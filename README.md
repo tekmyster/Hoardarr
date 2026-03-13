@@ -25,15 +25,6 @@ including:
 -   mixed storage backends
 -   foreign storage systems
 
-Hoardarr maintains a stable namespace for media tools such as:
-
--   Sonarr
--   Radarr
--   Lidarr
--   Prowlarr
--   Plex
--   Jellyfin
--   Emby
 
 ## Why Hoardarr Exists
 
@@ -45,10 +36,10 @@ Most NAS platforms assume:
 
 Real homelab storage environments evolve gradually:
 
--   disks are purchased opportunistically
+-   disks are acquired opportunistically
 -   storage pools accumulate over time
 -   RAID decisions age poorly
--   migrating arrays is difficult
+-   migrating arrays is difficult and disruptive
 -   ARR tools require stable paths
 
 Hoardarr provides lifecycle-aware storage management for these
