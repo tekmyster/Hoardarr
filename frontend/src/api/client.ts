@@ -20,6 +20,7 @@ import type {
   MetricHistoryDocument,
   MetricSampleDocument,
   LatencyAnalyticsDocument,
+  LogicalStorageDocument,
   MediaAccountProvisionResult,
   NetworkInterface,
   ManagedNetworkApplyResult,
@@ -34,6 +35,7 @@ import type {
   SetupStatus,
   StorageOperationProgress,
   StorageInventory,
+  StorageRedundancyPlan,
   StorageTelemetryDocument,
   TelemetryForecastDocument,
   TelemetrySettingsDocument,
@@ -174,6 +176,7 @@ function normalizeDrive(raw: unknown, index: number): Drive {
     serial,
     wwn: text(item.wwn ?? identity.wwn ?? identity.eui64 ?? identity.nguid) || null,
     capacityBytes: number(item.capacityBytes ?? item.capacity_bytes ?? item.size_bytes),
+    rotational: typeof item.rotational === "boolean" ? item.rotational : null,
     stableIdentity,
     readOnly,
     selectable: selectionBlockers.length === 0,
@@ -250,12 +253,27 @@ export function drivesFromSnapshot(snapshot: HardwareSnapshot): Drive[] {
       return drive.system_disk !== true && drive.systemDisk !== true;
     })
     .map(normalizeDrive);
-  const identityCounts = new Map<string, number>();
-  drives.forEach((drive) => identityCounts.set(drive.id, (identityCounts.get(drive.id) ?? 0) + 1));
-  return drives.map((drive) => {
-    if ((identityCounts.get(drive.id) ?? 0) < 2) return drive;
-    const selectionBlockers = [...drive.selectionBlockers, "This stable identity appears more than once in the same hardware snapshot."];
-    return { ...drive, selectable: false, selectionBlockers };
+  const grouped = new Map<string, Drive[]>();
+  for (const drive of drives) {
+    const key = drive.wwn ? `wwn:${drive.wwn.toLowerCase()}` : drive.id;
+    grouped.set(key, [...(grouped.get(key) ?? []), drive]);
+  }
+  return [...grouped.values()].map((paths) => {
+    if (paths.length === 1) return paths[0];
+    const mapped = paths.find((drive) => drive.path.startsWith("/dev/mapper/"));
+    const canonical = mapped ?? paths[0];
+    const selectionBlockers = mapped
+      ? canonical.selectionBlockers
+      : [
+          ...canonical.selectionBlockers,
+          "Multiple controller paths reach this storage. Import or manage it as one logical device before changing its contents.",
+        ];
+    return {
+      ...canonical,
+      alternatePaths: paths.map((drive) => drive.path),
+      selectable: mapped ? canonical.selectable : false,
+      selectionBlockers,
+    };
   });
 }
 
@@ -327,6 +345,37 @@ class HoardarrApi {
   async storageTelemetry(): Promise<StorageTelemetryDocument> {
     if (demoMode) throw new ApiError(503, "Live storage performance is unavailable in demo mode.");
     return this.request<StorageTelemetryDocument>("/storage/telemetry");
+  }
+
+  async logicalStorage(): Promise<LogicalStorageDocument[]> {
+    if (demoMode) return [];
+    const result = await this.request<{ items: LogicalStorageDocument[] }>("/storage/logical");
+    return result.items;
+  }
+
+  async previewStorageRedundancy(input: {
+    storage_entity_id: string;
+    action: "add" | "remove" | "replace";
+    path_identity?: string;
+    remove_path_identity?: string;
+    policy?: "recommended" | "failover" | "multibus" | "group_by_prio";
+  }): Promise<{ plan: StorageRedundancyPlan; plan_sha256: string }> {
+    return this.request("/storage/redundancy/preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async applyStorageRedundancy(
+    plan: StorageRedundancyPlan,
+    planSha256: string,
+  ): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>("/storage/redundancy", {
+      method: "POST",
+      headers: { "Idempotency-Key": createIdempotencyKey() },
+      body: JSON.stringify({ plan, plan_sha256: planSha256, confirmation: "APPLY" }),
+    });
+    return result.operation;
   }
 
   async metricCatalog(signal?: AbortSignal): Promise<MetricCatalogDocument> {

@@ -391,6 +391,7 @@ def test_iscsi_rejects_secrets_that_can_change_targetcli_script(
     with pytest.raises(executor.ExecutorFailure, match="password is invalid"):
         executor._apply_iscsi("service-1", config, secret)
 
+
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative Linux file operations")
 def test_backing_file_mutation_is_descriptor_relative_and_rejects_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

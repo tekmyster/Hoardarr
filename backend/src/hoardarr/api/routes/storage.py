@@ -18,6 +18,8 @@ from hoardarr.api.schemas import (
     DeviceMaintenancePreviewRequest,
     SnapraidReplacementApplyRequest,
     SnapraidReplacementPreviewRequest,
+    StorageRedundancyApplyRequest,
+    StorageRedundancyPreviewRequest,
     TierTransferApplyRequest,
     TierTransferCleanupRequest,
     TierTransferPreviewRequest,
@@ -30,6 +32,12 @@ from hoardarr.operations.service import OperationConflict, create_operation, doc
 from hoardarr.storage.inventory import discover_storage_inventory
 from hoardarr.storage.maintenance import MaintenanceError, build_plan, validate_plan
 from hoardarr.storage.mergerfs import discover_mergerfs
+from hoardarr.storage.redundancy import (
+    RedundancyError,
+    build_redundancy_plan,
+    storage_documents,
+    validate_redundancy_plan,
+)
 from hoardarr.storage.reservations import active_storage_reservations, reserved_device_ids
 from hoardarr.storage.snapraid import (
     SnapraidReplacementError,
@@ -78,6 +86,111 @@ def storage_inventory(
         ),
         "active_operations": active_storage_reservations(session),
     }
+
+
+@router.get("/logical")
+def logical_storage_inventory(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    snapshot = session.scalar(
+        select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+    )
+    return {
+        "items": storage_documents(session, snapshot.payload_json if snapshot is not None else None)
+    }
+
+
+@router.post("/redundancy/preview")
+def preview_storage_redundancy(
+    payload: StorageRedundancyPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    snapshot = _latest_hardware(session)
+    try:
+        plan = build_redundancy_plan(
+            session,
+            storage_entity_id=payload.storage_entity_id,
+            hardware_snapshot_sha256=snapshot.sha256,
+            hardware_snapshot=snapshot.payload_json,
+            action=payload.action,
+            candidate_path_identity=payload.path_identity,
+            remove_path_identity=payload.remove_path_identity,
+            policy=payload.policy,
+        )
+    except RedundancyError as exc:
+        raise Problem(422, exc.code, "Redundancy unavailable", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": plan["plan_sha256"]}
+
+
+@router.post("/redundancy", status_code=202)
+def apply_storage_redundancy_plan(
+    payload: StorageRedundancyApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        plan = validate_redundancy_plan(payload.plan)
+    except RedundancyError as exc:
+        raise Problem(422, exc.code, "Invalid redundancy plan", str(exc)) from exc
+    if payload.plan_sha256 != plan["plan_sha256"]:
+        raise Problem(409, "redundancy_plan_changed", "Plan changed", "Preview the change again.")
+    if _latest_hardware(session).sha256 != plan["hardware_snapshot_sha256"]:
+        raise Problem(
+            409,
+            "hardware_snapshot_changed",
+            "Discovery changed",
+            "Run discovery and review the change again.",
+        )
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.redundancy.apply",
+            principal=principal,
+            request={
+                "plan": plan,
+                "plan_sha256": plan["plan_sha256"],
+                "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
+            },
+            idempotency_key=key,
+            resource_type="storage_entity",
+            resource_id=str(plan["storage_entity_id"]),
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        conflict = session.scalar(
+            select(Operation).where(
+                Operation.id != operation.id,
+                Operation.status.in_(("queued", "running")),
+                Operation.resource_type == "storage_entity",
+                Operation.resource_id == str(plan["storage_entity_id"]),
+            )
+        )
+        if conflict is not None:
+            raise Problem(
+                409,
+                "storage_entity_reserved",
+                "Storage is busy",
+                "Another controller-path change is already queued or running.",
+            )
+        record_audit(
+            session,
+            principal=principal,
+            action=str(plan["operation"]),
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="storage_entity",
+            target_id=str(plan["storage_entity_id"]),
+            details={
+                "plan_sha256": plan["plan_sha256"],
+                "path": plan["selected_path"]["stable_path_identity"],
+            },
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
 
 
 @router.get("/telemetry")

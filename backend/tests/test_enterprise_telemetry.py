@@ -26,7 +26,9 @@ from hoardarr.db.models import (
     MetricRollup,
     MetricSample,
     Operation,
+    StorageEntity,
 )
+from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.telemetry.alerts import evaluate_basic_alerts
 from hoardarr.telemetry.analytics import (
     anomaly,
@@ -285,6 +287,100 @@ def test_read_ratio_and_multipath_failovers_use_durable_exact_transitions(tmp_pa
         assert next(item for item in first if item.metric_id == "multipath.failovers").value == 0
         assert next(item for item in second if item.metric_id == "multipath.failovers").value == 0
         assert next(item for item in third if item.metric_id == "multipath.failovers").value == 1
+    service.executor.shutdown(wait=True, cancel_futures=True)
+    engine.dispose()
+
+
+def test_logical_storage_history_and_today_counter_survive_path_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    service = TelemetryService(settings)
+    now = datetime.now(UTC)
+    path = {
+        "kernel_path": "/dev/sdb",
+        "capacity_bytes": 8_000_000_000,
+        "identity": {"wwn": "naa.600a098000history"},
+        "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+        "connection": {
+            "protocol": "iscsi",
+            "controller_address": "portal-a",
+            "target_port_wwn": "target-a",
+        },
+    }
+
+    class Filesystem:
+        total = 409_600
+        used = 163_840
+        free = 245_760
+
+    monkeypatch.setattr("hoardarr.telemetry.service.shutil.disk_usage", lambda _path: Filesystem())
+    monkeypatch.setattr(
+        "hoardarr.telemetry.service.os.path.realpath",
+        lambda value: "/dev/dm-0" if value.startswith("/dev/mapper/") else value,
+    )
+    with factory() as session, session.begin():
+        storage = register_single_path_storage(
+            session,
+            name="MediaPool",
+            device=path,
+            mountpoint="/media",
+            presentation_device="/dev/sdb",
+            filesystem_uuid="11111111-1111-4111-8111-111111111111",
+        )
+        direct = EntityReading("drive", "wwn:path-a", "Path A", labels={"device": "sdb"})
+        first = service._logical_storage_readings(
+            session,
+            [
+                _reading(
+                    direct,
+                    "io.write.today",
+                    100,
+                    observed_at=now,
+                    source="test diskstats",
+                    interval=5,
+                ),
+                _reading(
+                    direct,
+                    "io.write.bytes_per_second",
+                    20,
+                    observed_at=now,
+                    source="test diskstats",
+                    interval=5,
+                ),
+            ],
+            now,
+        )
+        storage.presentation_device = "/dev/mapper/3600a098000history"
+        mapped = EntityReading("drive", "wwn:map", "Map", labels={"device": "dm-0"})
+        second = service._logical_storage_readings(
+            session,
+            [
+                _reading(
+                    mapped,
+                    "io.write.today",
+                    20,
+                    observed_at=now + timedelta(seconds=5),
+                    source="test diskstats",
+                    interval=5,
+                ),
+                _reading(
+                    mapped,
+                    "io.write.bytes_per_second",
+                    40,
+                    observed_at=now + timedelta(seconds=5),
+                    source="test diskstats",
+                    interval=5,
+                ),
+            ],
+            now + timedelta(seconds=5),
+        )
+        first_today = next(item for item in first if item.metric_id == "io.write.today")
+        second_today = next(item for item in second if item.metric_id == "io.write.today")
+        assert first_today.entity.stable_id == second_today.entity.stable_id
+        assert first_today.value == 100
+        assert second_today.value == 120
+        assert session.scalar(select(StorageEntity)).id == storage.id  # type: ignore[union-attr]
     service.executor.shutdown(wait=True, cancel_futures=True)
     engine.dispose()
 

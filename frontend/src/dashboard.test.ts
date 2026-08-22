@@ -5,7 +5,7 @@ describe("Overview dashboard layout", () => {
   it("uses defaults when saved state is absent or invalid", () => {
     expect(loadDashboardPanels(null)).toEqual(DEFAULT_DASHBOARD_PANELS);
     expect(loadDashboardPanels("not-json")).toEqual(DEFAULT_DASHBOARD_PANELS);
-    expect(loadDashboardPanels('{"version":4,"panels":[]}')).toEqual(DEFAULT_DASHBOARD_PANELS);
+    expect(loadDashboardPanels('{"version":5,"panels":[]}')).toEqual(DEFAULT_DASHBOARD_PANELS);
   });
 
   it("accepts an intentionally empty dashboard and removes unknown or duplicate panels", () => {
@@ -13,6 +13,7 @@ describe("Overview dashboard layout", () => {
     expect(loadDashboardPanels('{"version":1,"panels":["network","unknown","network","system"]}')).toEqual(["network", "neighbors", "system", "storage-performance"]);
     expect(loadDashboardPanels('{"version":2,"panels":["network","system"]}')).toEqual(["network", "system", "storage-performance"]);
     expect(loadDashboardPanels('{"version":3,"panels":["network","system"]}')).toEqual(["network", "system"]);
+    expect(loadDashboardPanels('{"version":4,"panels":["storage","drive-health"]}')).toEqual(["storage", "drive-health"]);
   });
 
   it("supports drag and keyboard-style reordering without mutating input", () => {

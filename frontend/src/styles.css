@@ -472,6 +472,11 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .storage-summary-grid span { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .storage-summary-grid strong { overflow-wrap: anywhere; color: #35474f; font-size: 20px; font-weight: 500; }
 .storage-summary-grid small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.redundancy-storage-list { display: grid; gap: 8px; }
+.redundancy-storage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-soft); }
+.redundancy-storage-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.redundancy-storage-row span, .redundancy-storage-row small { color: var(--muted); overflow-wrap: anywhere; }
+.redundancy-storage-row .redundancy-path-detected { color: var(--success); font-weight: 600; }
 
 .storage-enclosures { display: grid; gap: 14px; }
 .storage-enclosure { overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }

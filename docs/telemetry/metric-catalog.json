@@ -181,7 +181,8 @@
         "filesystem",
         "mount",
         "storage_tier",
-        "mergerfs_pool"
+        "mergerfs_pool",
+        "logical_storage"
       ],
       "formula": null,
       "id": "capacity.total",
@@ -205,7 +206,8 @@
         "filesystem",
         "mount",
         "storage_tier",
-        "mergerfs_pool"
+        "mergerfs_pool",
+        "logical_storage"
       ],
       "formula": null,
       "id": "capacity.used",
@@ -229,7 +231,8 @@
         "filesystem",
         "mount",
         "storage_tier",
-        "mergerfs_pool"
+        "mergerfs_pool",
+        "logical_storage"
       ],
       "formula": null,
       "id": "capacity.free",
@@ -253,7 +256,8 @@
         "filesystem",
         "mount",
         "storage_tier",
-        "mergerfs_pool"
+        "mergerfs_pool",
+        "logical_storage"
       ],
       "formula": null,
       "id": "capacity.utilization",
@@ -319,7 +323,8 @@
         "storage_tier",
         "multipath_device",
         "storage_path",
-        "iscsi_lun"
+        "iscsi_lun",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.read.bytes_per_second",
@@ -347,7 +352,8 @@
         "storage_tier",
         "multipath_device",
         "storage_path",
-        "iscsi_lun"
+        "iscsi_lun",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.write.bytes_per_second",
@@ -375,7 +381,8 @@
         "storage_tier",
         "multipath_device",
         "storage_path",
-        "iscsi_lun"
+        "iscsi_lun",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.read.iops",
@@ -403,7 +410,8 @@
         "storage_tier",
         "multipath_device",
         "storage_path",
-        "iscsi_lun"
+        "iscsi_lun",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.write.iops",
@@ -426,7 +434,8 @@
         "drive",
         "pool",
         "vdev",
-        "storage_path"
+        "storage_path",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.read.latency",
@@ -449,7 +458,8 @@
         "drive",
         "pool",
         "vdev",
-        "storage_path"
+        "storage_path",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.write.latency",
@@ -472,7 +482,8 @@
         "drive",
         "pool",
         "vdev",
-        "storage_path"
+        "storage_path",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.utilization",
@@ -495,7 +506,8 @@
         "controller",
         "hba",
         "storage_path",
-        "pool"
+        "pool",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.queue.depth",
@@ -556,7 +568,8 @@
       "entity_types": [
         "drive",
         "pool",
-        "storage_tier"
+        "storage_tier",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.read.today",
@@ -577,7 +590,8 @@
       "entity_types": [
         "drive",
         "pool",
-        "storage_tier"
+        "storage_tier",
+        "logical_storage"
       ],
       "formula": null,
       "id": "io.write.today",
@@ -776,7 +790,8 @@
         "storage_path",
         "fc_port",
         "fcoe_path",
-        "service"
+        "service",
+        "logical_storage"
       ],
       "formula": null,
       "id": "health.overall",
@@ -1972,6 +1987,5 @@
       "unit": "ratio"
     }
   ],
-  "schema_version": 1,
-  "source": "hoardarr.telemetry.catalog"
+  "schema_version": 1
 }

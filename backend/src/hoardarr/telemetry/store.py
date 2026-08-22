@@ -85,8 +85,7 @@ def ingest(session: Session, readings: list[MetricReading]) -> dict[str, int]:
             )
         )
         existing_keys = {
-            (entity_id, metric_id, aware(observed_at))
-            for entity_id, metric_id, observed_at in rows
+            (entity_id, metric_id, aware(observed_at)) for entity_id, metric_id, observed_at in rows
         }
         seen_in_batch: set[tuple[str, str, datetime]] = set()
         pending: list[MetricSample] = []

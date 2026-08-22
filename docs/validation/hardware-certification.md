@@ -12,7 +12,7 @@ hardware certification.
 | USB/UAS bridges | Yes | Generic detector with honest SMART limitations | Yes | Pending | Not tested | Bridge may hide identity/SMART |
 | Fibre Channel | Yes | Generic FC topology fixtures | Yes | Pending | Not tested | `multipath-tools`, sysfs |
 | FCoE | Yes | Capability-gated connectivity provider | Yes | Pending | Not tested | Requires CNA, DCB/PFC, switch fabric |
-| iSCSI/multipath | Yes | Connectivity, health normalization, active path-group identity and durable failover transitions | Yes | Provider and state-transition fixtures only | Not tested | `targetcli-fb`, `open-iscsi`, multipath; polling observations are not counted as failovers |
+| iSCSI/multipath | Yes | Stable logical storage, add/replace/remove path lifecycle, health normalization, active path-group identity and durable failover transitions | Yes | Repository lifecycle harness creates one LIO LUN through multiple portals; hosted execution result pending | Not tested | `targetcli-fb`, `open-iscsi`, multipath; polling observations are not counted as failovers |
 | LSI/Avago/Broadcom | Yes | Package/provider registry | Yes | Pending | Not tested | Vendor utility acquisition/licensing varies |
 | Dell PERC/PowerEdge/VxRail-derived | Yes | Registry and fixtures | Yes | Pending | Not tested | `perccli`/`storcli` where licensed/available |
 | HPE Smart Array | Yes | Registry/fixtures | Yes | Pending | Not tested | `ssacli` availability varies |

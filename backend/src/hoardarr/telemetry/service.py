@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
@@ -14,13 +15,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from hoardarr.core.config import Settings
-from hoardarr.db.models import HardwareSnapshot, MetricSample, Operation, TelemetryState
+from hoardarr.db.models import (
+    HardwareSnapshot,
+    MetricSample,
+    Operation,
+    StorageEntity,
+    StoragePath,
+    TelemetryState,
+)
 from hoardarr.storage.inventory import discover_storage_inventory
+from hoardarr.storage.redundancy import reconcile_storage_path_health
 from hoardarr.storage.telemetry import storage_telemetry
 from hoardarr.telemetry.alerts import evaluate_basic_alerts
 from hoardarr.telemetry.collectors import HostCollector, StorageCollector, _reading
 from hoardarr.telemetry.platform_collectors import LinuxStoragePlatformCollector
-from hoardarr.telemetry.samples import EntityReading
+from hoardarr.telemetry.samples import EntityReading, MetricReading
 from hoardarr.telemetry.store import apply_retention, ingest
 
 LOGGER = logging.getLogger(__name__)
@@ -317,6 +326,11 @@ class TelemetryService:
                 if platform_error != "provider_busy":
                     self.last_platform = monotonic_now
                     self.last_platform_error = platform_error
+                if platform_error is None:
+                    reconcile_storage_path_health(
+                        session,
+                        self.platform.last_multipath_maps,
+                    )
             else:
                 platform_readings = []
                 platform_error = self.last_platform_error
@@ -345,6 +359,7 @@ class TelemetryService:
                 *service_readings,
                 *self._tier_readings(session, now),
             ]
+            readings.extend(self._logical_storage_readings(session, storage_readings, now))
             readings.extend(
                 self._derived_readings(
                     session, readings, now, self.settings.telemetry_fast_interval_seconds
@@ -377,6 +392,177 @@ class TelemetryService:
             for name, error in provider_errors.items():
                 self._provider_state(session, name, status=providers[name], detail=error, now=now)
             return {"status": "collected", **result, "alerts": alert_result, "providers": providers}
+
+    @staticmethod
+    def _logical_counter_value(
+        session: Session,
+        *,
+        entity_id: str,
+        metric_id: str,
+        source_device: str,
+        source_value: float,
+        now: datetime,
+    ) -> float:
+        state_id = f"logical-io:{entity_id}"
+        state = session.get(TelemetryState, state_id)
+        document = dict(state.state_json) if state is not None else {}
+        day = now.astimezone(UTC).date().isoformat()
+        counters = document.get("counters") if document.get("day") == day else {}
+        counters = dict(counters) if isinstance(counters, dict) else {}
+        previous = counters.get(metric_id)
+        previous = previous if isinstance(previous, dict) else {}
+        prior_source = previous.get("source")
+        prior_source_value = previous.get("source_value")
+        prior_logical_value = previous.get("logical_value")
+        offset = previous.get("offset")
+        offset = float(offset) if isinstance(offset, (int, float)) else 0.0
+        if (
+            prior_source != source_device
+            or not isinstance(prior_source_value, (int, float))
+            or source_value < float(prior_source_value)
+        ):
+            offset = (
+                float(prior_logical_value) if isinstance(prior_logical_value, (int, float)) else 0.0
+            )
+        logical_value = offset + source_value
+        counters[metric_id] = {
+            "source": source_device,
+            "source_value": source_value,
+            "offset": offset,
+            "logical_value": logical_value,
+        }
+        payload = {"day": day, "counters": counters}
+        if state is None:
+            session.add(TelemetryState(id=state_id, state_json=payload))
+            session.flush()
+        else:
+            state.state_json = payload
+            state.updated_at = now
+        return logical_value
+
+    def _logical_storage_readings(
+        self,
+        session: Session,
+        storage_readings: list[MetricReading],
+        now: datetime,
+    ) -> list[MetricReading]:
+        """Keep logical-storage history stable while its Linux path changes."""
+
+        by_device: dict[str, list[MetricReading]] = {}
+        for reading in storage_readings:
+            if reading.entity.entity_type != "drive":
+                continue
+            device_name = reading.entity.labels.get("device")
+            if device_name:
+                by_device.setdefault(device_name, []).append(reading)
+        result: list[MetricReading] = []
+        copied_metrics = {
+            "io.read.bytes_per_second",
+            "io.write.bytes_per_second",
+            "io.read.iops",
+            "io.write.iops",
+            "io.read.latency",
+            "io.write.latency",
+            "io.utilization",
+            "io.queue.depth",
+            "io.read.today",
+            "io.write.today",
+        }
+        for storage in session.scalars(select(StorageEntity)):
+            resolved = os.path.realpath(storage.presentation_device)
+            candidate_names = [
+                os.path.basename(resolved),
+                os.path.basename(storage.presentation_device),
+            ]
+            paths = list(
+                session.scalars(
+                    select(StoragePath).where(StoragePath.storage_entity_id == storage.id)
+                )
+            )
+            candidate_names.extend(
+                os.path.basename(path.kernel_path) for path in paths if path.active
+            )
+            source_name = next((name for name in candidate_names if name in by_device), None)
+            entity = EntityReading(
+                "logical_storage",
+                f"logical-storage:{storage.stable_identity}",
+                storage.name,
+                labels={"topology_state": storage.topology_state},
+                topology={
+                    "storage_entity_id": storage.id,
+                    "path_count": str(len(paths)),
+                },
+            )
+            if source_name is not None:
+                for reading in by_device[source_name]:
+                    if reading.metric_id not in copied_metrics:
+                        continue
+                    value = reading.value
+                    if reading.metric_id in {"io.read.today", "io.write.today"} and isinstance(
+                        value, (int, float)
+                    ):
+                        value = self._logical_counter_value(
+                            session,
+                            entity_id=storage.id,
+                            metric_id=reading.metric_id,
+                            source_device=source_name,
+                            source_value=float(value),
+                            now=now,
+                        )
+                    result.append(
+                        _reading(
+                            entity,
+                            reading.metric_id,
+                            value,
+                            observed_at=now,
+                            source=f"{reading.source} via {source_name}"[:128],
+                            interval=reading.collection_interval_seconds,
+                            quality=reading.quality,
+                            error_code=reading.error_code,
+                            labels={**reading.labels, "source_device": source_name},
+                        )
+                    )
+            try:
+                filesystem = shutil.disk_usage(storage.mountpoint)
+                total = filesystem.total
+                free = filesystem.free
+                used = filesystem.used
+                capacity_values: tuple[tuple[str, float | int], ...] = (
+                    ("capacity.total", total),
+                    ("capacity.used", used),
+                    ("capacity.free", free),
+                    ("capacity.utilization", used / total * 100 if total else 0.0),
+                )
+                for metric_id, value in capacity_values:
+                    result.append(
+                        _reading(
+                            entity,
+                            metric_id,
+                            value,
+                            observed_at=now,
+                            source="statvfs logical mount",
+                            interval=max(60, self.settings.telemetry_fast_interval_seconds),
+                        )
+                    )
+            except OSError:
+                pass
+            result.append(
+                _reading(
+                    entity,
+                    "health.overall",
+                    {
+                        "fully_redundant": "healthy",
+                        "single_path": "healthy",
+                        "reduced_redundancy": "degraded",
+                        "failed_over": "degraded",
+                        "no_path": "faulted",
+                    }.get(storage.topology_state, "unknown"),
+                    observed_at=now,
+                    source="durable logical storage topology",
+                    interval=max(30, self.settings.telemetry_fast_interval_seconds),
+                )
+            )
+        return result
 
     def maintain(self, session: Session) -> dict[str, int]:
         return apply_retention(

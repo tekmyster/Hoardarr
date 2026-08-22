@@ -138,12 +138,14 @@ def read_sas_phys(sys_root: Path) -> list[dict[str, Any]]:
     for phy in sorted(root.glob("phy-*")):
         sas_address = _read(phy / "sas_address") or _read(phy / "device/sas_address")
         identifier = _read(phy / "phy_identifier") or phy.name
+
         def integer(name: str, current: Path = phy) -> int | None:
             value = _read(current / name)
             try:
                 return max(0, int(value)) if value is not None else None
             except ValueError:
                 return None
+
         rows.append(
             {
                 "id": f"sas:{sas_address or phy.name}:{identifier}",
@@ -201,9 +203,10 @@ def parse_ses_metrics(output: str) -> dict[str, Any]:
     logical_id = document.get("enclosure_logical_identifier") or document.get(
         "primary_enclosure_logical_identifier"
     )
-    if not isinstance(logical_id, str) or re.fullmatch(
-        r"(?:0x|naa\.)?[0-9A-Fa-f]{16,64}", logical_id
-    ) is None:
+    if (
+        not isinstance(logical_id, str)
+        or re.fullmatch(r"(?:0x|naa\.)?[0-9A-Fa-f]{16,64}", logical_id) is None
+    ):
         logical_id = None
     return {
         "id": logical_id.casefold() if logical_id else None,
@@ -274,6 +277,7 @@ def parse_multipath_json(output: str) -> list[dict[str, Any]]:
         paths = item.get("paths")
         path_groups = item.get("path_groups") or item.get("pathgroups")
         active_group: str | None = None
+        normalized_paths: list[dict[str, Any]] = []
         if isinstance(path_groups, list):
             grouped_paths: list[Any] = []
             for index, group in enumerate(path_groups):
@@ -283,13 +287,50 @@ def parse_multipath_json(output: str) -> list[dict[str, Any]]:
                 if isinstance(candidates, list):
                     grouped_paths.extend(candidates)
                 state = str(group.get("status") or group.get("dm_st") or "").casefold()
+                group_identity = str(
+                    group.get("group") or group.get("id") or group.get("priority") or index
+                )[:128]
                 if active_group is None and state in {"active", "enabled", "ready"}:
-                    active_group = str(
-                        group.get("group") or group.get("id") or group.get("priority") or index
-                    )[:128]
+                    active_group = group_identity
+                for path in candidates if isinstance(candidates, list) else []:
+                    if isinstance(path, Mapping):
+                        normalized_paths.append(
+                            {
+                                "kernel_name": str(
+                                    path.get("dev") or path.get("device") or path.get("name") or ""
+                                )[:128],
+                                "state": str(
+                                    path.get("dm_st")
+                                    or path.get("chk_st")
+                                    or path.get("state")
+                                    or "unknown"
+                                ).casefold()[:64],
+                                "group": group_identity,
+                                "optimized": state in {"active", "enabled", "ready"},
+                            }
+                        )
             paths = grouped_paths
         if not isinstance(paths, list):
             paths = []
+        if not normalized_paths:
+            for path in paths:
+                if not isinstance(path, Mapping):
+                    continue
+                normalized_paths.append(
+                    {
+                        "kernel_name": str(
+                            path.get("dev") or path.get("device") or path.get("name") or ""
+                        )[:128],
+                        "state": str(
+                            path.get("dm_st")
+                            or path.get("chk_st")
+                            or path.get("state")
+                            or "unknown"
+                        ).casefold()[:64],
+                        "group": None,
+                        "optimized": None,
+                    }
+                )
         states = [
             str(path.get("dm_st", "")).casefold() for path in paths if isinstance(path, Mapping)
         ]
@@ -301,6 +342,7 @@ def parse_multipath_json(output: str) -> list[dict[str, Any]]:
                 "failed": sum(state in {"failed", "faulty", "offline"} for state in states),
                 "policy": str(item.get("selector") or "Not reported")[:128],
                 "active_group": active_group,
+                "paths": normalized_paths,
             }
         )
     return [item for item in result if item["wwid"]]
@@ -320,6 +362,7 @@ class LinuxStoragePlatformCollector:
         self.proc_root = proc_root
         self.sys_root = sys_root
         self.rates = ResetSafeCounterRates(maximum_elapsed_seconds=interval_seconds * 6)
+        self.last_multipath_maps: list[dict[str, Any]] = []
 
     def collect(self, observed_at: datetime | None = None) -> list[MetricReading]:
         now = observed_at or datetime.now(UTC)
@@ -468,12 +511,15 @@ class LinuxStoragePlatformCollector:
     def _multipath(self, now: datetime) -> list[MetricReading]:
         output = _command("multipathd", ["show", "maps", "json"])
         if output is None:
+            self.last_multipath_maps = []
             return []
         readings = []
         try:
             maps = parse_multipath_json(output)
         except ValueError:
+            self.last_multipath_maps = []
             return []
+        self.last_multipath_maps = maps
         for item in maps:
             entity = EntityReading(
                 "multipath_device",
@@ -531,9 +577,7 @@ class LinuxStoragePlatformCollector:
                     "negotiated_link_rate": str(item["negotiated_rate"] or "Not reported"),
                     "maximum_link_rate": str(item["maximum_rate"] or "Not reported"),
                     "loss_of_dword_sync": str(
-                        item["loss_of_sync"]
-                        if item["loss_of_sync"] is not None
-                        else "Not reported"
+                        item["loss_of_sync"] if item["loss_of_sync"] is not None else "Not reported"
                     ),
                     "phy_reset_problems": str(
                         item["reset_problems"]
@@ -594,8 +638,7 @@ class LinuxStoragePlatformCollector:
                     "voltages": ",".join(map(str, item["voltages"]))[:512] or "Not reported",
                     "locate": str(item["locate"]).lower(),
                     "fault": str(item["fault"]).lower(),
-                    "expander_states": ",".join(item["expander_states"])[:512]
-                    or "Not reported",
+                    "expander_states": ",".join(item["expander_states"])[:512] or "Not reported",
                     "slot_count": str(item["slot_count"]),
                 },
             )

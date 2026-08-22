@@ -110,6 +110,32 @@ describe("hardware snapshot normalization", () => {
     expect(drives.map((drive) => drive.id)).toEqual(["serial:data"]);
   });
 
+  it("collapses multiple controller paths to one logical device", () => {
+    const shared = {
+      id: "wwn:naa.600a098000abc",
+      stable_identity: true,
+      identity: { serial: "LUN7", wwn: "naa.600a098000abc" },
+      capacity_bytes: 8_000_000_000_000,
+      sector_sizes: { logical_bytes: 512, physical_bytes: 4096 },
+      partitions: [],
+      signatures: [],
+    };
+    const drives = drivesFromSnapshot({
+      id: "snapshot-multipath",
+      captured_at: "2026-08-21T12:00:00Z",
+      sha256: "d".repeat(64),
+      hardware: { disks: [
+        { ...shared, kernel_path: "/dev/sdb", connection: { protocol: "fc", controller_address: "hba-a" } },
+        { ...shared, kernel_path: "/dev/sdc", connection: { protocol: "fc", controller_address: "hba-b" } },
+      ] },
+    });
+
+    expect(drives).toHaveLength(1);
+    expect(drives[0].alternatePaths).toEqual(["/dev/sdb", "/dev/sdc"]);
+    expect(drives[0].selectable).toBe(false);
+    expect(drives[0].selectionBlockers.join(" ")).toMatch(/one logical device/i);
+  });
+
   it("preserves already-normalized demo health observations", () => {
     const [drive] = drivesFromSnapshot(demoSnapshot);
     expect(drive.observations).toHaveLength(2);

@@ -15,7 +15,7 @@ import { StorageProgressDetails } from "./components/StorageProgressDetails";
 import { StorageWizardDialog } from "./components/StorageWizardDialog";
 import { Card, ChoiceCard, Field, Notice, SourceBadge, Spinner, StatusBadge } from "./components/ui";
 import { gatewayForPayload, normalizeServerNameInput, serverSettingsError, supportedTimeZones, timeZoneLabel, timeZoneOffsetLabel, timeZoneUsesDaylightSaving, uiDefaultsFromOnboarding } from "./onboarding";
-import { actionDestructiveLabel, detectedFilesystems, exactConsentAccepted, existingDataSummary, filesystemRecommendation, hasKnownSectorGeometry, humanCapacity, isImportedNtfs, isUsbRaidOverride, layoutChoicesForDrive, sectorGeometryAssessment, selectPortableSystem, storageChoiceNeedsSectorGeometry, toggleNetworkInterfaceSelection } from "./policy";
+import { actionDestructiveLabel, detectedFilesystems, driveMayContainData, exactConsentAccepted, existingDataSummary, filesystemRecommendation, hasKnownSectorGeometry, humanCapacity, isImportedNtfs, isUsbRaidOverride, layoutChoicesForDrive, recommendStorage, sectorGeometryAssessment, selectPortableSystem, storageChoiceNeedsSectorGeometry, storageRoleLabel, toggleNetworkInterfaceSelection, type ProtectionPreference } from "./policy";
 import type {
   Drive,
   DaylightSavingMode,
@@ -150,7 +150,11 @@ export default function App() {
   const [destructiveTestAck, setDestructiveTestAck] = useState("");
 
   const [preserveData, setPreserveData] = useState(false);
+  const [preserveDataTouched, setPreserveDataTouched] = useState(false);
   const [purpose, setPurpose] = useState("media");
+  const [protectionPreference, setProtectionPreference] = useState<ProtectionPreference>("one");
+  const [oneLargeLocation, setOneLargeLocation] = useState(true);
+  const [easyExpansion, setEasyExpansion] = useState(true);
   const [portability, setPortability] = useState<string[]>(["linux"]);
   const [snapshots, setSnapshots] = useState(false);
   const [encryption, setEncryption] = useState("none");
@@ -182,6 +186,7 @@ export default function App() {
   const [formatTrimMode, setFormatTrimMode] = useState<"conditional" | "periodic" | "continuous" | "disabled">("conditional");
 
   const [libraries, setLibraries] = useState<LibraryChoice[]>(LIBRARY_DEFAULTS);
+  const [mediaServers, setMediaServers] = useState<string[]>(["Plex"]);
   const [torrentDownloads, setTorrentDownloads] = useState(true);
   const [usenetDownloads, setUsenetDownloads] = useState(true);
   const [newLibraryName, setNewLibraryName] = useState("");
@@ -287,6 +292,14 @@ export default function App() {
     [storageInventory],
   );
   const selectedDrives = useMemo(() => drives.filter((drive) => selectedDriveIds.includes(drive.id)), [drives, selectedDriveIds]);
+  const recommendation = useMemo(() => recommendStorage({
+    drives: selectedDrives,
+    purpose,
+    preserveData,
+    oneLargeLocation,
+    protection: protectionPreference,
+    easyExpansion,
+  }), [selectedDrives, purpose, preserveData, oneLargeLocation, protectionPreference, easyExpansion]);
   const selectedInterfaceSummary = useMemo(() => selectedInterfaces.map((id) => {
     const item = interfaces.find((candidate) => candidate.id === id);
     return item ? `${item.name} (${item.id})` : id;
@@ -301,6 +314,24 @@ export default function App() {
   const planRisk = objectValue(objectValue(plan?.document.storage).risk);
   const planNeedsApproval = planRisk.approval_required === true;
   const planDeclaredNonDestructive = planRisk.destructive === false && planRisk.approval_required === false;
+
+  useEffect(() => {
+    if (preserveDataTouched || !selectedDrives.length) return;
+    const shouldPreserve = selectedDrives.some(driveMayContainData);
+    setPreserveData(shouldPreserve);
+    if (shouldPreserve) setStorageRole(selectedDrives.length === 1 ? "import" : "mergerfs");
+  }, [preserveDataTouched, selectedDrives]);
+
+  function applyRecommendedLayout(): void {
+    setStorageRole(recommendation.role);
+    if (recommendation.role === "mergerfs" && mergerFsInventory?.items.length === 0) setMergerFsTarget("create");
+    if (recommendation.parityCount) setSnapraidParityCount(recommendation.parityCount);
+    if (recommendation.zfsVdevType) {
+      setZfsVdevType(recommendation.zfsVdevType);
+      setZfsVdevWidth(selectedDriveIds.length);
+    }
+    setPlan(null);
+  }
 
   async function loadAuthenticatedData(firstRun: boolean): Promise<void> {
     const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundWizards, foundOperations, foundIntegrations] = await Promise.all([
@@ -609,6 +640,11 @@ export default function App() {
       },
       preserve_data: preserveData,
       purpose,
+      guided_preferences: {
+        protection: protectionPreference,
+        one_large_location: oneLargeLocation,
+        easy_expansion: easyExpansion,
+      },
       portability,
       snapshots,
       encryption,
@@ -642,6 +678,7 @@ export default function App() {
         trim_mode: formatTrimMode,
       },
       libraries,
+      media_servers: mediaServers,
       downloads: { torrents: torrentDownloads, usenet: usenetDownloads },
       service_username: serviceUsername,
       account_mode: serviceCredentialMode,
@@ -931,6 +968,7 @@ export default function App() {
         }
       } else if (activeStep === 4) {
         if (!portability.length) throw new Error("Choose Windows, macOS, or Hoardarr-managed Linux storage.");
+        if (mode === "guided") applyRecommendedLayout();
       } else if (activeStep === 5) {
         if (storageRole === "mergerfs") mergerFsAnswer();
         if (storageRole === "zfs" || storageRole === "raid" || storageRole === "snapraid" || storageRole === "mixed") layoutOptionsAnswer(storageRole);
@@ -1094,7 +1132,11 @@ export default function App() {
     setTestDestructive(false);
     setDestructiveTestAck("");
     setPreserveData(false);
+    setPreserveDataTouched(false);
     setPurpose("media");
+    setProtectionPreference("one");
+    setOneLargeLocation(true);
+    setEasyExpansion(true);
     setPortability(["linux"]);
     setSnapshots(false);
     setEncryption("none");
@@ -1112,6 +1154,7 @@ export default function App() {
     setFormatNoatime(true);
     setFormatTrimMode("conditional");
     setLibraries(LIBRARY_DEFAULTS.map((library) => ({ ...library })));
+    setMediaServers(["Plex"]);
     setTorrentDownloads(true);
     setUsenetDownloads(true);
     setNewLibraryName("");
@@ -1228,6 +1271,7 @@ export default function App() {
         setTestSmartExtended(booleanValue(storedTests.smart_extended, false));
         setTestDestructive(booleanValue(storedTests.destructive_write_read, false));
         setPreserveData(booleanValue(storedStorage.preserve_data, false));
+        setPreserveDataTouched(true);
         setPurpose(stringValue(storedStorage.purpose, "media"));
         setPortability(stringArray(storedStorage.portable_systems));
         setSnapshots(booleanValue(storedStorage.snapshots, false));
@@ -1275,7 +1319,13 @@ export default function App() {
       setTestDestructive(booleanValue(tests.destructive, false));
       setDestructiveTestAck("");
       setPreserveData(booleanValue(draft.preserve_data, false));
+      setPreserveDataTouched(true);
       setPurpose(stringValue(draft.purpose, "media"));
+      const guidedPreferences = objectValue(draft.guided_preferences);
+      const savedProtection = stringValue(guidedPreferences.protection, "one");
+      setProtectionPreference(savedProtection === "none" || savedProtection === "two" ? savedProtection : "one");
+      setOneLargeLocation(booleanValue(guidedPreferences.one_large_location, true));
+      setEasyExpansion(booleanValue(guidedPreferences.easy_expansion, true));
       setPortability(stringArray(draft.portability).length ? stringArray(draft.portability) : ["linux"]);
       setSnapshots(booleanValue(draft.snapshots, false));
       setEncryption(stringValue(draft.encryption, "none"));
@@ -1301,6 +1351,7 @@ export default function App() {
       const trimMode = stringValue(format.trim_mode, "conditional");
       setFormatTrimMode(isTrimMode(trimMode) ? trimMode : "conditional");
       setLibraries(libraryChoices(draft.libraries));
+      setMediaServers(stringArray(draft.media_servers));
       const downloads = objectValue(draft.downloads);
       setTorrentDownloads(booleanValue(downloads.torrents, true));
       setUsenetDownloads(booleanValue(downloads.usenet, true));
@@ -1452,7 +1503,7 @@ export default function App() {
         const replacement = snapshot ? await api.startWizard(nextMode, snapshot.id) : null;
         setWizard(replacement);
       }
-      if (nextMode === "guided" && (storageRole === "raid" || storageRole === "snapraid" || (storageRole === "zfs" && (selectedDriveIds.length < 2 || selectedDrives.some((drive) => drive.connection.bus.toLowerCase() === "usb"))))) setStorageRole("individual");
+      if (nextMode === "guided" && (storageRole === "raid" || storageRole === "mixed" || ((storageRole === "snapraid" || storageRole === "zfs") && selectedDrives.some((drive) => drive.connection.bus.toLowerCase() === "usb")) || (storageRole === "zfs" && selectedDriveIds.length < 2))) setStorageRole("individual");
       if (nextMode === "guided") {
         setSnapshots(false);
         setEncryption("none");
@@ -1771,10 +1822,17 @@ export default function App() {
   }
 
   function renderPurpose() {
+    const detectedData = selectedDrives.filter(driveMayContainData);
     return (
       <>
-        <Card title="What is on these drives now?"><div className="choice-grid"><ChoiceCard name="preserve" value="no" checked={!preserveData} label="Nothing needs to be kept" description="The plan may replace partitions and filesystems after final consent." onChange={() => { setPreserveData(false); if (storageRole === "import") setStorageRole("individual"); }} /><ChoiceCard name="preserve" value="yes" checked={preserveData} label="Keep or import existing data" description="Hoardarr will plan a read-only inspection before any change." onChange={() => { setPreserveData(true); setStorageRole("import"); }} /></div></Card>
+        {detectedData.length > 0 && <Notice tone="warning" title="These drives may already contain data">{detectedData.length} selected drive{detectedData.length === 1 ? " has" : "s have"} partitions, filesystem signatures, or incomplete scan evidence. Hoardarr selected the non-formatting choice. Choose “Nothing needs to be kept” only when you are certain.</Notice>}
+        <Card title="What is on these drives now?"><div className="choice-grid"><ChoiceCard name="preserve" value="yes" checked={preserveData} label="Keep or import existing data" description="Preserve the current filesystems and inspect them before making storage available." onChange={() => { setPreserveDataTouched(true); setPreserveData(true); setStorageRole(selectedDriveIds.length === 1 ? "import" : "mergerfs"); }} /><ChoiceCard name="preserve" value="no" checked={!preserveData} label="Nothing needs to be kept" description="The reviewed plan may replace partitions and filesystems after final consent." warning={detectedData.length ? "Hoardarr detected possible existing data. Formatting would erase it." : undefined} onChange={() => { setPreserveDataTouched(true); setPreserveData(false); if (storageRole === "import") setStorageRole("individual"); }} /></div></Card>
         <Card title="What will you store?" description="This determines the directory layout and safe defaults."><div className="choice-grid"><ChoiceCard name="purpose" value="media" checked={purpose === "media"} label="Media libraries" description="Movies, TV, music, photos, books, and audiobooks." onChange={() => setPurpose("media")} /><ChoiceCard name="purpose" value="general" checked={purpose === "general"} label="Files and folders" description="General shared storage for documents and other files." onChange={() => setPurpose("general")} /><ChoiceCard name="purpose" value="archive" checked={purpose === "archive"} label="Archive and important files" description="Long-lived data with a conservative storage policy." onChange={() => setPurpose("archive")} /><ChoiceCard name="purpose" value="downloads" checked={purpose === "downloads"} label="Downloads and temporary work" description="High-write workspace for torrent or Usenet activity." onChange={() => setPurpose("downloads")} /></div></Card>
+        {selectedDriveIds.length > 1 && <>
+          <Card title="Do you want one large storage location?" description="Plex and the ARR applications normally work best with one stable media path."><div className="choice-grid"><ChoiceCard name="one-location" value="yes" checked={oneLargeLocation} label="Yes, one large location — Recommended" description="All selected capacity appears under one media path." onChange={() => setOneLargeLocation(true)} /><ChoiceCard name="one-location" value="no" checked={!oneLargeLocation} label="Keep the drives separate" description="Each drive gets its own storage location." onChange={() => setOneLargeLocation(false)} /></div></Card>
+          <Card title="Do you want protection from a drive failure?" description="Protection uses some capacity but can keep protected media available after a drive fails."><div className="choice-grid"><ChoiceCard name="protection" value="one" checked={protectionPreference === "one"} label="Protect against one drive failure — Recommended" description="Reserve enough capacity to recover after one selected drive fails." onChange={() => setProtectionPreference("one")} />{selectedDriveIds.length >= 4 && <ChoiceCard name="protection" value="two" checked={protectionPreference === "two"} label="Protect against two drive failures" description="Uses more capacity for additional protection." onChange={() => setProtectionPreference("two")} />}<ChoiceCard name="protection" value="none" checked={protectionPreference === "none"} label="No drive-failure protection" description="Use the most capacity and rely on another backup if a drive fails." onChange={() => setProtectionPreference("none")} /></div></Card>
+          <Card title="Will you add more drives later?"><div className="choice-grid"><ChoiceCard name="expansion" value="yes" checked={easyExpansion} label="Yes, make expansion easy — Recommended" description="Prefer layouts that accept another drive without rebuilding the existing media." onChange={() => setEasyExpansion(true)} /><ChoiceCard name="expansion" value="no" checked={!easyExpansion} label="Probably not" description="Prefer a fixed protected group when it better matches the selected drives." onChange={() => setEasyExpansion(false)} /></div></Card>
+        </>}
         <Card title="Will the drive be connected directly to another computer?" description="Choose every operating system that must read the drive without Hoardarr serving it. The Hoardarr-only choice is mutually exclusive."><div className="check-stack"><label><input type="checkbox" checked={portability.includes("windows")} onChange={() => setPortability((values) => selectPortableSystem(values, "windows"))} /><span><strong>Windows</strong><small>Use a Windows-readable filesystem and naming rules.</small></span></label><label><input type="checkbox" checked={portability.includes("macos")} onChange={() => setPortability((values) => selectPortableSystem(values, "macos"))} /><span><strong>macOS</strong><small>Use exFAT when macOS portability is selected without Windows.</small></span></label><label><input type="checkbox" checked={portability.length === 1 && portability[0] === "linux"} onChange={() => setPortability((values) => values.length === 1 && values[0] === "linux" ? [] : selectPortableSystem(values, "linux"))} /><span><strong>No, Hoardarr will always manage it</strong><small>Use a Linux-native format; clients access files through Hoardarr.</small></span></label></div></Card>
         <Card title="History and encryption">
           <div className="setting-summary"><div><span>Snapshots</span><strong>{snapshots ? "Enabled" : "Not needed"}</strong></div>{mode === "advanced" && <button type="button" className="text-button" onClick={() => setSnapshots((value) => !value)}>Change</button>}</div>
@@ -1791,6 +1849,13 @@ export default function App() {
     const geometryDependentWrite = storageChoiceNeedsSectorGeometry({ preserveData, topology: storageRole, encryption });
     return (
       <>
+        {mode === "guided" && <Card title="Recommended for your setup" description={recommendation.summary}>
+          <div className="recommendation-head"><div><span>{selectedDriveIds.length} selected drive{selectedDriveIds.length === 1 ? "" : "s"}</span><strong>{recommendation.title}</strong></div><SourceBadge>Recommended</SourceBadge></div>
+          <div className="review-grid"><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Protection" value={recommendation.protection} /><ReviewLine label="Adding drives later" value={recommendation.expansion} /></div>
+          <ul>{recommendation.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+          <button type="button" className="button button-primary" onClick={applyRecommendedLayout}>Use recommended setup</button>
+          <details><summary>Technical details and tradeoffs</summary><p><strong>{recommendation.technicalName}</strong></p><ul>{recommendation.tradeoffs.map((tradeoff) => <li key={tradeoff}>{tradeoff}</li>)}</ul></details>
+        </Card>}
         <Card title="How should these drives be presented?" description={firstDrive?.connection.bus.toLowerCase() === "usb" ? "USB storage defaults to an independent drive. Array options are intentionally kept out of Guided setup." : "Choose how capacity should be exposed."}>
           <SelectedDriveSummary drives={selectedDrives} />
           <div className="choice-grid layout-choices">{layoutChoices.map((choice) => <ChoiceCard key={choice.id} name="storage-role" value={choice.id} checked={storageRole === choice.id} label={`${choice.label}${choice.recommended ? " — Recommended" : ""}`} description={choice.description} warning={choice.warning} onChange={() => {
@@ -1815,6 +1880,7 @@ export default function App() {
             {selectedDriveIds.length >= 5 && <ChoiceCard name="guided-zfs-protection" value="three" checked={zfsVdevType === "raidz3"} label="Three drives" description="Storage stays available after any three selected drives fail." onChange={() => { setZfsVdevType("raidz3"); setZfsVdevWidth(selectedDriveIds.length); setPlan(null); }} />}
           </div>
         </Card>}
+        {mode === "guided" && storageRole === "snapraid" && <Card title="Media protection" description="Hoardarr combines the data drives into one media folder and keeps parity on the largest selected drive or drives."><Notice tone="info" title={recommendation.protection}>{recommendation.expansion}</Notice><details><summary>Technical details</summary><p>Uses mergerFS with {snapraidParityCount} SnapRAID parity drive{snapraidParityCount === 1 ? "" : "s"}. The first parity sync runs during setup.</p></details></Card>}
         {mode === "advanced" && (storageRole === "zfs" || storageRole === "raid" || storageRole === "snapraid" || storageRole === "mixed") && <Card title="Array settings" description="Choose the exact layout that will appear in the immutable review plan.">
           <div className="form-grid three-columns advanced-format-grid">
             <Field label="Storage name" source="Advanced selection"><input value={arrayName} onChange={(event) => { setArrayName(event.target.value.toLowerCase()); setPlan(null); }} /></Field>
@@ -1889,13 +1955,14 @@ export default function App() {
   function renderLibraries() {
     return (
       <>
+        <Card title="Which media server do you use?" description="This keeps folder names and access guidance aligned with your media applications. You can select more than one."><div className="check-stack">{["Plex", "Jellyfin", "Emby"].map((server) => <label key={server}><input type="checkbox" checked={mediaServers.includes(server)} onChange={() => setMediaServers((values) => checkboxToggle(values, server))} /><span><strong>{server}</strong><small>Use the same stable <code>/data/media</code> library root.</small></span>{server === "Plex" && <SourceBadge>Common choice</SourceBadge>}</label>)}</div></Card>
         <Card title="Media libraries" description="Recommendations and app-detected values remain selected but visible. Uncheck anything you do not want.">
           <div className="library-list">{libraries.map((library) => <label className="library-row" key={library.id}><input type="checkbox" checked={library.selected} onChange={() => setLibraries((items) => items.map((item) => item.id === library.id ? { ...item, selected: !item.selected } : item))} /><span className="library-name"><strong>{library.label}</strong><code>/data/media/{library.id}</code></span><span>{library.app}</span><SourceBadge>{library.source === "detected" ? "Connected app" : library.source === "user" ? "You" : "Hoardarr recommended"}</SourceBadge></label>)}</div>
           <details className="add-library"><summary>Add another library</summary><div className="form-grid three-columns"><Field label="Library name"><input value={newLibraryName} onChange={(event) => setNewLibraryName(event.target.value)} placeholder="Anime" /></Field><Field label="Content type"><select value={newLibraryType} onChange={(event) => setNewLibraryType(event.target.value)}><option value="series">Series</option><option value="movies">Movies</option><option value="movies-and-series">Movies and series</option><option value="music">Music</option><option value="books">Books</option><option value="photos">Photos</option></select></Field><Field label="Application"><select value={newLibraryApp} onChange={(event) => setNewLibraryApp(event.target.value)}><option>Sonarr</option><option>Radarr</option><option>Sonarr + Radarr</option><option>Lidarr</option><option>Readarr</option><option>Immich</option><option>File share</option></select></Field></div><button type="button" className="button button-secondary" onClick={addLibrary}>Add library</button></details>
         </Card>
-        <Card title="Downloads and imports" description="Downloader APIs can prefill these answers during app onboarding. They stay visible and can be unchecked.">
+        <Card title="How do you download?" description="Downloader APIs can prefill these answers during app onboarding. They stay visible and can be unchecked.">
           <div className="download-layout"><label><input type="checkbox" checked={torrentDownloads} onChange={(event) => setTorrentDownloads(event.target.checked)} /><span><strong>Torrents</strong><code>/data/downloads/torrents/incomplete</code><code>/data/downloads/torrents/complete</code></span><SourceBadge>Hoardarr recommended</SourceBadge></label><label><input type="checkbox" checked={usenetDownloads} onChange={(event) => setUsenetDownloads(event.target.checked)} /><span><strong>Usenet</strong><code>/data/downloads/usenet/incomplete</code><code>/data/downloads/usenet/complete</code></span><SourceBadge>Hoardarr recommended</SourceBadge></label></div>
-          {storageRole === "download-cache" ? <Notice tone="warning" title="Cache imports need temporary extra space">Completed torrents are copied to media while the original remains for seeding, then cleaned after the downloader reaches its ratio or time goal. Usenet work is unpacked and verified on cache before import.</Notice> : <Notice tone="info" title="Hardlinks stay on one filesystem">Hoardarr enables hardlinks only when the completed download and library are on the same filesystem. It will not pretend a cross-filesystem hardlink is possible.</Notice>}
+          {storageRole === "download-cache" ? <Notice tone="warning" title="Downloads stay fast while media moves safely">Completed torrents remain on the fast drive while seeding, with a copy imported to media. Usenet repair and unpack work stays on the fast drive before the completed file moves to media.</Notice> : <Notice tone="info" title="Completed files can move without another copy">When downloads and libraries share this filesystem, Hoardarr uses hardlinks where the application supports them. Cross-filesystem imports use a real copy or move.</Notice>}
         </Card>
       </>
     );
@@ -1974,8 +2041,8 @@ export default function App() {
         {planNeedsApproval ? <Notice tone="danger" title="ARE YOU SURE?">{String(planRisk.message ?? "The plan contains destructive storage actions.")} Nothing has been changed yet.</Notice> : planDeclaredNonDestructive ? <Notice tone="success" title="No destructive approval is required">The backend explicitly marked this plan as non-destructive.</Notice> : <Notice tone="warning" title="Risk declaration is incomplete">The plan did not explicitly declare both destructive risk and approval status. Treat any undeclared action conservatively and do not apply it.</Notice>}
         <Card title="Exact drives in this plan" description="Verify device, model, serial or WWN, capacity, connection, and physical location—not just a friendly label."><SelectedDriveSummary drives={selectedDrives} detailed /></Card>
         <div className="review-grid">
-          <Card title="Storage"><ReviewLine label="Use" value={storageRole} />{storageRole === "mergerfs" && <ReviewLine label="Combined storage" value={mergerFsTarget === "create" ? `${mergerFsName} (${mergerFsMountpoint})` : mergerFsInventory?.items.find((item) => item.id === mergerFsTarget)?.mountpoint ?? "Not selected"} />}<ReviewLine label="Filesystem" value={preserveData ? importedFilesystems.length ? `Preserve ${importedFilesystems.join(", ")}` : "Preserve detected filesystem" : filesystem.filesystem} /><ReviewLine label="Partitioning" value={preserveData ? "Preserve existing" : "GPT, 1 MiB aligned"} /><ReviewLine label="Existing data" value={preserveData ? "Preserve/import" : "Nothing to preserve"} /></Card>
-          {storageRole !== "test" && <Card title="Libraries and downloads"><ReviewLine label="Libraries" value={libraries.filter((library) => library.selected).map((library) => library.label).join(", ")} /><ReviewLine label="Torrents" value={torrentDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Usenet" value={usenetDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Media path" value="/data/media" /></Card>}
+          <Card title="Storage"><ReviewLine label="Setup" value={storageRoleLabel(storageRole)} />{mode === "guided" && <><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Drive failure" value={recommendation.protection} /></>}{storageRole === "mergerfs" && <ReviewLine label="Combined storage" value={mergerFsTarget === "create" ? `${mergerFsName} (${mergerFsMountpoint})` : mergerFsInventory?.items.find((item) => item.id === mergerFsTarget)?.mountpoint ?? "Not selected"} />}<ReviewLine label="Filesystem" value={preserveData ? importedFilesystems.length ? `Preserve ${importedFilesystems.join(", ")}` : "Preserve detected filesystem" : filesystem.filesystem} /><ReviewLine label="Existing data" value={preserveData ? "Preserve/import" : "Replace only after final consent"} /><details><summary>Technical details</summary><ReviewLine label="Backend topology" value={storageRole} /><ReviewLine label="Partitioning" value={preserveData ? "Preserve existing" : "GPT, 1 MiB aligned"} /></details></Card>
+          {storageRole !== "test" && <Card title="Libraries and downloads"><ReviewLine label="Media server" value={mediaServers.join(", ") || "None selected"} /><ReviewLine label="Libraries" value={libraries.filter((library) => library.selected).map((library) => library.label).join(", ")} /><ReviewLine label="Torrents" value={torrentDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Usenet" value={usenetDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Media path" value="/data/media" /></Card>}
           {storageRole !== "test" && <Card title="File access"><ReviewLine label="Protocol" value="SMB" /><ReviewLine label="Application identity" value={serviceUsername} /><ReviewLine label="Application access" value="Modify" /><ReviewLine label="Anonymous" value="No access" /></Card>}
           {storageRole !== "test" && <Card title="Storage Access"><ReviewLine label="When" value={connectivitySkipped ? "Set up later" : "Apply with storage"} /><ReviewLine label="Methods" value={connectivitySkipped ? "None" : [smbEnabled && "SMB", nfsEnabled && "NFS", iscsiEnabled && "iSCSI", fcoeEnabled && "FCoE"].filter(Boolean).join(", ")} /><ReviewLine label="Name" value={connectivitySkipped ? "—" : shareName} /><ReviewLine label="Path" value={connectivitySkipped ? "—" : sharePath} mono /></Card>}
           <Card title="Network"><ReviewLine label="Connection" value={networkMode} /><ReviewLine label="Selected ports" value={selectedInterfaceSummary} mono /><ReviewLine label="LLDP" value={lldp ? lldpMode === "rx_tx" ? "Receive + transmit" : "Receive only" : "Disabled"} /><ReviewLine label="CDP" value={cdpReceive ? cdpSmart ? "Listen + smart transmit" : "Listen only" : "Disabled"} /><ReviewLine label="Plan status" value={networkPlan ? networkPlan.plan.apply_available ? "Preview reports apply available" : "Review-only — apply blocked" : "Not previewed"} />{networkPlan && <ReviewLine label="Plan SHA-256" value={networkPlan.sha256} mono />}{networkPlan?.plan.blockers.map((blocker) => <Notice key={blocker.code} tone="warning" title={blocker.code}>{blocker.message}</Notice>)}</Card>

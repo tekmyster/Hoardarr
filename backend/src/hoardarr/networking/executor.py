@@ -158,12 +158,15 @@ def _selected_interfaces(
     configuration: ManagedNetworkRequest,
     sysfs_root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    inventory = {
-        str(item["id"]): item
-        for item in discover_network_interfaces(sysfs_root) if sysfs_root is not None
-    } if sysfs_root is not None else {
-        str(item["id"]): item for item in discover_network_interfaces()
-    }
+    inventory = (
+        {
+            str(item["id"]): item
+            for item in discover_network_interfaces(sysfs_root)
+            if sysfs_root is not None
+        }
+        if sysfs_root is not None
+        else {str(item["id"]): item for item in discover_network_interfaces()}
+    )
     requested = configuration.host.network.interface_ids
     missing = [name for name in requested if name not in inventory]
     if missing:

@@ -56,8 +56,8 @@ export function networkRates(
 
 const PANEL_NAMES: Record<DashboardPanelId, string> = {
   system: "System",
-  performance: "Resource Usage",
-  "storage-performance": "Storage Performance",
+  performance: "Server Usage",
+  "storage-performance": "Storage Activity",
   storage: "Storage",
   "drive-health": "Drive Health",
   network: "Network",
@@ -165,17 +165,15 @@ function panelBody(panel: DashboardPanelId, data: OverviewDocument | null, resou
     const performance = resources?.storage.performance;
     if (!performance || performance.summary.sample_seconds === null) return <EmptyReading>{loadError ?? "Collecting the first storage reading."}</EmptyReading>;
     const metrics = performance.summary;
+    const active = (metrics.read_bytes_per_second ?? 0) + (metrics.write_bytes_per_second ?? 0) > 0;
     return <><div className="storage-kpi-grid compact">
+        <div><span>Current activity</span><strong>{active ? "Active" : "Idle"}</strong></div>
         <div><span>Read</span><strong>{formatRate(metrics.read_bytes_per_second)}</strong></div>
         <div><span>Write</span><strong>{formatRate(metrics.write_bytes_per_second)}</strong></div>
-        <div><span>Read IOPS</span><strong>{formatNumber(metrics.read_iops)}</strong></div>
-        <div><span>Write IOPS</span><strong>{formatNumber(metrics.write_iops)}</strong></div>
-        <div><span>Read wait</span><strong>{formatNumber(metrics.read_wait_ms, " ms")}</strong></div>
-        <div><span>Write wait</span><strong>{formatNumber(metrics.write_wait_ms, " ms")}</strong></div>
         <div><span>Writes today</span><strong>{formatBytes(metrics.writes_today_bytes)}</strong></div>
-        <div><span>Busy</span><strong>{formatNumber(metrics.utilization_percent, "%")}</strong></div>
       </div>
       {history.length > 0 && <div className="storage-overview-chart"><MiniGraph label="Bandwidth" primary={history.map((item) => item.read)} secondary={history.map((item) => item.write)} /></div>}
+      <details><summary>Advanced details</summary><div className="storage-kpi-grid compact"><div><span>Read IOPS</span><strong>{formatNumber(metrics.read_iops)}</strong></div><div><span>Write IOPS</span><strong>{formatNumber(metrics.write_iops)}</strong></div><div><span>Read wait</span><strong>{formatNumber(metrics.read_wait_ms, " ms")}</strong></div><div><span>Write wait</span><strong>{formatNumber(metrics.write_wait_ms, " ms")}</strong></div><div><span>Busy</span><strong>{formatNumber(metrics.utilization_percent, "%")}</strong></div></div></details>
     </>;
   }
   if (!data) return <EmptyReading>{loadError ?? "Waiting for the first live reading."}</EmptyReading>;

@@ -14,7 +14,7 @@ describe("SettingsPage updates and add-ons", () => {
     vi.spyOn(api, "apiKeys").mockResolvedValue([]);
     vi.spyOn(api, "addons").mockResolvedValue([]);
     vi.spyOn(api, "updateStatus").mockResolvedValue({
-      current_version: "0.3.10",
+      current_version: "0.3.11",
       latest_version: null,
       channel: "stable",
       metadata_sha256: null,
@@ -23,7 +23,7 @@ describe("SettingsPage updates and add-ons", () => {
       operation: null,
     });
     vi.spyOn(api, "checkUpdates").mockResolvedValue({
-      current_version: "0.3.10",
+      current_version: "0.3.11",
       latest_version: "0.4.0",
       channel: "stable",
       compatible: false,
@@ -42,7 +42,7 @@ describe("SettingsPage updates and add-ons", () => {
     vi.spyOn(api, "apiKeys").mockResolvedValue([]);
     vi.spyOn(api, "addons").mockResolvedValue([]);
     vi.spyOn(api, "updateStatus").mockResolvedValue({
-      current_version: "0.3.10",
+      current_version: "0.3.11",
       latest_version: null,
       channel: "stable",
       metadata_sha256: null,
@@ -51,7 +51,7 @@ describe("SettingsPage updates and add-ons", () => {
       operation: null,
     });
     vi.spyOn(api, "checkUpdates").mockResolvedValue({
-      current_version: "0.3.10",
+      current_version: "0.3.11",
       latest_version: "0.4.0",
       channel: "stable",
       compatible: true,
@@ -86,7 +86,7 @@ describe("SettingsPage updates and add-ons", () => {
     vi.spyOn(api, "apiKeys").mockResolvedValue([]);
     vi.spyOn(api, "addons").mockResolvedValue([]);
     vi.spyOn(api, "updateStatus").mockResolvedValue({
-      current_version: "0.3.10",
+      current_version: "0.3.11",
       latest_version: null,
       channel: "stable",
       metadata_sha256: null,

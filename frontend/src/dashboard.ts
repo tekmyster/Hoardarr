@@ -15,15 +15,14 @@ export const DASHBOARD_PANEL_IDS = [
 export type DashboardPanelId = (typeof DASHBOARD_PANEL_IDS)[number];
 
 export const DEFAULT_DASHBOARD_PANELS: DashboardPanelId[] = [
-  "system",
-  "performance",
-  "storage-performance",
   "storage",
   "drive-health",
-  "network",
-  "neighbors",
+  "storage-performance",
   "alerts",
   "activity",
+  "applications",
+  "shares",
+  "performance",
 ];
 
 export const DASHBOARD_LAYOUT_KEY = "hoardarr.overview.layout.v1";
@@ -36,7 +35,7 @@ export function loadDashboardPanels(raw: string | null): DashboardPanelId[] {
   if (raw === null) return [...DEFAULT_DASHBOARD_PANELS];
   try {
     const parsed = JSON.parse(raw) as { version?: unknown; panels?: unknown };
-    if (!Array.isArray(parsed.panels) || ![1, 2, 3].includes(Number(parsed.version))) return [...DEFAULT_DASHBOARD_PANELS];
+    if (!Array.isArray(parsed.panels) || ![1, 2, 3, 4].includes(Number(parsed.version))) return [...DEFAULT_DASHBOARD_PANELS];
     const panels = parsed.panels.filter(isPanelId).filter((panel, index, items) => items.indexOf(panel) === index);
     if (parsed.version === 1 && panels.length && !panels.includes("neighbors")) {
       const networkIndex = panels.indexOf("network");
@@ -53,7 +52,7 @@ export function loadDashboardPanels(raw: string | null): DashboardPanelId[] {
 }
 
 export function saveDashboardPanels(panels: DashboardPanelId[]): string {
-  return JSON.stringify({ version: 3, panels });
+  return JSON.stringify({ version: 4, panels });
 }
 
 export function moveDashboardPanel(

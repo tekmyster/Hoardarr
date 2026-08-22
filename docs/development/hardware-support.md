@@ -136,8 +136,11 @@ Two rules follow from this:
 - two block nodes with the same authoritative WWID are not two inventory
   drives.
 
-Hoardarr uses `multipath` and status-only `multipathd` queries for topology and
-health. It does not rewrite multipath configuration during discovery.
+Discovery uses status-only `multipath` and `multipathd` queries. A separate
+Advanced, immutable lifecycle operation may create or change a verified map
+after matching authoritative logical identity, capacity, sector geometry, and
+filesystem UUID. That operation preserves the Hoardarr storage ID and public
+mount path; see [Storage controller and path redundancy](storage-redundancy.md).
 
 ## NetApp and other reused shelves
 

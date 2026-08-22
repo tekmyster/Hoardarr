@@ -219,3 +219,17 @@ class SnapraidReplacementApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     confirmation: Literal["I AGREE"]
+
+
+class StorageRedundancyPreviewRequest(StrictModel):
+    storage_entity_id: str = Field(min_length=36, max_length=36)
+    action: Literal["add", "remove", "replace"]
+    path_identity: str | None = Field(default=None, min_length=3, max_length=512)
+    remove_path_identity: str | None = Field(default=None, min_length=3, max_length=512)
+    policy: Literal["recommended", "failover", "multibus", "group_by_prio"] = "recommended"
+
+
+class StorageRedundancyApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["APPLY"]

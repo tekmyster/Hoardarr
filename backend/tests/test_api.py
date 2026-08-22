@@ -25,10 +25,12 @@ from hoardarr.db.models import (
     HardwareSnapshot,
     IntegrationConnection,
     Operation,
+    StorageEntity,
     User,
 )
 from hoardarr.operations.service import document_hash
 from hoardarr.operations.worker import run_once
+from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.storage.tiering import plan_transfer
 from hoardarr.wizard.service import DEFAULT_LAYOUT
 
@@ -1291,3 +1293,108 @@ def test_authentication_work_is_concurrency_bounded(
         assert second.result(timeout=5).status_code == 200
     assert app.state.authentication_slots.acquire(blocking=False)
     app.state.authentication_slots.release()
+
+
+def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+
+    def path(controller: str, kernel_path: str) -> dict[str, object]:
+        return {
+            "id": f"wwn:naa.600a098000api:{controller}",
+            "stable_identity": True,
+            "system_device": False,
+            "selectable": True,
+            "kernel_path": kernel_path,
+            "identity": {
+                "serial": "ARRAY-LUN-7",
+                "wwn": "naa.600a098000api",
+                "eui64": None,
+                "nguid": None,
+            },
+            "capacity_bytes": 8_000_000_000_000,
+            "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+            "connection": {
+                "protocol": "fc",
+                "controller_address": controller,
+                "target_port_wwn": f"50:00:{controller}",
+            },
+            "partitions": [],
+        }
+
+    first = path("hba-a", "/dev/sdb")
+    second = path("hba-b", "/dev/sdc")
+    hardware = {"schema_version": 1, "source": {"kind": "sysfs"}, "disks": [first, second]}
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="user",
+            actor_id="00000000-0000-0000-0000-000000000001",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="sysfs",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+        storage = register_single_path_storage(
+            session,
+            name="MediaPool",
+            device=first,
+            mountpoint="/media",
+            presentation_device="/dev/sdb",
+            filesystem_uuid="11111111-1111-4111-8111-111111111111",
+        )
+        storage_id = storage.id
+
+    inventory = client.get("/api/v1/storage/logical")
+    assert inventory.status_code == 200
+    assert inventory.json()["items"][0]["id"] == storage_id
+    assert inventory.json()["items"][0]["mountpoint"] == "/media"
+
+    assert (
+        client.post(
+            "/api/v1/storage/redundancy/preview",
+            headers={"Origin": "http://testserver"},
+            json={"storage_entity_id": storage_id, "action": "add"},
+        ).status_code
+        == 403
+    )
+    preview = client.post(
+        "/api/v1/storage/redundancy/preview",
+        headers=_state_headers(csrf),
+        json={"storage_entity_id": storage_id, "action": "add"},
+    )
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()["plan"]
+    assert plan["destructive"] is False
+    assert plan["format"] is False
+    assert plan["before"]["mountpoint"] == plan["after"]["mountpoint"] == "/media"
+    assert plan["before"]["filesystem_uuid"] == plan["after"]["filesystem_uuid"]
+
+    body = {
+        "plan": plan,
+        "plan_sha256": preview.json()["plan_sha256"],
+        "confirmation": "APPLY",
+    }
+    headers = _state_headers(csrf, **{"Idempotency-Key": "redundancy-api-one"})
+    accepted = client.post("/api/v1/storage/redundancy", headers=headers, json=body)
+    replay = client.post("/api/v1/storage/redundancy", headers=headers, json=body)
+    assert accepted.status_code == replay.status_code == 202
+    assert replay.json()["replayed"] is True
+
+    with app.state.session_factory() as session:
+        stored = session.get(StorageEntity, storage_id)
+        assert stored is not None
+        assert stored.mountpoint == "/media"
+        assert stored.filesystem_uuid == "11111111-1111-4111-8111-111111111111"

@@ -9,8 +9,11 @@ from hoardarr.operations.service import document_hash
 from hoardarr.storage.layouts import LayoutError, normalize_layout
 
 GUIDED_MODES = frozenset({"guided", "simple"})
-GUIDED_TOPOLOGIES = frozenset({"individual", "mergerfs", "cache", "block", "import", "test"})
+GUIDED_TOPOLOGIES = frozenset(
+    {"individual", "mergerfs", "cache", "block", "import", "test", "zfs", "snapraid"}
+)
 ARRAY_TOPOLOGIES = frozenset({"zfs", "raid", "snapraid", "mixed"})
+ADVANCED_ONLY_TOPOLOGIES = frozenset({"raid", "mixed"})
 DESTRUCTIVE_LAYOUT_TOPOLOGIES = ARRAY_TOPOLOGIES
 ALL_TOPOLOGIES = GUIDED_TOPOLOGIES | ARRAY_TOPOLOGIES
 STANDARD_LIBRARIES = ("Movies", "TV", "Music", "Photos", "Books", "Audiobooks")
@@ -666,10 +669,10 @@ def normalize_storage_answers(
     topology = storage.get("topology", "individual")
     if not isinstance(topology, str) or topology not in ALL_TOPOLOGIES:
         _error("storage.topology", "is not a supported storage layout")
-    if mode in GUIDED_MODES and topology not in GUIDED_TOPOLOGIES:
+    if mode in GUIDED_MODES and topology in ADVANCED_ONLY_TOPOLOGIES:
         _error(
             "storage.topology",
-            "ZFS, SnapRAID, and RAID are available only in Advanced mode",
+            "Linux RAID and mixed protected pools are available only in Advanced mode",
         )
 
     usb_devices = [device for device in devices if str(device["transport"]).lower() == "usb"]

@@ -31,12 +31,13 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/networking")) return json({ configuration: null, pending_confirmation: false, capabilities: { available: true, tools: {} }, interfaces: [], current: { hostname: "hoardarr", timezone: "UTC", addresses: {}, default_interface: null, default_gateway: null } });
     if (pathname.endsWith("/hardware/snapshots/latest")) return route.fulfill({ status: 404, json: { title: "Not found" } });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
+    if (pathname.endsWith("/storage/logical")) return json({ items: [] });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations")) return json({ items: [] });
     if (pathname.endsWith("/wizards") || pathname.endsWith("/operations")) return json({ items: [] });
     if (pathname.endsWith("/system/overview")) return json({
       captured_at: new Date().toISOString(), source: "live",
-      system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.10", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] },
+      system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.11", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] },
       storage: { snapshot: null, drive_count: null, raw_capacity_bytes: null, health: null, pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] } },
       network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: new Date().toISOString(), detail: null, neighbors: [] } },
       activity: { operations: [] }, applications: { connections: [] }, alerts: [],
@@ -172,12 +173,13 @@ async function unconfiguredServer(page: Page): Promise<void> {
     if (pathname.endsWith("/networking")) return json({ configuration: null, pending_confirmation: false, capabilities: { available: true, tools: {} }, interfaces: [], current: { hostname: "hoardarr", timezone: "UTC", addresses: {}, default_interface: "enp1s0", default_gateway: null } });
     if (pathname.endsWith("/hardware/snapshots/latest")) return route.fulfill({ status: 404, json: { title: "Not found" } });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
+    if (pathname.endsWith("/storage/logical")) return json({ items: [] });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations")) return json({ items: [] });
     if (pathname.endsWith("/wizards") || pathname.endsWith("/operations")) return json({ items: [] });
     if (pathname.endsWith("/system/overview")) return json({
       captured_at: new Date().toISOString(), source: "live",
-      system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.10", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] },
+      system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.11", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] },
       storage: { snapshot: null, drive_count: null, raw_capacity_bytes: null, health: null, pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] } },
       network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: new Date().toISOString(), detail: null, neighbors: [] } },
       activity: { operations: [] }, applications: { connections: [] }, alerts: [],
@@ -283,6 +285,37 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByLabel("Filesystem", { exact: true })).toBeVisible();
     await expect(dialog.getByLabel("Partition table")).toBeVisible();
     await expect(dialog.getByLabel("TRIM or discard")).toBeVisible();
+  });
+
+  test("guides a Plex user from four drives to protected media and download folders", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByRole("button", { name: "Add storage" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    for (const serial of ["SSD-1", "SSD-2", "SSD-3", "SSD-4"]) {
+      await dialog.getByRole("checkbox", { name: new RegExp(`Select SSD-1TB serial ${serial}`) }).check();
+    }
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByRole("heading", { name: "Check drive condition" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByText("What will you store?")).toBeVisible();
+    await expect(dialog.getByText("Media libraries", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Yes, one large location — Recommended")).toBeVisible();
+    await expect(dialog.getByText("Protect against one drive failure — Recommended")).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByText("Recommended for your setup")).toBeVisible();
+    await expect(dialog.getByText("Flexible protected media storage").first()).toBeVisible();
+    await expect(dialog.getByText(/Estimated usable/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Use recommended setup" }).click();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByText("Which media server do you use?")).toBeVisible();
+    await expect(dialog.getByRole("checkbox", { name: /Plex/ })).toBeChecked();
+    await expect(dialog.locator(".library-name strong", { hasText: "Movies" })).toBeVisible();
+    await expect(dialog.locator(".library-name strong", { hasText: "TV" })).toBeVisible();
+    await expect(dialog.getByText("How do you download?")).toBeVisible();
+    await expect(dialog.getByRole("checkbox", { name: /Torrents/ })).toBeChecked();
+    await expect(dialog.getByRole("checkbox", { name: /Usenet/ })).toBeChecked();
   });
 
   test("recovers a durable apply after refresh and reveals a generated password only until confirmation", async ({ page }) => {

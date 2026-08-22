@@ -418,8 +418,10 @@ def normalize_mutation_plan(product: str, value: Any) -> dict[str, Any]:
                     "download_field_refused",
                     "This download-client field is outside storage onboarding",
                 )
-            if not field_value or len(field_value) > 256 or any(
-                ord(character) < 32 for character in field_value
+            if (
+                not field_value
+                or len(field_value) > 256
+                or any(ord(character) < 32 for character in field_value)
             ):
                 raise ServarrError("invalid_plan", "Download-client field value is invalid")
             fields[name] = field_value

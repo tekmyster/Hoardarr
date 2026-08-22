@@ -303,6 +303,78 @@ class ShareAcl(Base):
     )
 
 
+class StorageEntity(Base):
+    """One durable logical storage object, independent of its current Linux paths."""
+
+    __tablename__ = "storage_entities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    stable_identity: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    storage_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="block")
+    filesystem_uuid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mountpoint: Mapped[str] = mapped_column(String(4096), nullable=False)
+    presentation_device: Mapped[str] = mapped_column(String(4096), nullable=False)
+    capacity_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    logical_sector_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    physical_sector_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    topology_state: Mapped[str] = mapped_column(String(32), nullable=False, default="single_path")
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="scsi")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class StorageController(Base):
+    __tablename__ = "storage_controllers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    stable_identity: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    state_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, index=True
+    )
+
+
+class StoragePath(Base):
+    __tablename__ = "storage_paths"
+    __table_args__ = (
+        UniqueConstraint("storage_entity_id", "stable_path_identity", name="uq_storage_path"),
+        Index("ix_storage_paths_entity_state", "storage_entity_id", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    storage_entity_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_entities.id", ondelete="CASCADE"), nullable=False
+    )
+    controller_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("storage_controllers.id", ondelete="SET NULL"), nullable=True
+    )
+    stable_path_identity: Mapped[str] = mapped_column(String(512), nullable=False)
+    kernel_path: Mapped[str] = mapped_column(String(4096), nullable=False)
+    logical_storage_identity: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    protocol: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    optimized: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, index=True
+    )
+
+
 class AddonInstallation(Base):
     __tablename__ = "addon_installations"
 
@@ -472,9 +544,7 @@ class MetricAlert(Base):
 
 class MetricAlertRule(Base):
     __tablename__ = "metric_alert_rules"
-    __table_args__ = (
-        Index("ix_metric_alert_rules_enabled_metric", "enabled", "metric_id"),
-    )
+    __table_args__ = (Index("ix_metric_alert_rules_enabled_metric", "enabled", "metric_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(128), nullable=False)

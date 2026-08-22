@@ -359,6 +359,7 @@ export interface Drive {
   serial: string;
   wwn: string | null;
   capacityBytes: number;
+  rotational?: boolean | null;
   stableIdentity: boolean;
   readOnly: boolean;
   selectable: boolean;
@@ -377,6 +378,7 @@ export interface Drive {
   signatureScan: SignatureScan;
   location: string;
   removable: boolean;
+  alternatePaths?: string[];
   healthStatus: "healthy" | "warning" | "critical" | "unknown";
   metrics: DriveMetric[];
   observations: DriveObservation[];
@@ -399,6 +401,78 @@ export interface DeviceMaintenancePlan {
   hardware_snapshot_sha256: string;
   destructive: true;
   advanced_only: boolean;
+}
+
+export interface StorageControllerPathDocument {
+  id: string;
+  stable_path_identity: string;
+  kernel_path: string;
+  protocol: string;
+  state: string;
+  active: boolean;
+  optimized: boolean | null;
+  controller: {
+    id: string;
+    stable_identity: string;
+    model: string | null;
+  } | null;
+}
+
+export interface LogicalStorageDocument {
+  id: string;
+  name: string;
+  stable_identity: string;
+  filesystem_uuid: string | null;
+  mountpoint: string;
+  presentation_device: string;
+  topology_state: "single_path" | "fully_redundant" | "reduced_redundancy" | "failed_over" | "no_path" | string;
+  capacity_bytes: number;
+  paths: StorageControllerPathDocument[];
+  available_paths?: Array<{
+    stable_path_identity: string;
+    kernel_path: string;
+    controller_identity: string;
+    protocol: string;
+  }>;
+}
+
+export interface StorageRedundancyPlan {
+  schema_version: 1;
+  operation: "redundancy.add" | "redundancy.remove" | "redundancy.replace";
+  storage_entity_id: string;
+  logical_storage_identity: string;
+  hardware_snapshot_sha256: string;
+  identity_binding_sha256: string;
+  before: {
+    path_ids: string[];
+    presentation_device: string;
+    mountpoint: string;
+    device_mountpoint: string;
+    filesystem_uuid: string | null;
+  };
+  after: {
+    path_ids: string[];
+    presentation_device: string;
+    mountpoint: string;
+    filesystem_uuid: string | null;
+    topology_state: string;
+  };
+  selected_path: {
+    stable_path_identity: string;
+    kernel_path: string;
+    controller_identity?: string;
+    protocol?: string;
+  };
+  removed_path?: {
+    stable_path_identity: string;
+    kernel_path: string;
+  } | null;
+  policy: "recommended" | "failover" | "multibus" | "group_by_prio";
+  destructive: false;
+  format: false;
+  copy_data: false;
+  preserves: string[];
+  plan_sha256: string;
 }
 
 export interface WizardDocument {

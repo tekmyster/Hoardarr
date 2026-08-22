@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { demoDrive } from "./demo/fixture";
-import { actionDestructiveLabel, exactConsentAccepted, existingDataSummary, filesystemRecommendation, hasKnownSectorGeometry, isImportedNtfs, layoutChoicesForDrive, sectorGeometryAssessment, selectPortableSystem, storageChoiceNeedsSectorGeometry, toggleNetworkInterfaceSelection } from "./policy";
+import { actionDestructiveLabel, exactConsentAccepted, existingDataSummary, filesystemRecommendation, hasKnownSectorGeometry, isImportedNtfs, layoutChoicesForDrive, recommendStorage, sectorGeometryAssessment, selectPortableSystem, storageChoiceNeedsSectorGeometry, toggleNetworkInterfaceSelection } from "./policy";
 
 describe("guided storage policy", () => {
   it("keeps USB array choices out of Guided setup", () => {
@@ -22,9 +22,51 @@ describe("guided storage policy", () => {
     const directDrive = { ...demoDrive, connection: { bus: "SAS", transport: "sas/mpt3sas" } };
     const choices = layoutChoicesForDrive(directDrive, "guided", false, 4);
     const protectedStorage = choices.find((choice) => choice.id === "zfs");
-    expect(protectedStorage?.label).toBe("Protected storage");
+    expect(protectedStorage?.label).toBe("Always-on protected storage");
     expect(protectedStorage?.requiresAdvanced).toBeUndefined();
+    expect(choices.find((choice) => choice.id === "snapraid")?.label).toBe("Flexible protected media storage");
     expect(layoutChoicesForDrive(directDrive, "guided", false, 1).map((choice) => choice.id)).not.toContain("zfs");
+  });
+
+  it("recommends mergerFS plus SnapRAID for expandable four-drive media storage", () => {
+    const drives = [0, 1, 2, 3].map((index) => ({
+      ...demoDrive,
+      id: `drive-${index}`,
+      serial: `MEDIA-${index}`,
+      capacityBytes: [12, 12, 8, 8][index] * 1_000_000_000_000,
+      rotational: true,
+      connection: { bus: "SAS", transport: "sas/mpt3sas" },
+      signatureScan: { status: "complete" as const, source: "wipefs", reason: null },
+    }));
+    const recommendation = recommendStorage({
+      drives, purpose: "media", preserveData: false, oneLargeLocation: true, protection: "one", easyExpansion: true,
+    });
+    expect(recommendation).toMatchObject({
+      role: "snapraid",
+      title: "Flexible protected media storage",
+      technicalName: "mergerFS + SnapRAID (1 parity)",
+      rawCapacityBytes: 40_000_000_000_000,
+      usableCapacityBytes: 28_000_000_000_000,
+      failureTolerance: 1,
+      parityCount: 1,
+    });
+  });
+
+  it("recommends a ZFS mirror for two direct-attached drives requesting protection", () => {
+    const drives = [0, 1].map((index) => ({
+      ...demoDrive, id: `ssd-${index}`, serial: `SSD-${index}`, capacityBytes: 4_000_000_000_000,
+      rotational: false, connection: { bus: "NVME", transport: "nvme/pcie" },
+      signatureScan: { status: "complete" as const, source: "wipefs", reason: null },
+    }));
+    expect(recommendStorage({
+      drives, purpose: "media", preserveData: false, oneLargeLocation: true, protection: "one", easyExpansion: false,
+    })).toMatchObject({ role: "zfs", zfsVdevType: "mirror", usableCapacityBytes: 4_000_000_000_000, failureTolerance: 1 });
+  });
+
+  it("defaults incomplete existing-data evidence to a non-formatting path", () => {
+    expect(recommendStorage({
+      drives: [demoDrive], purpose: "media", preserveData: true, oneLargeLocation: true, protection: "one", easyExpansion: true,
+    })).toMatchObject({ role: "import", usableCapacityBytes: demoDrive.capacityBytes });
   });
 
   it("recommends a non-formatting import layout when existing data must be preserved", () => {

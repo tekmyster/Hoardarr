@@ -74,6 +74,41 @@ def _usb_payload(*, capacity_bytes: int = 240_057_409_536) -> dict[str, object]:
     }
 
 
+def _direct_payload(*, drive_count: int = 4) -> dict[str, object]:
+    payload = deepcopy(_usb_payload(capacity_bytes=8_000_000_000_000))
+    disks = payload["disks"]
+    assert isinstance(disks, list)
+    template = disks[0]
+    assert isinstance(template, dict)
+    result: list[dict[str, object]] = []
+    for index in range(drive_count):
+        disk = deepcopy(template)
+        serial = f"MEDIA{index + 1:04d}"
+        disk["id"] = f"serial:seagate:media:{serial.casefold()}"
+        disk["kernel_name"] = f"sd{chr(ord('b') + index)}"
+        disk["kernel_path"] = f"/dev/sd{chr(ord('b') + index)}"
+        disk["volatile_locator"] = False
+        disk["identity"] = {
+            "serial": serial,
+            "wwn": f"naa.5000{index:012d}",
+            "eui64": None,
+            "nguid": None,
+        }
+        disk["vendor"] = "SEAGATE"
+        disk["model"] = "MEDIA-HDD"
+        disk["connection"] = {
+            "transport": "sas",
+            "protocol": "sas",
+            "controller_address": "0000:18:00.0",
+            "enclosure_id": "shelf-1",
+            "slot": index + 1,
+        }
+        disk["signature_scan"] = {"status": "complete", "reason": None, "source": "wipefs"}
+        result.append(disk)
+    payload["disks"] = result
+    return payload
+
+
 def _snapshot(
     session: Session,
     payload: dict[str, object],
@@ -898,7 +933,9 @@ def test_guided_forbids_arrays_and_advanced_usb_requires_exact_acknowledgement(
 ) -> None:
     snapshot = _snapshot(session, _usb_payload())
     guided = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)
-    with pytest.raises(WizardValidationError, match="Advanced mode"):
+    with pytest.raises(
+        WizardValidationError, match="USB drives cannot join an array in Guided mode"
+    ):
         update_step(
             session,
             wizard_id=guided.id,
@@ -946,6 +983,55 @@ def test_guided_forbids_arrays_and_advanced_usb_requires_exact_acknowledgement(
     )
     plan = create_plan(session, wizard_id=advanced.id, expected_revision=accepted.revision)
     assert plan.document_json["storage"]["warnings"][0]["code"] == ("advanced_usb_array_risk")
+
+
+@pytest.mark.parametrize("topology", ["zfs", "snapraid"])
+def test_guided_accepts_recommended_protected_layouts_on_direct_media_drives(
+    session: Session,
+    topology: str,
+) -> None:
+    payload = _direct_payload()
+    disks = payload["disks"]
+    assert isinstance(disks, list)
+    selected_ids = [str(disk["id"]) for disk in disks if isinstance(disk, dict)]
+    snapshot = _snapshot(session, payload)
+    wizard = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)
+    updated = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=0,
+        step="storage",
+        answers=_storage_answers(
+            selected_device_ids=selected_ids,
+            topology=topology,
+            portable_systems=["linux"],
+        ),
+    )
+    assert updated.answers_json["storage"]["topology"] == topology
+
+
+@pytest.mark.parametrize("topology", ["raid", "mixed"])
+def test_guided_keeps_expert_only_layouts_out_of_the_simple_path(
+    session: Session,
+    topology: str,
+) -> None:
+    payload = _direct_payload()
+    disks = payload["disks"]
+    assert isinstance(disks, list)
+    snapshot = _snapshot(session, payload)
+    wizard = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)
+    with pytest.raises(WizardValidationError, match="Advanced mode"):
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=0,
+            step="storage",
+            answers=_storage_answers(
+                selected_device_ids=[str(disk["id"]) for disk in disks if isinstance(disk, dict)],
+                topology=topology,
+                portable_systems=["linux"],
+            ),
+        )
 
 
 def test_custom_library_is_specific_and_anime_maps_to_arr_application(session: Session) -> None:

@@ -54,6 +54,7 @@ Hoardarr is an ARR-first storage control plane that allows operators to:
 -   drain and retire aging disks safely
 -   ingest foreign storage systems
 -   maintain stable media paths
+-   add a redundant controller path later without rebuilding media storage
 -   monitor disk health and parity freshness
 -   integrate with homelab automation systems
 
@@ -129,6 +130,9 @@ Hoardarr is in active beta development with a guarded storage vertical slice:
   for individual disks, mergerFS, ZFS, Linux MD, SnapRAID, mixed protected
   pools, tier movement, secure wipe and capability-gated sector conversion,
   including durable restart reconciliation and truthful cancellation boundaries;
+- an Advanced logical-storage identity and controller-path lifecycle that can
+  add, replace, fail over, or remove a verified multipath connection while
+  preserving the filesystem UUID, mount, shares, ARR paths and telemetry;
 - product-aware ARR discovery and writes, granular managed-path ACLs, signed
   direct-to-latest updates and a conservative trusted/local add-on runtime; and
 - a reproducible Ubuntu release bundle containing locked Python dependencies
@@ -166,6 +170,7 @@ the release documentation for the complete trust and installation boundary.
 - [Host bootstrap and package profiles](docs/development/bootstrap.md)
 - [Disk quarantine and storage autoactivation](docs/development/disk-quarantine.md)
 - [Hardware, controller, and enclosure support](docs/development/hardware-support.md)
+- [Non-destructive controller and path redundancy](docs/development/storage-redundancy.md)
 - [Tiered storage and download workloads](docs/development/tiered-storage.md)
 - [ARR folder and API integration](docs/development/arr-integration.md)
 - [Backend API and deployment](docs/development/backend.md)

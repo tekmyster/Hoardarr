@@ -108,6 +108,9 @@ describe("OverviewDashboard", () => {
     expect(screen.getByText("10.0%")).toBeInTheDocument();
     expect(screen.getByText("50.0%")).toBeInTheDocument();
     expect(screen.getByText("30.0%")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Customize Dashboard" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Network" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Connected Switches & Devices" }));
     expect(screen.getByText("core-9500")).toBeInTheDocument();
     expect(screen.getByText(/FortyGigabitEthernet1\/0\/1/)).toBeInTheDocument();
     expect(screen.getByLabelText("Network bandwidth live history")).toBeInTheDocument();

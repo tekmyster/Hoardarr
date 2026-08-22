@@ -343,9 +343,7 @@ def _execute_transfer_posix(
             dst_dir_fd=destination_parent_fd,
             follow_symlinks=False,
         )
-        published = os.stat(
-            destination.name, dir_fd=destination_parent_fd, follow_symlinks=False
-        )
+        published = os.stat(destination.name, dir_fd=destination_parent_fd, follow_symlinks=False)
         if (published.st_dev, published.st_ino) != (
             temporary_stat.st_dev,
             temporary_stat.st_ino,
@@ -479,9 +477,7 @@ def cleanup_retained_transfer(
             if not stat.S_ISREG(destination_stat.st_mode):
                 raise TieringError("destination_missing", "the imported destination is missing")
             try:
-                source_stat = os.stat(
-                    source.name, dir_fd=source_parent_fd, follow_symlinks=False
-                )
+                source_stat = os.stat(source.name, dir_fd=source_parent_fd, follow_symlinks=False)
             except FileNotFoundError:
                 source_removed = True
             else:

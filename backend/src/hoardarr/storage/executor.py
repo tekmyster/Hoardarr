@@ -42,6 +42,13 @@ from hoardarr.storage.quarantine import (
     atomic_text,
     validate_quarantine,
 )
+from hoardarr.storage.redundancy import (
+    RedundancyError,
+    logical_storage_identity,
+    matching_devices,
+    stable_path_identity,
+    validate_redundancy_plan,
+)
 from hoardarr.storage.snapraid import (
     SnapraidReplacementError,
     replace_data_entry,
@@ -1613,6 +1620,7 @@ def _execute_actions(
         safe_options.append("discard")
     disk_mounts: list[Path] = []
     disk_mounts_by_id: dict[str, Path] = {}
+    filesystem_uuids: dict[str, str] = {}
     fstab_lines: list[str] = []
     mount_members = topology not in {"zfs", "raid", "mixed"}
     for mount_index, (identifier, disk) in enumerate(devices.items() if mount_members else ()):
@@ -1672,6 +1680,7 @@ def _execute_actions(
         disk_mounts_by_id[identifier] = mountpoint
         # UUID and type are resolved now; /dev/sdX names are never persisted.
         filesystem_uuid = _blkid_value(partition, "UUID")
+        filesystem_uuids[identifier] = filesystem_uuid
         option_text = ",".join(device_options) if device_options else "defaults"
         fstab_lines.append(
             f"UUID={filesystem_uuid} {mountpoint} {filesystem_type} {option_text} 0 2"
@@ -1999,6 +2008,11 @@ def _execute_actions(
         "topology": topology,
         "selected_device_ids": list(devices),
         "mountpoint": os.fspath(presentation_root),
+        "filesystem_uuids": filesystem_uuids,
+        "member_mountpoints": {
+            identifier: os.fspath(mountpoint)
+            for identifier, mountpoint in disk_mounts_by_id.items()
+        },
         "completed_actions": completed,
         "notices": list(journal.get("notices", [])),
         "replayed": False,
@@ -2509,6 +2523,300 @@ def apply_snapraid_replacement(
         return result
 
 
+def apply_storage_redundancy(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    inventory_provider: InventoryProvider | None = None,
+    runner: CommandRunner = _run,
+    mapper_exists: Callable[[Path], bool] = Path.exists,
+    filesystem_uuid_provider: Callable[[Path], str] | None = None,
+) -> dict[str, Any]:
+    """Change only the access layer from one path to a verified multipath map."""
+
+    paths = paths or Paths()
+    expected = {"operation", "operation_id", "plan_sha256", "plan", "confirmation_sha256"}
+    if set(request) != expected or request.get("operation") != "apply_storage_redundancy":
+        raise ExecutorFailure("request_invalid", "The storage redundancy request is invalid.")
+    operation_id = request.get("operation_id")
+    raw_plan = request.get("plan")
+    if (
+        not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(raw_plan, Mapping)
+    ):
+        raise ExecutorFailure("request_invalid", "The storage redundancy request is invalid.")
+    if request.get("confirmation_sha256") != document_hash({"confirmation": "APPLY"}):
+        raise ExecutorFailure("confirmation_invalid", "The redundancy change was not confirmed.")
+    try:
+        plan = validate_redundancy_plan(raw_plan)
+    except RedundancyError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+    if plan["plan_sha256"] != request.get("plan_sha256"):
+        raise ExecutorFailure("redundancy_plan_changed", "The redundancy plan changed.")
+    provider = inventory_provider or (lambda: _live_inventory(paths))
+    snapshot = provider()
+    if not isinstance(snapshot, Mapping):
+        raise ExecutorFailure("hardware_scan_invalid", "The current storage inventory is invalid.")
+    observed = matching_devices(snapshot, str(plan["logical_storage_identity"]))
+    selected = plan["selected_path"]
+    selected_identity = str(selected["stable_path_identity"])
+    selected_devices = [
+        item for item in observed if stable_path_identity(item) == selected_identity
+    ]
+    if plan["operation"] in {"redundancy.add", "redundancy.replace"}:
+        if len(selected_devices) != 1:
+            raise ExecutorFailure(
+                "path_identity_changed",
+                "The reviewed redundant path is missing or ambiguous. "
+                "No storage access was changed.",
+            )
+        device = selected_devices[0]
+        if logical_storage_identity(device) != plan["logical_storage_identity"]:
+            raise ExecutorFailure(
+                "logical_identity_changed",
+                "The new path identifies different storage.",
+            )
+        if int(device.get("capacity_bytes") or -1) <= 0:
+            raise ExecutorFailure("capacity_not_reported", "The new path capacity is unavailable.")
+    mapper_text = str(
+        (
+            plan["after"]
+            if plan["operation"] in {"redundancy.add", "redundancy.replace"}
+            else plan["before"]
+        ).get("presentation_device")
+        or ""
+    )
+    mapper_posix = PurePosixPath(mapper_text)
+    if not mapper_text.startswith("/dev/mapper/") or ".." in mapper_posix.parts:
+        raise ExecutorFailure(
+            "mapper_path_invalid", "The reviewed multipath mapper path is invalid."
+        )
+    mapper = Path(mapper_text)
+    wwid = str(plan["logical_storage_identity"]).split(":", 1)[-1]
+    mountpoint_text = str(plan["before"]["mountpoint"])
+    device_mountpoint_text = str(plan["before"].get("device_mountpoint") or mountpoint_text)
+    mountpoint = Path(mountpoint_text)
+    device_mountpoint = Path(device_mountpoint_text)
+    if (
+        not mountpoint_text.startswith("/")
+        or ".." in PurePosixPath(mountpoint_text).parts
+        or not device_mountpoint_text.startswith("/")
+        or ".." in PurePosixPath(device_mountpoint_text).parts
+    ):
+        raise ExecutorFailure("mountpoint_invalid", "The reviewed storage mountpoint is invalid.")
+    try:
+        paths.transaction_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        transaction_details = paths.transaction_root.lstat()
+    except OSError as exc:
+        raise ExecutorFailure(
+            "transaction_journal_unavailable",
+            "Storage activity tracking could not be prepared. No path change was started.",
+            needs_attention=True,
+        ) from exc
+    if not stat.S_ISDIR(transaction_details.st_mode) or (
+        os.name != "nt"
+        and (transaction_details.st_uid != _executor_uid() or transaction_details.st_mode & 0o077)
+    ):
+        raise ExecutorFailure(
+            "transaction_journal_unsafe",
+            "Storage activity tracking has unsafe ownership or permissions. "
+            "No path change was started.",
+            needs_attention=True,
+        )
+    journal_path = _journal_path(paths, operation_id)
+    prior = _load_prior_journal(journal_path, str(plan["plan_sha256"]))
+    if prior is not None:
+        return {**prior, "replayed": True}
+    total_steps = 8 if plan["operation"] in {"redundancy.add", "redundancy.replace"} else 6
+    journal: dict[str, Any] = {
+        "schema_version": 1,
+        "operation_id": operation_id,
+        "plan_sha256": plan["plan_sha256"],
+        "state": "running",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "completed_actions": [],
+        "notices": [],
+        "phase": "Revalidating logical storage identity",
+        "completed_steps": 0,
+        "total_steps": total_steps,
+        "current_action": None,
+    }
+    atomic_json(journal_path, journal)
+    base_runner = runner
+
+    def tracked_runner(command: list[str], timeout_seconds: float) -> None:
+        number = int(journal["completed_steps"]) + 1
+        command_name = PurePosixPath(command[0].replace("\\", "/")).name
+        action_id = f"redundancy:{number}:{command_name}"
+        journal["phase"] = {
+            "multipath": "Preparing redundant storage access",
+            "multipathd": "Updating controller paths",
+            "umount": "Switching the storage access layer",
+            "mount": "Restoring the existing storage mount",
+        }.get(command_name, "Updating controller redundancy")
+        journal["current_action"] = {
+            "id": action_id,
+            "type": "storage.redundancy",
+            "number": min(number, total_steps),
+            "count": total_steps,
+        }
+        journal["updated_at"] = time.time()
+        atomic_json(journal_path, journal)
+        try:
+            base_runner(command, timeout_seconds)
+        except Exception:
+            journal["state"] = "needs_attention"
+            journal["updated_at"] = time.time()
+            atomic_json(journal_path, journal)
+            raise
+        journal["completed_steps"] = min(number, total_steps)
+        journal["completed_actions"] = [*journal["completed_actions"], action_id]
+        journal["current_action"] = None
+        journal["updated_at"] = time.time()
+        atomic_json(journal_path, journal)
+
+    runner = tracked_runner
+    if plan["operation"] in {"redundancy.add", "redundancy.replace"}:
+        kernel_path = str(selected_devices[0].get("kernel_path") or "")
+        if not kernel_path.startswith("/dev/") or ".." in PurePosixPath(kernel_path).parts:
+            raise ExecutorFailure("path_invalid", "The new kernel path is invalid.")
+        runner([_tool("multipath"), "-a", wwid], 30)
+        create_command = [_tool("multipath"), "-v2"]
+        policy = str(plan.get("policy") or "recommended")
+        if policy != "recommended":
+            create_command.extend(["-p", policy])
+        create_command.append(kernel_path)
+        runner(create_command, 120)
+        runner([_tool("multipathd"), "reconfigure"], 30)
+        if not mapper_exists(mapper):
+            journal["state"] = "needs_attention"
+            journal["updated_at"] = time.time()
+            atomic_json(journal_path, journal)
+            raise ExecutorFailure(
+                "multipath_map_unavailable",
+                "Linux did not create the reviewed multipath map. "
+                "The existing filesystem was not remounted.",
+            )
+        expected_uuid = plan["before"].get("filesystem_uuid")
+        uuid_reader = filesystem_uuid_provider or (lambda path: _blkid_value(path, "UUID"))
+        if expected_uuid and uuid_reader(mapper) != expected_uuid:
+            journal["state"] = "needs_attention"
+            journal["updated_at"] = time.time()
+            atomic_json(journal_path, journal)
+            raise ExecutorFailure(
+                "filesystem_identity_changed",
+                "The multipath map does not expose the reviewed filesystem UUID. "
+                "The existing filesystem was not remounted.",
+            )
+        if plan["operation"] == "redundancy.replace":
+            removed = plan.get("removed_path")
+            removed_kernel_path = PurePosixPath(
+                str(removed.get("kernel_path") if isinstance(removed, Mapping) else "")
+            ).name
+            if not removed_kernel_path:
+                raise ExecutorFailure("path_invalid", "The path being replaced is invalid.")
+            # The map and its mount remain online while the verified replacement is
+            # added first and the stale path is removed afterward.
+            runner([_tool("multipathd"), "del", "path", removed_kernel_path], 30)
+        else:
+            # The stable application path is briefly unmounted while its lower device is
+            # changed. Share definitions, ACLs, UUIDs, and application paths are untouched.
+            mapper_mounted = False
+            try:
+                if mountpoint != device_mountpoint:
+                    runner([_tool("umount"), mountpoint_text], 120)
+                runner([_tool("umount"), device_mountpoint_text], 120)
+                runner([_tool("mount"), mapper_text, device_mountpoint_text], 120)
+                mapper_mounted = True
+                if mountpoint != device_mountpoint:
+                    runner(
+                        [
+                            _tool("mount"),
+                            "--bind",
+                            device_mountpoint_text,
+                            mountpoint_text,
+                        ],
+                        120,
+                    )
+            except ExecutorFailure as exc:
+                # Best-effort return to the exact reviewed direct path. A failed rollback
+                # is surfaced as needs-attention and never reported as success.
+                try:
+                    if mapper_mounted:
+                        runner([_tool("umount"), device_mountpoint_text], 120)
+                    runner(
+                        [
+                            _tool("mount"),
+                            str(plan["before"]["presentation_device"]),
+                            device_mountpoint_text,
+                        ],
+                        120,
+                    )
+                    if mountpoint != device_mountpoint:
+                        runner(
+                            [
+                                _tool("mount"),
+                                "--bind",
+                                device_mountpoint_text,
+                                mountpoint_text,
+                            ],
+                            120,
+                        )
+                except ExecutorFailure as rollback_exc:
+                    raise ExecutorFailure(
+                        "redundancy_rollback_failed",
+                        "The multipath transition failed and the original mount could not "
+                        "be restored automatically.",
+                        needs_attention=True,
+                    ) from rollback_exc
+                raise ExecutorFailure(
+                    "redundancy_transition_failed",
+                    "The multipath transition failed; the original storage path was restored.",
+                ) from exc
+    else:
+        # Removing one path leaves the existing multipath map online. Transitioning
+        # back to a direct device is allowed only when the reviewed result has one path.
+        removed_kernel_path = PurePosixPath(str(selected.get("kernel_path") or "")).name
+        if not removed_kernel_path:
+            raise ExecutorFailure("path_invalid", "The path to remove is invalid.")
+        runner([_tool("multipathd"), "del", "path", removed_kernel_path], 30)
+        if len(plan["after"]["path_ids"]) == 1:
+            direct_text = str(plan["after"].get("presentation_device") or "")
+            if not direct_text.startswith("/dev/") or ".." in PurePosixPath(direct_text).parts:
+                raise ExecutorFailure("path_invalid", "The remaining direct path is invalid.")
+            if mountpoint != device_mountpoint:
+                runner([_tool("umount"), mountpoint_text], 120)
+            runner([_tool("umount"), device_mountpoint_text], 120)
+            runner([_tool("multipath"), "-f", wwid], 120)
+            runner([_tool("mount"), direct_text, device_mountpoint_text], 120)
+            if mountpoint != device_mountpoint:
+                runner(
+                    [_tool("mount"), "--bind", device_mountpoint_text, mountpoint_text],
+                    120,
+                )
+    result = {
+        "operation_id": operation_id,
+        "storage_entity_id": plan["storage_entity_id"],
+        "logical_storage_identity": plan["logical_storage_identity"],
+        "mountpoint": mountpoint_text,
+        "filesystem_uuid": plan["after"].get("filesystem_uuid"),
+        "presentation_device": plan["after"].get("presentation_device"),
+        "path_ids": list(plan["after"]["path_ids"]),
+        "topology_state": plan["after"]["topology_state"],
+        "replayed": False,
+    }
+    journal["state"] = "succeeded"
+    journal["phase"] = "Controller redundancy updated"
+    journal["completed_steps"] = total_steps
+    journal["current_action"] = None
+    journal["result"] = result
+    journal["updated_at"] = time.time()
+    atomic_json(journal_path, journal)
+    return result
+
+
 def _read_request(connection: socket.socket) -> dict[str, Any]:
     payload = bytearray()
     while True:
@@ -2555,6 +2863,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_device_maintenance(request, paths=paths)
         elif request.get("operation") == "apply_snapraid_replacement":
             result = apply_snapraid_replacement(request, paths=paths)
+        elif request.get("operation") == "apply_storage_redundancy":
+            result = apply_storage_redundancy(request, paths=paths)
         else:
             result = apply_storage_plan(request, paths=paths)
         response = {"ok": True, "result": result}

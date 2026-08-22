@@ -15,6 +15,24 @@ export interface ExistingDataSummary {
   uncertain: boolean;
 }
 
+export type ProtectionPreference = "none" | "one" | "two";
+
+export interface StorageRecommendation {
+  role: StorageRole;
+  title: string;
+  summary: string;
+  technicalName: string;
+  rawCapacityBytes: number;
+  usableCapacityBytes: number | null;
+  failureTolerance: number;
+  protection: string;
+  expansion: string;
+  reasons: string[];
+  tradeoffs: string[];
+  parityCount?: number;
+  zfsVdevType?: "mirror" | "raidz1" | "raidz2";
+}
+
 const BASE_CHOICES: LayoutChoice[] = [
   {
     id: "individual",
@@ -74,8 +92,14 @@ const ADVANCED_USB_CHOICES: LayoutChoice[] = [
 
 const GUIDED_ZFS_CHOICE: LayoutChoice = {
   id: "zfs",
-  label: "Protected storage",
-  description: "Combine the selected drives and choose how many can fail without losing the storage.",
+  label: "Always-on protected storage",
+  description: "Combine the drives into one protected storage location designed to stay online after a drive fails.",
+};
+
+const GUIDED_SNAPRAID_CHOICE: LayoutChoice = {
+  id: "snapraid",
+  label: "Flexible protected media storage",
+  description: "Use one large media folder with parity protection while keeping each data drive independently readable and easy to expand.",
 };
 
 export function layoutChoicesForDrive(drive: Drive | undefined, mode: WizardMode, preserveData = false, driveCount = 1): LayoutChoice[] {
@@ -92,12 +116,142 @@ export function layoutChoicesForDrive(drive: Drive | undefined, mode: WizardMode
     : BASE_CHOICES;
   if (mode === "guided") {
     const usb = Boolean(drive) && (drive!.connection.bus.toLowerCase() === "usb" || drive!.connection.transport.toLowerCase().includes("usb"));
-    return !usb && driveCount >= 2 ? [...base, GUIDED_ZFS_CHOICE] : base;
+    return !usb && driveCount >= 2 ? [...base, GUIDED_SNAPRAID_CHOICE, GUIDED_ZFS_CHOICE] : base;
   }
   if (!drive) return [...base, ...ADVANCED_USB_CHOICES];
   const usb = drive.connection.bus.toLowerCase() === "usb" || drive.connection.transport.toLowerCase().includes("usb");
   if (usb) return [...base, ...ADVANCED_USB_CHOICES];
   return [...base, ...ADVANCED_USB_CHOICES.map((choice) => ({ ...choice, warning: undefined }))];
+}
+
+export function driveMayContainData(drive: Drive): boolean {
+  return drive.partitions.length > 0 || drive.signatures.length > 0 || drive.signatureScan.status !== "complete";
+}
+
+function isUsbDrive(drive: Drive): boolean {
+  return drive.connection.bus.toLowerCase() === "usb" || drive.connection.transport.toLowerCase().includes("usb");
+}
+
+function isSolidState(drive: Drive): boolean {
+  if (drive.rotational === false) return true;
+  if (drive.rotational === true) return false;
+  const description = `${drive.connection.bus} ${drive.connection.transport} ${drive.model}`.toLowerCase();
+  return description.includes("nvme") || description.includes("ssd");
+}
+
+function capacityAfterParity(drives: Drive[], parityCount: number): number {
+  const capacities = drives.map((drive) => drive.capacityBytes).sort((left, right) => right - left);
+  return capacities.slice(parityCount).reduce((total, capacity) => total + capacity, 0);
+}
+
+export function recommendStorage(input: {
+  drives: Drive[];
+  purpose: string;
+  preserveData: boolean;
+  oneLargeLocation: boolean;
+  protection: ProtectionPreference;
+  easyExpansion: boolean;
+}): StorageRecommendation {
+  const { drives, purpose, preserveData, oneLargeLocation, protection, easyExpansion } = input;
+  const rawCapacityBytes = drives.reduce((total, drive) => total + drive.capacityBytes, 0);
+  const count = drives.length;
+  if (!count) {
+    return {
+      role: "individual", title: "Select drives to see a recommendation", summary: "Hoardarr needs the selected drive identities before choosing a layout.",
+      technicalName: "No layout selected", rawCapacityBytes: 0, usableCapacityBytes: null, failureTolerance: 0,
+      protection: "Not calculated", expansion: "Not calculated", reasons: [], tradeoffs: [],
+    };
+  }
+  if (preserveData) {
+    return {
+      role: count === 1 ? "import" : "mergerfs",
+      title: count === 1 ? "Import the existing drive" : "Combine the existing drives without formatting",
+      summary: count === 1
+        ? "Keep the filesystem and make its existing files available."
+        : "Present the existing files under one media location while leaving each drive independently readable.",
+      technicalName: count === 1 ? "Non-destructive filesystem import" : "mergerFS over existing filesystems",
+      rawCapacityBytes, usableCapacityBytes: rawCapacityBytes, failureTolerance: 0,
+      protection: "Existing data is preserved; new parity protection is not added automatically.",
+      expansion: count === 1 ? "Another drive can be added later." : "Additional independent drives can be added later.",
+      reasons: ["Existing data or incomplete signature evidence was detected, so formatting is not the default."],
+      tradeoffs: ["This recommendation preserves files but does not add protection from a drive failure."],
+    };
+  }
+  if (count === 1) {
+    const cache = purpose === "downloads" && isSolidState(drives[0]);
+    return {
+      role: cache ? "download-cache" : "individual",
+      title: cache ? "Use this fast drive for downloads" : "Use this drive independently",
+      summary: cache ? "Keep torrent, Usenet, repair, and unpack work away from the media disks." : "Create one simple storage location on this drive.",
+      technicalName: cache ? "Dedicated download/cache filesystem" : "Independent filesystem",
+      rawCapacityBytes, usableCapacityBytes: rawCapacityBytes, failureTolerance: 0,
+      protection: "No drive-failure protection.", expansion: "It can be added to combined storage later.",
+      reasons: [cache ? "A solid-state drive was selected for a write-heavy download workload." : "Only one drive is selected."],
+      tradeoffs: ["If this drive fails, files stored only here are lost."],
+    };
+  }
+  if (drives.some(isUsbDrive)) {
+    return {
+      role: oneLargeLocation ? "mergerfs" : "individual",
+      title: oneLargeLocation ? "One large folder from independent USB drives" : "Keep the USB drives separate",
+      summary: oneLargeLocation ? "Combine the folders without making the USB drives members of an array." : "Give each USB drive its own storage location.",
+      technicalName: oneLargeLocation ? "mergerFS over USB filesystems" : "Independent filesystems",
+      rawCapacityBytes, usableCapacityBytes: rawCapacityBytes, failureTolerance: 0,
+      protection: "No automatic drive-failure protection.", expansion: "More independent drives can be added later.",
+      reasons: ["USB bridges can disconnect or hide drive identity, so Guided mode avoids arrays."],
+      tradeoffs: ["Files on a failed or disconnected member are unavailable; files on other members remain readable."],
+    };
+  }
+  if (protection === "none") {
+    return {
+      role: oneLargeLocation ? "mergerfs" : "individual",
+      title: oneLargeLocation ? "One large media folder" : "Separate storage drives",
+      summary: oneLargeLocation ? "Use all selected capacity under one path while each drive remains independently readable." : "Keep every drive as its own storage location.",
+      technicalName: oneLargeLocation ? "mergerFS" : "Independent filesystems",
+      rawCapacityBytes, usableCapacityBytes: rawCapacityBytes, failureTolerance: 0,
+      protection: "No drive-failure protection.", expansion: "Adding another drive later is straightforward.",
+      reasons: ["You chose capacity and flexibility without parity protection."],
+      tradeoffs: ["Files on a failed drive are lost unless another backup exists."],
+    };
+  }
+  const requestedFailures = protection === "two" && count >= 4 ? 2 : 1;
+  const mixedSizes = new Set(drives.map((drive) => drive.capacityBytes)).size > 1;
+  const mediaOptimized = purpose === "media" && (!drives.every(isSolidState) || mixedSizes || easyExpansion);
+  if (count >= 3 && mediaOptimized) {
+    return {
+      role: "snapraid",
+      title: "Flexible protected media storage",
+      summary: `Use one large media folder and reserve ${requestedFailures} drive${requestedFailures === 1 ? "" : "s"} for parity protection.`,
+      technicalName: `mergerFS + SnapRAID (${requestedFailures} parity)`,
+      rawCapacityBytes, usableCapacityBytes: capacityAfterParity(drives, requestedFailures), failureTolerance: requestedFailures,
+      protection: `Protected media can tolerate ${requestedFailures} drive failure${requestedFailures === 1 ? "" : "s"} after parity is synchronized.`,
+      expansion: "Different-size drives can be added later; parity drives must be at least as large as the largest data drive.",
+      reasons: ["Media files change less often than downloads.", easyExpansion ? "You said easy expansion matters." : "The selected drive sizes favor flexible expansion."],
+      tradeoffs: ["Parity is not real-time and must finish syncing before it is current.", "Open files and recent changes are not protected until the next sync."],
+      parityCount: requestedFailures,
+    };
+  }
+  const zfsVdevType = count === 2 ? "mirror" : requestedFailures === 2 ? "raidz2" : "raidz1";
+  const usableCapacityBytes = count === 2
+    ? Math.min(...drives.map((drive) => drive.capacityBytes))
+    : Math.min(...drives.map((drive) => drive.capacityBytes)) * (count - requestedFailures);
+  return {
+    role: "zfs", title: "Always-on protected storage", summary: `Use the drives as one protected storage location that can tolerate ${requestedFailures} drive failure${requestedFailures === 1 ? "" : "s"}.`,
+    technicalName: `ZFS ${zfsVdevType.toUpperCase()}`, rawCapacityBytes, usableCapacityBytes, failureTolerance: requestedFailures,
+    protection: `Storage remains available after ${requestedFailures} selected drive failure${requestedFailures === 1 ? "" : "s"}.`,
+    expansion: count === 2 ? "Capacity normally grows by adding another matched pair." : "Capacity normally grows by adding another protected group of drives.",
+    reasons: ["You requested drive-failure protection.", "The selected drives are suited to an always-consistent protected layout."],
+    tradeoffs: ["Usable capacity is limited by the smallest drive in this protected group.", "Expansion is less flexible than adding one independent media drive."],
+    zfsVdevType,
+  };
+}
+
+export function storageRoleLabel(role: StorageRole): string {
+  return ({
+    individual: "Separate storage drives", mergerfs: "One large folder from independent drives", "download-cache": "Download and temporary-work drive",
+    block: "Block storage", import: "Import existing storage", test: "Test drives only", zfs: "Always-on protected storage",
+    raid: "Linux RAID", snapraid: "Flexible protected media storage", mixed: "Combined protected pools",
+  } as Record<StorageRole, string>)[role];
 }
 
 export function isUsbRaidOverride(drive: Drive | undefined, role: StorageRole): boolean {

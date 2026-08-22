@@ -58,7 +58,15 @@ from hoardarr.storage.client import (
     apply_device_maintenance,
     apply_snapraid_replacement,
     apply_storage_plan,
+    apply_storage_redundancy,
     storage_operation_status,
+)
+from hoardarr.storage.redundancy import (
+    apply_redundancy_result,
+    matching_devices,
+    register_completed_storage,
+    stable_path_identity,
+    validate_redundancy_plan,
 )
 from hoardarr.storage.tiering import (
     TieringError,
@@ -88,6 +96,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.transfer.cleanup",
         "storage.maintenance",
         "storage.snapraid.replace",
+        "storage.redundancy.apply",
         "connectivity.apply",
         "connectivity.remove",
         "update.apply",
@@ -204,6 +213,12 @@ class MaintenanceExecution:
 
 
 @dataclass(frozen=True)
+class RedundancyExecution:
+    plan: dict[str, Any]
+    result: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ConnectivityExecution:
     service_id: str
     config_sha256: str
@@ -218,6 +233,7 @@ ExecutionResult = (
     | StorageExecution
     | TierTransferExecution
     | MaintenanceExecution
+    | RedundancyExecution
     | ConnectivityExecution
     | UpdateExecution
 )
@@ -977,6 +993,28 @@ def _execute_work(
         return _execute_maintenance(item, settings, maintenance_applier)
     if item.kind == "storage.snapraid.replace":
         return _execute_snapraid_replacement(item, settings, snapraid_replacement_applier)
+    if item.kind == "storage.redundancy.apply":
+        raw_plan = item.request.get("plan")
+        if not isinstance(raw_plan, dict):
+            raise WorkFailure("invalid_operation_request", "The redundancy request is invalid")
+        try:
+            plan = validate_redundancy_plan(raw_plan)
+            result = apply_storage_redundancy(
+                settings.storage_executor_socket,
+                operation_id=item.operation_id,
+                plan_sha256=str(item.request.get("plan_sha256") or ""),
+                plan=plan,
+                confirmation_sha256=str(item.request.get("confirmation_sha256") or ""),
+                timeout_seconds=settings.storage_executor_timeout_seconds,
+            )
+        except (StorageExecutorError, ValueError) as exc:
+            code = exc.code if isinstance(exc, StorageExecutorError) else "redundancy_plan_invalid"
+            raise WorkFailure(
+                code,
+                str(exc),
+                needs_attention=getattr(exc, "needs_attention", False),
+            ) from exc
+        return RedundancyExecution(plan=plan, result=result)
     if item.kind == "storage.transfer":
         value = item.request.get("plan")
         if not isinstance(value, dict) or document_hash(value) != item.request.get("plan_sha256"):
@@ -1071,7 +1109,13 @@ def _finalize_success(
             return
         if operation.cancel_requested and isinstance(
             execution,
-            (StorageExecution, MaintenanceExecution, TierTransferExecution, ConnectivityExecution),
+            (
+                StorageExecution,
+                MaintenanceExecution,
+                RedundancyExecution,
+                TierTransferExecution,
+                ConnectivityExecution,
+            ),
         ):
             operation.cancel_requested = False
             append_event(
@@ -1141,11 +1185,48 @@ def _finalize_success(
                 return
             wizard.status = "applied"
             wizard.updated_at = utc_now()
+            snapshot = session.scalar(
+                select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+            )
+            register_completed_storage(
+                session,
+                plan.document_json,
+                execution.result,
+                hardware_snapshot=snapshot.payload_json if snapshot is not None else None,
+            )
             complete_operation(session, operation, execution.result)
             return
 
         if isinstance(execution, TierTransferExecution):
             complete_operation(session, operation, execution.result)
+            return
+
+        if isinstance(execution, RedundancyExecution):
+            snapshot = session.scalar(
+                select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+            )
+            selected = execution.plan["selected_path"]
+            observed = None
+            if snapshot is not None and execution.plan["operation"] in {
+                "redundancy.add",
+                "redundancy.replace",
+            }:
+                observed = next(
+                    (
+                        item
+                        for item in matching_devices(
+                            snapshot.payload_json, str(execution.plan["logical_storage_identity"])
+                        )
+                        if stable_path_identity(item) == selected["stable_path_identity"]
+                    ),
+                    None,
+                )
+            entity = apply_redundancy_result(session, plan=execution.plan, observed_device=observed)
+            complete_operation(
+                session,
+                operation,
+                {**execution.result, "storage_entity_id": entity.id},
+            )
             return
 
         if isinstance(execution, MaintenanceExecution):
@@ -1246,6 +1327,7 @@ def _finalize_failure(
             "storage.apply",
             "storage.maintenance",
             "storage.snapraid.replace",
+            "storage.redundancy.apply",
             "storage.transfer",
             "storage.transfer.cleanup",
             "connectivity.apply",
@@ -1413,6 +1495,7 @@ def recover_abandoned_operations(
         running_storage = [
             (
                 operation.id,
+                operation.kind,
                 operation.lease_owner,
                 operation.resource_type,
                 operation.resource_id,
@@ -1422,13 +1505,18 @@ def recover_abandoned_operations(
                 select(Operation).where(
                     Operation.status == "running",
                     Operation.kind.in_(
-                        ("storage.apply", "storage.maintenance", "storage.snapraid.replace")
+                        (
+                            "storage.apply",
+                            "storage.maintenance",
+                            "storage.snapraid.replace",
+                            "storage.redundancy.apply",
+                        )
                     ),
                     Operation.lease_owner.is_not(None),
                 )
             )
         ]
-    for operation_id, lease_owner, resource_type, resource_id, request in running_storage:
+    for operation_id, kind, lease_owner, resource_type, resource_id, request in running_storage:
         try:
             status = storage_status(
                 settings.storage_status_socket,
@@ -1441,15 +1529,7 @@ def recover_abandoned_operations(
         if state == "succeeded" and isinstance(status.get("result"), dict):
             item = WorkItem(
                 operation_id=operation_id,
-                kind=(
-                    "storage.apply"
-                    if resource_type == "wizard_session"
-                    else (
-                        "storage.snapraid.replace"
-                        if request.get("plan", {}).get("kind") == "snapraid_replacement"
-                        else "storage.maintenance"
-                    )
-                ),
+                kind=kind,
                 resource_type=resource_type,
                 resource_id=resource_id,
                 request=request,
@@ -1466,10 +1546,38 @@ def recover_abandoned_operations(
                     plan_sha256=str(plan_sha256),
                     result=deepcopy(status["result"]),
                 )
+            elif item.kind == "storage.redundancy.apply":
+                plan = request.get("plan")
+                if not isinstance(plan, dict):
+                    continue
+                try:
+                    validated_plan = validate_redundancy_plan(plan)
+                except ValueError:
+                    continue
+                execution = RedundancyExecution(
+                    plan=validated_plan,
+                    result=deepcopy(status["result"]),
+                )
             else:
                 execution = MaintenanceExecution(result=deepcopy(status["result"]))
             _finalize_success(session_factory, item, str(lease_owner), execution)
             reconciled += 1
+        elif state == "needs_attention":
+            with session_factory() as session, session.begin():
+                operation = session.get(Operation, operation_id)
+                if (
+                    operation is not None
+                    and operation.status == "running"
+                    and operation.lease_owner == lease_owner
+                ):
+                    fail_operation(
+                        session,
+                        operation,
+                        code="storage_executor_interrupted",
+                        message="The storage path change needs attention",
+                        needs_attention=True,
+                    )
+                    reconciled += 1
         elif state == "running":
             updated_at = status.get("updated_at")
             if isinstance(updated_at, (int, float)) and time.time() - updated_at <= storage_max_age:
@@ -1494,6 +1602,7 @@ def recover_abandoned_operations(
                 "storage.apply": storage_max_age,
                 "storage.maintenance": storage_max_age,
                 "storage.snapraid.replace": storage_max_age,
+                "storage.redundancy.apply": storage_max_age,
                 "connectivity.apply": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "connectivity.remove": int(settings.connectivity_executor_timeout_seconds) + 120,
             },
