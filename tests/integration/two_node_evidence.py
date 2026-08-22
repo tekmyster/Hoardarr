@@ -8,24 +8,27 @@ import base64
 import json
 import os
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from hoardarr.auth.service import create_initial_owner
+from hoardarr.auth.service import Principal, create_initial_owner
 from hoardarr.core.config import Settings
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.models import (
     MetricEntity,
     MetricRollup,
     MetricSample,
+    Operation,
     StorageEntity,
     StoragePath,
     StorageRedundancyEvent,
     User,
 )
+from hoardarr.operations.service import create_operation
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     build_redundancy_plan,
@@ -233,6 +236,60 @@ def collect(_args: argparse.Namespace) -> None:
         engine.dispose()
 
 
+def queue_hardware(args: argparse.Namespace) -> None:
+    """Queue the production durable hardware detector for this isolated node."""
+
+    settings = Settings()
+    engine = create_database_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    with factory() as session, session.begin():
+        owner = session.scalar(select(User).where(User.username == args.username))
+        if owner is None:
+            raise SystemExit("isolated validation owner is missing")
+        operation, _created = create_operation(
+            session,
+            kind="hardware.scan",
+            principal=Principal(
+                user_id=owner.id,
+                username=owner.username,
+                is_admin=True,
+                auth_type="session",
+                scopes=frozenset({"read", "operate", "admin"}),
+            ),
+            request={"schema_version": 1},
+            idempotency_key=f"two-node-hardware-{args.node.casefold().replace(' ', '-')}",
+            resource_type="hardware_snapshot",
+        )
+        operation_id = operation.id
+    engine.dispose()
+    print(operation_id)
+
+
+def wait_operation(args: argparse.Namespace) -> None:
+    settings = Settings()
+    engine = create_database_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    deadline = time.monotonic() + args.timeout
+    status = "unknown"
+    while time.monotonic() < deadline:
+        with factory() as session:
+            operation = session.get(Operation, args.operation_id)
+            if operation is None:
+                engine.dispose()
+                raise SystemExit("isolated validation operation is missing")
+            status = operation.status
+            if status == "succeeded":
+                print(status)
+                engine.dispose()
+                return
+            if status in {"failed", "cancelled", "needs_attention"}:
+                engine.dispose()
+                raise SystemExit(f"isolated validation operation ended in {status}")
+        time.sleep(0.25)
+    engine.dispose()
+    raise SystemExit(f"isolated validation operation timed out in {status}")
+
+
 def _json_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
@@ -370,6 +427,14 @@ def parser() -> argparse.ArgumentParser:
     ui.set_defaults(handler=provision_ui)
     collection = commands.add_parser("collect")
     collection.set_defaults(handler=collect)
+    hardware = commands.add_parser("queue-hardware")
+    hardware.add_argument("--node", required=True)
+    hardware.add_argument("--username", default="validation-owner")
+    hardware.set_defaults(handler=queue_hardware)
+    waiting = commands.add_parser("wait-operation")
+    waiting.add_argument("--operation-id", required=True)
+    waiting.add_argument("--timeout", type=float, default=60.0)
+    waiting.set_defaults(handler=wait_operation)
     evidence = commands.add_parser("export")
     evidence.add_argument("--node", required=True)
     evidence.add_argument("--output", required=True)

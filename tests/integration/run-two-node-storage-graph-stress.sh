@@ -218,6 +218,16 @@ while IFS='=' read -r key value; do topology["B_${key}"]="${value}"; done <"${OU
     exit 2
 }
 
+# Use Hoardarr's production durable scan/worker path so drive graphs are based
+# on the same immutable hardware snapshot flow as an installed appliance. The
+# restart occurs before workload and memory baselines, and makes the new
+# snapshot the collector's initial state instead of waiting for cache expiry.
+for node in A B; do
+    port=2222; [[ "${node}" == B ]] && port=2223
+    operation_id="$(remote "${port}" "sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence queue-hardware --node 'Node ${node}'" | tr -d '\r')"
+    remote "${port}" "sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence wait-operation --operation-id '${operation_id}' --timeout 60; sudo systemctl restart hoardarr-worker.service; sudo systemctl is-active --quiet hoardarr-worker.service"
+done
+
 write_sectors() {
     local port="$1" device="$2"
     remote "${port}" "cat /sys/class/block/\$(basename \$(readlink -f ${device}))/stat | awk '{print \$7 * 512}'"
@@ -255,7 +265,7 @@ remote 2222 'sudo fio --name=sequential-read --filename=/srv/hoardarr/shared/med
 phase random_read
 remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=4k --direct=1 --ioengine=libaio --time_based=1 --runtime=12 --iodepth=16 --numjobs=${WORKLOAD_CONCURRENCY} --output-format=json" >"${OUTPUT}/fio-random-read.json"
 phase limited_write
-remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
+remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --rate=1M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
 phase mixed_read_metadata
 remote 2222 'sudo fio --name=mixed-read-shape --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bsrange=4k-1M --direct=1 --ioengine=libaio --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
 
