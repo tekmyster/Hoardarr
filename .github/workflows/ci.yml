@@ -148,8 +148,12 @@ jobs:
           curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused \
             http://127.0.0.1:7877/health/live
           curl --fail --silent --show-error http://127.0.0.1:7877/health/ready
-          test "$(stat -c '%U:%G:%a' /var/lib/hoardarr)" = "root:root:700"
-          test "$(sudo stat -c '%U:%G:%a' /etc/hoardarr/hoardarr.env)" = "root:hoardarr:640"
+          state_permissions="$(stat -c '%U:%G:%a' /var/lib/hoardarr)"
+          config_permissions="$(sudo stat -c '%U:%G:%a' /etc/hoardarr/hoardarr.env)"
+          echo "state_permissions=${state_permissions}"
+          echo "config_permissions=${config_permissions}"
+          test "${state_permissions}" = "hoardarr:hoardarr:700"
+          test "${config_permissions}" = "root:hoardarr:640"
           test -L /usr/lib/hoardarr/current
           test -x /usr/local/bin/hoardarr
           test -f /usr/lib/hoardarr/current/frontend/index.html
