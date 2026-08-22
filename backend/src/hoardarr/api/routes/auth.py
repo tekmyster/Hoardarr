@@ -157,6 +157,11 @@ def setup_claim(
         target_type="user",
         target_id=user.id,
     )
+    # Publish browser credentials only after their database records are durable.
+    # Yield-dependency cleanup may run after response headers have been sent, and
+    # an immediate browser request must never receive a cookie for an uncommitted
+    # session.
+    session.commit()
     _set_session_cookie(
         response,
         request,
@@ -242,6 +247,7 @@ def login(
         outcome="succeeded",
         correlation_id=request.state.request_id,
     )
+    session.commit()
     _set_session_cookie(
         response,
         request,
@@ -282,6 +288,7 @@ def me(
         else:
             try:
                 csrf_token = refresh_session_csrf(session, principal.session_id)
+                session.commit()
             except AuthenticationError as exc:
                 raise Problem(
                     401,

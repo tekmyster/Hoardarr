@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+import hoardarr.api.routes.auth as auth_routes
 from hoardarr import __version__
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import create_initial_owner, issue_setup_token
@@ -21,6 +22,7 @@ from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.migrate import upgrade_database
 from hoardarr.db.models import (
     AuditEvent,
+    AuthSession,
     ConnectivityService,
     HardwareSnapshot,
     IntegrationConnection,
@@ -546,6 +548,32 @@ def test_setup_accepts_a_one_character_password(api_runtime: Any) -> None:
         json={"username": "owner", "password": "x"},
     )
     assert login.status_code == 200, login.text
+
+
+def test_login_session_is_durable_before_browser_cookie_is_published(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    original_set_cookie = auth_routes._set_session_cookie
+    observed_session_counts: list[int] = []
+
+    def assert_durable_session(*args: Any, **kwargs: Any) -> None:
+        with app.state.session_factory() as observer:
+            observed_session_counts.append(len(observer.scalars(select(AuthSession)).all()))
+        original_set_cookie(*args, **kwargs)
+
+    monkeypatch.setattr(auth_routes, "_set_session_cookie", assert_durable_session)
+    response = client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": "http://testserver"},
+        json={"username": "owner", "password": "a-long-unique-test-password"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert observed_session_counts == [2]
+    assert client.get("/api/v1/auth/me").status_code == 200
 
 
 def test_trusted_local_setup_can_create_owner_without_a_site_code(api_runtime: Any) -> None:
