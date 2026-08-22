@@ -250,7 +250,7 @@ remote 2222 'sudo fio --name=sequential-read --filename=/srv/hoardarr/shared/med
 phase random_read
 remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=4k --direct=1 --time_based=1 --runtime=12 --iodepth=16 --numjobs=${WORKLOAD_CONCURRENCY} --output-format=json" >"${OUTPUT}/fio-random-read.json"
 phase limited_write
-remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --direct=1 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
+remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
 phase mixed_read_metadata
 remote 2222 'sudo fio --name=mixed-read-shape --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bsrange=4k-1M --direct=1 --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
 
