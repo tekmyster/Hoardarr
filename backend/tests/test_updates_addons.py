@@ -155,7 +155,7 @@ def test_update_switches_and_rolls_back_after_failed_health_check(tmp_path: Path
         (stage / "backend").mkdir()
         (stage / "manifest.json").write_text("{}")
         (stage / "venv" / "bin").mkdir(parents=True)
-        (stage / "venv" / "bin" / "hoardarr-migrate").write_text("")
+        (stage / "venv" / "bin" / "python").write_text("")
 
     with pytest.raises(UpdateError) as exc:
         execute_update(
@@ -188,7 +188,7 @@ def test_update_restores_database_when_migration_fails_before_switch(tmp_path: P
     (paths.config / "hoardarr.env").write_text("before", encoding="utf-8")
 
     def runner(argv: list[str], _timeout: int) -> None:
-        if argv[0].endswith("hoardarr-migrate"):
+        if argv[-1] == "migrate":
             database.write_bytes(b"partially migrated")
             (paths.config / "hoardarr.env").write_text("changed", encoding="utf-8")
             raise UpdateError("migration_failed", "migration failed")

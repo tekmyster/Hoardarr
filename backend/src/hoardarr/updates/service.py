@@ -519,7 +519,7 @@ def execute_update(
         journal.update(phase="Running database migrations", percent=50)
         _atomic_json(paths.journal, journal)
         migration_started = True
-        runner([str(target / "venv/bin/hoardarr-migrate")], 900)
+        runner([str(target / "venv/bin/python"), "-m", "hoardarr.runtime", "migrate"], 900)
         journal.update(phase="Activating release", percent=65)
         _atomic_json(paths.journal, journal)
         temporary_link = paths.current.with_name(f".{paths.current.name}.{release_id}")

@@ -321,10 +321,12 @@ validate_destination_paths() {
             die "refusing to replace non-symbolic-link path: ${path}"
         fi
     done
-    if [[ -e "${CLI_LINK}" && ! -L "${CLI_LINK}" ]]; then
+    if [[ -e "${CLI_LINK}" && ! -L "${CLI_LINK}" ]] && \
+        ! runtime_wrapper_is_managed "${CLI_LINK}" cli; then
         die "refusing to replace non-symbolic-link path: ${CLI_LINK}"
     fi
-    if [[ -e "${QUARANTINE_CLI_LINK}" && ! -L "${QUARANTINE_CLI_LINK}" ]]; then
+    if [[ -e "${QUARANTINE_CLI_LINK}" && ! -L "${QUARANTINE_CLI_LINK}" ]] && \
+        ! runtime_wrapper_is_managed "${QUARANTINE_CLI_LINK}" storage-quarantine; then
         die "refusing to replace non-symbolic-link path: ${QUARANTINE_CLI_LINK}"
     fi
     if [[ ( -e "${CONFIG_FILE}" || -L "${CONFIG_FILE}" ) && \
@@ -341,6 +343,18 @@ validate_destination_paths() {
         ( ! -f "${LLDPD_DROPIN_ROOT}/hoardarr.conf" || -L "${LLDPD_DROPIN_ROOT}/hoardarr.conf" ) ]]; then
         die "existing LLDP/CDP service configuration is not a regular file"
     fi
+}
+
+runtime_wrapper_is_managed() {
+    local path="$1"
+    local command_name="$2"
+    local expected
+    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    [[ "$(stat -c '%u:%g:%a' "${path}")" == "0:0:755" ]] || return 1
+    expected="$(printf '%s\n' \
+        '#!/bin/sh' \
+        "exec /usr/lib/hoardarr/venv/bin/python -m hoardarr.runtime ${command_name} \"\$@\"")"
+    [[ "$(<"${path}")" == "${expected}" ]]
 }
 
 manifest_digest() {
@@ -571,6 +585,21 @@ atomic_symlink() {
     mv -Tf -- "${temporary}" "${link}"
 }
 
+install_runtime_wrapper() {
+    local destination="$1"
+    local command_name="$2"
+    local temporary="${destination}.new.$$"
+    [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || \
+        die "temporary runtime wrapper exists: ${temporary}"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        "exec /usr/lib/hoardarr/venv/bin/python -m hoardarr.runtime ${command_name} \"\$@\"" \
+        >"${temporary}"
+    chown root:root "${temporary}"
+    chmod 0755 "${temporary}"
+    mv -Tf -- "${temporary}" "${destination}"
+}
+
 install_config_units_docs() {
     install -d -o root -g hoardarr -m 0750 "${CONFIG_ROOT}"
     if [[ ! -e "${CONFIG_FILE}" ]]; then
@@ -638,9 +667,8 @@ apply_release() {
     # Retain the early preview path as a compatibility alias. The detector
     # itself resolves current/packaging/hardware relative to its script.
     atomic_symlink "current/packaging/hardware" "${LIB_ROOT}/hardware"
-    atomic_symlink "${LIB_ROOT}/venv/bin/hoardarr" "${CLI_LINK}"
-    atomic_symlink \
-        "${LIB_ROOT}/venv/bin/hoardarr-storage-quarantine" "${QUARANTINE_CLI_LINK}"
+    install_runtime_wrapper "${CLI_LINK}" cli
+    install_runtime_wrapper "${QUARANTINE_CLI_LINK}" storage-quarantine
     systemctl enable hoardarr-migrate.service hoardarr-api.service hoardarr-worker.service hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service
 
     if ! systemctl restart hoardarr-migrate.service; then

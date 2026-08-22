@@ -12,7 +12,7 @@ Group=root
 EnvironmentFile=-/etc/hoardarr/hoardarr.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/lib/hoardarr/venv/bin/hoardarr-api
+ExecStart=/usr/lib/hoardarr/venv/bin/python -m hoardarr.runtime api
 WorkingDirectory=/var/lib/hoardarr
 StateDirectory=hoardarr
 StateDirectoryMode=0700

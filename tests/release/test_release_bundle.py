@@ -212,7 +212,8 @@ class BuildPlanTests(unittest.TestCase):
         self.assertIn('"${stage}/packaging/packages/${relative}"', installer)
         self.assertIn('"${stage}/scripts/bootstrap.py"', installer)
         self.assertIn('atomic_symlink "current/packaging" "${LIB_ROOT}/packaging"', installer)
-        self.assertIn('atomic_symlink "${LIB_ROOT}/venv/bin/hoardarr" "${CLI_LINK}"', installer)
+        self.assertIn('install_runtime_wrapper "${CLI_LINK}" cli', installer)
+        self.assertIn("python -m hoardarr.runtime", installer)
         self.assertIn('"${stage}/frontend/${relative}"', installer)
 
     def test_detector_runs_from_unpacked_release_layout(self):
