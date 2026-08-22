@@ -22,13 +22,22 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: 0.11.28
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install QEMU and isolated workload dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cloud-image-utils fio jq qemu-system-x86 qemu-utils
           if test -e /dev/kvm; then sudo chmod 0666 /dev/kvm; fi
       - name: Build the backend wheel used by both nodes
-        run: uv build --project backend --wheel --out-dir "$PWD/dist/wheels"
+        run: |
+          uv build --project backend --wheel --out-dir "$PWD/dist/wheels"
+          npm ci --prefix frontend --no-audit --no-fund
+          npm run build --prefix frontend
+          npx --prefix frontend playwright install --with-deps chromium
       - name: Run two Ubuntu Hoardarr nodes with four virtual SSDs
         env:
           HOARDARR_WHEEL: ${{ github.workspace }}/dist/wheels/hoardarr-0.3.11-py3-none-any.whl
@@ -48,6 +57,8 @@ jobs:
           jq -e '[.node_a.events[], .node_b.events[] | select(.event_type == "storage_transitioned")] | length > 0' "$evidence"
           jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "storage.path.state")] | length > 0' "$evidence"
           jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "cpu.utilization")] | length > 0' "$evidence"
+          test -s dist/validation/two-node-storage/node-a-reconnected-history.png
+          test -s dist/validation/two-node-storage/node-b-reconnected-history.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:

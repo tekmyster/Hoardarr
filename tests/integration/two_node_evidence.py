@@ -4,15 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from hoardarr.auth.service import create_initial_owner
 from hoardarr.core.config import Settings
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.models import (
@@ -22,13 +24,20 @@ from hoardarr.db.models import (
     StorageEntity,
     StoragePath,
     StorageRedundancyEvent,
+    User,
 )
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     build_redundancy_plan,
     register_single_path_storage,
 )
+from hoardarr.telemetry.entitlements import (
+    KNOWN_CAPABILITIES,
+    canonical_json,
+    installation_id,
+)
 from hoardarr.telemetry.service import TelemetryService
+from sqlalchemy import select
 
 
 def _block_size(device: str) -> int:
@@ -148,6 +157,11 @@ def add_event(args: argparse.Namespace) -> None:
         )
         if storage is None:
             raise SystemExit("shared storage is not registered")
+        storage.config_json = {
+            **storage.config_json,
+            "ownership_state": args.resulting_state,
+            "peer_node": args.peer_node,
+        }
         session.add(
             StorageRedundancyEvent(
                 storage_entity_id=storage.id,
@@ -162,6 +176,47 @@ def add_event(args: argparse.Namespace) -> None:
                 occurred_at=datetime.now(UTC),
             )
         )
+    engine.dispose()
+
+
+def provision_ui(args: argparse.Namespace) -> None:
+    """Provision only the isolated VM's owner and ephemeral test entitlement."""
+    settings = Settings()
+    engine = create_database_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    with factory() as session, session.begin():
+        if session.scalar(select(User).limit(1)) is None:
+            create_initial_owner(session, username=args.username, password=args.password)
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    now = datetime.now(UTC)
+    payload = {
+        "license_id": f"isolated-two-node-{args.node.lower().replace(' ', '-')}",
+        "installation_id": installation_id(settings.installation_identity_file),
+        "not_before": (now - timedelta(minutes=5)).isoformat(),
+        "expires_at": (now + timedelta(hours=2)).isoformat(),
+        "capabilities": sorted(KNOWN_CAPABILITIES),
+    }
+    key_id = "isolated-two-node-test-key"
+    settings.telemetry_license_file.write_text(
+        json.dumps(
+            {
+                "payload": payload,
+                "key_id": key_id,
+                "signature": base64.b64encode(private_key.sign(canonical_json(payload))).decode(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings.telemetry_license_trust_file.write_text(
+        json.dumps({"keys": {key_id: base64.b64encode(public_key).decode()}}),
+        encoding="utf-8",
+    )
+    os.chmod(settings.telemetry_license_file, 0o600)
+    os.chmod(settings.telemetry_license_trust_file, 0o600)
     engine.dispose()
 
 
@@ -308,6 +363,11 @@ def parser() -> argparse.ArgumentParser:
     event.add_argument("--previous-state")
     event.add_argument("--resulting-state", required=True)
     event.set_defaults(handler=add_event)
+    ui = commands.add_parser("provision-ui")
+    ui.add_argument("--node", required=True)
+    ui.add_argument("--username", default="validation-owner")
+    ui.add_argument("--password", required=True)
+    ui.set_defaults(handler=provision_ui)
     collection = commands.add_parser("collect")
     collection.set_defaults(handler=collect)
     evidence = commands.add_parser("export")

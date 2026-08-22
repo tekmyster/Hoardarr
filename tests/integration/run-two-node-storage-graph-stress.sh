@@ -82,7 +82,7 @@ cpu="max"
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel="kvm"; cpu="host"; fi
 
 create_node() {
-    local node="$1" port="$2" lower hostname
+    local node="$1" port="$2" api_port="$3" lower hostname
     lower="${node,,}"
     hostname="hoardarr-node-${lower}"
     qemu-img create -q -f qcow2 -F qcow2 -b "${RUN_ROOT}/${BASE_NAME}" "${RUN_ROOT}/${lower}-os.qcow2"
@@ -119,9 +119,12 @@ EOF
     qemu-system-x86_64 \
         -name "hoardarr-node-${node}" -machine q35 -accel "${accel}" -cpu "${cpu}" -m 2048 -smp 2 \
         -daemonize -pidfile "${RUN_ROOT}/${lower}.pid" \
+        -D "${OUTPUT}/${lower}-qemu.log" -d guest_errors -no-reboot -monitor none \
         -serial "file:${OUTPUT}/${lower}-serial.log" -display none \
-        -drive "file=${RUN_ROOT}/${lower}-os.qcow2,if=virtio,format=qcow2" \
-        -drive "file=${RUN_ROOT}/${lower}-seed.img,if=virtio,format=raw,readonly=on" \
+        -drive "file=${RUN_ROOT}/${lower}-os.qcow2,if=none,id=${lower}os,format=qcow2" \
+        -device "virtio-blk-pci,drive=${lower}os,bootindex=1" \
+        -drive "file=${RUN_ROOT}/${lower}-seed.img,if=none,id=${lower}seed,format=raw,readonly=on" \
+        -device "virtio-blk-pci,drive=${lower}seed,bootindex=2" \
         -drive "file=${RUN_ROOT}/${lower}-ssd1.raw,if=none,id=${lower}local1,format=raw,cache=none" \
         -device "virtio-blk-pci,drive=${lower}local1,serial=HOARDARR_${node}_SSD1" \
         -drive "file=${RUN_ROOT}/${lower}-ssd2.raw,if=none,id=${lower}local2,format=raw,cache=none" \
@@ -134,29 +137,39 @@ EOF
         -blockdev "driver=file,node-name=${lower}sharedfile1,filename=${RUN_ROOT}/shared.raw,locking=off" \
         -blockdev "driver=raw,node-name=${lower}shared1,file=${lower}sharedfile1" \
         -device "scsi-hd,drive=${lower}shared1,bus=${lower}scsi1.0,serial=HOARDARR_SHARED,wwn=0x6000000000000011,share-rw=on" \
-        -netdev "user,id=${lower}net,hostfwd=tcp:127.0.0.1:${port}-:22" \
+        -netdev "user,id=${lower}net,hostfwd=tcp:127.0.0.1:${port}-:22,hostfwd=tcp:127.0.0.1:${api_port}-:7877" \
         -device "virtio-net-pci,netdev=${lower}net"
     PIDS+=("$(cat "${RUN_ROOT}/${lower}.pid")")
 }
 
 qemu-img create -q -f raw "${RUN_ROOT}/shared.raw" 768M
-create_node A 2222
-create_node B 2223
+create_node A 2222 8080
+create_node B 2223 8081
 
 SSH_OPTIONS=(-i "${RUN_ROOT}/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5)
 remote() { local port="$1"; shift; ssh "${SSH_OPTIONS[@]}" -p "${port}" hoardarr@127.0.0.1 "$@"; }
 copy_to() { local port="$1" source="$2" target="$3"; scp "${SSH_OPTIONS[@]}" -P "${port}" "${source}" "hoardarr@127.0.0.1:${target}"; }
 
 wait_node() {
-    local port="$1" attempt
+    local port="$1" node="$2" attempt pid
+    pid="$(cat "${RUN_ROOT}/${node}.pid")"
     for attempt in $(seq 1 120); do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            echo "QEMU node ${node} exited before SSH became ready" >&2
+            tail -n 200 "${OUTPUT}/${node}-qemu.log" >&2 || true
+            tail -n 200 "${OUTPUT}/${node}-serial.log" >&2 || true
+            return 1
+        fi
         if remote "${port}" 'cloud-init status --wait >/dev/null 2>&1'; then return 0; fi
         sleep 5
     done
+    echo "QEMU node ${node} did not become SSH-ready" >&2
+    tail -n 200 "${OUTPUT}/${node}-qemu.log" >&2 || true
+    tail -n 200 "${OUTPUT}/${node}-serial.log" >&2 || true
     return 1
 }
-wait_node 2222
-wait_node 2223
+wait_node 2222 a
+wait_node 2223 b
 
 install_node() {
     local port="$1"
@@ -167,6 +180,9 @@ install_node() {
         copy_to "${port}" "${ROOT}/packaging/systemd/${unit}" "/tmp/${unit}"
     done
     remote "${port}" 'sudo install -d -m 0755 /usr/lib/hoardarr /usr/local/libexec /etc/hoardarr; sudo install -d -m 0700 /var/lib/hoardarr; sudo python3 -m venv /usr/lib/hoardarr/venv; sudo /usr/lib/hoardarr/venv/bin/pip install --disable-pip-version-check /tmp/hoardarr.whl; sudo install -m 0755 /tmp/two_node_evidence.py /usr/local/libexec/hoardarr-two-node-evidence; sudo install -m 0755 /tmp/prepare-node.sh /usr/local/libexec/hoardarr-prepare-two-node; sudo install -m 0644 /tmp/hoardarr-*.service /etc/systemd/system/'
+    tar -C "${ROOT}/frontend/dist" -cf "${RUN_ROOT}/frontend.tar" .
+    copy_to "${port}" "${RUN_ROOT}/frontend.tar" /tmp/hoardarr-frontend.tar
+    remote "${port}" 'sudo install -d -m 0755 /usr/lib/hoardarr/current/frontend; sudo tar -C /usr/lib/hoardarr/current/frontend -xf /tmp/hoardarr-frontend.tar; sudo find /usr/lib/hoardarr/current/frontend -type d -exec chmod 0755 {} +; sudo find /usr/lib/hoardarr/current/frontend -type f -exec chmod 0644 {} +'
     remote "${port}" "sudo tee /etc/hoardarr/hoardarr.env >/dev/null <<'EOF'
 HOARDARR_ENVIRONMENT=production
 HOARDARR_DATABASE_URL=sqlite:////var/lib/hoardarr/hoardarr.db
@@ -180,7 +196,8 @@ HOARDARR_TELEMETRY_HARDWARE_INTERVAL_SECONDS=300
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now hoardarr-migrate.service hoardarr-worker.service hoardarr-api.service
-sudo systemctl is-active --quiet hoardarr-worker.service hoardarr-api.service"
+sudo systemctl is-active --quiet hoardarr-worker.service hoardarr-api.service
+sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence provision-ui --node isolated-node --password Hoardarr-Isolated-Validation-Only-11!"
 }
 install_node 2222
 install_node 2223
@@ -275,6 +292,13 @@ for node in A B; do
     remote "${port}" 'sudo multipath -ll' >"${OUTPUT}/node-${node,,}-multipath.txt"
     remote "${port}" 'sudo iostat -x -o JSON 1 2' >"${OUTPUT}/node-${node,,}-iostat-final.json"
 done
+
+# No browser or API metrics client was present for the workload above. Reconnect
+# only after export so the UI must reconstruct history from each node's database.
+node "${ROOT}/tests/integration/two-node/capture-two-node-ui.mjs" \
+    http://127.0.0.1:8080 "${OUTPUT}" node-a
+node "${ROOT}/tests/integration/two-node/capture-two-node-ui.mjs" \
+    http://127.0.0.1:8081 "${OUTPUT}" node-b
 
 diff -u "${OUTPUT}/shared-hash-before.txt" "${OUTPUT}/shared-hash-after-handoff.txt"
 
