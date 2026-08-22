@@ -188,7 +188,9 @@ install_node() {
 HOARDARR_ENVIRONMENT=production
 HOARDARR_DATABASE_URL=sqlite:////var/lib/hoardarr/hoardarr.db
 HOARDARR_SECRET_KEY_FILE=/var/lib/hoardarr/secret.key
-HOARDARR_BIND_HOST=127.0.0.1
+# The guest interface is reachable only through QEMU user networking. Host
+# forwards remain bound to host 127.0.0.1 for isolated browser evidence.
+HOARDARR_BIND_HOST=0.0.0.0
 HOARDARR_BIND_PORT=7877
 HOARDARR_SECURE_COOKIES=false
 HOARDARR_TELEMETRY_FAST_INTERVAL_SECONDS=2
