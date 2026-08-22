@@ -2,7 +2,7 @@ name: Build appliance ISO
 on:
   push:
     branches:
-      - rc/0.3.10-validation
+      - rc/0.3.11-validation
   workflow_dispatch:
     inputs:
       base_iso_url:

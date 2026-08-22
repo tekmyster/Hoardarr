@@ -86,6 +86,7 @@ function checkboxToggle(values: string[], value: string): string[] {
 export default function App() {
   const [activeStep, setActiveStep] = useState(0);
   const [activePage, setActivePage] = useState<AppPage>("Overview");
+  const [focusedStorageId, setFocusedStorageId] = useState<string | null>(null);
   const [storageAction, setStorageAction] = useState<StorageAction | null>(null);
   const [firstRunSetup, setFirstRunSetup] = useState(false);
   const [mode, setMode] = useState<WizardMode>("guided");
@@ -2146,7 +2147,7 @@ export default function App() {
 
   return (
     <AppShell activePage={activePage} onNavigate={setActivePage} demo={demoMode}>
-      {activePage === "Overview" ? <OverviewDashboard /> : activePage === "Storage" ? <StoragePage
+      {activePage === "Overview" ? <OverviewDashboard onOpenStorage={(storageId) => { setFocusedStorageId(storageId); setActivePage("Storage"); }} /> : activePage === "Storage" ? <StoragePage
         snapshot={snapshot}
         drives={drives}
         busy={busy}
@@ -2162,6 +2163,7 @@ export default function App() {
         storageInventory={storageInventory}
         activeOperation={storageOperation}
         operationProgress={storageProgress}
+        focusedStorageId={focusedStorageId}
       /> : activePage === "Storage Access" ? <ConnectivityPage /> : activePage === "Networking" ? renderNetworkingPage() : activePage === "Applications" ? <ApplicationsPage onChanged={setIntegrations} onRecommendations={applyApplicationRecommendations} /> : activePage === "Activity" ? <ActivityPage /> : activePage === "Health" ? <HealthPage /> : activePage === "Analytics" ? <AnalyticsPage /> : <SettingsPage />}
       {storageAction && <StorageWizardDialog
         action={storageAction}

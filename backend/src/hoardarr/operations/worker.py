@@ -1221,7 +1221,12 @@ def _finalize_success(
                     ),
                     None,
                 )
-            entity = apply_redundancy_result(session, plan=execution.plan, observed_device=observed)
+            entity = apply_redundancy_result(
+                session,
+                plan=execution.plan,
+                observed_device=observed,
+                operation_id=operation.id,
+            )
             complete_operation(
                 session,
                 operation,

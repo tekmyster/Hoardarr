@@ -415,7 +415,36 @@ export interface StorageControllerPathDocument {
     id: string;
     stable_identity: string;
     model: string | null;
+    provider?: string;
+    state?: Record<string, unknown>;
   } | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StorageRedundancySettings {
+  mode: "recommended" | "custom";
+  path_grouping_policy: "failover" | "group_by_prio" | "multibus";
+  path_selector: "service-time 0" | "round-robin 0" | "queue-length 0";
+  failback: "immediate" | "manual" | "followover";
+  no_path_retry: "fail" | "queue" | "queue_30";
+  polling_interval_seconds: number;
+  minimum_healthy_paths: number;
+  alert_on_reduced: boolean;
+  alert_on_failover: boolean;
+  alert_on_path_flapping: boolean;
+  alert_on_total_loss: boolean;
+}
+
+export interface StorageRedundancyEventDocument {
+  id: string;
+  event_type: string;
+  path_id: string | null;
+  controller_id: string | null;
+  operation_id: string | null;
+  previous_state: string | null;
+  resulting_state: string;
+  details: Record<string, unknown>;
+  occurred_at: string;
 }
 
 export interface LogicalStorageDocument {
@@ -427,6 +456,18 @@ export interface LogicalStorageDocument {
   presentation_device: string;
   topology_state: "single_path" | "fully_redundant" | "reduced_redundancy" | "failed_over" | "no_path" | string;
   capacity_bytes: number;
+  node_name?: string | null;
+  storage_scope?: "local" | "external_shared" | string;
+  transition_capability?: { mode: "online_supported" | "brief_maintenance_required" | "automatic_conversion_unsupported"; message: string };
+  redundancy_settings?: StorageRedundancySettings;
+  redundancy_summary?: {
+    healthy_paths: number;
+    active_paths: number;
+    failed_paths: number;
+    failovers_today: number;
+    last_failover: string | null;
+    time_degraded_seconds: number;
+  };
   paths: StorageControllerPathDocument[];
   available_paths?: Array<{
     stable_path_identity: string;
@@ -438,7 +479,7 @@ export interface LogicalStorageDocument {
 
 export interface StorageRedundancyPlan {
   schema_version: 1;
-  operation: "redundancy.add" | "redundancy.remove" | "redundancy.replace";
+  operation: "redundancy.add" | "redundancy.remove" | "redundancy.replace" | "redundancy.configure";
   storage_entity_id: string;
   logical_storage_identity: string;
   hardware_snapshot_sha256: string;
@@ -468,6 +509,9 @@ export interface StorageRedundancyPlan {
     kernel_path: string;
   } | null;
   policy: "recommended" | "failover" | "multibus" | "group_by_prio";
+  settings: StorageRedundancySettings;
+  transition: { mode: "online_supported" | "brief_maintenance_required" | "automatic_conversion_unsupported"; message: string };
+  managed_access_services?: Array<{ id: string; protocol: "smb" | "nfs"; name: string; path: string }>;
   destructive: false;
   format: false;
   copy_data: false;

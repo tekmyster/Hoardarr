@@ -223,10 +223,11 @@ class SnapraidReplacementApplyRequest(StrictModel):
 
 class StorageRedundancyPreviewRequest(StrictModel):
     storage_entity_id: str = Field(min_length=36, max_length=36)
-    action: Literal["add", "remove", "replace"]
+    action: Literal["add", "remove", "replace", "configure"]
     path_identity: str | None = Field(default=None, min_length=3, max_length=512)
     remove_path_identity: str | None = Field(default=None, min_length=3, max_length=512)
     policy: Literal["recommended", "failover", "multibus", "group_by_prio"] = "recommended"
+    settings: dict[str, Any] | None = None
 
 
 class StorageRedundancyApplyRequest(StrictModel):

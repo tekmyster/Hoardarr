@@ -11,7 +11,7 @@ import {
   shiftDashboardPanel,
   type DashboardPanelId,
 } from "../dashboard";
-import type { OverviewDocument, ResourceUsageDocument } from "../types";
+import type { LogicalStorageDocument, OverviewDocument, ResourceUsageDocument } from "../types";
 
 const RESOURCE_REFRESH_INTERVAL_MS = 2_000;
 const OVERVIEW_REFRESH_INTERVAL_MS = 30_000;
@@ -236,7 +236,7 @@ function panelBody(panel: DashboardPanelId, data: OverviewDocument | null, resou
   return data.storage.shares.status === "not_configured" ? <EmptyReading>Shares are not configured.</EmptyReading> : <DefinitionList items={[["Shares", data.storage.shares.items.length]]} />;
 }
 
-export function OverviewDashboard() {
+export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageId: string) => void } = {}) {
   const [data, setData] = useState<OverviewDocument | null>(null);
   const [resources, setResources] = useState<ResourceUsageDocument | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -246,14 +246,19 @@ export function OverviewDashboard() {
   const [panels, setPanels] = useState<DashboardPanelId[]>(readStoredPanels);
   const [draggedPanel, setDraggedPanel] = useState<DashboardPanelId | null>(null);
   const [resourceHistory, setResourceHistory] = useState<ResourceHistoryPoint[]>([]);
+  const [logicalStorage, setLogicalStorage] = useState<LogicalStorageDocument[]>([]);
   const resourceRequestActive = useRef(false);
   const previousNetworkCounters = useRef<NetworkCounterSample | null>(null);
   const hiddenPanels = useMemo(() => DASHBOARD_PANEL_IDS.filter((panel) => !panels.includes(panel)), [panels]);
 
   async function refreshOverview() {
     try {
-      const reading = await api.overview();
+      const [reading, storage] = await Promise.all([
+        api.overview(),
+        api.logicalStorage().catch(() => [] as LogicalStorageDocument[]),
+      ]);
       setData(reading);
+      setLogicalStorage(storage);
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "The live Overview reading could not be loaded.");
@@ -346,6 +351,11 @@ export function OverviewDashboard() {
       <div className="dashboard-add-list">{hiddenPanels.length ? hiddenPanels.map((panel) => <button type="button" key={panel} onClick={() => setPanels((current) => [...current, panel])}>+ {PANEL_NAMES[panel]}</button>) : <span>All panels are shown.</span>}</div>
       <button type="button" className="text-button dashboard-reset" onClick={() => setPanels([...DEFAULT_DASHBOARD_PANELS])}>Reset layout</button>
     </div>}
+
+    {logicalStorage.length > 0 && <section className="overview-redundancy-strip" aria-label="Storage redundancy status">
+      <div><strong>Storage redundancy</strong><span>{logicalStorage.some((storage) => ["reduced_redundancy", "failed_over", "no_path"].includes(storage.topology_state)) ? "Needs attention" : "Healthy"}</span></div>
+      <div className="overview-redundancy-items">{logicalStorage.map((storage) => <button type="button" key={storage.id} onClick={() => onOpenStorage?.(storage.id)}><strong>{storage.name}</strong><span>{storage.topology_state.replaceAll("_", " ")} · {storage.redundancy_summary?.healthy_paths ?? storage.paths.filter((path) => path.active).length}/{storage.paths.length} paths healthy</span></button>)}</div>
+    </section>}
 
     {panels.length ? <div className="dashboard-grid">{panels.map((panel, index) => <article
       className={`dashboard-panel ${customizing ? "is-customizing" : ""}`}

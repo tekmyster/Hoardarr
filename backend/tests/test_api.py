@@ -1361,6 +1361,19 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
     assert inventory.status_code == 200
     assert inventory.json()["items"][0]["id"] == storage_id
     assert inventory.json()["items"][0]["mountpoint"] == "/media"
+    assert inventory.json()["items"][0]["redundancy_summary"] == {
+        "healthy_paths": 1,
+        "active_paths": 1,
+        "failed_paths": 0,
+        "failovers_today": 0,
+        "last_failover": None,
+        "time_degraded_seconds": 0,
+    }
+    event_history = client.get(
+        f"/api/v1/storage/logical/{storage_id}/redundancy/events"
+    )
+    assert event_history.status_code == 200
+    assert event_history.json() == {"items": []}
 
     assert (
         client.post(
@@ -1381,6 +1394,8 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
     assert plan["format"] is False
     assert plan["before"]["mountpoint"] == plan["after"]["mountpoint"] == "/media"
     assert plan["before"]["filesystem_uuid"] == plan["after"]["filesystem_uuid"]
+    assert plan["transition"]["mode"] == "brief_maintenance_required"
+    assert plan["settings"]["path_grouping_policy"] == "group_by_prio"
 
     body = {
         "plan": plan,

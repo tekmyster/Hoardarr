@@ -806,6 +806,63 @@
       "unit": "state"
     },
     {
+      "aggregation": "last",
+      "availability": "When the named local source/provider reports the value",
+      "capability": "metrics.network.advanced",
+      "entity_types": [
+        "storage_path"
+      ],
+      "formula": null,
+      "id": "storage.path.state",
+      "implementation_status": "SUPPORTED WHEN PROVIDER REPORTS VALUE",
+      "kind": "raw",
+      "minimum_interval_seconds": 30,
+      "name": "Storage path state",
+      "physical_validation": "pending",
+      "retention_class": "recent",
+      "source": "durable multipath topology",
+      "test_evidence": "backend/tests/test_enterprise_telemetry.py",
+      "unit": "state"
+    },
+    {
+      "aggregation": "last",
+      "availability": "When the named local source/provider reports the value",
+      "capability": "metrics.network.advanced",
+      "entity_types": [
+        "logical_storage"
+      ],
+      "formula": null,
+      "id": "storage.paths.healthy",
+      "implementation_status": "SUPPORTED WHEN PROVIDER REPORTS VALUE",
+      "kind": "raw",
+      "minimum_interval_seconds": 30,
+      "name": "Healthy storage paths",
+      "physical_validation": "pending",
+      "retention_class": "recent",
+      "source": "durable multipath topology",
+      "test_evidence": "backend/tests/test_enterprise_telemetry.py",
+      "unit": "count"
+    },
+    {
+      "aggregation": "max",
+      "availability": "When the named local source/provider reports the value",
+      "capability": "metrics.network.advanced",
+      "entity_types": [
+        "logical_storage"
+      ],
+      "formula": null,
+      "id": "storage.paths.failed",
+      "implementation_status": "SUPPORTED WHEN PROVIDER REPORTS VALUE",
+      "kind": "raw",
+      "minimum_interval_seconds": 30,
+      "name": "Failed storage paths",
+      "physical_validation": "pending",
+      "retention_class": "recent",
+      "source": "durable multipath topology",
+      "test_evidence": "backend/tests/test_enterprise_telemetry.py",
+      "unit": "count"
+    },
+    {
       "aggregation": "mean",
       "availability": "When the named local source/provider reports the value",
       "capability": null,
@@ -1987,5 +2044,6 @@
       "unit": "ratio"
     }
   ],
-  "schema_version": 1
+  "schema_version": 1,
+  "source": "hoardarr.telemetry.catalog"
 }

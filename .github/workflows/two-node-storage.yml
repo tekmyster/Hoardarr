@@ -1,0 +1,56 @@
+name: Two-node storage graph stress
+on:
+  push:
+    branches:
+      - rc/0.3.11-validation
+  workflow_dispatch:
+    inputs:
+      read_soak_seconds:
+        description: Read-heavy soak duration after the storage ownership handoff
+        required: false
+        default: "45"
+        type: string
+concurrency:
+  group: two-node-storage-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  two-node-virtual-storage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - name: Install QEMU and isolated workload dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cloud-image-utils fio jq qemu-system-x86 qemu-utils
+          if test -e /dev/kvm; then sudo chmod 0666 /dev/kvm; fi
+      - name: Build the backend wheel used by both nodes
+        run: uv build --project backend --wheel --out-dir "$PWD/dist/wheels"
+      - name: Run two Ubuntu Hoardarr nodes with four virtual SSDs
+        env:
+          HOARDARR_WHEEL: ${{ github.workspace }}/dist/wheels/hoardarr-0.3.11-py3-none-any.whl
+          HOARDARR_TEST_MAX_TOTAL_WRITES: "100663296"
+          HOARDARR_TEST_MAX_DEVICE_WRITES: "67108864"
+          HOARDARR_TEST_READ_SOAK_SECONDS: ${{ inputs.read_soak_seconds || '45' }}
+          HOARDARR_TEST_WORKLOAD_CONCURRENCY: "2"
+        run: |
+          sudo touch /.hoardarr-disposable-runner
+          bash tests/integration/run-two-node-storage-graph-stress.sh
+      - name: Validate evidence boundaries and persistent metrics
+        run: |
+          evidence=dist/validation/two-node-storage/two-node-storage-graph-stress.json
+          jq -e '.device_type == "test-created virtual block devices"' "$evidence"
+          jq -e '.physical_ssd_validation | startswith("pending")' "$evidence"
+          jq -e '.write_budget.planned_payload_bytes <= .write_budget.maximum_total_bytes' "$evidence"
+          jq -e '[.node_a.events[], .node_b.events[] | select(.event_type == "storage_transitioned")] | length > 0' "$evidence"
+          jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "storage.path.state")] | length > 0' "$evidence"
+          jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "cpu.utilization")] | length > 0' "$evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: two-node-storage-graph-stress-evidence
+          path: dist/validation/two-node-storage
+          if-no-files-found: error

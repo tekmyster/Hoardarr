@@ -57,6 +57,11 @@ export function SourceBadge({ children }: PropsWithChildren) {
 
 export function statusPresentation(status: string): { label: string; tone: "good" | "bad" | "muted" | "info" } {
   const normalized = status.trim().toLowerCase().replaceAll("_", " ");
+  if (normalized === "fully redundant") return { label: "Fully redundant", tone: "good" };
+  if (normalized === "single path") return { label: "Single path", tone: "info" };
+  if (normalized === "failed over") return { label: "Failed over", tone: "bad" };
+  if (normalized === "reduced redundancy") return { label: "Reduced redundancy", tone: "bad" };
+  if (normalized === "no path") return { label: "Offline", tone: "bad" };
   if (["passed", "up", "high", "healthy", "succeeded", "configured", "online"].includes(normalized)) return { label: "Healthy", tone: "good" };
   if (["failed", "warning", "critical", "degraded", "faulted", "needs attention"].includes(normalized)) return { label: "Needs attention", tone: "bad" };
   if (["unavailable", "unreliable", "down", "unknown", "not reported"].includes(normalized)) return { label: "Not reported", tone: "muted" };

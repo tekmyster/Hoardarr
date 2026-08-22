@@ -2,7 +2,7 @@ name: Isolated storage integration
 on:
   push:
     branches:
-      - rc/0.3.10-validation
+      - rc/0.3.11-validation
   workflow_dispatch:
     inputs:
       run_extended_self_hosted:
@@ -28,6 +28,11 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID \
             env HOARDARR_TEST_PYTHON="$PWD/backend/.venv/bin/python" \
             bash tests/integration/run-multipath-redundancy-lifecycle.sh
+      - name: Verify durable failover telemetry evidence
+        run: |
+          jq -e '.failover_io_completed == true' dist/validation/multipath-redundancy-lifecycle.json
+          jq -e '[.telemetry.path_a_failed.events[] | select(.event_type == "path_failed" or .event_type == "controller_failover" or .event_type == "redundancy_reduced")] | length > 0' dist/validation/multipath-redundancy-lifecycle.json
+          jq -e '[.telemetry.path_a_failed.telemetry[] | select(.metric_id == "storage.path.state")] | length > 0' dist/validation/multipath-redundancy-lifecycle.json
       - uses: actions/upload-artifact@v4
         with:
           name: multipath-redundancy-lifecycle-evidence

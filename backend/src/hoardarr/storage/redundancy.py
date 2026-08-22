@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import MetricEntity, StorageController, StorageEntity, StoragePath, utc_now
+from hoardarr.db.models import (
+    ConnectivityService,
+    MetricEntity,
+    StorageController,
+    StorageEntity,
+    StoragePath,
+    StorageRedundancyEvent,
+    utc_now,
+)
 from hoardarr.operations.service import document_hash
 
 
@@ -19,6 +29,24 @@ class RedundancyError(ValueError):
 
 AUTHORITATIVE_IDENTIFIERS = ("wwn", "nguid", "eui64")
 SAFE_POLICY_VALUES = {"recommended", "failover", "multibus", "group_by_prio"}
+TRANSITION_MODES = {
+    "online_supported",
+    "brief_maintenance_required",
+    "automatic_conversion_unsupported",
+}
+DEFAULT_REDUNDANCY_SETTINGS: dict[str, Any] = {
+    "mode": "recommended",
+    "path_grouping_policy": "group_by_prio",
+    "path_selector": "service-time 0",
+    "failback": "followover",
+    "no_path_retry": "fail",
+    "polling_interval_seconds": 5,
+    "minimum_healthy_paths": 2,
+    "alert_on_reduced": True,
+    "alert_on_failover": True,
+    "alert_on_path_flapping": True,
+    "alert_on_total_loss": True,
+}
 
 
 def _text(value: object) -> str | None:
@@ -26,6 +54,13 @@ def _text(value: object) -> str | None:
         return None
     cleaned = value.strip().casefold()
     return cleaned or None
+
+
+def _reported(value: object, maximum: int = 256) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(character for character in value.strip() if character.isprintable())
+    return cleaned[:maximum] or None
 
 
 def logical_storage_identity(device: Mapping[str, Any]) -> str:
@@ -106,6 +141,127 @@ def _controller_identity(device: Mapping[str, Any]) -> str:
     return value
 
 
+def normalized_redundancy_settings(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    settings = {**DEFAULT_REDUNDANCY_SETTINGS, **dict(value or {})}
+    allowed = {
+        "mode": {"recommended", "custom"},
+        "path_grouping_policy": {"failover", "group_by_prio", "multibus"},
+        "path_selector": {"service-time 0", "round-robin 0", "queue-length 0"},
+        "failback": {"immediate", "manual", "followover"},
+        "no_path_retry": {"fail", "queue", "queue_30"},
+    }
+    for field, choices in allowed.items():
+        if settings.get(field) not in choices:
+            raise RedundancyError("redundancy_settings_invalid", f"{field} is not supported.")
+    interval = settings.get("polling_interval_seconds")
+    minimum = settings.get("minimum_healthy_paths")
+    if not isinstance(interval, int) or not 5 <= interval <= 60:
+        raise RedundancyError(
+            "redundancy_settings_invalid", "Path checks must be between 5 and 60 seconds."
+        )
+    if not isinstance(minimum, int) or not 1 <= minimum <= 8:
+        raise RedundancyError(
+            "redundancy_settings_invalid", "The minimum healthy path count must be 1 through 8."
+        )
+    for field in (
+        "alert_on_reduced",
+        "alert_on_failover",
+        "alert_on_path_flapping",
+        "alert_on_total_loss",
+    ):
+        if not isinstance(settings.get(field), bool):
+            raise RedundancyError("redundancy_settings_invalid", f"{field} must be true or false.")
+    return settings
+
+
+def transition_capability(
+    entity: StorageEntity, *, action: str, resulting_path_count: int
+) -> dict[str, str]:
+    """Describe whether this exact access-layer change needs a maintenance window."""
+
+    if action == "replace" or (
+        action == "add" and entity.presentation_device.startswith("/dev/mapper/")
+    ):
+        return {
+            "mode": "online_supported",
+            "message": "The verified path can be added while this storage remains online.",
+        }
+    if action == "remove" and resulting_path_count > 1:
+        return {
+            "mode": "online_supported",
+            "message": "The selected path can be retired while other healthy paths remain online.",
+        }
+    if not entity.filesystem_uuid or entity.storage_kind not in {
+        "filesystem",
+        "individual",
+        "import",
+        "cache",
+    }:
+        return {
+            "mode": "automatic_conversion_unsupported",
+            "message": "Hoardarr cannot automatically transition this storage stack to multipath.",
+        }
+    return {
+        "mode": "brief_maintenance_required",
+        "message": (
+            "Adding redundancy requires a brief storage interruption. The filesystem, data, "
+            "shares, and paths will not be recreated."
+        ),
+    }
+
+
+def _managed_access_services(session: Session, mountpoint: str) -> list[dict[str, str]]:
+    root = PurePosixPath(mountpoint)
+    result: list[dict[str, str]] = []
+    for service in session.scalars(
+        select(ConnectivityService).where(
+            ConnectivityService.status == "active",
+            ConnectivityService.protocol.in_(("smb", "nfs")),
+        )
+    ):
+        path = service.config_json.get("path")
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        candidate = PurePosixPath(path)
+        if candidate != root and root not in candidate.parents:
+            continue
+        result.append(
+            {
+                "id": service.id,
+                "protocol": service.protocol,
+                "name": service.name,
+                "path": path,
+            }
+        )
+    return result
+
+
+def _record_event(
+    session: Session,
+    entity: StorageEntity,
+    event_type: str,
+    *,
+    path: StoragePath | None = None,
+    previous_state: str | None = None,
+    resulting_state: str | None = None,
+    operation_id: str | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> StorageRedundancyEvent:
+    event = StorageRedundancyEvent(
+        storage_entity_id=entity.id,
+        event_type=event_type,
+        path_id=path.id if path else None,
+        controller_id=path.controller_id if path else None,
+        operation_id=operation_id,
+        previous_state=previous_state,
+        resulting_state=resulting_state or entity.topology_state,
+        details_json=dict(details or {}),
+        occurred_at=utc_now(),
+    )
+    session.add(event)
+    return event
+
+
 def _upsert_controller(session: Session, device: Mapping[str, Any]) -> StorageController:
     identity = _controller_identity(device)
     controller = session.scalar(
@@ -118,11 +274,27 @@ def _upsert_controller(session: Session, device: Mapping[str, Any]) -> StorageCo
             provider=_text(connection.get("protocol"))
             or _text(connection.get("transport"))
             or "scsi",
-            model=_text(connection.get("controller_model")),
+            model=_reported(connection.get("controller_model")),
             state_json={},
         )
         session.add(controller)
         session.flush()
+    controller.model = _reported(connection.get("controller_model")) or controller.model
+    controller.state_json = {
+        **controller.state_json,
+        **{
+            key: value
+            for key, value in {
+                "vendor": _reported(connection.get("controller_vendor")),
+                "firmware": _reported(connection.get("controller_firmware")),
+                "port": _reported(connection.get("controller_port")),
+                "initiator": _reported(
+                    connection.get("initiator") or connection.get("initiator_wwn")
+                ),
+            }.items()
+            if value is not None
+        },
+    }
     controller.last_seen_at = utc_now()
     return controller
 
@@ -159,6 +331,35 @@ def _upsert_path(session: Session, entity: StorageEntity, device: Mapping[str, A
         path.active = True
         path.state = "active"
         path.last_seen_at = utc_now()
+    path.metadata_json = {
+        **path.metadata_json,
+        **{
+            key: value
+            for key, value in {
+                "port": _reported(connection.get("port")),
+                "target": _reported(
+                    connection.get("target_port_wwn")
+                    or connection.get("target_port_sas_address")
+                    or connection.get("portal")
+                ),
+                "initiator": _reported(
+                    connection.get("initiator") or connection.get("initiator_wwn")
+                ),
+                "hctl": _reported(connection.get("hctl")),
+                "negotiated_speed": _reported(
+                    connection.get("negotiated_speed") or connection.get("negotiated_link_rate")
+                ),
+                "capable_speed": _reported(
+                    connection.get("capable_speed") or connection.get("maximum_link_rate")
+                ),
+                "path_group": _reported(connection.get("path_group")),
+                "priority": _reported(connection.get("priority")),
+                "checker": _reported(connection.get("checker")),
+                "alua_state": _reported(connection.get("alua_state")),
+            }.items()
+            if value is not None
+        },
+    }
     session.flush()
     return path
 
@@ -368,10 +569,11 @@ def build_redundancy_plan(
     candidate_path_identity: str | None = None,
     remove_path_identity: str | None = None,
     policy: str = "recommended",
+    settings_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if action not in {"add", "remove", "replace"}:
+    if action not in {"add", "remove", "replace", "configure"}:
         raise RedundancyError(
-            "action_invalid", "The redundancy action must be add, remove, or replace."
+            "action_invalid", "The redundancy action must be add, remove, replace, or configure."
         )
     if policy not in SAFE_POLICY_VALUES:
         raise RedundancyError("policy_invalid", "The selected multipath policy is not supported.")
@@ -395,7 +597,20 @@ def build_redundancy_plan(
         )
     observed_by_path = {identity: items[0] for identity, items in observed_groups.items()}
     existing_ids = {item.stable_path_identity for item in existing}
-    if action in {"add", "replace"}:
+    if action == "configure":
+        if len(existing) < 2 or not entity.presentation_device.startswith("/dev/mapper/"):
+            raise RedundancyError(
+                "redundancy_not_configured",
+                "Controller settings can be applied after redundant storage access is active.",
+            )
+        before = [item.stable_path_identity for item in existing]
+        after = list(before)
+        selected_path = {
+            "stable_path_identity": existing[0].stable_path_identity,
+            "kernel_path": existing[0].kernel_path,
+            "present": True,
+        }
+    elif action in {"add", "replace"}:
         candidates = [key for key in observed_by_path if key not in existing_ids]
         chosen = candidate_path_identity or (candidates[0] if len(candidates) == 1 else None)
         if not chosen or chosen not in candidates:
@@ -465,6 +680,21 @@ def build_redundancy_plan(
             "present": removed_observed is not None,
         }
     mapper_name = re.sub(r"[^a-zA-Z0-9_.-]", "", entity.stable_identity.split(":", 1)[1])
+    settings = normalized_redundancy_settings(
+        settings_override
+        if settings_override is not None
+        else entity.config_json.get("redundancy_settings")
+    )
+    if policy != "recommended":
+        settings = {**settings, "mode": "custom", "path_grouping_policy": policy}
+    capability = (
+        {
+            "mode": "online_supported",
+            "message": "These settings can be applied while the redundant device remains online.",
+        }
+        if action == "configure"
+        else transition_capability(entity, action=action, resulting_path_count=len(after))
+    )
     plan: dict[str, Any] = {
         "schema_version": 1,
         "operation": f"redundancy.{action}",
@@ -497,8 +727,8 @@ def build_redundancy_plan(
                     (remaining_observed or {}).get("kernel_path")
                     or remaining_path.kernel_path
                 )
-                if action == "remove"
-                else entity.presentation_device
+            if action == "remove"
+            else entity.presentation_device
             ),
             "mountpoint": entity.mountpoint,
             "filesystem_uuid": entity.filesystem_uuid,
@@ -517,6 +747,9 @@ def build_redundancy_plan(
             else None
         ),
         "policy": policy,
+        "settings": settings,
+        "transition": capability,
+        "managed_access_services": _managed_access_services(session, entity.mountpoint),
         "destructive": False,
         "format": False,
         "copy_data": False,
@@ -557,6 +790,13 @@ def validate_redundancy_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         raise RedundancyError(
             "storage_identity_changed", "The mount or filesystem identity changed."
         )
+    transition = value.get("transition")
+    if not isinstance(transition, Mapping) or transition.get("mode") not in TRANSITION_MODES:
+        raise RedundancyError("redundancy_plan_invalid", "The transition capability is missing.")
+    settings = value.get("settings")
+    if not isinstance(settings, Mapping):
+        raise RedundancyError("redundancy_plan_invalid", "Redundancy settings are missing.")
+    value["settings"] = normalized_redundancy_settings(settings)
     return {**value, "plan_sha256": supplied_hash}
 
 
@@ -565,6 +805,7 @@ def apply_redundancy_result(
     *,
     plan: Mapping[str, Any],
     observed_device: Mapping[str, Any] | None,
+    operation_id: str | None = None,
 ) -> StorageEntity:
     validated = validate_redundancy_plan(plan)
     entity = session.get(StorageEntity, str(validated["storage_entity_id"]))
@@ -586,7 +827,21 @@ def apply_redundancy_result(
         raise RedundancyError("storage_identity_changed", "The reviewed storage identity changed.")
     operation = str(validated["operation"])
     selected = validated["selected_path"]
-    if operation in {"redundancy.add", "redundancy.replace"}:
+    if operation == "redundancy.configure":
+        previous_settings = entity.config_json.get("redundancy_settings")
+        _record_event(
+            session,
+            entity,
+            "redundancy_settings_changed",
+            operation_id=operation_id,
+            details={
+                "previous_settings": previous_settings
+                if isinstance(previous_settings, Mapping)
+                else None,
+                "settings": dict(validated["settings"]),
+            },
+        )
+    elif operation in {"redundancy.add", "redundancy.replace"}:
         if (
             observed_device is None
             or stable_path_identity(observed_device) != selected["stable_path_identity"]
@@ -598,7 +853,7 @@ def apply_redundancy_result(
             raise RedundancyError(
                 "logical_identity_changed", "The new path no longer identifies the same storage."
             )
-        _upsert_path(session, entity, observed_device)
+        added_path = _upsert_path(session, entity, observed_device)
         if operation == "redundancy.replace":
             removed = validated.get("removed_path")
             removed_identity = (
@@ -620,7 +875,23 @@ def apply_redundancy_result(
                     **entity.config_json,
                     "preferred_path_identity": selected["stable_path_identity"],
                 }
+            _record_event(
+                session,
+                entity,
+                "controller_path_replaced",
+                path=added_path,
+                operation_id=operation_id,
+                details={"removed_path_identity": old_path.stable_path_identity},
+            )
             session.delete(old_path)
+        else:
+            _record_event(
+                session,
+                entity,
+                "redundant_path_added",
+                path=added_path,
+                operation_id=operation_id,
+            )
     elif operation == "redundancy.remove":
         path = session.scalar(
             select(StoragePath).where(
@@ -630,7 +901,6 @@ def apply_redundancy_result(
         )
         if path is None:
             raise RedundancyError("path_not_found", "The selected path no longer exists.")
-        session.delete(path)
         if entity.config_json.get("preferred_path_identity") == path.stable_path_identity:
             remaining = next(
                 (
@@ -644,9 +914,23 @@ def apply_redundancy_result(
                 **entity.config_json,
                 "preferred_path_identity": remaining,
             }
+        _record_event(
+            session,
+            entity,
+            "redundant_path_removed",
+            path=path,
+            operation_id=operation_id,
+            details={"protection_reduced": len(validated["after"]["path_ids"]) == 1},
+        )
+        session.delete(path)
     else:
         raise RedundancyError("action_invalid", "The redundancy action is invalid.")
     entity.topology_state = str(validated["after"]["topology_state"])
+    entity.config_json = {
+        **entity.config_json,
+        "redundancy_settings": dict(validated["settings"]),
+        "last_transition_mode": validated["transition"]["mode"],
+    }
     after_device = validated["after"].get("presentation_device")
     if isinstance(after_device, str):
         entity.presentation_device = after_device
@@ -700,6 +984,7 @@ def reconcile_storage_path_health(session: Session, multipath_maps: list[Mapping
         )
         active_path_ids: set[str] = set()
         for path in paths:
+            previous_path_state = path.state
             live = reported.get(path.kernel_path.rsplit("/", 1)[-1])
             state = str(live.get("state") or "unknown") if live else "missing"
             active = state in {"active", "ready", "running", "up"}
@@ -722,6 +1007,23 @@ def reconcile_storage_path_health(session: Session, multipath_maps: list[Mapping
                         "last_path_state": state,
                     }
                     controller.last_seen_at = utc_now()
+            if previous_path_state != state:
+                event_type = (
+                    "path_recovered"
+                    if active
+                    else "path_failed"
+                    if state in {"failed", "faulty", "offline", "missing"}
+                    else "path_state_changed"
+                )
+                _record_event(
+                    session,
+                    entity,
+                    event_type,
+                    path=path,
+                    previous_state=previous_path_state,
+                    resulting_state=state,
+                    details={"kernel_path": path.kernel_path},
+                )
         preferred = entity.config_json.get("preferred_path_identity")
         if not active_path_ids:
             topology_state = "no_path"
@@ -734,10 +1036,69 @@ def reconcile_storage_path_health(session: Session, multipath_maps: list[Mapping
         else:
             topology_state = "fully_redundant"
         if entity.topology_state != topology_state:
+            previous_topology = entity.topology_state
             entity.topology_state = topology_state
             entity.updated_at = utc_now()
+            event_type = {
+                "fully_redundant": "redundancy_restored",
+                "failed_over": "controller_failover",
+                "reduced_redundancy": "redundancy_reduced",
+                "no_path": "all_paths_lost",
+                "single_path": "single_path_active",
+            }.get(topology_state, "redundancy_state_changed")
+            _record_event(
+                session,
+                entity,
+                event_type,
+                previous_state=previous_topology,
+                resulting_state=topology_state,
+                details={
+                    "healthy_paths": len(active_path_ids),
+                    "total_paths": len(paths),
+                    "active_path_identities": sorted(active_path_ids),
+                },
+            )
             changed += 1
     return changed
+
+
+def update_redundancy_settings(
+    session: Session, storage_entity_id: str, settings: Mapping[str, Any]
+) -> dict[str, Any]:
+    entity = session.get(StorageEntity, storage_entity_id)
+    if entity is None:
+        raise RedundancyError("storage_not_found", "The logical storage object was not found.")
+    normalized = normalized_redundancy_settings(settings)
+    entity.config_json = {**entity.config_json, "redundancy_settings": normalized}
+    entity.updated_at = utc_now()
+    return normalized
+
+
+def redundancy_event_documents(
+    session: Session, storage_entity_id: str, *, limit: int = 200
+) -> list[dict[str, Any]]:
+    if session.get(StorageEntity, storage_entity_id) is None:
+        raise RedundancyError("storage_not_found", "The logical storage object was not found.")
+    events = session.scalars(
+        select(StorageRedundancyEvent)
+        .where(StorageRedundancyEvent.storage_entity_id == storage_entity_id)
+        .order_by(StorageRedundancyEvent.occurred_at.desc(), StorageRedundancyEvent.id.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    return [
+        {
+            "id": event.id,
+            "event_type": event.event_type,
+            "path_id": event.path_id,
+            "controller_id": event.controller_id,
+            "operation_id": event.operation_id,
+            "previous_state": event.previous_state,
+            "resulting_state": event.resulting_state,
+            "details": event.details_json,
+            "occurred_at": event.occurred_at,
+        }
+        for event in events
+    ]
 
 
 def storage_documents(
@@ -781,6 +1142,50 @@ def storage_documents(
                 )
             )
         }
+        today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        failover_events = list(
+            session.scalars(
+                select(StorageRedundancyEvent)
+                .where(
+                    StorageRedundancyEvent.storage_entity_id == entity.id,
+                    StorageRedundancyEvent.event_type == "controller_failover",
+                )
+                .order_by(StorageRedundancyEvent.occurred_at.desc())
+            )
+        )
+        failovers_today = sum(
+            1
+            for event in failover_events
+            if (
+                event.occurred_at.replace(tzinfo=UTC)
+                if event.occurred_at.tzinfo is None
+                else event.occurred_at.astimezone(UTC)
+            )
+            >= today
+        )
+        active_paths = sum(path.active for path in paths)
+        degraded_since = session.scalar(
+            select(StorageRedundancyEvent.occurred_at)
+            .where(
+                StorageRedundancyEvent.storage_entity_id == entity.id,
+                StorageRedundancyEvent.resulting_state.in_(
+                    ("reduced_redundancy", "failed_over", "no_path")
+                ),
+            )
+            .order_by(StorageRedundancyEvent.occurred_at.desc())
+            .limit(1)
+        )
+        degraded_seconds = 0
+        if (
+            entity.topology_state in {"reduced_redundancy", "failed_over", "no_path"}
+            and degraded_since
+        ):
+            degraded_at = (
+                degraded_since.replace(tzinfo=UTC)
+                if degraded_since.tzinfo is None
+                else degraded_since.astimezone(UTC)
+            )
+            degraded_seconds = max(0, int((datetime.now(UTC) - degraded_at).total_seconds()))
         documents.append(
             {
                 "id": entity.id,
@@ -791,6 +1196,22 @@ def storage_documents(
                 "presentation_device": entity.presentation_device,
                 "topology_state": entity.topology_state,
                 "capacity_bytes": entity.capacity_bytes,
+                "node_name": entity.config_json.get("node_name"),
+                "storage_scope": entity.config_json.get("storage_scope", "local"),
+                "transition_capability": transition_capability(
+                    entity, action="add", resulting_path_count=len(paths) + 1
+                ),
+                "redundancy_settings": normalized_redundancy_settings(
+                    entity.config_json.get("redundancy_settings")
+                ),
+                "redundancy_summary": {
+                    "healthy_paths": active_paths,
+                    "active_paths": active_paths,
+                    "failed_paths": len(paths) - active_paths,
+                    "failovers_today": failovers_today,
+                    "last_failover": failover_events[0].occurred_at if failover_events else None,
+                    "time_degraded_seconds": degraded_seconds,
+                },
                 "paths": [
                     {
                         "id": path.id,
@@ -805,10 +1226,13 @@ def storage_documents(
                                 "id": controllers[path.controller_id].id,
                                 "stable_identity": controllers[path.controller_id].stable_identity,
                                 "model": controllers[path.controller_id].model,
+                                "provider": controllers[path.controller_id].provider,
+                                "state": controllers[path.controller_id].state_json,
                             }
                             if path.controller_id in controllers
                             else None
                         ),
+                        "metadata": path.metadata_json,
                     }
                     for path in paths
                 ],

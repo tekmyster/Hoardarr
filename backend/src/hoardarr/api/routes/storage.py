@@ -35,6 +35,7 @@ from hoardarr.storage.mergerfs import discover_mergerfs
 from hoardarr.storage.redundancy import (
     RedundancyError,
     build_redundancy_plan,
+    redundancy_event_documents,
     storage_documents,
     validate_redundancy_plan,
 )
@@ -118,6 +119,7 @@ def preview_storage_redundancy(
             candidate_path_identity=payload.path_identity,
             remove_path_identity=payload.remove_path_identity,
             policy=payload.policy,
+            settings_override=payload.settings,
         )
     except RedundancyError as exc:
         raise Problem(422, exc.code, "Redundancy unavailable", str(exc)) from exc
@@ -191,6 +193,23 @@ def apply_storage_redundancy_plan(
             },
         )
     return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.get("/logical/{storage_entity_id}/redundancy/events")
+def storage_redundancy_events(
+    storage_entity_id: str,
+    limit: int = 200,
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        return {
+            "items": redundancy_event_documents(
+                session, storage_entity_id, limit=max(1, min(limit, 500))
+            )
+        }
+    except RedundancyError as exc:
+        raise Problem(404, exc.code, "Storage not found", str(exc)) from exc
 
 
 @router.get("/telemetry")

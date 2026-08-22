@@ -176,6 +176,7 @@ class Paths:
     dev_by_id: Path = Path("/dev/disk/by-id")
     snapraid_config_root: Path = Path("/etc/snapraid")
     systemd_unit_root: Path = Path("/etc/systemd/system")
+    multipath_config_root: Path = Path("/etc/multipath/conf.d")
 
 
 CommandRunner = Callable[[list[str], int], None]
@@ -2595,6 +2596,8 @@ def apply_storage_redundancy(
         )
     mapper = Path(mapper_text)
     wwid = str(plan["logical_storage_identity"]).split(":", 1)[-1]
+    if re.fullmatch(r"[A-Za-z0-9_.:-]{3,512}", wwid) is None:
+        raise ExecutorFailure("logical_identity_invalid", "The reviewed storage WWID is invalid.")
     mountpoint_text = str(plan["before"]["mountpoint"])
     device_mountpoint_text = str(plan["before"].get("device_mountpoint") or mountpoint_text)
     mountpoint = Path(mountpoint_text)
@@ -2629,7 +2632,13 @@ def apply_storage_redundancy(
     prior = _load_prior_journal(journal_path, str(plan["plan_sha256"]))
     if prior is not None:
         return {**prior, "replayed": True}
-    total_steps = 8 if plan["operation"] in {"redundancy.add", "redundancy.replace"} else 6
+    total_steps = (
+        8
+        if plan["operation"] in {"redundancy.add", "redundancy.replace"}
+        else 3
+        if plan["operation"] == "redundancy.configure"
+        else 6
+    )
     journal: dict[str, Any] = {
         "schema_version": 1,
         "operation_id": operation_id,
@@ -2651,12 +2660,18 @@ def apply_storage_redundancy(
         number = int(journal["completed_steps"]) + 1
         command_name = PurePosixPath(command[0].replace("\\", "/")).name
         action_id = f"redundancy:{number}:{command_name}"
-        journal["phase"] = {
+        journal["phase"] = (
+            "Pausing storage access"
+            if command_name == "systemctl" and len(command) > 1 and command[1] == "stop"
+            else "Verifying shares"
+            if command_name == "systemctl" and len(command) > 1 and command[1] == "start"
+            else {
             "multipath": "Preparing redundant storage access",
             "multipathd": "Updating controller paths",
             "umount": "Switching the storage access layer",
             "mount": "Restoring the existing storage mount",
-        }.get(command_name, "Updating controller redundancy")
+            }.get(command_name, "Updating controller redundancy")
+        )
         journal["current_action"] = {
             "id": action_id,
             "type": "storage.redundancy",
@@ -2680,17 +2695,101 @@ def apply_storage_redundancy(
 
     runner = tracked_runner
 
+    def set_phase(phase: str) -> None:
+        journal["phase"] = phase
+        journal["updated_at"] = time.time()
+        atomic_json(journal_path, journal)
+
+    managed_services = plan.get("managed_access_services")
+    managed_services = managed_services if isinstance(managed_services, list) else []
+    service_units = sorted(
+        {
+            "smbd.service" if item.get("protocol") == "smb" else "nfs-server.service"
+            for item in managed_services
+            if isinstance(item, Mapping) and item.get("protocol") in {"smb", "nfs"}
+        }
+    )
+    config_backup: tuple[Path, str | None] | None = None
+
+    def coordinate_services(action: str) -> None:
+        if not service_units:
+            return
+        set_phase("Pausing storage access" if action == "stop" else "Verifying shares")
+        for unit in service_units:
+            runner([_tool("systemctl"), action, unit], 120)
+
+    def apply_multipath_settings() -> Path:
+        nonlocal config_backup
+        settings = plan["settings"]
+        no_path_retry = settings["no_path_retry"]
+        retry_value = "30" if no_path_retry == "queue_30" else no_path_retry
+        alias = mapper.name
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", alias):
+            raise ExecutorFailure("mapper_path_invalid", "The multipath alias is invalid.")
+        config = (
+            "# Managed by Hoardarr.\n"
+            "multipaths {\n"
+            "    multipath {\n"
+            f'        wwid "{wwid}"\n'
+            f'        alias "{alias}"\n'
+            f"        path_grouping_policy {settings['path_grouping_policy']}\n"
+            f'        path_selector "{settings["path_selector"]}"\n'
+            f"        failback {settings['failback']}\n"
+            f"        no_path_retry {retry_value}\n"
+            "    }\n"
+            "}\n"
+        )
+        config_root = paths.multipath_config_root
+        if os.name == "nt" and config_root == Path("/etc/multipath/conf.d"):
+            config_root = paths.transaction_root.parent / "multipath-config"
+        config_root.mkdir(parents=True, exist_ok=True, mode=0o755)
+        config_path = config_root / f"hoardarr-{alias}.conf"
+        if config_backup is None:
+            try:
+                previous = config_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                previous = None
+            except OSError as exc:
+                raise ExecutorFailure(
+                    "multipath_config_unavailable",
+                    "The existing multipath configuration could not be read.",
+                ) from exc
+            config_backup = (config_path, previous)
+        atomic_text(config_path, config, mode=0o644)
+        return config_path
+
+    def restore_multipath_settings() -> None:
+        if config_backup is None:
+            return
+        config_path, previous = config_backup
+        try:
+            if previous is None:
+                config_path.unlink(missing_ok=True)
+            else:
+                atomic_text(config_path, previous, mode=0o644)
+            base_runner([_tool("multipathd"), "reconfigure"], 30)
+        except (OSError, ExecutorFailure) as exc:
+            raise ExecutorFailure(
+                "multipath_config_rollback_failed",
+                "The prior multipath configuration could not be restored.",
+                needs_attention=True,
+            ) from exc
+
     def create_and_verify_map(kernel_path: str) -> None:
         if not kernel_path.startswith("/dev/") or ".." in PurePosixPath(kernel_path).parts:
             raise ExecutorFailure("path_invalid", "The new kernel path is invalid.")
-        runner([_tool("multipath"), "-a", wwid], 30)
-        create_command = [_tool("multipath"), "-v2"]
-        policy = str(plan.get("policy") or "recommended")
-        if policy != "recommended":
-            create_command.extend(["-p", policy])
-        create_command.append(kernel_path)
-        runner(create_command, 120)
-        runner([_tool("multipathd"), "reconfigure"], 30)
+        set_phase("Preparing multipath")
+        apply_multipath_settings()
+        try:
+            runner([_tool("multipath"), "-t"], 30)
+            runner([_tool("multipath"), "-a", wwid], 30)
+            create_command = [_tool("multipath"), "-v2"]
+            create_command.append(kernel_path)
+            runner(create_command, 120)
+            runner([_tool("multipathd"), "reconfigure"], 30)
+        except ExecutorFailure:
+            restore_multipath_settings()
+            raise
         # Device Mapper publishes the verified alias asynchronously through udev.
         # Keep the propagation wait bounded so a broken daemon cannot hold the
         # operation forever.
@@ -2708,6 +2807,7 @@ def apply_storage_redundancy(
                 "The existing filesystem was not remounted.",
             )
         expected_uuid = plan["before"].get("filesystem_uuid")
+        set_phase("Verifying filesystem")
         uuid_reader = filesystem_uuid_provider or (lambda path: _blkid_value(path, "UUID"))
         if expected_uuid and uuid_reader(mapper) != expected_uuid:
             journal["state"] = "needs_attention"
@@ -2755,7 +2855,22 @@ def apply_storage_redundancy(
                 atomic_json(journal_path, journal)
                 sleep(0.2 * attempt)
 
-    if plan["operation"] == "redundancy.replace":
+    if plan["operation"] == "redundancy.configure":
+        set_phase("Applying provider settings")
+        apply_multipath_settings()
+        try:
+            runner([_tool("multipath"), "-t"], 30)
+            runner([_tool("multipathd"), "reconfigure"], 30)
+            if not mapper_exists(mapper):
+                raise ExecutorFailure(
+                    "multipath_map_unavailable",
+                    "The redundant storage device disappeared while settings were applied.",
+                    needs_attention=True,
+                )
+        except ExecutorFailure:
+            restore_multipath_settings()
+            raise
+    elif plan["operation"] == "redundancy.replace":
         kernel_path = str(selected_devices[0].get("kernel_path") or "")
         create_and_verify_map(kernel_path)
         removed = plan.get("removed_path")
@@ -2771,7 +2886,11 @@ def apply_storage_redundancy(
         public_unmounted = False
         device_unmounted = False
         mapper_mounted = False
+        services_stopped = False
         try:
+            coordinate_services("stop")
+            services_stopped = bool(service_units)
+            set_phase("Pausing storage access")
             if mountpoint != device_mountpoint:
                 runner([_tool("umount"), mountpoint_text], 120)
                 public_unmounted = True
@@ -2779,6 +2898,7 @@ def apply_storage_redundancy(
             device_unmounted = True
             kernel_path = str(selected_devices[0].get("kernel_path") or "")
             create_and_verify_map(kernel_path)
+            set_phase("Activating redundant device")
             runner([_tool("mount"), mapper_text, device_mountpoint_text], 120)
             mapper_mounted = True
             if mountpoint != device_mountpoint:
@@ -2787,6 +2907,9 @@ def apply_storage_redundancy(
                     120,
                 )
                 public_unmounted = False
+            coordinate_services("start")
+            services_stopped = False
+            set_phase("Verifying applications")
         except ExecutorFailure as exc:
             # Return to the exact reviewed direct path. A failed rollback is
             # surfaced as needs-attention and is never reported as success.
@@ -2810,6 +2933,9 @@ def apply_storage_redundancy(
                         120,
                     )
                     public_unmounted = False
+                if services_stopped:
+                    coordinate_services("start")
+                    services_stopped = False
             except ExecutorFailure as rollback_exc:
                 raise ExecutorFailure(
                     "redundancy_rollback_failed",

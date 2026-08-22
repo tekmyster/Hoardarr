@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import Base, MetricEntity, StorageEntity, StoragePath
+from hoardarr.db.models import (
+    Base,
+    ConnectivityService,
+    MetricAlert,
+    MetricEntity,
+    MetricSample,
+    StorageEntity,
+    StoragePath,
+    StorageRedundancyEvent,
+)
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.executor import (
     ExecutorFailure,
@@ -20,11 +30,13 @@ from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     build_redundancy_plan,
     reconcile_storage_path_health,
+    redundancy_event_documents,
     register_completed_storage,
     register_single_path_storage,
     stable_path_identity,
     storage_documents,
 )
+from hoardarr.telemetry.alerts import evaluate_basic_alerts
 
 
 @pytest.fixture
@@ -227,7 +239,10 @@ def test_privileged_transition_uses_multipath_and_remounts_without_formatting(
             "plan": plan,
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
-        paths=Paths(transaction_root=tmp_path / "transactions"),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
         inventory_provider=lambda: {"disks": [first, second]},
         runner=lambda command, _timeout: commands.append(command),
         mapper_exists=lambda _path: True,
@@ -306,7 +321,10 @@ def test_privileged_removal_returns_to_remaining_direct_path_without_formatting(
             "plan": remove_plan,
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
-        paths=Paths(transaction_root=tmp_path / "transactions"),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
         inventory_provider=lambda: {"disks": [first, second]},
         runner=lambda command, _timeout: commands.append(command),
     )
@@ -363,7 +381,10 @@ def test_redundancy_removal_waits_for_busy_mapper_and_preserves_mount(
             "plan": remove_plan,
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
-        paths=Paths(transaction_root=tmp_path / "transactions"),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
         inventory_provider=lambda: {"disks": [first, second]},
         runner=busy_then_ready,
         sleep=waits.append,
@@ -402,19 +423,20 @@ def test_expert_grouping_policy_is_applied_only_to_new_map(
             "plan": plan,
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
-        paths=Paths(transaction_root=tmp_path / "transactions"),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
         inventory_provider=lambda: {"disks": [first, second]},
         runner=lambda command, _timeout: commands.append(command),
         mapper_exists=lambda _path: True,
         filesystem_uuid_provider=lambda _path: entity.filesystem_uuid or "",
     )
-    assert [
-        "/usr/sbin/multipath",
-        "-v2",
-        "-p",
-        "group_by_prio",
-        "/dev/sdc",
-    ] in commands
+    assert ["/usr/sbin/multipath", "-t"] in commands
+    assert ["/usr/sbin/multipath", "-v2", "/dev/sdc"] in commands
+    config = next((tmp_path / "multipath").glob("hoardarr-*.conf")).read_text()
+    assert "path_grouping_policy group_by_prio" in config
+    assert 'path_selector "service-time 0"' in config
 
 
 def test_controller_path_replacement_adds_new_path_before_removing_old(
@@ -517,6 +539,41 @@ def test_path_failure_and_recovery_preserve_logical_storage_identity(session: Se
     assert entity.id == original_id
     assert entity.filesystem_uuid == original_uuid
     assert entity.mountpoint == original_mount
+    assert session.scalar(
+        select(StorageRedundancyEvent).where(
+            StorageRedundancyEvent.event_type == "controller_failover"
+        )
+    ) is not None
+    failover_count = len(
+        list(
+            session.scalars(
+                select(StorageRedundancyEvent).where(
+                    StorageRedundancyEvent.event_type == "controller_failover"
+                )
+            )
+        )
+    )
+    reconcile_storage_path_health(
+        session,
+        [
+            {
+                "wwid": "naa.600a098000abc",
+                "paths": [
+                    {"kernel_name": "sdb", "state": "failed", "optimized": False},
+                    {"kernel_name": "sdc", "state": "ready", "optimized": True},
+                ],
+            }
+        ],
+    )
+    assert len(
+        list(
+            session.scalars(
+                select(StorageRedundancyEvent).where(
+                    StorageRedundancyEvent.event_type == "controller_failover"
+                )
+            )
+        )
+    ) == failover_count
 
     reconcile_storage_path_health(
         session,
@@ -532,6 +589,11 @@ def test_path_failure_and_recovery_preserve_logical_storage_identity(session: Se
     )
     assert entity.topology_state == "fully_redundant"
     assert entity.id == original_id
+    assert session.scalar(
+        select(StorageRedundancyEvent).where(
+            StorageRedundancyEvent.event_type == "redundancy_restored"
+        )
+    ) is not None
 
     reconcile_storage_path_health(
         session,
@@ -712,3 +774,247 @@ def test_failed_bind_mount_rolls_back_from_mapper_to_reviewed_direct_path(
         "/mnt/hoardarr/lun7",
         "/media",
     ]
+
+
+def test_configure_plan_applies_real_multipath_settings_and_records_event(
+    session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entity, first = _registered(session)
+    second = _path("hba-b", "/dev/sdc")
+    add = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="f" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="add",
+    )
+    apply_redundancy_result(session, plan=add, observed_device=second)
+    settings = {
+        **add["settings"],
+        "mode": "custom",
+        "path_grouping_policy": "multibus",
+        "path_selector": "queue-length 0",
+        "failback": "manual",
+        "no_path_retry": "queue_30",
+    }
+    plan = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="f" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="configure",
+        settings_override=settings,
+    )
+    assert plan["transition"]["mode"] == "online_supported"
+    commands: list[list[str]] = []
+    monkeypatch.setattr("hoardarr.storage.executor._tool", lambda name: f"/usr/sbin/{name}")
+    result = apply_storage_redundancy(
+        {
+            "operation": "apply_storage_redundancy",
+            "operation_id": "77777777-7777-4777-8777-777777777777",
+            "plan_sha256": plan["plan_sha256"],
+            "plan": plan,
+            "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
+        },
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
+        inventory_provider=lambda: {"disks": [first, second]},
+        runner=lambda command, _timeout: commands.append(command),
+        mapper_exists=lambda _path: True,
+    )
+    assert result["topology_state"] == "fully_redundant"
+    assert ["/usr/sbin/multipath", "-t"] in commands
+    assert ["/usr/sbin/multipathd", "reconfigure"] in commands
+    config = next((tmp_path / "multipath").glob("hoardarr-*.conf")).read_text()
+    assert "path_grouping_policy multibus" in config
+    assert 'path_selector "queue-length 0"' in config
+    assert "failback manual" in config
+    assert "no_path_retry 30" in config
+    apply_redundancy_result(
+        session,
+        plan=plan,
+        observed_device=None,
+        operation_id="77777777-7777-4777-8777-777777777777",
+    )
+    event = session.scalar(
+        select(StorageRedundancyEvent).where(
+            StorageRedundancyEvent.event_type == "redundancy_settings_changed"
+        )
+    )
+    assert event is not None
+    assert event.operation_id == "77777777-7777-4777-8777-777777777777"
+    documents = redundancy_event_documents(session, entity.id)
+    assert documents[0]["event_type"] == "redundancy_settings_changed"
+
+
+def test_maintenance_transition_coordinates_managed_smb_and_nfs(
+    session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entity, first = _registered(session)
+    for protocol, name in (("smb", "Media"), ("nfs", "Media export")):
+        config = {"path": "/media/library"}
+        session.add(
+            ConnectivityService(
+                protocol=protocol,
+                name=name,
+                config_json=config,
+                config_sha256=document_hash(config),
+                status="active",
+                state_json={},
+            )
+        )
+    session.flush()
+    second = _path("hba-b", "/dev/sdc")
+    plan = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="f" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="add",
+    )
+    assert {item["protocol"] for item in plan["managed_access_services"]} == {"smb", "nfs"}
+    commands: list[list[str]] = []
+    monkeypatch.setattr("hoardarr.storage.executor._tool", lambda name: f"/usr/sbin/{name}")
+    apply_storage_redundancy(
+        {
+            "operation": "apply_storage_redundancy",
+            "operation_id": "88888888-8888-4888-8888-888888888888",
+            "plan_sha256": plan["plan_sha256"],
+            "plan": plan,
+            "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
+        },
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
+        inventory_provider=lambda: {"disks": [first, second]},
+        runner=lambda command, _timeout: commands.append(command),
+        mapper_exists=lambda _path: True,
+        filesystem_uuid_provider=lambda _path: entity.filesystem_uuid or "",
+    )
+    first_unmount = commands.index(["/usr/sbin/umount", "/media"])
+    last_mount = commands.index(
+        ["/usr/sbin/mount", "--bind", "/mnt/hoardarr/lun7", "/media"]
+    )
+    for unit in ("nfs-server.service", "smbd.service"):
+        assert commands.index(["/usr/sbin/systemctl", "stop", unit]) < first_unmount
+        assert commands.index(["/usr/sbin/systemctl", "start", unit]) > last_mount
+
+
+def test_path_flapping_alert_uses_durable_transitions_and_setting(session: Session) -> None:
+    entity, _first = _registered(session)
+    path = session.scalar(select(StoragePath))
+    assert path is not None
+    path_metric = MetricEntity(
+        entity_type="storage_path",
+        stable_id=f"storage-path:{path.stable_path_identity}",
+        display_name=path.kernel_path,
+        topology_json={"storage_entity_id": entity.id},
+    )
+    session.add(path_metric)
+    session.flush()
+    now = datetime.now(UTC).replace(microsecond=0)
+    for index, event_type in enumerate(
+        ("path_failed", "path_recovered", "path_failed", "path_recovered")
+    ):
+        session.add(
+            StorageRedundancyEvent(
+                storage_entity_id=entity.id,
+                path_id=path.id,
+                controller_id=path.controller_id,
+                event_type=event_type,
+                previous_state="active" if event_type == "path_failed" else "failed",
+                resulting_state="failed" if event_type == "path_failed" else "active",
+                occurred_at=now - timedelta(minutes=4 - index),
+            )
+        )
+    sample = MetricSample(
+        entity_id=path_metric.id,
+        metric_id="storage.path.state",
+        value=None,
+        value_text="active",
+        quality="available",
+        source="multipathd",
+        collection_interval_seconds=30,
+        raw=True,
+        observed_at=now,
+    )
+    session.add(sample)
+    session.flush()
+
+    assert evaluate_basic_alerts(session, [sample]) == {"opened": 1, "resolved": 0}
+    session.flush()
+    alert = next(
+        (
+            item
+            for item in session.scalars(select(MetricAlert))
+            if item.details_json.get("condition") == "path_flapping"
+        ),
+        None,
+    )
+    assert alert is not None
+    assert alert.trigger_value == 4
+
+    entity.config_json = {
+        **entity.config_json,
+        "redundancy_settings": {"alert_on_path_flapping": False},
+    }
+    assert evaluate_basic_alerts(session, [sample]) == {"opened": 0, "resolved": 1}
+    assert alert.state == "resolved"
+
+
+def test_failed_settings_validation_restores_previous_multipath_config(
+    session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entity, first = _registered(session)
+    second = _path("hba-b", "/dev/sdc")
+    add = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="f" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="add",
+    )
+    apply_redundancy_result(session, plan=add, observed_device=second)
+    plan = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="f" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="configure",
+        settings_override={
+            **add["settings"],
+            "mode": "custom",
+            "failback": "manual",
+        },
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr("hoardarr.storage.executor._tool", lambda name: f"/usr/sbin/{name}")
+
+    def fail_validation(command: list[str], _timeout: float) -> None:
+        commands.append(command)
+        if command == ["/usr/sbin/multipath", "-t"]:
+            raise ExecutorFailure("command_failed", "invalid multipath configuration")
+
+    config_root = tmp_path / "multipath"
+    with pytest.raises(ExecutorFailure, match="invalid multipath configuration"):
+        apply_storage_redundancy(
+            {
+                "operation": "apply_storage_redundancy",
+                "operation_id": "99999999-9999-4999-8999-999999999999",
+                "plan_sha256": plan["plan_sha256"],
+                "plan": plan,
+                "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
+            },
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                multipath_config_root=config_root,
+            ),
+            inventory_provider=lambda: {"disks": [first, second]},
+            runner=fail_validation,
+            mapper_exists=lambda _path: True,
+        )
+    assert list(config_root.glob("hoardarr-*.conf")) == []
+    assert commands[-1] == ["/usr/sbin/multipathd", "reconfigure"]

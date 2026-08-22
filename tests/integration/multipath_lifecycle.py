@@ -9,24 +9,28 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from hoardarr.db.models import Base, StorageEntity, StoragePath
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from hoardarr.core.config import Settings
+from hoardarr.db.models import Base, MetricSample, StorageEntity, StoragePath
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.executor import Paths, apply_storage_redundancy
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     build_redundancy_plan,
+    redundancy_event_documents,
     register_single_path_storage,
     stable_path_identity,
     storage_documents,
 )
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from hoardarr.telemetry.service import TelemetryService
 
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "action", choices=("register", "add", "replace", "remove", "inspect")
+        "action", choices=("register", "add", "replace", "remove", "inspect", "collect")
     )
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--transaction-root", type=Path, required=True)
@@ -90,6 +94,7 @@ def main() -> None:
     Base.metadata.create_all(engine)
     devices = [device(args.wwid, value) for value in args.path]
     with Session(engine) as session, session.begin():
+        collection: dict[str, object] | None = None
         if args.action == "register":
             if len(devices) != 1:
                 raise SystemExit("register requires exactly one path")
@@ -109,7 +114,18 @@ def main() -> None:
             entity = session.scalar(select(StorageEntity).limit(1))
             if entity is None:
                 raise SystemExit("logical storage is not registered")
-            if args.action != "inspect":
+            if args.action == "collect":
+                service = TelemetryService(
+                    Settings(
+                        environment="test",
+                        database_url=f"sqlite+pysqlite:///{args.database}",
+                    )
+                )
+                try:
+                    collection = service.collect(session, force=True)
+                finally:
+                    service.close(wait=True)
+            elif args.action != "inspect":
                 path_by_controller = {
                     str(item["connection"]["controller_address"]): item
                     for item in devices
@@ -189,6 +205,11 @@ def main() -> None:
                     raise SystemExit("executor changed the logical storage identity")
         session.flush()
         document = storage_documents(session)[0]
+        samples = list(
+            session.scalars(
+                select(MetricSample).order_by(MetricSample.observed_at.desc()).limit(200)
+            )
+        )
         print(
             json.dumps(
                 {
@@ -199,6 +220,18 @@ def main() -> None:
                     "topology_state": document["topology_state"],
                     "path_count": len(document["paths"]),
                     "paths": [item["kernel_path"] for item in document["paths"]],
+                    "collection": collection,
+                    "events": redundancy_event_documents(session, document["id"]),
+                    "telemetry": [
+                        {
+                            "metric_id": item.metric_id,
+                            "entity_id": item.entity_id,
+                            "observed_at": item.observed_at.isoformat(),
+                            "value": item.value if item.value is not None else item.value_text,
+                            "quality": item.quality,
+                        }
+                        for item in samples
+                    ],
                 },
                 sort_keys=True,
             )

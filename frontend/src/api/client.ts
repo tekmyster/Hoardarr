@@ -36,6 +36,8 @@ import type {
   StorageOperationProgress,
   StorageInventory,
   StorageRedundancyPlan,
+  StorageRedundancyEventDocument,
+  StorageRedundancySettings,
   StorageTelemetryDocument,
   TelemetryForecastDocument,
   TelemetrySettingsDocument,
@@ -355,15 +357,27 @@ class HoardarrApi {
 
   async previewStorageRedundancy(input: {
     storage_entity_id: string;
-    action: "add" | "remove" | "replace";
+    action: "add" | "remove" | "replace" | "configure";
     path_identity?: string;
     remove_path_identity?: string;
     policy?: "recommended" | "failover" | "multibus" | "group_by_prio";
+    settings?: StorageRedundancySettings;
   }): Promise<{ plan: StorageRedundancyPlan; plan_sha256: string }> {
     return this.request("/storage/redundancy/preview", {
       method: "POST",
       body: JSON.stringify(input),
     });
+  }
+
+  async storageRedundancyEvents(
+    storageEntityId: string,
+    signal?: AbortSignal,
+  ): Promise<StorageRedundancyEventDocument[]> {
+    const result = await this.request<{ items: StorageRedundancyEventDocument[] }>(
+      `/storage/logical/${encodeURIComponent(storageEntityId)}/redundancy/events`,
+      { signal },
+    );
+    return result.items;
   }
 
   async applyStorageRedundancy(

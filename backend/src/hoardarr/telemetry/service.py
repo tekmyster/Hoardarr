@@ -359,6 +359,7 @@ class TelemetryService:
                 *service_readings,
                 *self._tier_readings(session, now),
             ]
+            readings.extend(self._storage_path_readings(session, storage_readings, now))
             readings.extend(self._logical_storage_readings(session, storage_readings, now))
             readings.extend(
                 self._derived_readings(
@@ -560,6 +561,116 @@ class TelemetryService:
                     observed_at=now,
                     source="durable logical storage topology",
                     interval=max(30, self.settings.telemetry_fast_interval_seconds),
+                )
+            )
+            for metric_id, value in (
+                ("storage.paths.healthy", sum(path.active for path in paths)),
+                ("storage.paths.failed", sum(not path.active for path in paths)),
+            ):
+                result.append(
+                    _reading(
+                        entity,
+                        metric_id,
+                        value,
+                        observed_at=now,
+                        source="durable multipath topology",
+                        interval=max(30, self.settings.telemetry_fast_interval_seconds),
+                    )
+                )
+        return result
+
+    def _storage_path_readings(
+        self,
+        session: Session,
+        storage_readings: list[MetricReading],
+        now: datetime,
+    ) -> list[MetricReading]:
+        """Attach physical-path counters to durable path IDs instead of /dev names."""
+
+        by_device: dict[str, list[MetricReading]] = {}
+        for reading in storage_readings:
+            if reading.entity.entity_type != "drive":
+                continue
+            device_name = reading.entity.labels.get("device")
+            if device_name:
+                by_device.setdefault(device_name, []).append(reading)
+        copied_metrics = {
+            "io.read.bytes_per_second",
+            "io.write.bytes_per_second",
+            "io.read.iops",
+            "io.write.iops",
+            "io.read.latency",
+            "io.write.latency",
+            "io.utilization",
+            "io.queue.depth",
+        }
+        result: list[MetricReading] = []
+        for path in session.scalars(select(StoragePath)):
+            storage = session.get(StorageEntity, path.storage_entity_id)
+            if storage is None:
+                continue
+            device_name = os.path.basename(path.kernel_path)
+            entity = EntityReading(
+                "storage_path",
+                f"storage-path:{path.stable_path_identity}"[:512],
+                path.kernel_path,
+                labels={
+                    "device": device_name,
+                    "protocol": path.protocol,
+                    "state": path.state,
+                    "optimized": (
+                        "not_reported" if path.optimized is None else str(path.optimized).lower()
+                    ),
+                },
+                topology={
+                    "storage_entity_id": storage.id,
+                    "logical_storage": f"logical-storage:{storage.stable_identity}"[:512],
+                    **(
+                        {"controller_id": path.controller_id}
+                        if path.controller_id is not None
+                        else {}
+                    ),
+                },
+            )
+            for reading in by_device.get(device_name, []):
+                if reading.metric_id not in copied_metrics:
+                    continue
+                result.append(
+                    _reading(
+                        entity,
+                        reading.metric_id,
+                        reading.value,
+                        observed_at=now,
+                        source=f"{reading.source} via {device_name}"[:128],
+                        interval=reading.collection_interval_seconds,
+                        quality=reading.quality,
+                        error_code=reading.error_code,
+                    )
+                )
+            result.extend(
+                (
+                    _reading(
+                        entity,
+                        "storage.path.state",
+                        path.state or "unknown",
+                        observed_at=now,
+                        source="durable multipath topology",
+                        interval=max(30, self.settings.telemetry_fast_interval_seconds),
+                    ),
+                    _reading(
+                        entity,
+                        "health.overall",
+                        (
+                            "healthy"
+                            if path.active
+                            else "faulted"
+                            if path.state in {"failed", "faulty", "offline", "missing"}
+                            else "degraded"
+                        ),
+                        observed_at=now,
+                        source="durable multipath topology",
+                        interval=max(30, self.settings.telemetry_fast_interval_seconds),
+                    ),
                 )
             )
         return result

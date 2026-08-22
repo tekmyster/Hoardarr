@@ -75,6 +75,7 @@ export function StoragePage({
   storageInventory = null,
   activeOperation = null,
   operationProgress = null,
+  focusedStorageId = null,
 }: {
   snapshot: HardwareSnapshot | null;
   drives: Drive[];
@@ -92,6 +93,7 @@ export function StoragePage({
   storageInventory?: StorageInventory | null;
   activeOperation?: OperationDocument | null;
   operationProgress?: StorageOperationProgress | null;
+  focusedStorageId?: string | null;
 }) {
   const [maintenanceDrive, setMaintenanceDrive] = useState<Drive | null>(null);
   const [maintenanceAction, setMaintenanceAction] = useState<"wipe" | "sector_conversion">("wipe");
@@ -203,7 +205,7 @@ export function StoragePage({
 
     <StorageTopologyPanels topology={storageInventory?.topology} />
 
-    <StorageRedundancyPanel />
+    <StorageRedundancyPanel initialManagedId={focusedStorageId} />
 
     <Card title="Drives" description="Stable device paths and hardware identities are shown instead of friendly aliases.">
       {!snapshot ? <div className="empty-state storage-empty"><span aria-hidden="true">▤</span><h3>No storage inventory yet</h3><p>Run a read-only scan to identify controllers, enclosures, and drives.</p><button type="button" className="button button-primary" onClick={onScan} disabled={busy}>{busy ? "Scanning…" : "Scan storage"}</button></div> : !drives.length ? <div className="empty-state storage-empty"><span aria-hidden="true">▤</span><h3>No drives detected</h3><p>The latest hardware scan did not report any storage devices.</p></div> : <div className="table-scroll"><table className="data-table storage-inventory-table">

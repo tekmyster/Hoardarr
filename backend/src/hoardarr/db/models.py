@@ -329,6 +329,37 @@ class StorageEntity(Base):
     )
 
 
+class StorageRedundancyEvent(Base):
+    """Durable, user-visible controller/path lifecycle history."""
+
+    __tablename__ = "storage_redundancy_events"
+    __table_args__ = (
+        Index("ix_storage_redundancy_events_storage_time", "storage_entity_id", "occurred_at"),
+        Index("ix_storage_redundancy_events_type_time", "event_type", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    storage_entity_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_entities.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    path_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("storage_paths.id", ondelete="SET NULL"), nullable=True
+    )
+    controller_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("storage_controllers.id", ondelete="SET NULL"), nullable=True
+    )
+    operation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("operations.id", ondelete="SET NULL"), nullable=True
+    )
+    previous_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resulting_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class StorageController(Base):
     __tablename__ = "storage_controllers"
 

@@ -189,6 +189,56 @@ async function unconfiguredServer(page: Page): Promise<void> {
   });
 }
 
+async function controllerRedundancyServer(page: Page) {
+  await authenticatedEmptyServer(page);
+  let state: "single" | "fully_redundant" | "failed_over" = "single";
+  const storageId = "11111111-1111-4111-8111-111111111111";
+  const path = (name: "a" | "b", active = true) => ({
+    id: `${name === "a" ? "3" : "4"}3333333-3333-4333-8333-333333333333`,
+    stable_path_identity: `fc:hba-${name}:target-${name}`,
+    kernel_path: name === "a" ? "/dev/sdb" : "/dev/sdc",
+    protocol: "fc",
+    state: active ? "ready" : "failed",
+    active,
+    optimized: name === "a",
+    controller: { id: `${name === "a" ? "5" : "6"}5555555-5555-4555-8555-555555555555`, stable_identity: `hba-${name}`, model: `Controller ${name.toUpperCase()}`, provider: "dm-multipath", state: { vendor: "TEST", firmware: "1.2.3" } },
+    metadata: { negotiated_speed: "12 Gb/s", capable_speed: "12 Gb/s", hctl: name === "a" ? "2:0:0:1" : "3:0:0:1", target: `50:00:target-${name}`, initiator: `10:00:hba-${name}` },
+  });
+  const settings = { mode: "recommended", path_grouping_policy: "group_by_prio", path_selector: "service-time 0", failback: "followover", no_path_retry: "fail", polling_interval_seconds: 5, minimum_healthy_paths: 2, alert_on_reduced: true, alert_on_failover: true, alert_on_path_flapping: true, alert_on_total_loss: true };
+  const storage = () => {
+    const paths = state === "single" ? [path("a")] : state === "failed_over" ? [path("a", false), path("b")] : [path("a"), path("b")];
+    return { id: storageId, name: "MediaPool", stable_identity: "wwn:naa.600a098000abc", filesystem_uuid: "22222222-2222-4222-8222-222222222222", mountpoint: "/media", presentation_device: state === "single" ? "/dev/sdb" : "/dev/mapper/naa.600a098000abc", topology_state: state, capacity_bytes: 8_000_000_000_000, transition_capability: { mode: state === "single" ? "brief_maintenance_required" : "online_supported", message: state === "single" ? "Adding redundancy requires a brief storage interruption." : "The map remains online." }, redundancy_settings: settings, redundancy_summary: { healthy_paths: paths.filter((item) => item.active).length, active_paths: paths.filter((item) => item.active).length, failed_paths: paths.filter((item) => !item.active).length, failovers_today: state === "failed_over" ? 1 : 0, last_failover: state === "failed_over" ? "2026-08-22T14:32:08Z" : null, time_degraded_seconds: state === "failed_over" ? 45 : 0 }, paths, available_paths: state === "single" ? [{ stable_path_identity: "fc:hba-b:target-b", kernel_path: "/dev/sdc", controller_identity: "hba-b", protocol: "fc" }] : [] };
+  };
+  const entity = (name: "a" | "b") => ({ id: `${name === "a" ? "7" : "8"}7777777-7777-4777-8777-777777777777`, entity_type: "storage_path", stable_id: `storage-path:fc:hba-${name}:target-${name}`, display_name: name === "a" ? "/dev/sdb" : "/dev/sdc", labels: { device: name === "a" ? "sdb" : "sdc" }, topology: { storage_entity_id: storageId }, first_seen_at: "2026-08-22T13:00:00Z", last_seen_at: "2026-08-22T15:00:00Z" });
+  const failoverEvent = () => ({ id: "99999999-9999-4999-8999-999999999999", event_type: "controller_failover", path_id: path("a").id, controller_id: path("a").controller.id, operation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", previous_state: "fully_redundant", resulting_state: "failed_over", details: { active_path: "fc:hba-b:target-b" }, occurred_at: "2026-08-22T14:32:08Z" });
+  await page.route("**/api/v1/storage/logical", (route) => route.fulfill({ json: { items: [storage()] } }));
+  await page.route(`**/api/v1/storage/logical/${storageId}/redundancy/events`, (route) => route.fulfill({ json: { items: state === "failed_over" ? [failoverEvent()] : [] } }));
+  await page.route("**/api/v1/storage/redundancy/preview", (route) => {
+    const value = storage();
+    const plan = { schema_version: 1, operation: "redundancy.add", storage_entity_id: storageId, logical_storage_identity: value.stable_identity, hardware_snapshot_sha256: "a".repeat(64), identity_binding_sha256: "b".repeat(64), before: { path_ids: [path("a").stable_path_identity], presentation_device: "/dev/sdb", mountpoint: "/media", device_mountpoint: "/media", filesystem_uuid: value.filesystem_uuid }, after: { path_ids: [path("a").stable_path_identity, path("b").stable_path_identity], presentation_device: "/dev/mapper/naa.600a098000abc", mountpoint: "/media", filesystem_uuid: value.filesystem_uuid, topology_state: "fully_redundant" }, selected_path: { stable_path_identity: path("b").stable_path_identity, kernel_path: "/dev/sdc", controller_identity: "hba-b", protocol: "fc" }, removed_path: null, policy: "recommended", settings, transition: { mode: "brief_maintenance_required", message: "Adding redundancy requires a brief storage interruption. Your data remains unchanged." }, managed_access_services: [{ id: "smb-media", protocol: "smb", name: "Media", path: "/media" }], destructive: false, format: false, copy_data: false, preserves: ["storage_entity_id", "filesystem_uuid", "mountpoint", "shares", "telemetry_history"], plan_sha256: "c".repeat(64) };
+    return route.fulfill({ json: { plan, plan_sha256: plan.plan_sha256 } });
+  });
+  await page.route("**/api/v1/telemetry/entities?entity_type=storage_path", (route) => route.fulfill({ json: { items: state === "single" ? [entity("a")] : [entity("a"), entity("b")] } }));
+  await page.route("**/api/v1/telemetry/current?entity_type=storage_path", (route) => {
+    const entities = state === "single" ? [entity("a")] : [entity("a"), entity("b")];
+    const items = entities.flatMap((item, index) => [["io.read.bytes_per_second", 100_000_000 + index * 25_000_000, "bytes_per_second"], ["io.write.bytes_per_second", 60_000_000, "bytes_per_second"], ["io.read.iops", 220, "operations_per_second"], ["io.write.iops", 140, "operations_per_second"], ["io.read.latency", state === "failed_over" ? 8.5 : 2.4, "milliseconds"], ["io.write.latency", 3.1, "milliseconds"]].map(([metric_id, value, unit]) => ({ metric_id, name: metric_id, entity: item, timestamp: "2026-08-22T15:00:00Z", value, unit, source: "Linux block counters", collection_interval_seconds: 5, quality: "available", raw: true, labels: {}, capability: null, error_code: null })));
+    return route.fulfill({ json: { captured_at: "2026-08-22T15:00:00Z", items, restricted_capabilities: [] } });
+  });
+  await page.route("**/api/v1/telemetry/history?**", (route) => {
+    const request = new URL(route.request().url());
+    const entityId = request.searchParams.get("entity_id")!;
+    const metricId = request.searchParams.get("metric_id")!;
+    const item = entityId.startsWith("7") ? entity("a") : entity("b");
+    const offset = entityId.startsWith("7") ? 0 : 18;
+    return route.fulfill({ json: { entity: item, metric_id: metricId, unit: metricId.includes("latency") ? "milliseconds" : metricId.includes("iops") ? "operations_per_second" : "bytes_per_second", resolution: "raw", requested_resolution: "auto", source_resolution: "raw", aggregation_method: "raw samples", raw: true, points_returned: 4, displayed_points: 4, start: "2026-08-22T13:00:00Z", end: "2026-08-22T15:00:00Z", points: [{ timestamp: "2026-08-22T13:00:00Z", value: 5 + offset, quality: "available" }, { timestamp: "2026-08-22T14:00:00Z", value: 60 - offset, quality: "available" }, { timestamp: "2026-08-22T14:32:08Z", value: (state === "failed_over" ? 95 : 70) - offset, quality: "available" }, { timestamp: "2026-08-22T15:00:00Z", value: 20 + offset, quality: "available" }] } });
+  });
+  return {
+    fullyRedundant: () => { state = "fully_redundant"; },
+    failover: () => { state = "failed_over"; },
+    recover: () => { state = "fully_redundant"; },
+  };
+}
+
 test.describe("production sign-in shell", () => {
   test("uses ARR layout and functional password reveal in a real browser", async ({ page }) => {
     await configuredButSignedOut(page);
@@ -360,6 +410,62 @@ test.describe("production sign-in shell", () => {
     await expect(page.getByText("Linux block counters", { exact: true }).first()).toBeVisible();
     await page.getByLabel("Graph").selectOption("bars");
     await expect(page.locator(".graph-bars rect")).toHaveCount(1);
+  });
+
+  test("productizes controller redundancy from single path through failover and recovery", async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
+    const controls = await controllerRedundancyServer(page);
+    const shot = async (name: string) => page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: true });
+    await page.goto("/");
+    await expect(page.getByText("Storage redundancy", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /MediaPool/ }).click();
+    await expect(page.getByText("1 / 1 paths healthy")).toBeVisible();
+    await shot("controller-redundancy-single-path");
+
+    await page.getByRole("button", { name: "Add redundant path" }).last().click();
+    const dialog = page.getByRole("dialog", { name: "Add storage redundancy" });
+    await expect(dialog.getByText("hba-b")).toBeVisible();
+    await shot("controller-redundancy-second-path-detected");
+    await dialog.getByRole("button", { name: "Review change" }).click();
+    await expect(dialog.getByText("Will not change")).toBeVisible();
+    await expect(dialog.getByText(/brief storage interruption/i)).toBeVisible();
+    await shot("controller-redundancy-add-review");
+    await dialog.getByRole("button", { name: "Close controller settings" }).click();
+
+    controls.fullyRedundant();
+    await expect(page.getByText("2 / 2 paths healthy")).toBeVisible({ timeout: 8_000 });
+    await shot("controller-redundancy-fully-redundant");
+    await page.getByRole("button", { name: "Controllers & paths" }).click();
+    await expect(page.getByText("Controller B")).toBeVisible();
+    await shot("controller-redundancy-path-detail");
+
+    await page.getByRole("button", { name: "Performance" }).click();
+    await expect(page.getByRole("img", { name: "Read throughput by controller path" })).toBeVisible();
+    await shot("controller-redundancy-graphs");
+    await page.getByRole("button", { name: "Advanced settings" }).click();
+    await expect(page.getByText("Exact resulting settings")).toBeVisible();
+    await shot("controller-redundancy-settings");
+
+    controls.failover();
+    await expect(page.getByText("Storage has failed over")).toBeVisible({ timeout: 8_000 });
+    await shot("controller-redundancy-failed-over");
+    await page.getByRole("button", { name: "Performance" }).click();
+    await expect(page.locator(".failover-marker")).toHaveCount(6, { timeout: 8_000 });
+    await shot("controller-redundancy-failover-graphs");
+    await page.getByRole("button", { name: "Events" }).click();
+    await expect(page.getByText("controller failover")).toBeVisible({ timeout: 8_000 });
+    await shot("controller-redundancy-events");
+
+    controls.recover();
+    await expect(page.getByText("2 / 2 paths healthy")).toBeVisible({ timeout: 8_000 });
+    await shot("controller-redundancy-recovered");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "Controllers & paths" }).click();
+    await expect(page.getByText("Controller A")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await shot("controller-redundancy-mobile");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await shot("controller-redundancy-mobile-dark");
   });
 
   test("repeated analytics navigation releases polling and stabilizes browser heap", async ({ page }, testInfo) => {

@@ -27,6 +27,7 @@ from hoardarr.db.models import (
     MetricSample,
     Operation,
     StorageEntity,
+    StoragePath,
 )
 from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.telemetry.alerts import evaluate_basic_alerts
@@ -377,11 +378,84 @@ def test_logical_storage_history_and_today_counter_survive_path_transition(
         )
         first_today = next(item for item in first if item.metric_id == "io.write.today")
         second_today = next(item for item in second if item.metric_id == "io.write.today")
+        healthy_paths = next(item for item in second if item.metric_id == "storage.paths.healthy")
+        failed_paths = next(item for item in second if item.metric_id == "storage.paths.failed")
         assert first_today.entity.stable_id == second_today.entity.stable_id
         assert first_today.value == 100
         assert second_today.value == 120
+        assert healthy_paths.value == 1
+        assert failed_paths.value == 0
         assert session.scalar(select(StorageEntity)).id == storage.id  # type: ignore[union-attr]
     service.executor.shutdown(wait=True, cancel_futures=True)
+    engine.dispose()
+
+
+def test_path_metrics_use_durable_identity_and_report_state(tmp_path: Path) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    service = TelemetryService(settings)
+    now = datetime.now(UTC)
+    device = {
+        "id": "wwn:naa.600a098000path",
+        "wwn": "naa.600a098000path",
+        "serial": "PATH-A",
+        "kernel_path": "/dev/sdb",
+        "capacity_bytes": 1_000_000,
+        "logical_sector_bytes": 512,
+        "physical_sector_bytes": 4096,
+        "connection": {
+            "protocol": "fc",
+            "controller_address": "hba-a",
+            "target_port_wwn": "target-a",
+        },
+    }
+    with factory() as session, session.begin():
+        storage = register_single_path_storage(
+            session,
+            name="MediaPool",
+            device=device,
+            mountpoint="/media",
+            presentation_device="/dev/sdb",
+            filesystem_uuid="11111111-1111-4111-8111-111111111111",
+        )
+        source = EntityReading("drive", "wwn:path-a", "Path A", labels={"device": "sdb"})
+        readings = service._storage_path_readings(
+            session,
+            [
+                _reading(
+                    source,
+                    "io.read.bytes_per_second",
+                    4096,
+                    observed_at=now,
+                    source="test diskstats",
+                    interval=5,
+                ),
+                _reading(
+                    source,
+                    "io.read.latency",
+                    1.25,
+                    observed_at=now,
+                    source="test diskstats",
+                    interval=5,
+                ),
+            ],
+            now,
+        )
+        path = session.scalar(select(StoragePath))
+        assert path is not None
+        assert {item.metric_id for item in readings} == {
+            "io.read.bytes_per_second",
+            "io.read.latency",
+            "storage.path.state",
+            "health.overall",
+        }
+        assert all(
+            item.entity.stable_id == f"storage-path:{path.stable_path_identity}"
+            for item in readings
+        )
+        assert readings[0].entity.topology["storage_entity_id"] == storage.id
+        state = next(item for item in readings if item.metric_id == "storage.path.state")
+        assert state.value == "active"
+    service.close(wait=True)
     engine.dispose()
 
 

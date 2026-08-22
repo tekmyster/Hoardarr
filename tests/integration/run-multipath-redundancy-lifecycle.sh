@@ -142,17 +142,30 @@ replace_json="$(run_helper replace --remove-controller "${portals[1]}" \
 logout_portal "${portals[1]}"
 
 # Continuous application IO survives loss and recovery of each serving path.
+phase_idle_at="$(date --iso-8601=ns)"
+telemetry_before="$(run_helper collect)"
+phase_io_at="$(date --iso-8601=ns)"
 fio --name=failover --filename="$mountpoint/failover.bin" --size=384M \
   --rw=randrw --bs=128k --time_based=1 --runtime=35 --direct=1 \
   --verify=crc32c --verify_fatal=1 --group_reporting >/dev/null &
 fio_pid=$!
 sleep 7
 logout_portal "${portals[0]}"
+phase_a_failed_at="$(date --iso-8601=ns)"
+sleep 2
+telemetry_a_failed="$(run_helper collect)"
 sleep 7
 path_a="$(login_portal "${portals[0]}")"
+phase_a_recovered_at="$(date --iso-8601=ns)"
+sleep 2
+telemetry_a_recovered="$(run_helper collect)"
 sleep 7
 logout_portal "${portals[2]}"
+phase_c_failed_at="$(date --iso-8601=ns)"
+sleep 2
+telemetry_c_failed="$(run_helper collect)"
 wait "$fio_pid"
+phase_io_complete_at="$(date --iso-8601=ns)"
 sync
 sha256sum -c "$work/existing.sha256" >/dev/null
 [[ "$(blkid -s UUID -o value "/dev/mapper/$wwid")" == "$filesystem_uuid" ]]
@@ -167,6 +180,9 @@ sha256sum -c "$work/existing.sha256" >/dev/null
 path_c="$(login_portal "${portals[2]}")"
 udevadm settle
 multipath -r >/dev/null
+phase_c_recovered_at="$(date --iso-8601=ns)"
+sleep 2
+telemetry_recovered="$(run_helper collect)"
 path_a="$(wait_path "${portals[0]}")"
 path_c="$(wait_path "${portals[2]}")"
 remove_json="$(run_helper remove --remove-controller "${portals[2]}" \
@@ -186,10 +202,29 @@ jq -n \
   --argjson add "$add_json" \
   --argjson replace "$replace_json" \
   --argjson remove "$remove_json" \
+  --argjson telemetry_before "$telemetry_before" \
+  --argjson telemetry_a_failed "$telemetry_a_failed" \
+  --argjson telemetry_a_recovered "$telemetry_a_recovered" \
+  --argjson telemetry_c_failed "$telemetry_c_failed" \
+  --argjson telemetry_recovered "$telemetry_recovered" \
+  --arg phase_idle_at "$phase_idle_at" \
+  --arg phase_io_at "$phase_io_at" \
+  --arg phase_a_failed_at "$phase_a_failed_at" \
+  --arg phase_a_recovered_at "$phase_a_recovered_at" \
+  --arg phase_c_failed_at "$phase_c_failed_at" \
+  --arg phase_c_recovered_at "$phase_c_recovered_at" \
+  --arg phase_io_complete_at "$phase_io_complete_at" \
   '{status:"verified_in_isolation", storage_entity_id:$storage_id,
     filesystem_uuid_before:$filesystem_uuid, filesystem_uuid_after:$filesystem_uuid,
     mountpoint_before:$mountpoint, mountpoint_after:$mountpoint, wwid:$wwid,
     register:$register, add:$add, replace:$replace, remove:$remove,
+    workload_phases:{idle:$phase_idle_at,io_started:$phase_io_at,
+      path_a_failed:$phase_a_failed_at,path_a_recovered:$phase_a_recovered_at,
+      path_c_failed:$phase_c_failed_at,path_c_recovered:$phase_c_recovered_at,
+      io_completed:$phase_io_complete_at},
+    telemetry:{before:$telemetry_before,path_a_failed:$telemetry_a_failed,
+      path_a_recovered:$telemetry_a_recovered,path_c_failed:$telemetry_c_failed,
+      recovered:$telemetry_recovered},
     data_hash_preserved:true, failover_io_completed:true,
     multipathd_restart_preserved_mount:true, formatting_commands_after_day_one:0}' \
   >dist/validation/multipath-redundancy-lifecycle.json

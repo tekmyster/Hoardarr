@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -12,6 +13,9 @@ from hoardarr.db.models import (
     MetricAlertRule,
     MetricEntity,
     MetricSample,
+    StorageEntity,
+    StoragePath,
+    StorageRedundancyEvent,
     TelemetryState,
 )
 from hoardarr.telemetry.store import aware, entity_document
@@ -22,6 +26,32 @@ BASIC_RULES = {
     "drive.nvme.critical_warning": {"warning": 1.0, "critical": 1.0, "clear_below": 1.0},
 }
 FAULT_STATES = {"faulted", "failed", "critical", "degraded", "missing", "read_only"}
+PATH_FLAP_WINDOW = timedelta(minutes=10)
+PATH_FLAP_EVENT_THRESHOLD = 4
+
+
+def _redundancy_health_alert_enabled(
+    session: Session, entity: MetricEntity, observed_state: str | None
+) -> bool:
+    if entity.entity_type not in {"logical_storage", "storage_path"}:
+        return True
+    storage_id = entity.topology_json.get("storage_entity_id")
+    if not isinstance(storage_id, str):
+        return True
+    storage = session.get(StorageEntity, storage_id)
+    if storage is None:
+        return True
+    settings = storage.config_json.get("redundancy_settings")
+    if not isinstance(settings, dict):
+        return True
+    topology_state = entity.labels_json.get("topology_state")
+    if topology_state == "no_path":
+        return settings.get("alert_on_total_loss") is not False
+    if topology_state == "failed_over":
+        return settings.get("alert_on_failover") is not False
+    if entity.entity_type == "logical_storage" and observed_state in {"faulted", "failed"}:
+        return settings.get("alert_on_total_loss") is not False
+    return settings.get("alert_on_reduced") is not False
 
 
 def _rule_id(metric_id: str, entity_id: str) -> str:
@@ -30,7 +60,7 @@ def _rule_id(metric_id: str, entity_id: str) -> str:
 
 
 def evaluate_basic_alerts(session: Session, samples: list[MetricSample]) -> dict[str, int]:
-    now = datetime.now(UTC)
+    now = max((aware(sample.observed_at) for sample in samples), default=datetime.now(UTC))
     opened = 0
     resolved = 0
     for sample in samples:
@@ -47,7 +77,11 @@ def evaluate_basic_alerts(session: Session, samples: list[MetricSample]) -> dict
         triggered = False
         severity = "warning"
         threshold: dict[str, Any] = {}
-        if sample.metric_id == "health.overall" and sample.value_text in FAULT_STATES:
+        if (
+            sample.metric_id == "health.overall"
+            and sample.value_text in FAULT_STATES
+            and _redundancy_health_alert_enabled(session, entity, sample.value_text)
+        ):
             triggered = True
             severity = (
                 "critical" if sample.value_text in {"faulted", "failed", "critical"} else "warning"
@@ -91,11 +125,90 @@ def evaluate_basic_alerts(session: Session, samples: list[MetricSample]) -> dict
                 active.state = "resolved"
                 active.resolved_at = now
                 resolved += 1
+    flapping = _evaluate_path_flapping(session, now)
     custom = evaluate_custom_alerts(session, samples)
     return {
-        "opened": opened + custom["opened"],
-        "resolved": resolved + custom["resolved"],
+        "opened": opened + flapping["opened"] + custom["opened"],
+        "resolved": resolved + flapping["resolved"] + custom["resolved"],
     }
+
+
+def _evaluate_path_flapping(session: Session, now: datetime) -> dict[str, int]:
+    """Alert once for repeated durable state transitions, never for repeated polls."""
+
+    since = now - PATH_FLAP_WINDOW
+    counts = Counter(
+        event.path_id
+        for event in session.scalars(
+            select(StorageRedundancyEvent).where(
+                StorageRedundancyEvent.path_id.is_not(None),
+                StorageRedundancyEvent.event_type.in_(("path_failed", "path_recovered")),
+                StorageRedundancyEvent.occurred_at >= since,
+                StorageRedundancyEvent.occurred_at <= now,
+            )
+        )
+        if event.path_id is not None
+    )
+    opened = 0
+    resolved = 0
+    for path in session.scalars(select(StoragePath)):
+        storage = session.get(StorageEntity, path.storage_entity_id)
+        if storage is None:
+            continue
+        settings = storage.config_json.get("redundancy_settings")
+        enabled = (
+            not isinstance(settings, dict)
+            or settings.get("alert_on_path_flapping") is not False
+        )
+        entity = session.scalar(
+            select(MetricEntity).where(
+                MetricEntity.entity_type == "storage_path",
+                MetricEntity.stable_id == f"storage-path:{path.stable_path_identity}"[:512],
+            )
+        )
+        if entity is None:
+            continue
+        rule_id = _rule_id("storage.path.flapping", entity.id)
+        active = session.scalar(
+            select(MetricAlert).where(
+                MetricAlert.rule_id == rule_id,
+                MetricAlert.state == "active",
+            )
+        )
+        transition_count = counts[path.id]
+        if enabled and transition_count >= PATH_FLAP_EVENT_THRESHOLD:
+            if active is None:
+                session.add(
+                    MetricAlert(
+                        rule_id=rule_id,
+                        entity_id=entity.id,
+                        metric_id="storage.path.state",
+                        severity="warning",
+                        state="active",
+                        trigger_value=float(transition_count),
+                        threshold_json={
+                            "event_count": PATH_FLAP_EVENT_THRESHOLD,
+                            "window_seconds": int(PATH_FLAP_WINDOW.total_seconds()),
+                        },
+                        topology_json=dict(entity.topology_json),
+                        details_json={
+                            "condition": "path_flapping",
+                            "path_identity": path.stable_path_identity,
+                            "observed_transitions": transition_count,
+                        },
+                        started_at=now,
+                        last_seen_at=now,
+                    )
+                )
+                opened += 1
+            else:
+                active.last_seen_at = now
+                active.trigger_value = float(transition_count)
+        elif active is not None:
+            active.state = "resolved"
+            active.resolved_at = now
+            resolved += 1
+    return {"opened": opened, "resolved": resolved}
 
 
 def _custom_triggered(rule: MetricAlertRule, value: float) -> tuple[bool, str]:
