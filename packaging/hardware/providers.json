@@ -1,0 +1,1140 @@
+{
+  "platform_recommendations": [
+    {
+      "capabilities": [
+        "platform.health",
+        "platform.inventory",
+        "platform.redfish"
+      ],
+      "id": "dell-platform-management",
+      "match": {
+        "system_vendor_contains": [
+          "dell"
+        ]
+      },
+      "name": "Dell platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ipmitool",
+        "redfishtool"
+      ],
+      "vendor_tools": [
+        "dell-racadm"
+      ],
+      "warnings": [
+        "Use the server's Redfish or iDRAC interface for chassis and out-of-band health; controller utilities do not replace platform monitoring."
+      ]
+    },
+    {
+      "capabilities": [
+        "platform.health",
+        "platform.inventory",
+        "platform.redfish"
+      ],
+      "id": "hpe-platform-management",
+      "match": {
+        "system_vendor_contains": [
+          "hewlett packard",
+          "hewlett-packard",
+          "hpe"
+        ]
+      },
+      "name": "HPE platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ilorest",
+        "ipmitool",
+        "redfishtool"
+      ],
+      "vendor_tools": [],
+      "warnings": [
+        "Use the server's Redfish or iLO interface for chassis and out-of-band health; controller utilities do not replace platform monitoring."
+      ]
+    },
+    {
+      "capabilities": [
+        "platform.health",
+        "platform.inventory",
+        "platform.redfish"
+      ],
+      "id": "oracle-sun-platform-management",
+      "match": {
+        "product_name_contains": [
+          "oracle server",
+          "sun fire",
+          "sun server"
+        ],
+        "system_vendor_contains": [
+          "oracle corporation",
+          "sun microsystems"
+        ]
+      },
+      "name": "Oracle or Sun platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ipmitool",
+        "redfishtool"
+      ],
+      "vendor_tools": [],
+      "warnings": [
+        "Use Oracle ILOM through Redfish when the installed ILOM generation supports it, with IPMI as the standards-based fallback on older systems.",
+        "The PCI controller provider remains authoritative for drive, enclosure, RAID, HBA, and NVMe capabilities even when the platform is recognized as Oracle or Sun."
+      ]
+    },
+    {
+      "capabilities": [
+        "platform.health",
+        "platform.inventory",
+        "platform.redfish"
+      ],
+      "id": "supermicro-platform-management",
+      "match": {
+        "product_name_contains": [
+          "super server",
+          "supermicro"
+        ],
+        "system_vendor_contains": [
+          "supermicro",
+          "super micro"
+        ]
+      },
+      "name": "Supermicro platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ipmitool",
+        "redfishtool"
+      ],
+      "vendor_tools": [
+        "supermicro-sum"
+      ],
+      "warnings": [
+        "Use the board's Redfish or IPMI interface for chassis, fan, power-supply, and temperature monitoring.",
+        "The PCI controller provider remains authoritative for drive, enclosure, RAID, and HBA capabilities even when the platform is recognized as Supermicro."
+      ]
+    },
+    {
+      "capabilities": [
+        "platform.health",
+        "platform.inventory",
+        "platform.redfish"
+      ],
+      "id": "fortyfive-drives-platform-management",
+      "match": {
+        "product_name_contains": [
+          "45 drives",
+          "45drives",
+          "storinator"
+        ],
+        "system_vendor_contains": [
+          "45 drives",
+          "45drives",
+          "forty five drives"
+        ]
+      },
+      "name": "45Drives platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ipmitool",
+        "redfishtool"
+      ],
+      "vendor_tools": [
+        "fortyfive-drives-tools"
+      ],
+      "warnings": [
+        "Use Redfish or IPMI for chassis, fan, power-supply, and temperature monitoring when the installed management controller exposes it.",
+        "The PCI controller provider remains authoritative for drive, enclosure, RAID, and HBA capabilities; many 45Drives systems use separately detected Broadcom or LSI controllers.",
+        "45Drives dmap and lsdev output can provide useful model-specific bay-mapping evidence, but mappings must be validated for the exact chassis and Hoardarr never invokes destructive commands such as wipedev automatically."
+      ]
+    },
+    {
+      "capabilities": [
+        "platform.health",
+        "platform.inventory",
+        "platform.redfish"
+      ],
+      "id": "lenovo-ibm-platform-management",
+      "match": {
+        "system_vendor_contains": [
+          "ibm",
+          "lenovo"
+        ]
+      },
+      "name": "Lenovo or IBM platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ipmitool",
+        "redfishtool"
+      ],
+      "vendor_tools": [],
+      "warnings": [
+        "Use the server's Redfish or XClarity interface for chassis and out-of-band health."
+      ]
+    },
+    {
+      "id": "microsoft-virtual-machine",
+      "match": {
+        "system_vendor_contains": [
+          "microsoft"
+        ]
+      },
+      "name": "Microsoft virtual machine",
+      "packages": [
+        "dmidecode"
+      ],
+      "vendor_tools": [],
+      "warnings": [
+        "A virtual machine can report virtual disk health only. Monitor physical drives, controllers, and shelves on the Hyper-V host."
+      ]
+    },
+    {
+      "id": "generic-bmc-management",
+      "match": {
+        "requires_bmc": true
+      },
+      "name": "Generic platform management",
+      "packages": [
+        "dmidecode",
+        "freeipmi-tools",
+        "ipmitool"
+      ],
+      "vendor_tools": [],
+      "warnings": [
+        "An IPMI interface was found. Prefer Redfish when the BMC supports it and keep the management network isolated."
+      ]
+    }
+  ],
+  "providers": [
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.jbod",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "PERC 12/13 and HBA465 MPI3 generation",
+      "id": "dell-perc-mpi3",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mpi3mr"
+        ],
+        "subsystem_vendors": [
+          "0x1028"
+        ]
+      },
+      "name": "Dell PERC or HBA (MPI3 generation)",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "dell-perccli2"
+      ],
+      "warnings": [
+        "Raw SMART and NVMe logs may be hidden by controller firmware. Treat controller-reported health separately from direct drive health.",
+        "HBA, enhanced-HBA, mixed, and non-RAID modes are model and firmware capabilities; detect them before offering a mode change."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "drive.smart-tunnel",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.jbod",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "PERC 9/10/11 MegaRAID generation",
+      "id": "dell-perc-megaraid",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "megaraid_sas"
+        ],
+        "subsystem_vendors": [
+          "0x1028"
+        ]
+      },
+      "name": "Dell PERC (MegaRAID generation)",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "dell-perccli"
+      ],
+      "warnings": [
+        "SMART access to RAID members is a controller tunnel and must be labelled as tunneled rather than native.",
+        "Per-drive non-RAID, JBOD, HBA, and enhanced-HBA support varies by controller and firmware."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.health",
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.hba",
+        "transport.sas"
+      ],
+      "generation": "Dell SAS HBA using Fusion-MPT",
+      "id": "dell-fusion-hba",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mpt3sas"
+        ],
+        "subsystem_vendors": [
+          "0x1028"
+        ]
+      },
+      "name": "Dell SAS host bus adapter",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools",
+        "smp-utils"
+      ],
+      "support_level": "full",
+      "vendor_tools": [
+        "dell-perccli"
+      ],
+      "warnings": [
+        "Use Dell firmware for Dell subsystem IDs. Cross-flashing is not an automated Hoardarr operation."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.jbod",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "HPE MR MPI3 generation",
+      "id": "hpe-mr-mpi3",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mpi3mr"
+        ],
+        "subsystem_vendors": [
+          "0x103c"
+        ]
+      },
+      "name": "HPE MR storage controller (MPI3 generation)",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "hpe-storcli2"
+      ],
+      "warnings": [
+        "HPE MR controllers use the MR tool family, not HPE Smart Storage Administrator.",
+        "Use HPE-qualified firmware for HPE subsystem IDs."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "drive.smart-tunnel",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.jbod",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "HPE MR Gen10 Plus/Gen11 MegaRAID generation",
+      "id": "hpe-mr-megaraid",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "megaraid_sas"
+        ],
+        "subsystem_vendors": [
+          "0x103c"
+        ]
+      },
+      "name": "HPE MR storage controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "hpe-storcli"
+      ],
+      "warnings": [
+        "HPE MR controllers use HPE StorCLI or MR Storage Administrator, not SSACLI.",
+        "Use HPE-qualified firmware for HPE subsystem IDs."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.hba",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "HPE Smart Array SR Gen10 smartpqi generation",
+      "id": "hpe-smart-array-smartpqi",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "smartpqi"
+        ],
+        "subsystem_vendors": [
+          "0x103c"
+        ]
+      },
+      "name": "HPE Smart Array SR controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "hpe-ssacli"
+      ],
+      "warnings": [
+        "SSACLI health is controller-reported. Claim native SMART only when the drive is directly exposed in HBA mode."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "drive.smart-tunnel",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.hba",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "Legacy HPE Smart Array hpsa/cciss generation",
+      "id": "hpe-smart-array-legacy",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "cciss",
+          "hpsa"
+        ],
+        "subsystem_vendors": [
+          "0x103c"
+        ]
+      },
+      "name": "HPE Smart Array controller (legacy generation)",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "hpe-ssacli"
+      ],
+      "warnings": [
+        "Physical-drive SMART may require the documented cciss tunnel and is not equivalent to a directly attached drive."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.hba",
+        "mode.jbod",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor",
+        "transport.nvme",
+        "transport.sas"
+      ],
+      "generation": "Broadcom MPI3/SAS4 generation",
+      "id": "broadcom-mpi3",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mpi3mr"
+        ]
+      },
+      "name": "Broadcom MPI3 storage controller",
+      "packages": [
+        "lsscsi",
+        "nvme-cli",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "broadcom-storcli2"
+      ],
+      "warnings": [
+        "Controller personality and per-drive passthrough vary by product and firmware; probe capabilities before planning storage."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "drive.smart-tunnel",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.jbod",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "Broadcom/LSI MegaRAID generation",
+      "id": "broadcom-megaraid",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "megaraid_sas"
+        ]
+      },
+      "name": "Broadcom MegaRAID controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "broadcom-storcli"
+      ],
+      "warnings": [
+        "SMART access to RAID members is a controller tunnel. Preserve that provenance in health records."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.health",
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.hba",
+        "transport.sas"
+      ],
+      "generation": "Broadcom/LSI SAS2 and SAS3 Fusion-MPT generation",
+      "id": "broadcom-fusion-hba",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mpt2sas",
+          "mpt3sas"
+        ]
+      },
+      "name": "Broadcom or LSI SAS host bus adapter",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools",
+        "smp-utils"
+      ],
+      "support_level": "full",
+      "vendor_tools": [
+        "broadcom-sas3ircu",
+        "broadcom-storcli"
+      ],
+      "warnings": [
+        "Do not automatically cross-flash controller firmware. Firmware maintenance requires an exact board and subsystem match."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "mode.hba",
+        "mode.mixed",
+        "raid.manage",
+        "raid.monitor",
+        "transport.nvme",
+        "transport.sas"
+      ],
+      "generation": "Microchip SmartRAID and SmartHBA smartpqi generation",
+      "id": "microchip-smartpqi",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "smartpqi"
+        ]
+      },
+      "name": "Microchip Smart Storage controller",
+      "packages": [
+        "lsscsi",
+        "nvme-cli",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "microchip-arcconf"
+      ],
+      "warnings": [
+        "ARCCONF commands are capability-specific. HBA, RAID-hide-raw, and mixed modes are not interchangeable."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.smart-tunnel",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "Adaptec AACRAID legacy generation",
+      "id": "adaptec-aacraid",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "aacraid"
+        ]
+      },
+      "name": "Adaptec AACRAID controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "microchip-arcconf"
+      ],
+      "warnings": [
+        "This is a legacy controller family. Validate firmware, drive size, sector format, and operating-system support before use."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "drive.smart-tunnel",
+        "enclosure.inventory",
+        "enclosure.locate",
+        "raid.manage",
+        "raid.monitor"
+      ],
+      "generation": "Areca ARC SATA/SAS RAID",
+      "id": "areca-raid",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "arcmsr"
+        ]
+      },
+      "name": "Areca RAID controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "areca-cli"
+      ],
+      "warnings": [
+        "The Areca command-line utility is model-specific and text-oriented. Keep versioned parsers and captured fixtures."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.health",
+        "controller.inventory",
+        "drive.inventory",
+        "raid.monitor"
+      ],
+      "generation": "Marvell UMI hardware RAID",
+      "id": "marvell-mvumi",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mvumi"
+        ]
+      },
+      "name": "Marvell hardware RAID controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "inventory",
+      "vendor_tools": [],
+      "warnings": [
+        "No current universal machine-readable Marvell RAID utility is assumed. Hoardarr will inventory this controller without offering configuration changes."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory",
+        "enclosure.inventory",
+        "mode.hba",
+        "transport.sas"
+      ],
+      "generation": "Marvell SAS HBA",
+      "id": "marvell-sas-hba",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "mvsas"
+        ]
+      },
+      "name": "Marvell SAS host bus adapter",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools",
+        "smp-utils"
+      ],
+      "support_level": "full",
+      "vendor_tools": [],
+      "warnings": []
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory"
+      ],
+      "generation": "Marvell AHCI SATA",
+      "id": "marvell-ahci",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "ahci"
+        ],
+        "vendors": [
+          "0x11ab",
+          "0x1b4b"
+        ]
+      },
+      "name": "Marvell SATA controller",
+      "packages": [
+        "pciutils",
+        "smartmontools"
+      ],
+      "support_level": "full",
+      "vendor_tools": [],
+      "warnings": []
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory",
+        "drive.locate",
+        "raid.manage",
+        "raid.monitor",
+        "transport.nvme"
+      ],
+      "generation": "Intel Volume Management Device",
+      "id": "intel-vmd",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "vmd"
+        ]
+      },
+      "name": "Intel VMD or VROC controller",
+      "packages": [
+        "ledmon",
+        "mdadm",
+        "nvme-cli",
+        "pciutils",
+        "smartmontools"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [],
+      "warnings": [
+        "Available VROC RAID levels depend on platform firmware and licensing. Inspect existing IMSM metadata before offering changes.",
+        "Consumer Intel RST metadata is an import and inspection case, not a preferred new Hoardarr storage backend."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.health",
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory",
+        "transport.nvme"
+      ],
+      "generation": "Native Linux NVMe",
+      "id": "native-nvme",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "nvme"
+        ]
+      },
+      "name": "Native NVMe controller",
+      "packages": [
+        "nvme-cli",
+        "pciutils",
+        "smartmontools"
+      ],
+      "support_level": "full",
+      "vendor_tools": [],
+      "warnings": []
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory"
+      ],
+      "generation": "Standard AHCI or libata SATA",
+      "id": "ahci-sata",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "ahci",
+          "ata_piix"
+        ]
+      },
+      "name": "Onboard or standard SATA controller",
+      "packages": [
+        "pciutils",
+        "smartmontools"
+      ],
+      "support_level": "full",
+      "vendor_tools": [],
+      "warnings": []
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "transport.fc"
+      ],
+      "generation": "QLogic or Marvell Fibre Channel",
+      "id": "qlogic-fibre-channel",
+      "kind": "transport",
+      "match": {
+        "drivers": [
+          "qla2xxx"
+        ]
+      },
+      "name": "QLogic or Marvell Fibre Channel adapter",
+      "packages": [
+        "lsscsi",
+        "multipath-tools",
+        "pciutils",
+        "sg3-utils",
+        "sysfsutils"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "marvell-qaucli"
+      ],
+      "warnings": [
+        "A Fibre Channel LUN exposes array and path health, not SMART data for the physical drives inside the storage array."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.events",
+        "controller.health",
+        "controller.inventory",
+        "transport.fc"
+      ],
+      "generation": "Emulex or Broadcom Fibre Channel",
+      "id": "emulex-fibre-channel",
+      "kind": "transport",
+      "match": {
+        "drivers": [
+          "lpfc"
+        ]
+      },
+      "name": "Emulex or Broadcom Fibre Channel adapter",
+      "packages": [
+        "lsscsi",
+        "multipath-tools",
+        "pciutils",
+        "sg3-utils",
+        "sysfsutils"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [
+        "broadcom-hbacmd"
+      ],
+      "warnings": [
+        "A Fibre Channel LUN exposes array and path health, not SMART data for the physical drives inside the storage array."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.health",
+        "controller.inventory",
+        "transport.fc",
+        "transport.fcoe"
+      ],
+      "generation": "Linux FCoE offload or software host",
+      "id": "fcoe-host",
+      "kind": "transport",
+      "match": {
+        "drivers": [
+          "bnx2fc",
+          "fcoe",
+          "fnic",
+          "qedf"
+        ]
+      },
+      "name": "Fibre Channel over Ethernet host",
+      "packages": [
+        "fcoe-utils",
+        "lldpad",
+        "lsscsi",
+        "multipath-tools",
+        "sg3-utils"
+      ],
+      "support_level": "managed",
+      "vendor_tools": [],
+      "warnings": [
+        "FCoE setup is an advanced network and storage workflow. Validate DCB, VLAN, zoning, and redundant paths together."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "transport.fc"
+      ],
+      "generation": "Generic Fibre Channel PCI class",
+      "id": "generic-fibre-channel",
+      "kind": "transport",
+      "match": {
+        "class_prefixes": [
+          "0x0c04"
+        ]
+      },
+      "name": "Fibre Channel adapter",
+      "packages": [
+        "lsscsi",
+        "multipath-tools",
+        "pciutils",
+        "sg3-utils",
+        "sysfsutils"
+      ],
+      "support_level": "inventory",
+      "vendor_tools": [],
+      "warnings": [
+        "The adapter class is recognized, but no tested driver-specific management provider matched."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "virtual.inventory"
+      ],
+      "generation": "Hyper-V synthetic storage",
+      "id": "hyperv-storvsc",
+      "kind": "transport",
+      "match": {
+        "drivers": [
+          "hv_storvsc",
+          "storvsc",
+          "storvsc_host",
+          "storvsc_host_t"
+        ]
+      },
+      "name": "Hyper-V synthetic storage",
+      "packages": [
+        "lsscsi",
+        "multipath-tools"
+      ],
+      "support_level": "virtualized",
+      "vendor_tools": [],
+      "warnings": [
+        "Physical drive, controller, and shelf health is available only from the Hyper-V host or its storage platform."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.inventory",
+        "drive.direct",
+        "drive.health",
+        "drive.inventory",
+        "transport.sas"
+      ],
+      "generation": "Generic Linux SAS host bus adapter",
+      "id": "generic-sas-hba",
+      "kind": "storage",
+      "match": {
+        "drivers": [
+          "aic94xx",
+          "esas2r",
+          "hisi_sas",
+          "isci",
+          "pm80xx"
+        ]
+      },
+      "name": "SAS host bus adapter",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools",
+        "smp-utils"
+      ],
+      "support_level": "full",
+      "vendor_tools": [],
+      "warnings": []
+    },
+    {
+      "capabilities": [
+        "controller.inventory"
+      ],
+      "generation": "Unrecognized RAID controller",
+      "id": "generic-raid-controller",
+      "kind": "storage",
+      "match": {
+        "class_prefixes": [
+          "0x0104"
+        ]
+      },
+      "name": "RAID controller",
+      "packages": [
+        "lsscsi",
+        "pciutils",
+        "sg3-utils",
+        "smartmontools"
+      ],
+      "support_level": "inventory",
+      "vendor_tools": [],
+      "warnings": [
+        "The RAID controller is visible, but no tested management provider matched its driver. Configuration changes are disabled."
+      ]
+    },
+    {
+      "capabilities": [
+        "controller.inventory"
+      ],
+      "generation": "Unbound or unrecognized SATA controller",
+      "id": "generic-sata-controller",
+      "kind": "storage",
+      "match": {
+        "class_prefixes": [
+          "0x0106"
+        ]
+      },
+      "name": "SATA controller",
+      "packages": [
+        "pciutils",
+        "smartmontools"
+      ],
+      "support_level": "inventory",
+      "vendor_tools": [],
+      "warnings": [
+        "The SATA controller class is recognized, but a tested kernel-driver provider did not match."
+      ]
+    }
+  ],
+  "schema_version": 1
+}

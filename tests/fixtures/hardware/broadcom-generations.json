@@ -1,0 +1,39 @@
+{
+  "controllers": [
+    {
+      "address": "0000:65:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010400",
+      "device_id": "0x00a5",
+      "kernel_driver": "mpi3mr",
+      "subsystem_device_id": "0x4000",
+      "subsystem_vendor_id": "0x1000",
+      "vendor_id": "0x1000"
+    },
+    {
+      "address": "0000:01:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010700",
+      "device_id": "0x0097",
+      "kernel_driver": "mpt3sas",
+      "subsystem_device_id": "0x30e0",
+      "subsystem_vendor_id": "0x1000",
+      "vendor_id": "0x1000"
+    },
+    {
+      "address": "0000:42:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010400",
+      "device_id": "0x005d",
+      "kernel_driver": "megaraid_sas",
+      "subsystem_device_id": "0x9361",
+      "subsystem_vendor_id": "0x1000",
+      "vendor_id": "0x1000"
+    }
+  ],
+  "dmi": {
+    "product_name": "Custom Storage Server",
+    "system_vendor": "Generic"
+  },
+  "schema_version": 1
+}

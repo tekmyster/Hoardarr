@@ -1,0 +1,22 @@
+{
+  "bmc_interfaces": [
+    "ipmi0"
+  ],
+  "controllers": [
+    {
+      "address": "0000:01:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010400",
+      "device_id": "0x005d",
+      "kernel_driver": "megaraid_sas",
+      "subsystem_device_id": "0x9361",
+      "subsystem_vendor_id": "0x1000",
+      "vendor_id": "0x1000"
+    }
+  ],
+  "dmi": {
+    "product_name": "Storinator XL60",
+    "sys_vendor": "45Drives"
+  },
+  "schema_version": 1
+}

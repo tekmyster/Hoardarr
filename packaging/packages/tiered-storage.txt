@@ -1,0 +1,11 @@
+# File-aware SSD landing tiers and optional advanced block-cache tooling.
+# Installing these tools never creates or configures a cache or touches a disk.
+bcache-tools
+dmsetup
+inotify-tools
+lsof
+lvm2
+rclone
+rsync
+thin-provisioning-tools
+util-linux

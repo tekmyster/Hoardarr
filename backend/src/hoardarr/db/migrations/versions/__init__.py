@@ -1,0 +1,1 @@
+"""Hoardarr database revisions."""

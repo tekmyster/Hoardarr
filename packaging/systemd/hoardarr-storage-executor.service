@@ -1,0 +1,46 @@
+[Unit]
+Description=Hoardarr privileged storage executor
+Documentation=file:/usr/share/doc/hoardarr/disk-quarantine.md
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/lib/hoardarr/venv/bin/python -m hoardarr.storage.executor --socket /run/hoardarr/storage-executor.sock --detector /usr/lib/hoardarr/scripts/detect-hardware.py --quarantine-marker /var/lib/hoardarr/storage-executor/quarantine.json
+RuntimeDirectory=hoardarr
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+
+# This is the only process allowed to mutate storage. It has no network access,
+# accepts a closed set of typed operations, and resolves /dev paths itself.
+PrivateDevices=no
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Do not prefix the executor state path with "-". If the installer has not
+# created it before sandbox setup, systemd must refuse to start the service
+# instead of silently leaving the path read-only.
+ReadWritePaths=-/data -/mnt -/srv -/etc/fstab /var/lib/hoardarr/storage-executor -/run/hoardarr -/run/mount
+ProtectHome=read-only
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

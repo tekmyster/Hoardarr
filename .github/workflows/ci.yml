@@ -1,0 +1,84 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - run: uv sync --project backend --locked --all-groups
+      - run: uv run --project backend --locked ruff check backend/src backend/tests scripts/benchmark-telemetry.py scripts/soak-telemetry.py tests/integration/mergerfs_persistent_telemetry.py
+      - run: uv run --project backend --locked pytest backend/tests -q
+      - name: Run bounded-memory telemetry soak
+        run: uv run --project backend --locked python scripts/soak-telemetry.py --drives 60 --cycles 100
+      - name: Verify live read-only Linux telemetry sources
+        run: uv run --project backend --locked python tests/integration/verify-linux-telemetry.py
+      - run: uv build --project backend
+      - run: python -m unittest discover -s tests/bootstrap -p 'test_*.py'
+      - run: python -m unittest discover -s tests/release -p 'test_*.py'
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test -- --run
+        working-directory: frontend
+      - run: npm run test:a11y
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run test:e2e
+        working-directory: frontend
+  ubuntu-installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv systemd
+      - run: python3.12 -m unittest discover -s tests/bootstrap -p 'test_*.py'
+      - run: bash -n scripts/install-release-bundle.sh scripts/build-appliance.sh
+      - run: python3 scripts/detect-hardware.py --help
+  release-bundle-systemd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y systemd
+      - run: uv sync --project backend --locked --all-groups
+      - run: npm ci --prefix frontend --no-audit --no-fund
+      - run: python3 scripts/build-release-bundle.py build --output-dir dist/releases
+      - name: Install the built wheel into an empty Python 3.12 environment
+        run: |
+          release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
+          test -n "$release_dir"
+          python3.12 -m venv /tmp/hoardarr-wheel-validation
+          /tmp/hoardarr-wheel-validation/bin/pip install --no-index \
+            --only-binary=:all: --require-hashes \
+            --find-links "$release_dir/wheels" \
+            -r "$release_dir/requirements/runtime.lock" \
+            -r "$release_dir/requirements/hoardarr.lock"
+          /tmp/hoardarr-wheel-validation/bin/hoardarr --help
+          sudo install -d -m 0755 /usr/lib/hoardarr/scripts
+          sudo ln -s /tmp/hoardarr-wheel-validation /usr/lib/hoardarr/venv
+          sudo install -m 0555 scripts/detect-hardware.py /usr/lib/hoardarr/scripts/detect-hardware.py
+      - name: Verify every Hoardarr systemd unit against installed entry points
+        run: systemd-analyze verify packaging/systemd/hoardarr-*.service
+      - run: python3.12 -m unittest discover -s tests/release -p 'test_*.py'

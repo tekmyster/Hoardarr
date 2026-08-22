@@ -1,0 +1,23 @@
+{
+  "bmc_interfaces": [
+    "ipmi0"
+  ],
+  "controllers": [
+    {
+      "address": "0000:03:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010700",
+      "device_id": "0x0097",
+      "kernel_driver": "mpt3sas",
+      "subsystem_device_id": "0x30e0",
+      "subsystem_vendor_id": "0x1000",
+      "vendor_id": "0x1000"
+    }
+  ],
+  "dmi": {
+    "board_name": "X12SPA-TF",
+    "product_name": "Super Server",
+    "sys_vendor": "Supermicro"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,40 @@
+#cloud-config
+autoinstall:
+  version: 1
+  # Installation-disk selection is always interactive. Hoardarr never guesses
+  # that the largest disk is the operating-system target.
+  interactive-sections:
+    - storage
+  refresh-installer:
+    update: false
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: hoardarr
+    username: hoardarr-setup
+    # Disabled password; the console prompts for owner setup after installation.
+    password: "!"
+  ssh:
+    install-server: true
+    allow-pw: false
+  storage:
+    layout:
+      name: direct
+  packages:
+    - python3.12
+    - python3.12-venv
+    - smartmontools
+    - nvme-cli
+    - lsscsi
+    - sg3-utils
+    - mergerfs
+  late-commands:
+    - curtin in-target --target=/target -- mkdir -p /opt/hoardarr-install
+    - cp /cdrom/hoardarr/hoardarr-release.tar.gz /target/opt/hoardarr-install/release.tar.gz
+    - curtin in-target --target=/target -- tar -xzf /opt/hoardarr-install/release.tar.gz -C /opt/hoardarr-install
+    - curtin in-target --target=/target -- sh -c 'release="$(find /opt/hoardarr-install -mindepth 1 -maxdepth 1 -type d -name "hoardarr-*" -print -quit)"; test -n "$release"; exec bash "$release/scripts/install.sh" "$release"'
+    - curtin in-target --target=/target -- systemctl enable hoardarr-api.service hoardarr-worker.service
+  user-data:
+    runcmd:
+      - [sh, -c, 'echo "Run sudo hoardarr setup to create the owner account." >/etc/motd.d/hoardarr']

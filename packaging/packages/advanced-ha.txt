@@ -1,0 +1,9 @@
+# Optional high-availability packages. They remain disabled after bootstrap.
+corosync
+crmsh
+ctdb
+fence-agents-base
+pacemaker
+resource-agents-base
+resource-agents-extra
+watchdog

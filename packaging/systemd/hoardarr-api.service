@@ -1,0 +1,27 @@
+[Unit]
+Description=Hoardarr API
+Documentation=file:/usr/share/doc/hoardarr/backend.md
+Requires=hoardarr-migrate.service
+After=network-online.target hoardarr-migrate.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/hoardarr/hoardarr.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/lib/hoardarr/venv/bin/hoardarr-api
+WorkingDirectory=/var/lib/hoardarr
+StateDirectory=hoardarr
+StateDirectoryMode=0700
+UMask=0022
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+
+# Hoardarr is a host-management appliance. The API intentionally runs as root
+# so hardware and protocol features can use one backend without privilege relays.
+[Install]
+WantedBy=multi-user.target

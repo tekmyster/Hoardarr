@@ -1,0 +1,52 @@
+name: Build appliance ISO
+on:
+  workflow_dispatch:
+    inputs:
+      base_iso_url:
+        description: Official Ubuntu 24.04 live-server ISO URL
+        required: true
+      base_iso_sha256:
+        description: SHA-256 from Ubuntu SHA256SUMS
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BASE_ISO_URL: ${{ inputs.base_iso_url }}
+      BASE_ISO_SHA256: ${{ inputs.base_iso_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y xorriso python3.12 python3.12-venv qemu-system-x86
+      - run: python3 scripts/build-release-bundle.py build --output-dir dist/releases
+      - name: Create deterministic release archive
+        run: |
+          release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
+          test -n "$release_dir"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -czf dist/hoardarr-release.tar.gz -C "$(dirname "$release_dir")" "$(basename "$release_dir")"
+      - run: curl --fail --location --proto '=https' --tlsv1.2 --output ubuntu.iso "$BASE_ISO_URL"
+      - run: scripts/build-appliance.sh ubuntu.iso "$BASE_ISO_SHA256" dist/hoardarr-release.tar.gz hoardarr.iso
+      - name: Boot the appliance to the interactive installer checkpoint
+        run: |
+          set +e
+          timeout 240 qemu-system-x86_64 -machine accel=tcg -m 2048 -smp 2 \
+            -boot d -cdrom hoardarr.iso -no-reboot -nographic \
+            >qemu-serial.log 2>&1
+          status=$?
+          set -e
+          test "$status" -eq 0 -o "$status" -eq 124
+          grep -Eiq 'Ubuntu|subiquity|autoinstall|cloud-init' qemu-serial.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoardarr-appliance
+          path: |
+            hoardarr.iso
+            hoardarr.iso.sha256
+            qemu-serial.log

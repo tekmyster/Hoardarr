@@ -1,0 +1,10 @@
+# File and block sharing services. Hoardarr enables them only after configuration.
+nfs-common
+nfs-kernel-server
+open-iscsi
+samba
+samba-common-bin
+samba-vfs-modules
+targetcli-fb
+winbind
+

@@ -1,0 +1,40 @@
+[Unit]
+Description=Hoardarr read-only storage progress service
+Documentation=file:/usr/share/doc/hoardarr/backend.md
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/lib/hoardarr/venv/bin/python -m hoardarr.storage.executor --status-only --socket /run/hoardarr/storage-status.sock --detector /usr/lib/hoardarr/scripts/detect-hardware.py --quarantine-marker /var/lib/hoardarr/storage-executor/quarantine.json
+RuntimeDirectory=hoardarr
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+
+# This companion can read executor journals but cannot accept apply requests.
+PrivateDevices=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

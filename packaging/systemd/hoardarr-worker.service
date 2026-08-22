@@ -1,0 +1,25 @@
+[Unit]
+Description=Hoardarr background worker
+Documentation=file:/usr/share/doc/hoardarr/backend.md
+Requires=hoardarr-migrate.service
+After=network-online.target hoardarr-migrate.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/hoardarr/hoardarr.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/lib/hoardarr/venv/bin/hoardarr-worker
+WorkingDirectory=/var/lib/hoardarr
+StateDirectory=hoardarr
+StateDirectoryMode=0700
+UMask=0022
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

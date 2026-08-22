@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hoardarr"
+version = "0.3.10"
+description = "API-first storage lifecycle control plane"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Hoardarr contributors" }]
+dependencies = [
+  "alembic==1.19.1",
+  "argon2-cffi==25.1.0",
+  "cryptography==50.0.0",
+  "fastapi==0.141.1",
+  "httpx==0.28.1",
+  "prometheus-client==0.26.0",
+  "psutil==7.2.2",
+  "pydantic-settings==2.15.0",
+  "sqlalchemy==2.0.52",
+  "uvicorn==0.52.3",
+]
+
+[project.scripts]
+hoardarr = "hoardarr.cli:main"
+hoardarr-api = "hoardarr.cli:api_main"
+hoardarr-worker = "hoardarr.cli:worker_main"
+hoardarr-migrate = "hoardarr.cli:migrate_main"
+hoardarr-setup-token = "hoardarr.cli:setup_token_main"
+hoardarr-account-executor = "hoardarr.accounts.executor:main"
+hoardarr-storage-executor = "hoardarr.storage.executor:main"
+hoardarr-storage-quarantine = "hoardarr.storage.quarantine:main"
+hoardarr-zfs-snapshot = "hoardarr.storage.zfs:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.16.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hoardarr"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/hoardarr/db/migrations/versions/*.py" = ["E501"]
+"src/hoardarr/api/*.py" = ["B008"]
+"src/hoardarr/api/routes/*.py" = ["B008"]

@@ -1,0 +1,21 @@
+[Unit]
+Description=Hoardarr database migration
+Documentation=file:/usr/share/doc/hoardarr/backend.md
+Before=hoardarr-api.service hoardarr-worker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/hoardarr/hoardarr.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/lib/hoardarr/venv/bin/hoardarr-migrate
+WorkingDirectory=/var/lib/hoardarr
+StateDirectory=hoardarr
+StateDirectoryMode=0700
+UMask=0022
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

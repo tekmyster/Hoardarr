@@ -1,0 +1,37 @@
+{
+  "controllers": [
+    {
+      "address": "host12",
+      "attributes": {
+        "port_name": "0x10000090fa123456",
+        "port_state": "Online",
+        "speed": "16 Gbit"
+      },
+      "bus_type": "scsi_host",
+      "kernel_driver": "qla2xxx"
+    },
+    {
+      "address": "0000:82:00.0",
+      "bus_type": "pci",
+      "class_code": "0x0c0400",
+      "device_id": "0xe300",
+      "kernel_driver": "lpfc",
+      "vendor_id": "0x10df"
+    },
+    {
+      "address": "host7",
+      "bus_type": "scsi_host",
+      "kernel_driver": "bnx2fc"
+    },
+    {
+      "address": "0000:84:00.0",
+      "bus_type": "pci",
+      "class_code": "0x0c0400",
+      "device_id": "0x9999",
+      "kernel_driver": "unknown_fc",
+      "vendor_id": "0x9999"
+    }
+  ],
+  "dmi": {},
+  "schema_version": 1
+}

@@ -1,0 +1,4 @@
+# Optional Fibre Channel over Ethernet control-plane packages.
+fcoe-utils
+lldpad
+

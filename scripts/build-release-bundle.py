@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""Build a self-contained Hoardarr Python release bundle for Ubuntu.
+
+The builder intentionally targets one platform.  Building on that platform lets
+pip select the same binary wheels that the offline installer will consume and
+avoids accidentally shipping Windows or macOS artifacts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+
+TARGET_OS_ID = "ubuntu"
+TARGET_OS_VERSION = "24.04"
+TARGET_ARCHITECTURE = "amd64"
+TARGET_MACHINE = "x86_64"
+TARGET_PYTHON = "3.12"
+MANIFEST_NAME = "SHA256SUMS"
+VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[A-Za-z0-9._+-]*)?$")
+RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class ReleasePlan:
+    version: str
+    release_id: str
+    bundle_name: str
+    output: str
+    target_os: str
+    target_os_version: str
+    target_architecture: str
+    target_python: str
+    copied_paths: tuple[str, ...]
+
+
+class BuildError(RuntimeError):
+    """A release cannot be built safely."""
+
+
+def repository_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def safe_relative_path(value: str) -> PurePosixPath:
+    """Validate a manifest path and return its canonical POSIX form."""
+
+    if not value or "\\" in value or any(ord(char) < 32 for char in value):
+        raise BuildError(f"unsafe bundle path: {value!r}")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise BuildError(f"unsafe bundle path: {value!r}")
+    if str(path) != value:
+        raise BuildError(f"non-canonical bundle path: {value!r}")
+    return path
+
+
+def iter_bundle_files(root: Path) -> Iterable[tuple[str, Path]]:
+    """Yield regular files in deterministic order and reject symbolic links."""
+
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if path.is_symlink():
+            raise BuildError(f"symbolic links are not allowed in bundles: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise BuildError(f"non-regular bundle entry: {path}")
+        relative = path.relative_to(root).as_posix()
+        safe_relative_path(relative)
+        if relative != MANIFEST_NAME:
+            yield relative, path
+
+
+def write_manifest(root: Path) -> Path:
+    """Write a deterministic GNU sha256sum-compatible manifest."""
+
+    entries = [f"{sha256_file(path)}  {relative}\n" for relative, path in iter_bundle_files(root)]
+    if not entries:
+        raise BuildError("refusing to create an empty release manifest")
+    manifest = root / MANIFEST_NAME
+    manifest.write_text("".join(entries), encoding="utf-8", newline="\n")
+    return manifest
+
+
+def verify_manifest(root: Path) -> None:
+    """Verify the manifest, exact file set, paths, entry types, and hashes."""
+
+    manifest = root / MANIFEST_NAME
+    if not manifest.is_file() or manifest.is_symlink():
+        raise BuildError(f"{MANIFEST_NAME} is missing or is not a regular file")
+    expected: dict[str, str] = {}
+    pattern = re.compile(r"^([0-9a-f]{64})  ([^\n]+)$")
+    for number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
+        match = pattern.fullmatch(line)
+        if not match:
+            raise BuildError(f"malformed manifest line {number}")
+        digest, relative = match.groups()
+        safe_relative_path(relative)
+        if relative == MANIFEST_NAME or relative in expected:
+            raise BuildError(f"duplicate or reserved manifest path on line {number}")
+        expected[relative] = digest
+    if not expected:
+        raise BuildError("release manifest is empty")
+    actual = {relative for relative, _ in iter_bundle_files(root)}
+    if actual != set(expected):
+        missing = sorted(set(expected) - actual)
+        extra = sorted(actual - set(expected))
+        raise BuildError(f"bundle file set mismatch: missing={missing!r} extra={extra!r}")
+    for relative, path in iter_bundle_files(root):
+        if sha256_file(path) != expected[relative]:
+            raise BuildError(f"SHA-256 mismatch: {relative}")
+
+
+def validate_hashed_requirements(path: Path) -> None:
+    """Require an exact, hashed, registry-only runtime requirements export."""
+
+    text = path.read_text(encoding="utf-8")
+    logical_lines: list[str] = []
+    pending = ""
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        pending = f"{pending} {stripped}".strip()
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+            continue
+        logical_lines.append(pending)
+        pending = ""
+    if pending:
+        raise BuildError("runtime requirements end with a continuation")
+    if not logical_lines:
+        raise BuildError("runtime requirements export is empty")
+    for line in logical_lines:
+        if line.startswith(("-e ", "--editable", "http:", "https:", "git+", "file:")):
+            raise BuildError(f"non-registry runtime requirement is not allowed: {line}")
+        requirement = line.split(" ; ", maxsplit=1)[0]
+        if "==" not in requirement or " --hash=sha256:" not in line:
+            raise BuildError(f"runtime requirement is not exact and hashed: {line}")
+
+
+def _project_metadata(root: Path) -> tuple[str, str]:
+    pyproject = root / "backend" / "pyproject.toml"
+    locks = (root / "backend" / "uv.lock", root / "frontend" / "package-lock.json")
+    if not pyproject.is_file() or any(not lock.is_file() for lock in locks):
+        raise BuildError(
+            "backend/pyproject.toml, backend/uv.lock, and frontend/package-lock.json are required"
+        )
+    metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+    version = str(metadata["version"])
+    if not VERSION_RE.fullmatch(version):
+        raise BuildError(f"unsupported project version: {version!r}")
+    lock_digest = hashlib.sha256()
+    for lock in locks:
+        lock_digest.update(lock.relative_to(root).as_posix().encode("utf-8"))
+        lock_digest.update(b"\0")
+        lock_digest.update(lock.read_bytes())
+        lock_digest.update(b"\0")
+    release_id = f"{version}-{lock_digest.hexdigest()[:12]}"
+    if not RELEASE_ID_RE.fullmatch(release_id):
+        raise BuildError(f"unsafe release identifier: {release_id!r}")
+    return version, release_id
+
+
+def create_plan(root: Path, output_dir: Path) -> ReleasePlan:
+    version, release_id = _project_metadata(root)
+    bundle_name = f"hoardarr-{release_id}-ubuntu24.04-amd64-cp312"
+    copied_paths = (
+        "scripts/install.sh",
+        "scripts/bootstrap.py",
+        "scripts/detect-hardware.py",
+        "hardware/",
+        "packages/",
+        "systemd/",
+        "config/hoardarr.env",
+        "docs/",
+        "requirements/runtime.lock",
+        "requirements/hoardarr.lock",
+        "wheels/",
+        "frontend/",
+        "RELEASE.json",
+        MANIFEST_NAME,
+    )
+    return ReleasePlan(
+        version=version,
+        release_id=release_id,
+        bundle_name=bundle_name,
+        output=str((output_dir / bundle_name).resolve()),
+        target_os=TARGET_OS_ID,
+        target_os_version=TARGET_OS_VERSION,
+        target_architecture=TARGET_ARCHITECTURE,
+        target_python=TARGET_PYTHON,
+        copied_paths=copied_paths,
+    )
+
+
+def _read_os_release(path: Path = Path("/etc/os-release")) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", maxsplit=1)
+        values[key] = value.strip().strip('"')
+    return values
+
+
+def validate_build_host() -> None:
+    release = _read_os_release()
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    failures: list[str] = []
+    if sys.platform != "linux":
+        failures.append(f"host platform is {sys.platform}, expected linux")
+    if release.get("ID") != TARGET_OS_ID or release.get("VERSION_ID") != TARGET_OS_VERSION:
+        failures.append(
+            f"host OS is {release.get('ID', 'unknown')} {release.get('VERSION_ID', 'unknown')}, "
+            f"expected {TARGET_OS_ID} {TARGET_OS_VERSION}"
+        )
+    if platform.machine() != TARGET_MACHINE:
+        failures.append(f"host machine is {platform.machine()}, expected {TARGET_MACHINE}")
+    if python_version != TARGET_PYTHON:
+        failures.append(f"builder Python is {python_version}, expected {TARGET_PYTHON}")
+    if importlib.util.find_spec("pip") is None:
+        failures.append("builder interpreter has no pip module (run with Ubuntu /usr/bin/python3)")
+    if failures:
+        raise BuildError("incompatible build host:\n- " + "\n- ".join(failures))
+
+
+def _run(command: Sequence[str], *, cwd: Path) -> None:
+    printable = " ".join(command)
+    print(f"+ {printable}", flush=True)
+    try:
+        subprocess.run(command, cwd=cwd, check=True)
+    except FileNotFoundError as exc:
+        raise BuildError(f"required build command not found: {command[0]}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise BuildError(
+            f"build command failed with exit code {exc.returncode}: {printable}"
+        ) from exc
+
+
+def _copy_tree(source: Path, destination: Path) -> None:
+    if not source.is_dir():
+        raise BuildError(f"required source directory is missing: {source}")
+    for path in source.rglob("*"):
+        if path.is_symlink():
+            raise BuildError(f"source tree contains a symbolic link: {path}")
+        relative = path.relative_to(source)
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        else:
+            raise BuildError(f"source tree contains a non-regular entry: {path}")
+
+
+def _copy_release_assets(root: Path, staging: Path) -> None:
+    individual = {
+        root / "scripts" / "install-release-bundle.sh": staging / "scripts" / "install.sh",
+        root / "scripts" / "bootstrap.py": staging / "scripts" / "bootstrap.py",
+        root / "scripts" / "detect-hardware.py": staging / "scripts" / "detect-hardware.py",
+        root / "packaging" / "config" / "hoardarr.env": staging / "config" / "hoardarr.env",
+    }
+    for source, destination in individual.items():
+        if not source.is_file() or source.is_symlink():
+            raise BuildError(f"required regular source file is missing: {source}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    os.chmod(staging / "scripts" / "install.sh", 0o755)
+    os.chmod(staging / "scripts" / "bootstrap.py", 0o555)
+    os.chmod(staging / "scripts" / "detect-hardware.py", 0o555)
+
+    _copy_tree(root / "packaging" / "hardware", staging / "hardware")
+    _copy_tree(root / "packaging" / "packages", staging / "packages")
+    _copy_tree(root / "packaging" / "systemd", staging / "systemd")
+
+    docs = (
+        "backend.md",
+        "arr-integration.md",
+        "disk-quarantine.md",
+        "hardware-support.md",
+        "updates.md",
+        "release-bundles.md",
+    )
+    for name in docs:
+        source = root / "docs" / "development" / name
+        if not source.is_file():
+            raise BuildError(f"required release documentation is missing: {source}")
+        destination = staging / "docs" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def _write_release_metadata(root: Path, staging: Path, plan: ReleasePlan) -> None:
+    commit = "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        candidate = result.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40,64}", candidate):
+            commit = candidate
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+    metadata = {
+        "schema": 1,
+        "name": "hoardarr",
+        "version": plan.version,
+        "release_id": plan.release_id,
+        "target": {
+            "os_id": TARGET_OS_ID,
+            "os_version": TARGET_OS_VERSION,
+            "architecture": TARGET_ARCHITECTURE,
+            "machine": TARGET_MACHINE,
+            "python": TARGET_PYTHON,
+        },
+        "source_commit": commit,
+        "built_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
+    }
+    (staging / "RELEASE.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+    )
+
+
+def _build_wheels(root: Path, staging: Path, plan: ReleasePlan, uv: str) -> None:
+    backend = root / "backend"
+    requirements_dir = staging / "requirements"
+    wheels_dir = staging / "wheels"
+    requirements_dir.mkdir(parents=True)
+    wheels_dir.mkdir(parents=True)
+    runtime_lock = requirements_dir / "runtime.lock"
+
+    _run(
+        [
+            uv,
+            "export",
+            "--locked",
+            "--no-dev",
+            "--no-emit-project",
+            "--format",
+            "requirements.txt",
+            "--output-file",
+            str(runtime_lock),
+        ],
+        cwd=backend,
+    )
+    validate_hashed_requirements(runtime_lock)
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "download",
+            "--require-hashes",
+            "--only-binary=:all:",
+            "--dest",
+            str(wheels_dir),
+            "--requirement",
+            str(runtime_lock),
+        ],
+        cwd=backend,
+    )
+    _run(
+        [uv, "build", "--wheel", "--out-dir", str(wheels_dir), "--no-create-gitignore"],
+        cwd=backend,
+    )
+
+    artifacts = sorted(wheels_dir.iterdir())
+    if not artifacts or any(not item.is_file() or item.suffix != ".whl" for item in artifacts):
+        raise BuildError("wheelhouse contains a missing, non-regular, or non-wheel artifact")
+    project_wheels = [item for item in artifacts if item.name.startswith("hoardarr-")]
+    if len(project_wheels) != 1:
+        raise BuildError(f"expected one Hoardarr wheel, found {len(project_wheels)}")
+    project_wheel = project_wheels[0]
+    normalized_version = plan.version.replace("-", "_")
+    if not project_wheel.name.startswith(f"hoardarr-{normalized_version}-"):
+        raise BuildError(f"Hoardarr wheel version does not match release: {project_wheel.name}")
+    project_lock = requirements_dir / "hoardarr.lock"
+    project_lock.write_text(
+        f"hoardarr=={plan.version} --hash=sha256:{sha256_file(project_wheel)}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _verify_offline_install(staging)
+
+
+def _build_frontend(root: Path, staging: Path, npm: str) -> None:
+    frontend = root / "frontend"
+    package = frontend / "package.json"
+    lock = frontend / "package-lock.json"
+    if not package.is_file() or not lock.is_file():
+        raise BuildError("frontend/package.json and frontend/package-lock.json are required")
+    _run([npm, "ci", "--no-audit", "--no-fund"], cwd=frontend)
+    _run([npm, "run", "build"], cwd=frontend)
+    output = frontend / "dist"
+    if not (output / "index.html").is_file():
+        raise BuildError("frontend build did not produce dist/index.html")
+    _copy_tree(output, staging / "frontend")
+
+
+def _verify_offline_install(staging: Path) -> None:
+    """Prove that the wheelhouse can create an importable environment offline."""
+
+    with tempfile.TemporaryDirectory(prefix=".offline-verify-", dir=staging.parent) as temporary:
+        venv = Path(temporary) / "venv"
+        _run([sys.executable, "-m", "venv", str(venv)], cwd=staging)
+        python = venv / "bin" / "python"
+        _run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--isolated",
+                "--no-index",
+                "--no-input",
+                "--disable-pip-version-check",
+                "--only-binary=:all:",
+                "--require-hashes",
+                "--find-links",
+                str(staging / "wheels"),
+                "--requirement",
+                str(staging / "requirements" / "runtime.lock"),
+                "--requirement",
+                str(staging / "requirements" / "hoardarr.lock"),
+            ],
+            cwd=staging,
+        )
+        _run([str(python), "-c", "import hoardarr"], cwd=staging)
+
+
+def build_bundle(root: Path, output_dir: Path, *, uv: str, npm: str) -> Path:
+    validate_build_host()
+    plan = create_plan(root, output_dir)
+    destination = Path(plan.output)
+    if destination.exists() or destination.is_symlink():
+        raise BuildError(f"release destination already exists: {destination}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{plan.bundle_name}-", dir=output_dir) as temporary:
+        staging = Path(temporary) / plan.bundle_name
+        staging.mkdir()
+        _copy_release_assets(root, staging)
+        _build_frontend(root, staging, npm)
+        _build_wheels(root, staging, plan, uv)
+        _write_release_metadata(root, staging, plan)
+        write_manifest(staging)
+        staging.replace(destination)
+    return destination
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("plan", "build"):
+        subparser = subparsers.add_parser(command)
+        subparser.add_argument(
+            "--output-dir",
+            type=Path,
+            default=Path("dist/releases"),
+            help="parent directory for the versioned release bundle",
+        )
+    subparsers.choices["build"].add_argument(
+        "--uv", default=os.environ.get("UV", "uv"), help="uv executable"
+    )
+    subparsers.choices["build"].add_argument(
+        "--npm", default=os.environ.get("NPM", "npm"), help="npm executable"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    root = repository_root()
+    output_dir = args.output_dir
+    if not output_dir.is_absolute():
+        output_dir = root / output_dir
+    try:
+        if args.command == "plan":
+            print(json.dumps(asdict(create_plan(root, output_dir)), indent=2, sort_keys=True))
+            return 0
+        destination = build_bundle(root, output_dir, uv=args.uv, npm=args.npm)
+        print(f"Release bundle: {destination}")
+        print(f"Manifest SHA-256: {sha256_file(destination / MANIFEST_NAME)}")
+        return 0
+    except BuildError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

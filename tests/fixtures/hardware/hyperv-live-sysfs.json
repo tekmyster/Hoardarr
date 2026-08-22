@@ -1,0 +1,17 @@
+{
+  "directories": [],
+  "expected": {
+    "controller_address": "f8b3781a-1e82-4818-a1c3-63d806ec15bb",
+    "provider": "hyperv-storvsc",
+    "transport_host": "host0"
+  },
+  "files": {
+    "bus/vmbus/devices/1eccfd72-4b6f-4f97-9f83-2c3f95fdf241/driver": "hv_netvsc",
+    "bus/vmbus/devices/6c30dcaf-4f22-4e9e-8fa7-55b27c4f79aa/driver": "hv_balloon",
+    "bus/vmbus/devices/f8b3781a-1e82-4818-a1c3-63d806ec15bb/driver": "hv_storvsc",
+    "class/dmi/id/product_name": "Virtual Machine",
+    "class/dmi/id/sys_vendor": "Microsoft Corporation",
+    "class/scsi_host/host0/proc_name": "storvsc_host"
+  },
+  "schema_version": 1
+}

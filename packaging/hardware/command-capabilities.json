@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "execution_policy": {
+    "argument_policy": "deny-unlisted",
+    "public_api_accepts_argv": false,
+    "raw_passthrough_allowed": false,
+    "destructive_operations_require_lifecycle_plan": true,
+    "indicator_controls": {
+      "requires_identity_revalidation": true,
+      "requires_audit_record": true,
+      "maximum_duration_seconds": 300
+    }
+  },
+  "package_commands": [
+    {
+      "package": "dmidecode",
+      "commands": [
+        {
+          "name": "dmidecode",
+          "capabilities": [
+            "platform.inventory"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "freeipmi-tools",
+      "commands": [
+        {
+          "name": "ipmi-fru",
+          "capabilities": [
+            "platform.fru-inventory"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        },
+        {
+          "name": "ipmi-sensors",
+          "capabilities": [
+            "platform.sensor-health"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "hdparm",
+      "commands": [
+        {
+          "name": "hdparm",
+          "capabilities": [
+            "ata.capabilities",
+            "ata.identity"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "allowlisted"
+        }
+      ]
+    },
+    {
+      "package": "ipmitool",
+      "commands": [
+        {
+          "name": "ipmitool",
+          "capabilities": [
+            "platform.fru-inventory",
+            "platform.sensor-health"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "ledmon",
+      "commands": [
+        {
+          "name": "ledctl",
+          "capabilities": [
+            "enclosure.indicator-control",
+            "enclosure.slot-inventory"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "indicator-only"
+        },
+        {
+          "name": "ledmon",
+          "capabilities": [
+            "enclosure.indicator-monitoring"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "indicator-only"
+        }
+      ]
+    },
+    {
+      "package": "lsscsi",
+      "commands": [
+        {
+          "name": "lsscsi",
+          "capabilities": [
+            "scsi.endpoint-inventory",
+            "scsi.path-inventory"
+          ],
+          "output": "text",
+          "privilege": "user",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "mdadm",
+      "commands": [
+        {
+          "name": "mdadm",
+          "capabilities": [
+            "mdraid.array-health",
+            "mdraid.device-inventory",
+            "vroc.array-health"
+          ],
+          "output": "key-value",
+          "privilege": "root",
+          "policy": "status-only"
+        }
+      ]
+    },
+    {
+      "package": "multipath-tools",
+      "commands": [
+        {
+          "name": "multipath",
+          "capabilities": [
+            "multipath.map-inventory",
+            "multipath.path-health"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "status-only"
+        },
+        {
+          "name": "multipathd",
+          "capabilities": [
+            "multipath.map-inventory",
+            "multipath.path-health"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "status-only"
+        }
+      ]
+    },
+    {
+      "package": "nvme-cli",
+      "commands": [
+        {
+          "name": "nvme",
+          "capabilities": [
+            "nvme.controller-inventory",
+            "nvme.device-health",
+            "nvme.device-inventory",
+            "nvme.self-test"
+          ],
+          "output": "json-or-text",
+          "privilege": "root",
+          "policy": "allowlisted"
+        }
+      ]
+    },
+    {
+      "package": "pciutils",
+      "commands": [
+        {
+          "name": "lspci",
+          "capabilities": [
+            "controller.driver-binding",
+            "controller.pci-inventory"
+          ],
+          "output": "text",
+          "privilege": "user",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "sdparm",
+      "commands": [
+        {
+          "name": "sdparm",
+          "capabilities": [
+            "scsi.device-capabilities",
+            "scsi.device-identity"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "allowlisted"
+        }
+      ]
+    },
+    {
+      "package": "sg3-utils",
+      "commands": [
+        {
+          "name": "sg_inq",
+          "capabilities": [
+            "scsi.device-identity",
+            "scsi.endpoint-inventory"
+          ],
+          "output": "json-or-text",
+          "privilege": "root",
+          "policy": "read-only"
+        },
+        {
+          "name": "sg_logs",
+          "capabilities": [
+            "scsi.device-health",
+            "scsi.phy-health"
+          ],
+          "output": "json-or-text",
+          "privilege": "root",
+          "policy": "read-only"
+        },
+        {
+          "name": "sg_map",
+          "capabilities": [
+            "scsi.path-inventory"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        },
+        {
+          "name": "sg_ses",
+          "capabilities": [
+            "enclosure.component-health",
+            "enclosure.endpoint-inventory",
+            "enclosure.indicator-control",
+            "enclosure.slot-inventory"
+          ],
+          "output": "json-or-text",
+          "privilege": "root",
+          "policy": "allowlisted"
+        },
+        {
+          "name": "sg_vpd",
+          "capabilities": [
+            "scsi.device-identity"
+          ],
+          "output": "json-or-text",
+          "privilege": "root",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "smartmontools",
+      "commands": [
+        {
+          "name": "smartctl",
+          "capabilities": [
+            "drive.capabilities",
+            "drive.health",
+            "drive.identity",
+            "drive.self-test"
+          ],
+          "output": "json-or-text",
+          "privilege": "root",
+          "policy": "allowlisted"
+        },
+        {
+          "name": "smartd",
+          "capabilities": [
+            "drive.health-monitoring"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "smp-utils",
+      "commands": [
+        {
+          "name": "smp_discover",
+          "capabilities": [
+            "sas.expander-topology",
+            "sas.phy-health",
+            "sas.slot-correlation"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        },
+        {
+          "name": "smp_discover_list",
+          "capabilities": [
+            "sas.expander-topology",
+            "sas.slot-correlation"
+          ],
+          "output": "text",
+          "privilege": "root",
+          "policy": "read-only"
+        }
+      ]
+    },
+    {
+      "package": "usbutils",
+      "commands": [
+        {
+          "name": "lsusb",
+          "capabilities": [
+            "usb.device-inventory",
+            "usb.path-inventory"
+          ],
+          "output": "text",
+          "privilege": "user",
+          "policy": "read-only"
+        }
+      ]
+    }
+  ]
+}

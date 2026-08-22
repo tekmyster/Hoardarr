@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import json
+
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from hoardarr.api.dependencies import (
+    authenticated_principal,
+    database_session,
+    require_state_scope,
+    settings_from_request,
+)
+from hoardarr.api.problem import Problem
+from hoardarr.api.serializers import event_document, operation_document
+from hoardarr.audit.service import record_audit
+from hoardarr.auth.service import Principal
+from hoardarr.core.config import Settings
+from hoardarr.db.models import Operation, OperationEvent
+from hoardarr.operations.service import OperationConflict, request_cancellation
+from hoardarr.storage.client import StorageExecutorError, storage_operation_status
+from hoardarr.updates.service import UpdatePaths
+
+router = APIRouter(prefix="/operations", tags=["operations"])
+
+
+def visible_operation(session: Session, operation_id: str, principal: Principal) -> Operation:
+    operation = session.get(Operation, operation_id)
+    if operation is None or (not principal.is_admin and operation.actor_id != principal.user_id):
+        raise Problem(404, "operation_not_found", "Not found", "Operation was not found.")
+    return operation
+
+
+@router.get("")
+def list_operations(
+    principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    query = select(Operation).order_by(Operation.created_at.desc()).limit(100)
+    if not principal.is_admin:
+        query = query.where(Operation.actor_id == principal.user_id)
+    return {"items": [operation_document(item) for item in session.scalars(query)]}
+
+
+@router.get("/{operation_id}")
+def get_operation(
+    operation_id: str,
+    principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    return operation_document(visible_operation(session, operation_id, principal))
+
+
+@router.get("/{operation_id}/events")
+def get_operation_events(
+    operation_id: str,
+    principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    operation = visible_operation(session, operation_id, principal)
+    events = session.scalars(
+        select(OperationEvent)
+        .where(OperationEvent.operation_id == operation.id)
+        .order_by(OperationEvent.sequence)
+    )
+    return {"items": [event_document(event) for event in events]}
+
+
+@router.get("/{operation_id}/progress")
+def get_operation_progress(
+    operation_id: str,
+    principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+    settings: Settings = Depends(settings_from_request),
+) -> dict[str, object]:
+    operation = visible_operation(session, operation_id, principal)
+    if operation.kind == "update.apply":
+        current = settings.frontend_dir.parent
+        paths = UpdatePaths(
+            releases=current.parent / "releases",
+            current=current,
+            state=settings.secret_key_file.parent,
+            config=settings.update_trust_file.parent,
+            trust=settings.update_trust_file,
+            backup=settings.update_artifact_root.parent / "update-backups",
+        )
+        try:
+            journal = json.loads(paths.journal.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            journal = {}
+        expected_release = operation.request_json.get("metadata", {}).get("release_id")
+        if journal.get("release_id") != expected_release:
+            journal = {}
+        return {
+            "state": journal.get("state", operation.status),
+            "phase": journal.get("phase", operation.status.replace("_", " ")),
+            "percent": journal.get("percent", 100 if operation.status == "succeeded" else 0),
+            "estimated_seconds_remaining": None,
+        }
+    if operation.kind not in {
+        "storage.apply",
+        "storage.maintenance",
+        "storage.snapraid.replace",
+    }:
+        raise Problem(
+            409,
+            "progress_not_supported",
+            "Progress is unavailable",
+            "This operation does not expose detailed storage progress.",
+        )
+    try:
+        progress = storage_operation_status(
+            settings.storage_status_socket,
+            operation_id=operation.id,
+            timeout_seconds=min(5.0, settings.storage_executor_timeout_seconds),
+        )
+    except StorageExecutorError as exc:
+        raise Problem(503, exc.code, "Storage progress unavailable", str(exc)) from exc
+    if progress.get("state") == "waiting" and operation.status in {
+        "succeeded",
+        "failed",
+        "cancelled",
+        "needs_attention",
+    }:
+        error = operation.error_json if isinstance(operation.error_json, dict) else {}
+        progress = {
+            **progress,
+            "state": operation.status,
+            "phase": error.get("detail")
+            or error.get("message")
+            or f"Storage ended with status {operation.status}.",
+        }
+    return progress
+
+
+@router.post("/{operation_id}/cancel", status_code=202)
+def cancel_operation(
+    operation_id: str,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    operation = visible_operation(session, operation_id, principal)
+    try:
+        request_cancellation(session, operation)
+    except OperationConflict as exc:
+        raise Problem(
+            409,
+            "operation_not_cancellable",
+            "Operation cannot be cancelled",
+            str(exc),
+        ) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="operation.cancel",
+        outcome="accepted",
+        correlation_id=request.state.request_id,
+        target_type="operation",
+        target_id=operation.id,
+    )
+    return operation_document(operation)

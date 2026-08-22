@@ -1,0 +1,14 @@
+{
+  "controllers": [
+    {
+      "address": "f8b3781a-1e82-4818-a1c3-63d806ec15bb",
+      "bus_type": "vmbus",
+      "kernel_driver": "hv_storvsc"
+    }
+  ],
+  "dmi": {
+    "product_name": "Virtual Machine",
+    "sys_vendor": "Microsoft Corporation"
+  },
+  "schema_version": 1
+}

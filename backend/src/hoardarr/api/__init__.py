@@ -1,0 +1,1 @@
+"""Hoardarr HTTP API."""

@@ -1,0 +1,22 @@
+{
+  "controllers": [
+    {
+      "address": "0000:5d:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010802",
+      "device_id": "0xa80a",
+      "kernel_driver": "nvme",
+      "vendor_id": "0x144d"
+    },
+    {
+      "address": "0000:00:0e.0",
+      "bus_type": "pci",
+      "class_code": "0x088000",
+      "device_id": "0x201d",
+      "kernel_driver": "vmd",
+      "vendor_id": "0x8086"
+    }
+  ],
+  "dmi": {},
+  "schema_version": 1
+}

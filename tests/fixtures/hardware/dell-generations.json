@@ -1,0 +1,43 @@
+{
+  "bmc_interfaces": [
+    "ipmi0"
+  ],
+  "controllers": [
+    {
+      "address": "0000:83:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010700",
+      "device_id": "0x00ac",
+      "kernel_driver": "mpt3sas",
+      "subsystem_device_id": "0x1f5f",
+      "subsystem_vendor_id": "0x1028",
+      "vendor_id": "0x1000"
+    },
+    {
+      "address": "0000:02:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010400",
+      "device_id": "0x005d",
+      "kernel_driver": "megaraid_sas",
+      "subsystem_device_id": "0x1f49",
+      "subsystem_vendor_id": "0x1028",
+      "vendor_id": "0x1000"
+    },
+    {
+      "address": "0000:41:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010400",
+      "device_id": "0x00a5",
+      "kernel_driver": "mpi3mr",
+      "subsystem_device_id": "0x2176",
+      "subsystem_vendor_id": "0x1028",
+      "vendor_id": "0x1000"
+    }
+  ],
+  "dmi": {
+    "board_name": "0H7H8M",
+    "product_name": "PowerEdge R760",
+    "sys_vendor": "Dell Inc."
+  },
+  "schema_version": 1
+}

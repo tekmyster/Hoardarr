@@ -1,0 +1,10 @@
+# Proprietary utilities are not Ubuntu archive packages. Hardware detection selects
+# the exact provider. Bootstrap fetches pinned tools from official public download
+# sites when available and after any required license acceptance. Login-gated or
+# restricted payloads are reported with exact manual staging instructions.
+#
+# Broadcom: StorCLI / StorCLI2
+# Dell:     PERCCLI / PERCCLI2
+# HPE:      SSACLI / HPE StorCLI
+# Microchip: ARCCONF
+# Areca:    cli64

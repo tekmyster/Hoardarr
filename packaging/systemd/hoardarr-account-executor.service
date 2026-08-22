@@ -1,0 +1,40 @@
+[Unit]
+Description=Hoardarr privileged media-account executor
+Documentation=file:/usr/share/doc/hoardarr/backend.md
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/lib/hoardarr/venv/bin/python -m hoardarr.accounts.executor --socket /run/hoardarr/account-executor.sock
+RuntimeDirectory=hoardarr
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+
+# This root service exposes one typed operation over a root-owned Unix socket.
+# Samba's local passdb tools use Netlink only to enumerate host interfaces;
+# internet protocol sockets remain unavailable to this service.
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

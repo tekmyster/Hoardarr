@@ -1,0 +1,90 @@
+{
+  "controllers": [
+    {
+      "address": "f8b3781a-1e82-4818-a1c3-63d806ec15bb",
+      "bus_type": "vmbus",
+      "driver": "hv_storvsc"
+    }
+  ],
+  "disks": [
+    {
+      "capacity_bytes": 240057409536,
+      "connection": {
+        "controller_address": "f8b3781a-1e82-4818-a1c3-63d806ec15bb",
+        "enclosure_id": null,
+        "presentation": "hyperv-scsi",
+        "protocol": "uas",
+        "slot": null,
+        "transport": "usb"
+      },
+      "firmware_revision": "V01",
+      "health": {
+        "power_on_hours": {
+          "captured_at": "2026-08-16T20:07:00Z",
+          "confidence": "unavailable",
+          "observations": [
+            {
+              "captured_at": "2026-08-16T20:07:00Z",
+              "confidence": "low",
+              "qualifies_as_lifetime": false,
+              "reason": "Translated host counter was not corroborated by raw SMART data.",
+              "source": "windows-storage-reliability-counter",
+              "transport": "usb/uas -> hyperv-scsi",
+              "unit": "hours",
+              "value": 8
+            },
+            {
+              "captured_at": "2026-08-16T20:07:00Z",
+              "confidence": "high",
+              "qualifies_as_lifetime": false,
+              "reason": "This is device attachment duration, not drive lifetime power-on hours.",
+              "source": "os-device-attachment-duration",
+              "transport": "usb/uas -> hyperv-scsi",
+              "unit": "seconds",
+              "value": 59820
+            }
+          ],
+          "reason": "Raw device SMART lifetime data was unavailable through the USB/UAS and Hyper-V SCSI presentation; translated counters and attachment duration are not substitutes.",
+          "source": "smartctl-raw-device-data",
+          "status": "unavailable",
+          "transport": "usb/uas -> hyperv-scsi",
+          "unit": "hours",
+          "value": null
+        }
+      },
+      "identity": {
+        "serial": "STP26501RAW"
+      },
+      "kernel_name": "sdb",
+      "kernel_path": "/dev/sdb",
+      "model": "SSD-240G",
+      "partitions": [],
+      "read_only": false,
+      "removable": false,
+      "rotational": false,
+      "sector_sizes": {
+        "logical_bytes": 512,
+        "physical_bytes": 4096
+      },
+      "signature_scan": {
+        "reason": "No partition or filesystem signature was reported by the read-only scan.",
+        "source": "udev",
+        "status": "partial"
+      },
+      "signatures": [],
+      "vendor": "CISCO"
+    }
+  ],
+  "dmi": {
+    "product_name": "Virtual Machine",
+    "system_vendor": "Microsoft Corporation"
+  },
+  "schema_version": 1,
+  "transport_hosts": [
+    {
+      "address": "host0",
+      "bus_type": "scsi_host",
+      "driver": "storvsc_host"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "bmc_interfaces": [
+    "ipmi0"
+  ],
+  "controllers": [
+    {
+      "address": "0000:18:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010700",
+      "device_id": "0x0097",
+      "kernel_driver": "mpt3sas",
+      "subsystem_device_id": "0x30e0",
+      "subsystem_vendor_id": "0x1000",
+      "vendor_id": "0x1000"
+    },
+    {
+      "address": "0000:5e:00.0",
+      "bus_type": "pci",
+      "class_code": "0x010802",
+      "device_id": "0x0a54",
+      "kernel_driver": "nvme",
+      "subsystem_device_id": "0x0000",
+      "subsystem_vendor_id": "0x108e",
+      "vendor_id": "0x8086"
+    }
+  ],
+  "dmi": {
+    "board_name": "ASSY,MOTHERBOARD,1U",
+    "product_name": "ORACLE SERVER X8-2L",
+    "sys_vendor": "Oracle Corporation"
+  },
+  "schema_version": 1
+}
