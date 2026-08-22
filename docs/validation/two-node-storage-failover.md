@@ -24,8 +24,8 @@ The default hard limits are:
 - 64 MiB planned payload writes to any one virtual device;
 - 9 MiB written once to each local virtual SSD;
 - 32 MiB written once to the shared virtual LUN;
-- one 4 MiB controlled write and an 8 MiB 95%-read mixed workload, with the
-  mixed phase's full worst-case write volume reserved against both possible
+- one 4 MiB controlled write and a 12-second, 1 MiB/s, 95%-read mixed workload, with the
+  mixed phase's full 12 MiB worst-case write volume reserved against both possible
   mergerFS destination members;
 - repeated stress and soak phases are read-only.
 

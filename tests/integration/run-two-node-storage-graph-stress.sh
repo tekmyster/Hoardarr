@@ -69,8 +69,8 @@ charge_write() {
 # is reserved against both members even though only one can receive the file.
 for device in A1 A2 B1 B2; do charge_write "${device}" $((9 * 1024 * 1024)); done
 charge_write A1 $((4 * 1024 * 1024))
-charge_write A1 $((8 * 1024 * 1024))
-charge_write A2 $((8 * 1024 * 1024))
+charge_write A1 $((12 * 1024 * 1024))
+charge_write A2 $((12 * 1024 * 1024))
 charge_write SHARED $((32 * 1024 * 1024))
 
 curl --fail --location --proto '=https' --tlsv1.2 \
@@ -272,7 +272,7 @@ remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-d
 phase limited_write
 remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --rate=1M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
 phase mixed_read_write
-remote 2222 'sudo fio --name=mixed-read-write --filename=/srv/hoardarr/a/local/mixed-io.bin --rw=randrw --rwmixread=95 --bs=64k --size=8M --io_size=8M --rate=1M --direct=0 --fsync=1 --iodepth=4 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
+remote 2222 'sudo fio --name=mixed-read-write --filename=/srv/hoardarr/a/local/mixed-io.bin --rw=randrw --rwmixread=95 --bs=64k --size=8M --time_based=1 --runtime=12 --rate=1M --direct=1 --ioengine=libaio --iodepth=4 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
 
 first_path="${topology[A_SHARED_PATH_ONE]}"
 phase path_a_failover_start
