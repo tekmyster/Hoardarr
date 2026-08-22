@@ -310,11 +310,27 @@ def metric_history(
     requested_resolution = resolution
     duration = end - start
     if resolution == "auto":
-        expected_raw = duration.total_seconds() / max(1, definition.minimum_interval_seconds)
-        if (
-            duration <= timedelta(hours=settings.telemetry_recent_retention_hours)
-            and expected_raw <= limit
-        ):
+        # A newly installed node can have only minutes of retained samples even
+        # when the requested window is 24 hours. Prefer those bounded raw
+        # observations over an hourly rollup that does not exist yet. Once the
+        # actual raw population exceeds the graph budget, normal progressive
+        # resolution selection applies.
+        raw_points = 0
+        if duration <= timedelta(hours=settings.telemetry_recent_retention_hours):
+            raw_points = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(MetricSample)
+                    .where(
+                        MetricSample.entity_id == entity_id,
+                        MetricSample.metric_id == metric_id,
+                        MetricSample.observed_at >= start,
+                        MetricSample.observed_at <= end,
+                    )
+                )
+                or 0
+            )
+        if raw_points <= limit and raw_points > 0:
             resolution = "raw"
         elif (
             duration <= timedelta(days=settings.telemetry_hourly_retention_days)

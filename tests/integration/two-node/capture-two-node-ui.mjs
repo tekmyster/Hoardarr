@@ -85,6 +85,9 @@ try {
   if (memoryEvidence.postWarmupGrowthBytes !== null && memoryEvidence.postWarmupGrowthBytes > memoryEvidence.acceptanceEnvelopeBytes) {
     throw new Error(`browser heap grew ${memoryEvidence.postWarmupGrowthBytes} bytes after warm-up`);
   }
+  if (memoryEvidence.maximumCommandsPerSeries < 2) {
+    throw new Error("persisted controller telemetry did not produce a visible graph series");
+  }
   await fs.writeFile(
     path.join(outputDirectory, `${nodeSlug}-browser-memory.json`),
     `${JSON.stringify(memoryEvidence, null, 2)}\n`,

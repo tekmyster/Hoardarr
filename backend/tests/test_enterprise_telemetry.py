@@ -1137,6 +1137,43 @@ def test_auto_history_uses_retained_resolution_and_describes_aggregation(tmp_pat
     engine.dispose()
 
 
+def test_auto_history_uses_bounded_raw_samples_before_first_rollup(tmp_path: Path) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    now = datetime.now(UTC).replace(microsecond=0)
+    with factory() as session, session.begin():
+        token = issue_setup_token(session)
+        ingest(
+            session,
+            [
+                reading("io.read.iops", value, now - timedelta(seconds=offset))
+                for value, offset in ((10, 15), (20, 10), (30, 5))
+            ],
+        )
+        entity = session.scalar(select(MetricEntity))
+        assert entity is not None
+        entity_id = entity.id
+    with TestClient(create_app(settings), base_url="http://testserver") as client:
+        claim(client, token)
+        response = client.get(
+            "/api/v1/telemetry/history",
+            params={
+                "entity_id": entity_id,
+                "metric_id": "io.read.iops",
+                "start": (now - timedelta(hours=24)).isoformat(),
+                "end": now.isoformat(),
+                "resolution": "auto",
+                "limit": 240,
+            },
+        )
+        assert response.status_code == 200
+        document = response.json()
+        assert document["source_resolution"] == "raw"
+        assert document["raw"] is True
+        assert document["points_returned"] == 3
+        assert [point["value"] for point in document["points"]] == [10, 20, 30]
+    engine.dispose()
+
+
 @pytest.mark.parametrize("count", [1, 24, 60, 120, 240])
 def test_scale_ingestion_and_bounded_current_query(tmp_path: Path, count: int) -> None:
     _settings, engine, factory = runtime(tmp_path)
