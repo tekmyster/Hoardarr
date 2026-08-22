@@ -16,7 +16,7 @@ mountpoint="$work/media"
 device_mountpoint="$work/device"
 database="$work/hoardarr.sqlite3"
 transactions="$work/transactions"
-initiator="$(awk -F= '/^InitiatorName=/{print $2}' /etc/iscsi/initiatorname.iscsi)"
+initiator="iqn.2026-08.local.hoardarr:initiator-${GITHUB_RUN_ID:-$$}"
 portals=(127.0.0.2 127.0.0.3 127.0.0.4)
 
 cleanup() {
@@ -72,6 +72,8 @@ run_helper() {
 modprobe target_core_file
 modprobe iscsi_target_mod
 mkdir -p "$mountpoint" "$device_mountpoint" /etc/multipath/conf.d
+systemctl stop iscsid.service iscsid.socket >/dev/null 2>&1 || true
+printf 'InitiatorName=%s\n' "$initiator" >/etc/iscsi/initiatorname.iscsi
 targetcli /backstores/fileio create name="$backstore" file_or_dev="$backing" size=3G write_back=false >/dev/null
 targetcli /iscsi create "$target_iqn" >/dev/null
 targetcli "/iscsi/$target_iqn/tpg1/luns" create "/backstores/fileio/$backstore" >/dev/null
