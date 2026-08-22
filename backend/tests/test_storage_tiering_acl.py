@@ -190,7 +190,7 @@ def test_transfer_does_not_replace_destination_created_during_copy(
             "source_identity": "source-volume",
             "destination_identity": "destination-volume",
             "method": "copy",
-            "retain_until": "never",
+            "retain_until": "import_complete",
             "cleanup": False,
             "required_bytes": source.stat().st_size,
             "completed_steps": ["download", "repair", "unpack", "verify"],
