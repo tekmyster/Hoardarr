@@ -19,11 +19,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+
+import tomllib
 
 TARGET_OS_ID = "ubuntu"
 TARGET_OS_VERSION = "24.04"
@@ -172,16 +173,49 @@ def _project_metadata(root: Path) -> tuple[str, str]:
     version = str(metadata["version"])
     if not VERSION_RE.fullmatch(version):
         raise BuildError(f"unsupported project version: {version!r}")
-    lock_digest = hashlib.sha256()
-    for lock in locks:
-        lock_digest.update(lock.relative_to(root).as_posix().encode("utf-8"))
-        lock_digest.update(b"\0")
-        lock_digest.update(lock.read_bytes())
-        lock_digest.update(b"\0")
-    release_id = f"{version}-{lock_digest.hexdigest()[:12]}"
+    commit, _epoch = source_revision(root)
+    release_id = f"{version}-{commit[:12]}"
     if not RELEASE_ID_RE.fullmatch(release_id):
         raise BuildError(f"unsafe release identifier: {release_id!r}")
     return version, release_id
+
+
+def source_revision(root: Path) -> tuple[str, int]:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        epoch_text = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise BuildError("release builds require a Git source checkout") from exc
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit) or not epoch_text.isdecimal():
+        raise BuildError("Git returned an invalid source revision")
+    return commit, int(epoch_text)
+
+
+def validate_clean_source(root: Path) -> None:
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise BuildError("could not verify the release source checkout") from exc
+    if status.strip():
+        raise BuildError("release source checkout contains uncommitted files")
 
 
 def create_plan(root: Path, output_dir: Path) -> ReleasePlan:
@@ -317,20 +351,7 @@ def _copy_release_assets(root: Path, staging: Path) -> None:
 
 
 def _write_release_metadata(root: Path, staging: Path, plan: ReleasePlan) -> None:
-    commit = "unknown"
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        candidate = result.stdout.strip()
-        if re.fullmatch(r"[0-9a-f]{40,64}", candidate):
-            commit = candidate
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pass
+    commit, source_epoch = source_revision(root)
     metadata = {
         "schema": 1,
         "name": "hoardarr",
@@ -344,7 +365,7 @@ def _write_release_metadata(root: Path, staging: Path, plan: ReleasePlan) -> Non
             "python": TARGET_PYTHON,
         },
         "source_commit": commit,
-        "built_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "built_at": datetime.fromtimestamp(source_epoch, UTC).isoformat(),
     }
     (staging / "RELEASE.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
@@ -460,6 +481,9 @@ def _verify_offline_install(staging: Path) -> None:
 
 def build_bundle(root: Path, output_dir: Path, *, uv: str, npm: str) -> Path:
     validate_build_host()
+    validate_clean_source(root)
+    _commit, source_epoch = source_revision(root)
+    os.environ.setdefault("SOURCE_DATE_EPOCH", str(source_epoch))
     plan = create_plan(root, output_dir)
     destination = Path(plan.output)
     if destination.exists() or destination.is_symlink():

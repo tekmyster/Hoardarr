@@ -72,7 +72,8 @@ jobs:
           test -n "$release_dir"
           archive="dist/$(basename "$release_dir").tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf "$archive" -C "$(dirname "$release_dir")" "$(basename "$release_dir")"
+            --use-compress-program='gzip -n' -cf "$archive" \
+            -C "$(dirname "$release_dir")" "$(basename "$release_dir")"
           sha256sum "$archive" >"$archive.sha256"
       - name: Install the built wheel into an empty Python 3.12 environment
         run: |
@@ -144,7 +145,8 @@ jobs:
             hoardarr-account-executor.service \
             hoardarr-storage-executor.service \
             hoardarr-storage-status.service
-          curl --fail --silent --show-error http://127.0.0.1:7877/health/live
+          curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:7877/health/live
           curl --fail --silent --show-error http://127.0.0.1:7877/health/ready
           test "$(stat -c '%U:%G:%a' /var/lib/hoardarr)" = "root:root:700"
           test "$(stat -c '%U:%G:%a' /etc/hoardarr/hoardarr.env)" = "root:hoardarr:640"

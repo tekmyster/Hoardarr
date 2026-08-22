@@ -88,7 +88,7 @@ parse_args() {
 require_commands() {
     local command_name
     for command_name in \
-        python3 systemctl apt-get dpkg-query getent id install useradd usermod awk chmod chown find flock grep ln mv mktemp ps readlink stat tr
+        python3 systemctl apt-get dpkg-query getent id install useradd usermod awk chmod chown curl find flock grep ln mv mktemp ps readlink sleep stat tr
     do
         command -v "${command_name}" >/dev/null 2>&1 || die "required command is missing: ${command_name}"
     done
@@ -600,6 +600,44 @@ install_runtime_wrapper() {
     mv -Tf -- "${temporary}" "${destination}"
 }
 
+wait_for_api_ready() {
+    local attempt
+    for ((attempt = 1; attempt <= 30; attempt++)); do
+        if curl --fail --silent --show-error --max-time 2 \
+            http://127.0.0.1:7877/health/ready >/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+stop_runtime_services() {
+    systemctl stop \
+        hoardarr-api.service \
+        hoardarr-worker.service \
+        hoardarr-account-executor.service \
+        hoardarr-storage-executor.service \
+        hoardarr-storage-status.service || true
+}
+
+restore_previous_release() {
+    local previous_release="$1"
+    stop_runtime_services
+    if [[ -n "${previous_release}" ]]; then
+        atomic_symlink "${previous_release}" "${LIB_ROOT}/current"
+        systemctl restart hoardarr-migrate.service || return 1
+        systemctl start \
+            hoardarr-account-executor.service \
+            hoardarr-storage-executor.service \
+            hoardarr-storage-status.service \
+            hoardarr-worker.service \
+            hoardarr-api.service || return 1
+    else
+        rm -f -- "${LIB_ROOT}/current"
+    fi
+}
+
 install_config_units_docs() {
     install -d -o root -g hoardarr -m 0750 "${CONFIG_ROOT}"
     if [[ ! -e "${CONFIG_FILE}" ]]; then
@@ -659,7 +697,7 @@ apply_release() {
     install_config_units_docs
     systemctl daemon-reload
     systemctl enable --now lldpd.service
-    systemctl stop hoardarr-api.service hoardarr-worker.service hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service
+    stop_runtime_services
     atomic_symlink "releases/${RELEASE_ID}" "${LIB_ROOT}/current"
     atomic_symlink "current/venv" "${LIB_ROOT}/venv"
     atomic_symlink "current/scripts" "${LIB_ROOT}/scripts"
@@ -672,15 +710,16 @@ apply_release() {
     systemctl enable hoardarr-migrate.service hoardarr-api.service hoardarr-worker.service hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service
 
     if ! systemctl restart hoardarr-migrate.service; then
-        if [[ -n "${previous_release}" ]]; then
-            atomic_symlink "${previous_release}" "${LIB_ROOT}/current"
-        fi
-        systemctl stop hoardarr-api.service hoardarr-worker.service || true
-        die "database migration failed; API and worker remain stopped"
+        restore_previous_release "${previous_release}" || true
+        die "database migration failed; the previous runtime was restored when available"
     fi
     if ! systemctl start hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service hoardarr-worker.service hoardarr-api.service; then
-        systemctl stop hoardarr-api.service hoardarr-worker.service hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service || true
-        die "a runtime service failed to start; runtime services are stopped"
+        restore_previous_release "${previous_release}" || true
+        die "a runtime service failed to start; the previous runtime was restored when available"
+    fi
+    if ! wait_for_api_ready; then
+        restore_previous_release "${previous_release}" || true
+        die "the API did not become ready; the previous runtime was restored when available"
     fi
     log "Installed Hoardarr ${RELEASE_VERSION} (${RELEASE_ID})."
     log "No setup token was issued. The API retains the configured bind address."

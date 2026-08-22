@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import hashlib
 import json
 import os
 import platform
@@ -176,31 +175,25 @@ class RequirementsTests(unittest.TestCase):
 
 
 class BuildPlanTests(unittest.TestCase):
-    def test_plan_is_read_only_and_versioned_from_lock(self):
+    def test_plan_is_read_only_and_versioned_from_source_commit(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "not-created"
             plan = builder.create_plan(ROOT, output)
             self.assertRegex(plan.version, r"^[0-9]+\.[0-9]+\.[0-9]+")
-            self.assertEqual(
-                plan.release_id,
-                f"{plan.version}-{self._lock_digest()[:12]}",
-            )
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(plan.release_id, f"{plan.version}-{commit[:12]}")
             self.assertIn(plan.release_id, plan.bundle_name)
             self.assertIn("requirements/runtime.lock", plan.copied_paths)
             self.assertIn("scripts/bootstrap.py", plan.copied_paths)
             self.assertIn("packages/", plan.copied_paths)
             self.assertIn("frontend/", plan.copied_paths)
             self.assertFalse(output.exists())
-
-    @staticmethod
-    def _lock_digest() -> str:
-        digest = hashlib.sha256()
-        for path in (ROOT / "backend" / "uv.lock", ROOT / "frontend" / "package-lock.json"):
-            digest.update(path.relative_to(ROOT).as_posix().encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-            digest.update(b"\0")
-        return digest.hexdigest()
 
     def test_installed_detector_and_hardware_manifests_share_release_root(self):
         detector = (ROOT / "scripts" / "detect-hardware.py").read_text(encoding="utf-8")
