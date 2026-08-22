@@ -1,5 +1,8 @@
 name: Isolated storage integration
 on:
+  push:
+    branches:
+      - rc/0.3.10-validation
   workflow_dispatch:
 jobs:
   mergerfs-persistent-telemetry:

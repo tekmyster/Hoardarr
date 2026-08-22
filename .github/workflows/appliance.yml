@@ -1,5 +1,8 @@
 name: Build appliance ISO
 on:
+  push:
+    branches:
+      - rc/0.3.10-validation
   workflow_dispatch:
     inputs:
       base_iso_url:
@@ -12,8 +15,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     env:
-      BASE_ISO_URL: ${{ inputs.base_iso_url }}
-      BASE_ISO_SHA256: ${{ inputs.base_iso_sha256 }}
+      BASE_ISO_URL: ${{ inputs.base_iso_url || 'https://releases.ubuntu.com/noble/ubuntu-24.04.4-live-server-amd64.iso' }}
+      BASE_ISO_SHA256: ${{ inputs.base_iso_sha256 || 'e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

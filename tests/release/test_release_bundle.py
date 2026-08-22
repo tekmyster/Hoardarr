@@ -333,15 +333,25 @@ class InstallerPlanTests(unittest.TestCase):
                 "versions.env",
             ):
                 (bundle / "packages" / package_manifest).write_text(
-                    "mergerfs\nsamba\n"
+                    "lldpd\nmergerfs\nsamba\n"
                     if package_manifest == "appliance-core.txt"
                     else "placeholder\n",
                     encoding="utf-8",
                 )
-            for unit in ("api", "worker", "migrate", "account-executor"):
+            for unit in (
+                "api",
+                "worker",
+                "migrate",
+                "account-executor",
+                "storage-executor",
+                "storage-status",
+            ):
                 (bundle / "systemd" / f"hoardarr-{unit}.service").write_text(
                     "[Unit]\n", encoding="utf-8"
                 )
+            (bundle / "systemd" / "hoardarr-lldpd.conf").write_text(
+                "[Service]\n", encoding="utf-8"
+            )
             (bundle / "docs" / "backend.md").write_text("# Backend\n", encoding="utf-8")
             (bundle / "frontend" / "index.html").write_text(
                 "<!doctype html><title>Hoardarr</title>\n", encoding="utf-8"
