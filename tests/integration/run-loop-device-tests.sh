@@ -21,7 +21,8 @@ cleanup() {
 trap cleanup EXIT
 
 make_loop() {
-  local name="$1" size="$2" image="$work/$name.img" loop backing
+  local name="$1" size="$2" image loop backing
+  image="$work/$name.img"
   truncate -s "$size" "$image"
   loop="$(losetup --find --show "$image")"
   loops+=("$loop")

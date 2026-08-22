@@ -48,6 +48,7 @@ class ApplianceAssetsTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("/.hoardarr-disposable-runner", loop_test)
+        self.assertIn('image="$work/$name.img"', loop_test)
         self.assertIn("run-mergerfs-telemetry-workload.sh", storage)
         workload = (ROOT / "tests/integration/run-mergerfs-telemetry-workload.sh").read_text(
             encoding="utf-8"
