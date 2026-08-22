@@ -23,6 +23,7 @@ readonly MAX_DEVICE_WRITES="${HOARDARR_TEST_MAX_DEVICE_WRITES:-67108864}"
 readonly READ_SOAK_SECONDS="${HOARDARR_TEST_READ_SOAK_SECONDS:-45}"
 readonly WORKLOAD_CONCURRENCY="${HOARDARR_TEST_WORKLOAD_CONCURRENCY:-2}"
 readonly WHEEL="${HOARDARR_WHEEL:?HOARDARR_WHEEL must name the built backend wheel}"
+readonly WHEEL_NAME="$(basename "${WHEEL}")"
 
 case "${RUN_ROOT}" in
     "${RUNNER_TEMP}"/hoardarr-two-node-*) ;;
@@ -173,13 +174,13 @@ wait_node 2223 b
 
 install_node() {
     local port="$1"
-    copy_to "${port}" "${WHEEL}" /tmp/hoardarr.whl
+    copy_to "${port}" "${WHEEL}" "/tmp/${WHEEL_NAME}"
     copy_to "${port}" "${ROOT}/tests/integration/two_node_evidence.py" /tmp/two_node_evidence.py
     copy_to "${port}" "${ROOT}/tests/integration/two-node/prepare-node.sh" /tmp/prepare-node.sh
     for unit in hoardarr-migrate.service hoardarr-api.service hoardarr-worker.service; do
         copy_to "${port}" "${ROOT}/packaging/systemd/${unit}" "/tmp/${unit}"
     done
-    remote "${port}" 'sudo install -d -m 0755 /usr/lib/hoardarr /usr/local/libexec /etc/hoardarr; sudo install -d -m 0700 /var/lib/hoardarr; sudo python3 -m venv /usr/lib/hoardarr/venv; sudo /usr/lib/hoardarr/venv/bin/pip install --disable-pip-version-check /tmp/hoardarr.whl; sudo install -m 0755 /tmp/two_node_evidence.py /usr/local/libexec/hoardarr-two-node-evidence; sudo install -m 0755 /tmp/prepare-node.sh /usr/local/libexec/hoardarr-prepare-two-node; sudo install -m 0644 /tmp/hoardarr-*.service /etc/systemd/system/'
+    remote "${port}" "set -Eeuo pipefail; sudo install -d -m 0755 /usr/lib/hoardarr /usr/local/libexec /etc/hoardarr; sudo install -d -m 0700 /var/lib/hoardarr; sudo python3 -m venv /usr/lib/hoardarr/venv; sudo /usr/lib/hoardarr/venv/bin/pip install --disable-pip-version-check /tmp/${WHEEL_NAME}; sudo install -m 0755 /tmp/two_node_evidence.py /usr/local/libexec/hoardarr-two-node-evidence; sudo install -m 0755 /tmp/prepare-node.sh /usr/local/libexec/hoardarr-prepare-two-node; sudo install -m 0644 /tmp/hoardarr-*.service /etc/systemd/system/"
     tar -C "${ROOT}/frontend/dist" -cf "${RUN_ROOT}/frontend.tar" .
     copy_to "${port}" "${RUN_ROOT}/frontend.tar" /tmp/hoardarr-frontend.tar
     remote "${port}" 'sudo install -d -m 0755 /usr/lib/hoardarr/current/frontend; sudo tar -C /usr/lib/hoardarr/current/frontend -xf /tmp/hoardarr-frontend.tar; sudo find /usr/lib/hoardarr/current/frontend -type d -exec chmod 0755 {} +; sudo find /usr/lib/hoardarr/current/frontend -type f -exec chmod 0644 {} +'
@@ -213,6 +214,23 @@ while IFS='=' read -r key value; do topology["B_${key}"]="${value}"; done <"${OU
     exit 2
 }
 
+write_sectors() {
+    local port="$1" device="$2"
+    remote "${port}" "cat /sys/class/block/\$(basename \$(readlink -f ${device}))/stat | awk '{print \$7 * 512}'"
+}
+
+# Capture Linux block-layer counters before any test dataset is written. These
+# counters include filesystem metadata and therefore remain separate from the
+# planned payload budget.
+for node in A B; do
+    port=2222; [[ "${node}" == B ]] && port=2223
+    for member in ONE TWO; do
+        device="${topology[${node}_LOCAL_${member}]}"
+        write_sectors "${port}" "${device}" >"${OUTPUT}/${node,,}-${member,,}-writes-before.txt"
+    done
+    write_sectors "${port}" /dev/mapper/hoardarr-shared >"${OUTPUT}/${node,,}-shared-writes-before.txt"
+done
+
 for node in A B; do
     port=2222; [[ "${node}" == B ]] && port=2223
     for member in 1 2; do
@@ -220,18 +238,6 @@ for node in A B; do
     done
 done
 remote 2222 'sudo dd if=/dev/urandom of=/srv/hoardarr/shared/media-dataset.bin bs=1M count=32 conv=fsync status=none; sudo sha256sum /srv/hoardarr/shared/media-dataset.bin' | tee "${OUTPUT}/shared-hash-before.txt"
-
-write_sectors() {
-    local port="$1" device="$2"
-    remote "${port}" "cat /sys/class/block/\$(basename \$(readlink -f ${device}))/stat | awk '{print \$7 * 512}'"
-}
-for node in A B; do
-    port=2222; [[ "${node}" == B ]] && port=2223
-    for member in ONE TWO; do
-        device="${topology[${node}_LOCAL_${member}]}"
-        write_sectors "${port}" "${device}" >"${OUTPUT}/${node,,}-${member,,}-writes-before.txt"
-    done
-done
 
 phase_file="${OUTPUT}/workload-phases.jsonl"
 phase() { printf '{"phase":"%s","timestamp":"%s"}\n' "$1" "$(date --utc +%FT%TZ)" | tee -a "${phase_file}"; }
@@ -287,6 +293,7 @@ for node in A B; do
         device="${topology[${node}_LOCAL_${member}]}"
         write_sectors "${port}" "${device}" >"${OUTPUT}/${node,,}-${member,,}-writes-after.txt"
     done
+    write_sectors "${port}" /dev/mapper/hoardarr-shared >"${OUTPUT}/${node,,}-shared-writes-after.txt"
     remote "${port}" "sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence export --node 'Node ${node}' --output /tmp/node-${node,,}-evidence.json; sudo cat /proc/\$(systemctl show --property=MainPID --value hoardarr-worker)/status | grep -E '^(VmRSS|VmHWM|Threads):'" >"${OUTPUT}/node-${node,,}-worker-memory.txt"
     remote "${port}" "sudo cat /tmp/node-${node,,}-evidence.json" >"${OUTPUT}/node-${node,,}-evidence.json"
     remote "${port}" 'sudo multipath -ll' >"${OUTPUT}/node-${node,,}-multipath.txt"
@@ -346,6 +353,9 @@ for node in "ab":
         before = int((root / f"{node}-{member}-writes-before.txt").read_text().strip())
         after = int((root / f"{node}-{member}-writes-after.txt").read_text().strip())
         actual_writes[f"Node {node.upper()} SSD {1 if member == 'one' else 2}"] = max(0, after - before)
+    before = int((root / f"{node}-shared-writes-before.txt").read_text().strip())
+    after = int((root / f"{node}-shared-writes-after.txt").read_text().strip())
+    actual_writes[f"Node {node.upper()} shared LUN path stack"] = max(0, after - before)
 
 summary = {
     "environment": "two Ubuntu 24.04 QEMU VMs with systemd",
