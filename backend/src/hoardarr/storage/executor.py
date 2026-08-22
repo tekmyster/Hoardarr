@@ -2731,6 +2731,30 @@ def apply_storage_redundancy(
         runner([_tool("multipathd"), "fail", "path", kernel_name], 30)
         runner([_tool("multipathd"), "del", "path", kernel_name], 30)
 
+    def flush_map_with_retry() -> None:
+        runner([_tool("udevadm"), "settle", "--timeout=60"], 70)
+        command = [_tool("multipath"), "-f", wwid]
+        for attempt in range(1, 6):
+            try:
+                runner(command, 120)
+                return
+            except ExecutorFailure:
+                if attempt == 5:
+                    raise
+                journal["state"] = "running"
+                journal["current_action"] = None
+                journal["notices"] = [
+                    *journal["notices"],
+                    {
+                        "code": "multipath_flush_retry",
+                        "message": "Waiting for Linux to release the unmounted multipath map.",
+                        "attempt": attempt,
+                    },
+                ]
+                journal["updated_at"] = time.time()
+                atomic_json(journal_path, journal)
+                sleep(0.2 * attempt)
+
     if plan["operation"] == "redundancy.replace":
         kernel_path = str(selected_devices[0].get("kernel_path") or "")
         create_and_verify_map(kernel_path)
@@ -2805,16 +2829,48 @@ def apply_storage_redundancy(
             direct_text = str(plan["after"].get("presentation_device") or "")
             if not direct_text.startswith("/dev/") or ".." in PurePosixPath(direct_text).parts:
                 raise ExecutorFailure("path_invalid", "The remaining direct path is invalid.")
-            if mountpoint != device_mountpoint:
-                runner([_tool("umount"), mountpoint_text], 120)
-            runner([_tool("umount"), device_mountpoint_text], 120)
-            runner([_tool("multipath"), "-f", wwid], 120)
-            runner([_tool("mount"), direct_text, device_mountpoint_text], 120)
-            if mountpoint != device_mountpoint:
-                runner(
-                    [_tool("mount"), "--bind", device_mountpoint_text, mountpoint_text],
-                    120,
-                )
+            public_unmounted = False
+            device_unmounted = False
+            map_flushed = False
+            try:
+                if mountpoint != device_mountpoint:
+                    runner([_tool("umount"), mountpoint_text], 120)
+                    public_unmounted = True
+                runner([_tool("umount"), device_mountpoint_text], 120)
+                device_unmounted = True
+                flush_map_with_retry()
+                map_flushed = True
+                runner([_tool("mount"), direct_text, device_mountpoint_text], 120)
+                device_unmounted = False
+                if mountpoint != device_mountpoint:
+                    runner(
+                        [_tool("mount"), "--bind", device_mountpoint_text, mountpoint_text],
+                        120,
+                    )
+                    public_unmounted = False
+            except ExecutorFailure as exc:
+                try:
+                    if device_unmounted:
+                        rollback_source = direct_text if map_flushed else mapper_text
+                        runner([_tool("mount"), rollback_source, device_mountpoint_text], 120)
+                        device_unmounted = False
+                    if mountpoint != device_mountpoint and public_unmounted:
+                        runner(
+                            [_tool("mount"), "--bind", device_mountpoint_text, mountpoint_text],
+                            120,
+                        )
+                        public_unmounted = False
+                except ExecutorFailure as rollback_exc:
+                    raise ExecutorFailure(
+                        "redundancy_rollback_failed",
+                        "The redundancy change failed and the existing mount could not "
+                        "be restored automatically.",
+                        needs_attention=True,
+                    ) from rollback_exc
+                raise ExecutorFailure(
+                    "redundancy_transition_failed",
+                    "The redundancy change failed; the existing storage mount was restored.",
+                ) from exc
     result = {
         "operation_id": operation_id,
         "storage_entity_id": plan["storage_entity_id"],

@@ -321,6 +321,64 @@ def test_privileged_removal_returns_to_remaining_direct_path_without_formatting(
     assert result["mountpoint"] == entity.mountpoint
 
 
+def test_redundancy_removal_waits_for_busy_mapper_and_preserves_mount(
+    session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entity, first = _registered(session)
+    second = _path("hba-b", "/dev/sdc")
+    add_plan = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="e" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="add",
+    )
+    apply_redundancy_result(session, plan=add_plan, observed_device=second)
+    remove_plan = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="f" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="remove",
+        candidate_path_identity=stable_path_identity(second),
+    )
+    commands: list[list[str]] = []
+    waits: list[float] = []
+    flush_attempts = 0
+
+    def busy_then_ready(command: list[str], _timeout: float) -> None:
+        nonlocal flush_attempts
+        commands.append(command)
+        if command[0].endswith("multipath") and "-f" in command:
+            flush_attempts += 1
+            if flush_attempts < 3:
+                raise ExecutorFailure("multipath_busy", "The map is still busy")
+
+    monkeypatch.setattr("hoardarr.storage.executor._tool", lambda name: f"/usr/sbin/{name}")
+    result = apply_storage_redundancy(
+        {
+            "operation": "apply_storage_redundancy",
+            "operation_id": "77777777-7777-4777-8777-777777777777",
+            "plan_sha256": remove_plan["plan_sha256"],
+            "plan": remove_plan,
+            "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
+        },
+        paths=Paths(transaction_root=tmp_path / "transactions"),
+        inventory_provider=lambda: {"disks": [first, second]},
+        runner=busy_then_ready,
+        sleep=waits.append,
+    )
+
+    assert flush_attempts == 3
+    assert waits == [0.2, 0.4]
+    assert ["/usr/sbin/udevadm", "settle", "--timeout=60"] in commands
+    assert commands[-2:] == [
+        ["/usr/sbin/mount", "/dev/sdb", "/mnt/hoardarr/lun7"],
+        ["/usr/sbin/mount", "--bind", "/mnt/hoardarr/lun7", "/media"],
+    ]
+    assert result["storage_entity_id"] == entity.id
+
+
 def test_expert_grouping_policy_is_applied_only_to_new_map(
     session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
