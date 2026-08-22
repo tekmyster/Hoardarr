@@ -13,7 +13,10 @@ if (!baseURL || !outputDirectory || !nodeSlug) {
 }
 
 await fs.mkdir(outputDirectory, { recursive: true });
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  args: ["--enable-precise-memory-info"],
+});
 try {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, colorScheme: "dark" });
   const page = await context.newPage();
@@ -26,7 +29,7 @@ try {
   await page.getByRole("heading", { name: "Storage Analytics", exact: true }).waitFor();
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-analytics-history.png`), fullPage: true });
   await page.getByRole("button", { name: "Storage", exact: true }).click();
-  await page.getByRole("heading", { name: "Storage", exact: true }).waitFor();
+  await page.locator("h1").filter({ hasText: /^Storage$/ }).waitFor();
   const sharedRow = page.locator(".redundancy-storage-row").filter({ hasText: "Shared Media" });
   await sharedRow.getByRole("button", { name: "Manage" }).click();
   await page.locator(".redundancy-management").waitFor();
@@ -38,13 +41,56 @@ try {
   await page.locator(".redundancy-graph").first().waitFor();
   await page.locator(".failover-marker").first().waitFor();
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-reconnected-history.png`), fullPage: true });
+
+  const heap = async () => {
+    await page.requestGC();
+    return page.evaluate(() => ({
+      usedJSHeapSize: performance.memory?.usedJSHeapSize ?? null,
+      totalJSHeapSize: performance.memory?.totalJSHeapSize ?? null,
+    }));
+  };
+  const graphShape = async () => page.locator(".path-series").evaluateAll((series) => ({
+    series: series.length,
+    maximumCommands: Math.max(0, ...series.map((item) => (item.getAttribute("d")?.match(/[ML]/g) ?? []).length)),
+  }));
+  const initialHeap = await heap();
+  let warmHeap = initialHeap;
+  let maximumSeries = 0;
+  let maximumCommands = 0;
+  await context.tracing.start({ screenshots: true, snapshots: true });
+  for (let cycle = 0; cycle < 80; cycle += 1) {
+    await page.getByRole("button", { name: cycle % 2 === 0 ? "Events" : "Controllers & paths" }).click();
+    await page.getByRole("button", { name: "Performance" }).click();
+    await page.locator(".redundancy-graph").first().waitFor();
+    const shape = await graphShape();
+    maximumSeries = Math.max(maximumSeries, shape.series);
+    maximumCommands = Math.max(maximumCommands, shape.maximumCommands);
+    if (cycle === 19) warmHeap = await heap();
+  }
+  const finalHeap = await heap();
+  const memoryEvidence = {
+    cycles: 80,
+    initial: initialHeap,
+    afterWarmup: warmHeap,
+    final: finalHeap,
+    postWarmupGrowthBytes: finalHeap.usedJSHeapSize === null || warmHeap.usedJSHeapSize === null
+      ? null
+      : finalHeap.usedJSHeapSize - warmHeap.usedJSHeapSize,
+    maximumRenderedSeries: maximumSeries,
+    maximumCommandsPerSeries: maximumCommands,
+    acceptanceEnvelopeBytes: 16 * 1024 * 1024,
+  };
+  if (memoryEvidence.postWarmupGrowthBytes !== null && memoryEvidence.postWarmupGrowthBytes > memoryEvidence.acceptanceEnvelopeBytes) {
+    throw new Error(`browser heap grew ${memoryEvidence.postWarmupGrowthBytes} bytes after warm-up`);
+  }
+  await fs.writeFile(
+    path.join(outputDirectory, `${nodeSlug}-browser-memory.json`),
+    `${JSON.stringify(memoryEvidence, null, 2)}\n`,
+  );
+  await context.tracing.stop({ path: path.join(outputDirectory, `${nodeSlug}-browser-trace.zip`) });
   await page.getByRole("button", { name: "Events" }).click();
   await page.locator(".redundancy-events").waitFor();
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-failover-events.png`), fullPage: true });
-  await context.tracing.start({ screenshots: true, snapshots: true });
-  await page.getByRole("button", { name: "Performance" }).click();
-  await page.getByRole("button", { name: "Events" }).click();
-  await context.tracing.stop({ path: path.join(outputDirectory, `${nodeSlug}-browser-trace.zip`) });
 } finally {
   await browser.close();
 }

@@ -62,6 +62,8 @@ jobs:
           test -s dist/validation/two-node-storage/node-b-reconnected-history.png
           test -s dist/validation/two-node-storage/node-a-analytics-history.png
           test -s dist/validation/two-node-storage/node-b-analytics-history.png
+          jq -e '.cycles == 80 and .postWarmupGrowthBytes <= .acceptanceEnvelopeBytes' dist/validation/two-node-storage/node-a-browser-memory.json
+          jq -e '.cycles == 80 and .postWarmupGrowthBytes <= .acceptanceEnvelopeBytes' dist/validation/two-node-storage/node-b-browser-memory.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

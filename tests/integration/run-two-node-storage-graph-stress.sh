@@ -233,6 +233,7 @@ for node in A B; do
         write_sectors "${port}" "${device}" >"${OUTPUT}/${node,,}-${member,,}-writes-before.txt"
     done
     write_sectors "${port}" /dev/mapper/hoardarr-shared >"${OUTPUT}/${node,,}-shared-writes-before.txt"
+    remote "${port}" "sudo cat /proc/\$(systemctl show --property=MainPID --value hoardarr-worker)/status | grep -E '^(VmRSS|VmHWM|Threads):'" >"${OUTPUT}/node-${node,,}-worker-memory-before.txt"
 done
 
 for node in A B; do
