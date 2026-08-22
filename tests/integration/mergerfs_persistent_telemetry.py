@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import issue_setup_token
 from hoardarr.core.config import Settings
@@ -20,7 +22,6 @@ from hoardarr.storage.telemetry import StorageTelemetrySampler
 from hoardarr.telemetry.collectors import HostCollector, StorageCollector
 from hoardarr.telemetry.service import TelemetryService
 from hoardarr.telemetry.store import build_rollups, history, ingest
-from sqlalchemy import func, select
 
 
 def runtime(database: Path):  # type: ignore[no-untyped-def]
@@ -108,7 +109,10 @@ def report(args: argparse.Namespace) -> int:
     before = _diskstats(args.independent / "diskstats-before.txt", names)
     after = _diskstats(args.independent / "diskstats-after.txt", names)
     deltas = {
-        name: {key: max(0, values[key] - before.get(name, {}).get(key, values[key])) for key in values}
+        name: {
+            key: max(0, values[key] - before.get(name, {}).get(key, values[key]))
+            for key in values
+        }
         for name, values in after.items()
     }
     engine, factory = runtime(args.database)
@@ -156,7 +160,11 @@ def report(args: argparse.Namespace) -> int:
             or 0
         )
         writes = session.execute(
-            select(MetricSample.entity_id, func.min(MetricSample.value), func.max(MetricSample.value))
+            select(
+                MetricSample.entity_id,
+                func.min(MetricSample.value),
+                func.max(MetricSample.value),
+            )
             .where(MetricSample.metric_id == "io.write.today", MetricSample.value.is_not(None))
             .group_by(MetricSample.entity_id)
         ).all()
@@ -200,7 +208,10 @@ def report(args: argparse.Namespace) -> int:
         raise RuntimeError("workload did not place files on every mergerFS member")
     if disconnected_samples == 0:
         raise RuntimeError("no telemetry persisted while every browser/API client was absent")
-    if not any((maximum_value or 0) > (minimum_value or 0) for _, minimum_value, maximum_value in writes):
+    if not any(
+        (maximum_value or 0) > (minimum_value or 0)
+        for _, minimum_value, maximum_value in writes
+    ):
         raise RuntimeError("writes-today did not increase during the controlled workload")
     if not all(item.get("write_sectors", 0) > 0 for item in deltas.values()) or len(deltas) != 4:
         raise RuntimeError("independent /proc/diskstats did not observe writes on all four members")
