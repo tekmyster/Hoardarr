@@ -1355,12 +1355,25 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
             presentation_device="/dev/sdb",
             filesystem_uuid="11111111-1111-4111-8111-111111111111",
         )
+        storage.config_json = {
+            **storage.config_json,
+            "node_name": "Node A",
+            "storage_scope": "external_shared",
+            "ownership_mode": "controlled_single_writer",
+            "ownership_state": "serving",
+            "peer_node": "Node B",
+        }
         storage_id = storage.id
 
     inventory = client.get("/api/v1/storage/logical")
     assert inventory.status_code == 200
     assert inventory.json()["items"][0]["id"] == storage_id
     assert inventory.json()["items"][0]["mountpoint"] == "/media"
+    assert inventory.json()["items"][0]["node_name"] == "Node A"
+    assert inventory.json()["items"][0]["storage_scope"] == "external_shared"
+    assert inventory.json()["items"][0]["ownership_mode"] == "controlled_single_writer"
+    assert inventory.json()["items"][0]["ownership_state"] == "serving"
+    assert inventory.json()["items"][0]["peer_node"] == "Node B"
     assert inventory.json()["items"][0]["redundancy_summary"] == {
         "healthy_paths": 1,
         "active_paths": 1,

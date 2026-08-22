@@ -1198,6 +1198,9 @@ def storage_documents(
                 "capacity_bytes": entity.capacity_bytes,
                 "node_name": entity.config_json.get("node_name"),
                 "storage_scope": entity.config_json.get("storage_scope", "local"),
+                "ownership_mode": entity.config_json.get("ownership_mode"),
+                "ownership_state": entity.config_json.get("ownership_state"),
+                "peer_node": entity.config_json.get("peer_node"),
                 "transition_capability": transition_capability(
                     entity, action="add", resulting_path_count=len(paths) + 1
                 ),

@@ -458,6 +458,9 @@ export interface LogicalStorageDocument {
   capacity_bytes: number;
   node_name?: string | null;
   storage_scope?: "local" | "external_shared" | string;
+  ownership_mode?: string | null;
+  ownership_state?: "serving" | "standby" | "unavailable" | "restarting" | string | null;
+  peer_node?: string | null;
   transition_capability?: { mode: "online_supported" | "brief_maintenance_required" | "automatic_conversion_unsupported"; message: string };
   redundancy_settings?: StorageRedundancySettings;
   redundancy_summary?: {

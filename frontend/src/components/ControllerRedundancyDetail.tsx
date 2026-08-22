@@ -235,6 +235,9 @@ export function ControllerRedundancyDetail({
     const unit = values[0].unit;
     return formatMetric({ ...values[0], value: total, unit });
   };
+  const nodeRole = storage.ownership_state
+    ? storage.ownership_state.replaceAll("_", " ")
+    : "Not reported";
 
   return <section className="redundancy-management" aria-label={`${storage.name} controller redundancy`}>
     <header className="redundancy-hero">
@@ -251,6 +254,9 @@ export function ControllerRedundancyDetail({
 
     {tab === "overview" && <>
       <div className="redundancy-kpis">
+        {storage.storage_scope === "external_shared" && <article><small>Current node</small><strong>{storage.node_name ?? "Not reported"}</strong></article>}
+        {storage.storage_scope === "external_shared" && <article><small>Storage role</small><strong>{nodeRole}</strong></article>}
+        {storage.storage_scope === "external_shared" && <article><small>Peer node</small><strong>{storage.peer_node ?? "Not reported"}</strong></article>}
         <article><small>Redundancy</small><strong>{stateLabel(storage)}</strong></article>
         <article><small>Healthy paths</small><strong>{summary.healthy_paths} / {storage.paths.length}</strong></article>
         <article><small>Active paths</small><strong>{summary.active_paths}</strong></article>
@@ -262,6 +268,7 @@ export function ControllerRedundancyDetail({
         <article><small>Current IOPS</small><strong>{aggregate("io.read.iops")} read · {aggregate("io.write.iops")} write</strong></article>
         <article><small>Latency</small><strong>{aggregate("io.read.latency")} read · {aggregate("io.write.latency")} write</strong></article>
       </div>
+      {storage.storage_scope === "external_shared" && <p className="field-hint">This view shows telemetry collected by {storage.node_name ?? "this node"}. Open {storage.peer_node ?? "the peer node"} to compare its live activity; Hoardarr does not infer peer IO or ownership from this node's counters.</p>}
       <Topology storage={storage} />
       <div className="redundancy-actions">
         <button type="button" className="button button-primary" onClick={() => onAction("add")}>Add redundant path</button>

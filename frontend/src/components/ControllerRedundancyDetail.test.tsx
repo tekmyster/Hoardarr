@@ -35,6 +35,11 @@ const storage: LogicalStorageDocument = {
   presentation_device: "/dev/mapper/naa.600a098000abc",
   topology_state: "fully_redundant",
   capacity_bytes: 8_000_000_000_000,
+  node_name: "Node A",
+  storage_scope: "external_shared",
+  ownership_mode: "controlled_single_writer",
+  ownership_state: "serving",
+  peer_node: "Node B",
   redundancy_settings: settings,
   redundancy_summary: {
     healthy_paths: 2,
@@ -158,6 +163,11 @@ describe("ControllerRedundancyDetail", () => {
     expect(await screen.findByText("2 / 2 paths healthy")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /MediaPool controller and path topology/i })).toBeInTheDocument();
     expect(screen.getByText("Failovers today")).toBeInTheDocument();
+    expect(screen.getByText("Node A")).toBeInTheDocument();
+    expect(screen.getByText("Storage role")).toBeInTheDocument();
+    expect(screen.getByText("serving")).toBeInTheDocument();
+    expect(screen.getByText("Node B")).toBeInTheDocument();
+    expect(screen.getByText(/does not infer peer IO or ownership/i)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Controllers & paths" }));
     expect(screen.getByText("Controller A")).toBeInTheDocument();
