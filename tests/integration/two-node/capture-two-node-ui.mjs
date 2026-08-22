@@ -17,7 +17,7 @@ const browser = await chromium.launch({
   headless: true,
   args: ["--enable-precise-memory-info"],
 });
-const diagnostics = { console: [], pageErrors: [], requestFailures: [], loginStatus: null, finalUrl: null, alert: null };
+  const diagnostics = { console: [], pageErrors: [], requestFailures: [], responseErrors: [], loginStatus: null, finalUrl: null, alert: null };
 try {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, colorScheme: "dark" });
   const page = await context.newPage();
@@ -28,6 +28,13 @@ try {
     url: request.url(),
     failure: request.failure()?.errorText ?? "unknown",
   }));
+  page.on("response", (response) => {
+    if (response.status() >= 400) diagnostics.responseErrors.push({
+      method: response.request().method(),
+      url: response.url(),
+      status: response.status(),
+    });
+  });
   await page.goto(baseURL, { waitUntil: "networkidle" });
   await page.locator("#username").fill("validation-owner");
   await page.locator("#password").fill("Hoardarr-Isolated-Validation-Only-11!");
@@ -106,6 +113,9 @@ try {
   await page.getByRole("button", { name: "Events" }).click();
   await page.locator(".redundancy-events").waitFor();
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-failover-events.png`), fullPage: true });
+  diagnostics.finalUrl = page.url();
+  const serverErrors = diagnostics.responseErrors.filter((response) => response.status >= 500);
+  if (serverErrors.length > 0) throw new Error(`browser observed server errors: ${JSON.stringify(serverErrors)}`);
 } catch (error) {
   const page = browser.contexts()[0]?.pages()[0];
   if (page) {
