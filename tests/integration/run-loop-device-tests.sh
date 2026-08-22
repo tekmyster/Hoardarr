@@ -111,7 +111,12 @@ EOF
 snapraid -c "$work/snapraid.conf" sync
 snapraid -c "$work/snapraid.conf" status
 snapraid -c "$work/snapraid.conf" diff
-[[ -s "$work/snap-data/snapraid.content" ]]
-[[ -s "$work/snap-parity/snapraid.content" ]]
-[[ -s "$work/snap-parity/snapraid.parity" ]]
+snapraid -c "$work/snapraid.conf" check
+stat --format='%n size=%s blocks=%b' \
+  "$work/snap-data/snapraid.content" \
+  "$work/snap-parity/snapraid.content" \
+  "$work/snap-parity/snapraid.parity"
+[[ -f "$work/snap-data/snapraid.content" ]]
+[[ -f "$work/snap-parity/snapraid.content" ]]
+[[ -f "$work/snap-parity/snapraid.parity" ]]
 umount "$work/snap-data" "$work/snap-parity"
