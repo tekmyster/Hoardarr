@@ -344,6 +344,11 @@ done
 
 # No browser or API metrics client was present for the workload above. Reconnect
 # only after export so the UI must reconstruct history from each node's database.
+for node in A B; do
+    port=2222; [[ "${node}" == B ]] && port=2223
+    remote "${port}" 'sudo systemctl is-active hoardarr-api.service hoardarr-worker.service; curl --fail --silent --show-error --max-time 10 http://127.0.0.1:7877/health/ready' >"${OUTPUT}/node-${node,,}-pre-browser-health.txt"
+    remote "${port}" 'sudo journalctl --no-pager -u hoardarr-api.service -u hoardarr-worker.service --since "10 minutes ago"' >"${OUTPUT}/node-${node,,}-service-journal.txt"
+done
 node "${ROOT}/tests/integration/two-node/capture-two-node-ui.mjs" \
     http://127.0.0.1:8080 "${OUTPUT}" node-a
 node "${ROOT}/tests/integration/two-node/capture-two-node-ui.mjs" \

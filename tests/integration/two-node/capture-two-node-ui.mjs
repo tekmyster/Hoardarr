@@ -17,14 +17,24 @@ const browser = await chromium.launch({
   headless: true,
   args: ["--enable-precise-memory-info"],
 });
+const diagnostics = { console: [], pageErrors: [], requestFailures: [], loginStatus: null, finalUrl: null, alert: null };
 try {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, colorScheme: "dark" });
   const page = await context.newPage();
+  page.on("console", (message) => diagnostics.console.push({ type: message.type(), text: message.text().slice(0, 1000) }));
+  page.on("pageerror", (error) => diagnostics.pageErrors.push(String(error).slice(0, 2000)));
+  page.on("requestfailed", (request) => diagnostics.requestFailures.push({
+    method: request.method(),
+    url: request.url(),
+    failure: request.failure()?.errorText ?? "unknown",
+  }));
   await page.goto(baseURL, { waitUntil: "networkidle" });
   await page.locator("#username").fill("validation-owner");
   await page.locator("#password").fill("Hoardarr-Isolated-Validation-Only-11!");
+  const loginResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/auth/login") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Login" }).click();
-  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  diagnostics.loginStatus = (await loginResponse).status();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor({ timeout: 60_000 });
   await page.getByRole("button", { name: "Analytics", exact: true }).click();
   await page.getByRole("heading", { name: "Storage Analytics", exact: true }).waitFor();
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-analytics-history.png`), fullPage: true });
@@ -96,6 +106,18 @@ try {
   await page.getByRole("button", { name: "Events" }).click();
   await page.locator(".redundancy-events").waitFor();
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-failover-events.png`), fullPage: true });
+} catch (error) {
+  const page = browser.contexts()[0]?.pages()[0];
+  if (page) {
+    diagnostics.finalUrl = page.url();
+    diagnostics.alert = (await page.getByRole("alert").allTextContents()).join(" | ").slice(0, 4000) || null;
+    await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-browser-failure.png`), fullPage: true }).catch(() => undefined);
+  }
+  throw error;
 } finally {
+  await fs.writeFile(
+    path.join(outputDirectory, `${nodeSlug}-browser-diagnostics.json`),
+    `${JSON.stringify(diagnostics, null, 2)}\n`,
+  );
   await browser.close();
 }
