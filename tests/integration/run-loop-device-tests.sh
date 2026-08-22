@@ -11,6 +11,7 @@ loops=()
 md_device=""
 zpool_name=""
 cleanup() {
+  set +e
   [[ -z "$zpool_name" ]] || zpool destroy -f "$zpool_name" 2>/dev/null || true
   [[ -z "$md_device" ]] || mdadm --stop "$md_device" 2>/dev/null || true
   for loop in "${loops[@]}"; do
