@@ -234,6 +234,7 @@ def main() -> None:
                     ],
                 },
                 sort_keys=True,
+                default=lambda value: value.isoformat(),
             )
         )
 
