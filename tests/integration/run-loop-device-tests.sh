@@ -119,4 +119,5 @@ stat --format='%n size=%s blocks=%b' \
 [[ -f "$work/snap-data/snapraid.content" ]]
 [[ -f "$work/snap-parity/snapraid.content" ]]
 [[ -f "$work/snap-parity/snapraid.parity" ]]
-umount "$work/snap-data" "$work/snap-parity"
+umount "$work/snap-data"
+umount "$work/snap-parity"
