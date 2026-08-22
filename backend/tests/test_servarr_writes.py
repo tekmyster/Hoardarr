@@ -121,9 +121,24 @@ def test_servarr_write_compensates_created_root_on_partial_failure(tmp_path) -> 
     assert "secret remote detail" not in str(exc.value)
 
 
-def test_servarr_write_rejects_secret_fields() -> None:
+@pytest.mark.parametrize(
+    "field",
+    ["password", "apiKey", "token", "host", "port", "useSsl", "clientSecret", "enable"],
+)
+def test_servarr_write_allows_only_product_storage_fields(field: str) -> None:
     with pytest.raises(ServarrError) as exc:
         normalize_mutation_plan(
-            "radarr", {"download_clients": [{"id": 1, "fields": {"password": "bad"}}]}
+            "radarr", {"download_clients": [{"id": 1, "fields": {field: "bad"}}]}
         )
-    assert exc.value.code == "secret_field_refused"
+    assert exc.value.code == "download_field_refused"
+
+
+def test_servarr_write_uses_product_aware_category_names() -> None:
+    assert normalize_mutation_plan(
+        "sonarr", {"download_clients": [{"id": 1, "fields": {"tvCategory": "tv"}}]}
+    )["download_clients"][0]["fields"] == {"tvCategory": "tv"}
+    with pytest.raises(ServarrError) as exc:
+        normalize_mutation_plan(
+            "radarr", {"download_clients": [{"id": 1, "fields": {"tvCategory": "tv"}}]}
+        )
+    assert exc.value.code == "download_field_refused"

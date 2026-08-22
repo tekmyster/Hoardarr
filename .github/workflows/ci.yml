@@ -154,9 +154,15 @@ jobs:
           echo "config_permissions=${config_permissions}"
           test "${state_permissions}" = "root:root:700"
           test "${config_permissions}" = "root:hoardarr:640"
-          test -L /usr/lib/hoardarr/current
-          test -x /usr/local/bin/hoardarr
-          test -f /usr/lib/hoardarr/current/frontend/index.html
+          readlink /usr/lib/hoardarr/current
+          ls -ld /usr/lib/hoardarr/current /usr/lib/hoardarr/current/frontend
+          ls -l /usr/local/bin/hoardarr /usr/lib/hoardarr/current/frontend/index.html
+          test -L /usr/lib/hoardarr/current || { echo "current release link is missing"; exit 1; }
+          test -x /usr/local/bin/hoardarr || { echo "CLI wrapper is not executable"; exit 1; }
+          test -f /usr/lib/hoardarr/current/frontend/index.html || {
+            echo "installed frontend entry point is missing"
+            exit 1
+          }
           sudo /usr/local/bin/hoardarr --help
       - name: Verify idempotent reapply of the identical signed bundle
         run: |

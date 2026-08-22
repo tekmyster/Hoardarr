@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { EntitlementDocument, LatencyAnalyticsDocument, MetricAlertDocument, MetricDefinition, MetricEntity, MetricHistoryDocument, MetricSampleDocument, TelemetryForecastDocument, TelemetrySettingsDocument } from "../types";
 import { Notice } from "./ui";
@@ -83,11 +83,16 @@ export function AnalyticsPage() {
   const [graphType, setGraphType] = useState<"line" | "bars">("line");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const refreshController = useRef<AbortController | null>(null);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
+    refreshController.current?.abort();
+    const controller = new AbortController();
+    refreshController.current = controller;
     try {
       const [catalog, entityItems, current, alertItems] = await Promise.all([
-        api.metricCatalog(), api.metricEntities(), api.currentMetrics(), api.metricAlerts(),
+        api.metricCatalog(controller.signal), api.metricEntities(undefined, controller.signal),
+        api.currentMetrics({}, controller.signal), api.metricAlerts("active", controller.signal),
       ]);
       setDefinitions(catalog.items);
       setEntitlements(catalog.entitlements);
@@ -97,18 +102,30 @@ export function AnalyticsPage() {
       setSelectedEntity((value) => value || entityItems[0]?.id || "");
       setError(null);
     } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
       setError(reason instanceof Error ? reason.message : "Storage analytics could not be loaded.");
     } finally {
-      setLoading(false);
+      if (refreshController.current === controller) {
+        refreshController.current = null;
+        setLoading(false);
+      }
     }
-  }
+  }, []);
 
   useEffect(() => {
     void refresh();
-    void api.telemetrySettings().then(setHistorySettings).catch(() => setHistorySettings(null));
+    const settingsController = new AbortController();
+    void api.telemetrySettings(settingsController.signal).then(setHistorySettings).catch((reason) => {
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) setHistorySettings(null);
+    });
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+    return () => {
+      window.clearInterval(timer);
+      settingsController.abort();
+      refreshController.current?.abort();
+      refreshController.current = null;
+    };
+  }, [refresh]);
 
   useEffect(() => {
     if (!selectedEntity || !selectedMetric) {
@@ -137,21 +154,33 @@ export function AnalyticsPage() {
     setTopItems([]);
     setAnomalies([]);
     if (!entitlements || !selectedEntity) return;
+    const controller = new AbortController();
     const capabilities = new Set(entitlements.capabilities);
     if (capabilities.has("metrics.analytics.performance")) {
-      void api.topMetrics(selectedMetric).then(setTopItems).catch(() => setTopItems([]));
+      void api.topMetrics(selectedMetric, "highest", controller.signal).then(setTopItems).catch((reason) => {
+        if (!(reason instanceof DOMException && reason.name === "AbortError")) setTopItems([]);
+      });
       if (selectedMetric === "io.read.latency" || selectedMetric === "io.write.latency") {
-        void api.latencyAnalytics(selectedEntity, selectedMetric).then(setLatency).catch(() => setLatency(null));
+        void api.latencyAnalytics(selectedEntity, selectedMetric, controller.signal).then(setLatency).catch((reason) => {
+          if (!(reason instanceof DOMException && reason.name === "AbortError")) setLatency(null);
+        });
       }
     }
     if (selectedEntityType === "drive" && capabilities.has("metrics.analytics.endurance")) {
-      void api.enduranceForecast(selectedEntity).then((value) => setForecast(value.forecast)).catch(() => setForecast(null));
+      void api.enduranceForecast(selectedEntity, controller.signal).then((value) => setForecast(value.forecast)).catch((reason) => {
+        if (!(reason instanceof DOMException && reason.name === "AbortError")) setForecast(null);
+      });
     } else if (capabilities.has("metrics.analytics.capacity")) {
-      void api.capacityForecast(selectedEntity).then((value) => setForecast(value.forecast)).catch(() => setForecast(null));
+      void api.capacityForecast(selectedEntity, controller.signal).then((value) => setForecast(value.forecast)).catch((reason) => {
+        if (!(reason instanceof DOMException && reason.name === "AbortError")) setForecast(null);
+      });
     }
     if (capabilities.has("metrics.analytics.anomaly")) {
-      void api.telemetryAnomalies().then(setAnomalies).catch(() => setAnomalies([]));
+      void api.telemetryAnomalies(controller.signal).then(setAnomalies).catch((reason) => {
+        if (!(reason instanceof DOMException && reason.name === "AbortError")) setAnomalies([]);
+      });
     }
+    return () => controller.abort();
   }, [capabilityKey, selectedEntity, selectedEntityType, selectedMetric]);
 
   const definitionMap = useMemo(() => new Map(definitions.map((item) => [item.id, item])), [definitions]);

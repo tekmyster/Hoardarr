@@ -76,6 +76,18 @@ def _state_headers(csrf: str, **extra: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf, **extra}
 
 
+def test_authenticated_read_only_settings_requests_do_not_require_csrf_origin(
+    api_runtime: Any,
+) -> None:
+    client, _app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.headers.pop("Origin", None)
+    assert client.get("/api/v1/updates/status").status_code == 200
+    response = client.get("/api/v1/addons")
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
 def test_device_maintenance_preview_apply_and_worker_are_bound(api_runtime: Any) -> None:
     client, app, setup_token, secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

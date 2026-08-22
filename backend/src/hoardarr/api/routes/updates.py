@@ -8,7 +8,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from hoardarr import __version__
-from hoardarr.api.dependencies import database_session, idempotency_key, require_state_scope
+from hoardarr.api.dependencies import (
+    database_session,
+    idempotency_key,
+    require_scope,
+    require_state_scope,
+)
 from hoardarr.api.problem import Problem
 from hoardarr.api.schemas import UpdateApplyRequest
 from hoardarr.api.serializers import operation_document
@@ -33,7 +38,7 @@ def _state(session: Session, channel: str) -> UpdateState:
 @router.get("/status")
 def update_status(
     request: Request,
-    _principal: Principal = Depends(require_state_scope("read")),
+    _principal: Principal = Depends(require_scope("read")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
     state = _state(session, request.app.state.settings.update_channel)

@@ -333,6 +333,29 @@ def test_mergerfs_new_target_is_bound_into_the_storage_plan(session: Session) ->
     assert layout_action["requires_live_instance_revalidation"] is False
 
 
+def test_mergerfs_mountpoint_rejects_fstab_control_characters(session: Session) -> None:
+    snapshot = _snapshot(session, _usb_payload())
+    wizard = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)
+
+    with pytest.raises(WizardValidationError, match="absolute Linux path"):
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=0,
+            step="storage",
+            answers=_storage_answers(
+                topology="mergerfs",
+                mergerfs={
+                    "mode": "create",
+                    "name": "combined-storage",
+                    "mountpoint": "/mnt/media\n/dev/sdz /root none bind 0 0",
+                    "create_policy": "mfs",
+                    "search_policy": "ff",
+                },
+            ),
+        )
+
+
 def test_advanced_mixed_layout_is_immutable_and_does_not_format_raw_array_members(
     session: Session,
 ) -> None:

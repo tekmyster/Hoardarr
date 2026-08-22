@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,50 @@ def test_transfer_rejects_staging_symlink(tmp_path: Path) -> None:
             identity_provider=lambda path: "source" if path == source else "destination",
             free_space_provider=lambda _path: 100,
         )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative Linux path test")
+def test_transfer_does_not_replace_destination_created_during_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "destination"
+    source_root.mkdir()
+    destination_root.mkdir()
+    source = source_root / "movie.bin"
+    destination = destination_root / "movie.bin"
+    source.write_bytes(b"source data")
+    plan = plan_transfer(
+        {
+            "workload": "usenet",
+            "source": str(source),
+            "destination": str(destination),
+            "source_identity": "source-volume",
+            "destination_identity": "destination-volume",
+            "method": "copy",
+            "retain_until": "never",
+            "cleanup": False,
+            "required_bytes": source.stat().st_size,
+            "completed_steps": ["download", "repair", "unpack", "verify"],
+        }
+    )
+    real_link = os.link
+
+    def competing_link(source_name: str, destination_name: str, **kwargs: object) -> None:
+        destination.write_bytes(b"competing data")
+        real_link(source_name, destination_name, **kwargs)
+
+    monkeypatch.setattr(os, "link", competing_link)
+    with pytest.raises(TieringError) as error:
+        execute_transfer(
+            plan,
+            identity_provider=lambda path: (
+                "source-volume" if path == source else "destination-volume"
+            ),
+        )
+    assert error.value.code == "transfer_io_failed"
+    assert destination.read_bytes() == b"competing data"
+    assert source.read_bytes() == b"source data"
 
 
 def test_acl_maps_roles_and_prevents_unmanaged_paths() -> None:

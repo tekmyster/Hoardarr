@@ -21,7 +21,7 @@ from hoardarr.addons.service import (
     validate_upgrade,
     verify_manifest,
 )
-from hoardarr.api.dependencies import database_session, require_state_scope
+from hoardarr.api.dependencies import database_session, require_scope, require_state_scope
 from hoardarr.api.problem import Problem
 from hoardarr.api.schemas import AddonInstallRequest, AddonLifecycleRequest
 from hoardarr.audit.service import record_audit
@@ -50,7 +50,7 @@ def _trust_key(path: Path, key_id: str) -> str:
 
 @router.get("")
 def list_addons(
-    _principal: Principal = Depends(require_state_scope("read")),
+    _principal: Principal = Depends(require_scope("read")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
     items = session.scalars(select(AddonInstallation).order_by(AddonInstallation.name))

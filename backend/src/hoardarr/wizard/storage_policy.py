@@ -64,7 +64,12 @@ def _as_bool(value: Any, *, field: str) -> bool:
 
 
 def _mergerfs_mountpoint(value: Any) -> str:
-    if not isinstance(value, str) or not value.startswith("/") or "\x00" in value:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or any(character.isspace() or ord(character) < 32 for character in value)
+        or "\\" in value
+    ):
         _error("storage.mergerfs.mountpoint", "must be an absolute Linux path")
     path = PurePosixPath(value)
     if ".." in path.parts or path == PurePosixPath("/"):

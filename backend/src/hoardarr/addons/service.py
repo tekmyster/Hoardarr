@@ -27,12 +27,36 @@ class AddonError(ValueError):
 _NAME = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 _PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,127}$")
 _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
+_RELATIVE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
 def _version_key(value: object) -> tuple[int, int, int]:
     if not isinstance(value, str) or (match := _VERSION.fullmatch(value)) is None:
         raise AddonError("manifest_invalid", "Version compatibility value is invalid")
     return tuple(int(item) for item in match.groups())  # type: ignore[return-value]
+
+
+def _relative_payload_path(value: object, *, suffix: str | None = None) -> PurePosixPath:
+    if not isinstance(value, str) or not value or _RELATIVE_PATH.fullmatch(value) is None:
+        raise AddonError("manifest_invalid", "Add-on payload path is invalid")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or "." in path.parts
+        or path.as_posix() != value
+        or (suffix is not None and path.suffix != suffix)
+    ):
+        raise AddonError("manifest_invalid", "Add-on payload path is invalid")
+    return path
+
+
+def _valid_ui_module(value: object) -> bool:
+    try:
+        _relative_payload_path(value)
+    except AddonError:
+        return False
+    return True
 
 
 def normalize_manifest(value: Any) -> dict[str, Any]:
@@ -60,14 +84,15 @@ def normalize_manifest(value: Any) -> dict[str, Any]:
         not isinstance(name, str)
         or not _NAME.fullmatch(name)
         or not isinstance(version, str)
-        or not version
+        or _VERSION.fullmatch(version) is None
     ):
         raise AddonError("manifest_invalid", "Add-on identity is invalid")
-    path = PurePosixPath(str(entrypoint))
-    if path.is_absolute() or ".." in path.parts or path.suffix != ".py":
+    try:
+        _relative_payload_path(entrypoint, suffix=".py")
+    except AddonError as exc:
         raise AddonError(
             "entrypoint_invalid", "Add-on entrypoint must be a relative Python module path"
-        )
+        ) from exc
     api = value.get("api")
     database = value.get("database")
     updates = value.get("updates")
@@ -102,7 +127,7 @@ def normalize_manifest(value: Any) -> dict[str, Any]:
         and set(item) == {"slot", "module"}
         and item["slot"] in {"settings", "storage", "health", "overview"}
         and isinstance(item["module"], str)
-        and ".." not in PurePosixPath(item["module"]).parts
+        and _valid_ui_module(item["module"])
         for item in ui
     ):
         raise AddonError("ui_extension_invalid", "UI extension declaration is invalid")

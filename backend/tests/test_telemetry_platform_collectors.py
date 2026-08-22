@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from hoardarr.telemetry.platform_collectors import (
+    MAX_PROVIDER_OUTPUT,
     LinuxStoragePlatformCollector,
+    _command,
     parse_mdstat,
     parse_multipath_json,
     parse_ses_metrics,
@@ -14,6 +17,17 @@ from hoardarr.telemetry.platform_collectors import (
     parse_zpool_status_errors,
     read_sas_phys,
 )
+
+
+def test_provider_command_bounds_output_before_returning_it() -> None:
+    assert _command(sys.executable, ["-c", "print('bounded')"]).strip() == "bounded"
+    assert (
+        _command(
+            sys.executable,
+            ["-c", f"import sys; sys.stdout.write('x' * {MAX_PROVIDER_OUTPUT + 1})"],
+        )
+        is None
+    )
 
 
 def test_zpool_parser_rejects_noise_and_preserves_reported_values() -> None:
@@ -105,7 +119,8 @@ def test_sas_transport_and_ses_parsers_preserve_reported_values(tmp_path: Path) 
     assert rows[0]["reset_problems"] == 1
 
     ses = parse_ses_metrics(
-        '{"status":"OK","enclosure_descriptor":"shelf-1","elements":['
+        '{"status":"OK","enclosure_descriptor":"shelf-1",'
+        '"enclosure_logical_identifier":"0x5000c50012345678","elements":['
         '{"element_type":"Temperature sensor","temperature_c":42},'
         '{"element_type":"Cooling","speed_rpm":8200},'
         '{"element_type":"Power supply","status":"OK"},'
@@ -117,6 +132,12 @@ def test_sas_transport_and_ses_parsers_preserve_reported_values(tmp_path: Path) 
     assert ses["fan_rpm"] == 8200
     assert ses["psu_states"] == ["OK"]
     assert ses["locate"] is True
+    assert ses["id"] == "0x5000c50012345678"
+    descriptor_only = parse_ses_metrics(
+        '{"status":"OK","enclosure_descriptor":"duplicate-name","elements":[]}'
+    )
+    assert descriptor_only["id"] is None
+    assert descriptor_only["descriptor"] == "duplicate-name"
     with pytest.raises(ValueError, match="elements"):
         parse_ses_metrics("{}")
 

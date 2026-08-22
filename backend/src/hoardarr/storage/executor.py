@@ -1191,6 +1191,14 @@ def _load_prior_journal(path: Path, plan_sha: str) -> dict[str, Any] | None:
 
 
 def _safe_mountpoint(value: str) -> Path:
+    if (
+        not isinstance(value, str)
+        or any(character.isspace() or ord(character) < 32 for character in value)
+        or "\\" in value
+    ):
+        raise ExecutorFailure(
+            "mountpoint_invalid", "The storage mount path is outside approved roots."
+        )
     path = PurePosixPath(value)
     allowed = (PurePosixPath("/data"), PurePosixPath("/mnt"), PurePosixPath("/srv"))
     if (

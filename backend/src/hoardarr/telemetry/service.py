@@ -48,6 +48,8 @@ class TelemetryService:
         self.inflight: dict[str, Future[Any]] = {}
         self.last_run = 0.0
         self.last_inventory = 0.0
+        self.last_platform = 0.0
+        self.last_platform_error: str | None = None
         self.inventory_cache: dict[str, Any] | None = None
         self.closed = False
 
@@ -303,9 +305,21 @@ class TelemetryService:
                 ),
                 15.0,
             )
-            platform_readings, platform_error = self._run_provider(
-                "linux-storage-platforms", lambda: self.platform.collect(observed_at=now), 15.0
-            )
+            if (
+                force
+                or self.last_platform == 0.0
+                or monotonic_now - self.last_platform
+                >= self.settings.telemetry_hardware_interval_seconds
+            ):
+                platform_readings, platform_error = self._run_provider(
+                    "linux-storage-platforms", lambda: self.platform.collect(observed_at=now), 15.0
+                )
+                if platform_error != "provider_busy":
+                    self.last_platform = monotonic_now
+                    self.last_platform_error = platform_error
+            else:
+                platform_readings = []
+                platform_error = self.last_platform_error
             provider_errors = {
                 "host": host_error,
                 "storage": storage_error,

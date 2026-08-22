@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -309,6 +310,11 @@ def test_iscsi_failure_removes_only_a_new_backing_file(
     monkeypatch.setattr(executor, "_ensure_backing_file", lambda _config: (backing, True))
     monkeypatch.setattr(
         executor,
+        "_unlink_backing_file",
+        lambda _value, missing_ok: (backing.unlink(missing_ok=missing_ok), True)[1],
+    )
+    monkeypatch.setattr(
+        executor,
         "_targetcli",
         lambda _values: (_ for _ in ()).throw(executor.ExecutorFailure("target_failed", "failed")),
     )
@@ -384,3 +390,31 @@ def test_iscsi_rejects_secrets_that_can_change_targetcli_script(
 
     with pytest.raises(executor.ExecutorFailure, match="password is invalid"):
         executor._apply_iscsi("service-1", config, secret)
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative Linux file operations")
+def test_backing_file_mutation_is_descriptor_relative_and_rejects_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backing = tmp_path / "target.img"
+    monkeypatch.setattr(executor, "_safe_path", lambda _value, directory: backing)
+    monkeypatch.setattr(
+        executor,
+        "_trusted_backing_parent",
+        lambda _path: os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY),
+    )
+    monkeypatch.setattr(
+        executor.shutil,
+        "disk_usage",
+        lambda _path: type("Usage", (), {"total": 100 * 1024**3, "free": 90 * 1024**3})(),
+    )
+    path, created = executor._ensure_backing_file(
+        {"backing_path": str(backing), "size_bytes": 4096}
+    )
+    assert (path, created, backing.stat().st_size) == (backing, True, 4096)
+    assert executor._unlink_backing_file(str(backing), missing_ok=False) is True
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    backing.symlink_to(victim)
+    with pytest.raises(executor.ExecutorFailure, match="identity changed"):
+        executor._unlink_backing_file(str(backing), missing_ok=False)
+    assert victim.read_text(encoding="utf-8") == "keep"

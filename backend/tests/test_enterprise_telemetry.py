@@ -6,13 +6,15 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from hoardarr.api.app import create_app
+from hoardarr.api.routes import telemetry as telemetry_routes
 from hoardarr.auth.service import issue_setup_token
 from hoardarr.core.config import Settings
 from hoardarr.db.engine import create_database_engine, create_session_factory
@@ -350,6 +352,33 @@ def test_worker_persists_telemetry_without_any_browser_or_api_consumer(
             .order_by(MetricSample.observed_at)
         ).all()
     assert values == [10.0, 30.0]
+    engine.dispose()
+
+
+def test_expensive_platform_collection_obeys_hardware_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    service = TelemetryService(settings)
+    service.inventory_cache = {}
+    service.last_inventory = time.monotonic()
+    calls = 0
+
+    def collect_platform(**_kwargs: object) -> list[object]:
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(service.host, "collect", lambda **_kwargs: [])
+    monkeypatch.setattr(service.storage, "collect", lambda **_kwargs: [])
+    monkeypatch.setattr(service.platform, "collect", collect_platform)
+    with factory() as session:
+        assert service.collect(session)["status"] == "collected"
+        session.commit()
+        service.last_run -= settings.telemetry_fast_interval_seconds + 1
+        assert service.collect(session)["status"] == "collected"
+    assert calls == 1
+    service.close(wait=True)
     engine.dispose()
 
 
@@ -955,4 +984,79 @@ def test_scale_ingestion_and_bounded_current_query(tmp_path: Path, count: int) -
         assert ingest(session, readings)["inserted"] == count
     with factory() as session:
         assert len(current_samples(session, limit=100)) == min(100, count)
+    engine.dispose()
+
+
+def test_anomaly_analysis_uses_one_globally_bounded_history_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings, engine, factory = runtime(tmp_path)
+    latest = [
+        {
+            "entity": {"id": f"entity-{index}", "type": "drive", "name": str(index)},
+            "metric_id": "drive.temperature",
+            "value": 40.0,
+            "quality": "available",
+        }
+        for index in range(telemetry_routes.ANOMALY_MAX_SERIES + 50)
+    ]
+    monkeypatch.setattr(telemetry_routes, "current_samples", lambda *_args, **_kwargs: latest)
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        with factory() as session:
+            status = SimpleNamespace(allows=lambda _capability: True)
+            assert telemetry_routes._active_anomalies(session, status) == []
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+        engine.dispose()
+
+    assert len(statements) == 1
+    assert "row_number() OVER" in statements[0]
+
+
+def test_analytics_enforces_underlying_metric_entitlement(tmp_path: Path) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    now = datetime.now(UTC).replace(microsecond=0)
+    install_license(
+        settings,
+        Ed25519PrivateKey.generate(),
+        ["metrics.analytics.performance", "metrics.analytics.anomaly"],
+        now=now,
+    )
+    with factory() as session, session.begin():
+        token = issue_setup_token(session)
+        ingest(
+            session,
+            [
+                reading(
+                    "controller.cache.hit_ratio",
+                    99.0,
+                    now,
+                    entity_type="controller",
+                    stable_id="controller:test",
+                )
+            ],
+        )
+
+    with TestClient(create_app(settings), base_url="http://testserver") as client:
+        claim(client, token)
+        response = client.get(
+            "/api/v1/telemetry/top",
+            params={"metric_id": "controller.cache.hit_ratio"},
+        )
+        assert response.status_code == 403
+        assert response.json()["type"].endswith("entitlement_required")
+
     engine.dispose()

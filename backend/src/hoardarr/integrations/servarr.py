@@ -391,6 +391,14 @@ def normalize_mutation_plan(product: str, value: Any) -> dict[str, Any]:
                 "local_path": item["local_path"],
             }
         )
+    allowed_download_fields = {
+        "sonarr": frozenset({"category", "tvCategory"}),
+        "radarr": frozenset({"category", "movieCategory"}),
+        "lidarr": frozenset({"category", "musicCategory"}),
+        "readarr": frozenset({"category", "bookCategory"}),
+        "whisparr": frozenset({"category"}),
+        "prowlarr": frozenset({"category"}),
+    }[product]
     clients: list[dict[str, Any]] = []
     for item in value.get("download_clients", []):
         if not isinstance(item, dict) or set(item) != {"id", "fields"}:
@@ -405,11 +413,15 @@ def normalize_mutation_plan(product: str, value: Any) -> dict[str, Any]:
         for name, field_value in item["fields"].items():
             if not isinstance(name, str) or not name or not isinstance(field_value, str):
                 raise ServarrError("invalid_plan", "Download-client field is invalid")
-            if any(marker in name.casefold() for marker in ("password", "apikey", "token")):
+            if name not in allowed_download_fields:
                 raise ServarrError(
-                    "secret_field_refused",
-                    "Credential fields are not changed by storage onboarding",
+                    "download_field_refused",
+                    "This download-client field is outside storage onboarding",
                 )
+            if not field_value or len(field_value) > 256 or any(
+                ord(character) < 32 for character in field_value
+            ):
+                raise ServarrError("invalid_plan", "Download-client field value is invalid")
             fields[name] = field_value
         clients.append({"id": item["id"], "fields": fields})
     if product == "prowlarr" and (roots or mappings):

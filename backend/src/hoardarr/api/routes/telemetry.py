@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
 from hoardarr.api.dependencies import (
@@ -40,6 +40,9 @@ from hoardarr.telemetry.store import aware, current_samples, entity_document, hi
 
 router = APIRouter(prefix="/telemetry", tags=["telemetry"])
 METRIC_ID_RE = re.compile(r"[a-z][a-z0-9_.]{2,127}")
+ANOMALY_MAX_SERIES = 16
+ANOMALY_POINTS_PER_SERIES = 250
+ANOMALY_OBSERVATION_BUDGET = ANOMALY_MAX_SERIES * ANOMALY_POINTS_PER_SERIES
 
 
 class AlertRuleInput(BaseModel):
@@ -493,14 +496,26 @@ def latency_percentiles(
     }
 
 
-def _active_anomalies(session: Session, *, hours: int = 24) -> list[dict[str, Any]]:
+def _active_anomalies(
+    session: Session,
+    status: Any,
+    *,
+    hours: int = 24,
+    maximum_series: int = ANOMALY_MAX_SERIES,
+    maximum_observations: int = ANOMALY_OBSERVATION_BUDGET,
+) -> list[dict[str, Any]]:
+    series_limit = min(maximum_series, ANOMALY_MAX_SERIES)
+    observation_limit = min(maximum_observations, ANOMALY_OBSERVATION_BUDGET)
+    points_per_series = min(ANOMALY_POINTS_PER_SERIES, max(1, observation_limit // series_limit))
     now = datetime.now(UTC)
     latest = current_samples(session, limit=5000)
-    output = []
+    eligible: list[dict[str, Any]] = []
     for item in latest:
         if item["value"] is None or not isinstance(item["value"], (int, float)):
             continue
         definition = CATALOG_BY_ID[item["metric_id"]]
+        if not status.allows(definition.capability):
+            continue
         if definition.capability is None and item["metric_id"] not in {
             "io.read.latency",
             "io.write.latency",
@@ -508,17 +523,51 @@ def _active_anomalies(session: Session, *, hours: int = 24) -> list[dict[str, An
             "io.utilization",
         }:
             continue
-        points = _series(
-            session,
-            item["entity"]["id"],
-            item["metric_id"],
-            now - timedelta(hours=hours),
+        eligible.append(item)
+        if len(eligible) >= series_limit:
+            break
+
+    if not eligible:
+        return []
+    pairs = [(item["entity"]["id"], item["metric_id"]) for item in eligible]
+    ranked = (
+        select(
+            MetricSample.entity_id.label("entity_id"),
+            MetricSample.metric_id.label("metric_id"),
+            MetricSample.observed_at.label("observed_at"),
+            MetricSample.value.label("value"),
+            func.row_number()
+            .over(
+                partition_by=(MetricSample.entity_id, MetricSample.metric_id),
+                order_by=MetricSample.observed_at.desc(),
+            )
+            .label("series_rank"),
         )
+        .where(
+            tuple_(MetricSample.entity_id, MetricSample.metric_id).in_(pairs),
+            MetricSample.observed_at >= now - timedelta(hours=hours),
+            MetricSample.value.is_not(None),
+        )
+        .subquery()
+    )
+    rows = session.execute(
+        select(ranked.c.entity_id, ranked.c.metric_id, ranked.c.observed_at, ranked.c.value)
+        .where(ranked.c.series_rank <= points_per_series)
+        .order_by(ranked.c.entity_id, ranked.c.metric_id, ranked.c.observed_at)
+        .limit(observation_limit)
+    ).all()
+    histories: dict[tuple[str, str], list[float]] = {}
+    for entity_id, metric_id, _observed_at, value in rows:
+        histories.setdefault((str(entity_id), str(metric_id)), []).append(float(value))
+
+    output = []
+    for item in eligible:
+        points = histories.get((item["entity"]["id"], item["metric_id"]), [])
         result = anomaly(
             entity=item["entity"],
             metric_id=item["metric_id"],
             observed=float(item["value"]),
-            history=[value for _, value in points[:-1]],
+            history=points[:-1],
             now=now,
         )
         if result:
@@ -534,7 +583,15 @@ def anomalies(
 ) -> dict[str, Any]:
     status = _entitlements(request, session)
     _require(status, "metrics.analytics.anomaly")
-    return {"items": _active_anomalies(session)}
+    settings = request.app.state.settings
+    return {
+        "items": _active_anomalies(
+            session,
+            status,
+            maximum_series=settings.telemetry_max_graph_series,
+            maximum_observations=settings.telemetry_max_query_observations,
+        )
+    }
 
 
 @router.get("/analytics/correlations")
@@ -545,7 +602,17 @@ def correlations(
 ) -> dict[str, Any]:
     status = _entitlements(request, session)
     _require(status, "metrics.analytics.anomaly")
-    return {"items": correlate(_active_anomalies(session))}
+    settings = request.app.state.settings
+    return {
+        "items": correlate(
+            _active_anomalies(
+                session,
+                status,
+                maximum_series=settings.telemetry_max_graph_series,
+                maximum_observations=settings.telemetry_max_query_observations,
+            )
+        )
+    }
 
 
 @router.get("/top")
@@ -558,9 +625,10 @@ def top_metrics(
     _principal: Principal = Depends(authenticated_principal),
     session: Session = Depends(database_session),
 ) -> dict[str, Any]:
-    _metric(metric_id)
+    definition = _metric(metric_id)
     status = _entitlements(request, session)
     _require(status, "metrics.analytics.performance")
+    _require(status, definition.capability)
     items = [
         item
         for item in current_samples(

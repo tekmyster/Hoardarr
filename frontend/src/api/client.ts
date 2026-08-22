@@ -329,22 +329,22 @@ class HoardarrApi {
     return this.request<StorageTelemetryDocument>("/storage/telemetry");
   }
 
-  async metricCatalog(): Promise<MetricCatalogDocument> {
-    return this.request<MetricCatalogDocument>("/telemetry/catalog");
+  async metricCatalog(signal?: AbortSignal): Promise<MetricCatalogDocument> {
+    return this.request<MetricCatalogDocument>("/telemetry/catalog", { signal });
   }
 
-  async metricEntities(entityType?: string): Promise<MetricEntity[]> {
+  async metricEntities(entityType?: string, signal?: AbortSignal): Promise<MetricEntity[]> {
     const query = entityType ? `?entity_type=${encodeURIComponent(entityType)}` : "";
-    const result = await this.request<{ items: MetricEntity[] }>(`/telemetry/entities${query}`);
+    const result = await this.request<{ items: MetricEntity[] }>(`/telemetry/entities${query}`, { signal });
     return result.items;
   }
 
-  async currentMetrics(filters: { metricId?: string; entityType?: string; entityId?: string } = {}): Promise<CurrentMetricsDocument> {
+  async currentMetrics(filters: { metricId?: string; entityType?: string; entityId?: string } = {}, signal?: AbortSignal): Promise<CurrentMetricsDocument> {
     const query = new URLSearchParams();
     if (filters.metricId) query.append("metric_id", filters.metricId);
     if (filters.entityType) query.set("entity_type", filters.entityType);
     if (filters.entityId) query.set("entity_id", filters.entityId);
-    return this.request<CurrentMetricsDocument>(`/telemetry/current${query.size ? `?${query}` : ""}`);
+    return this.request<CurrentMetricsDocument>(`/telemetry/current${query.size ? `?${query}` : ""}`, { signal });
   }
 
   async metricHistory(input: { entityId: string; metricId: string; start: string; end: string; resolution?: "auto" | "raw" | "hour" | "day"; maximumPoints?: number; signal?: AbortSignal }): Promise<MetricHistoryDocument> {
@@ -359,40 +359,40 @@ class HoardarrApi {
     return this.request<MetricHistoryDocument>(`/telemetry/history?${query}`, { signal: input.signal });
   }
 
-  async telemetrySettings(): Promise<TelemetrySettingsDocument> {
-    return this.request<TelemetrySettingsDocument>("/telemetry/settings");
+  async telemetrySettings(signal?: AbortSignal): Promise<TelemetrySettingsDocument> {
+    return this.request<TelemetrySettingsDocument>("/telemetry/settings", { signal });
   }
 
   async telemetryEntitlements(): Promise<EntitlementDocument> {
     return this.request<EntitlementDocument>("/telemetry/entitlements");
   }
 
-  async metricAlerts(state: "active" | "resolved" | "all" = "active"): Promise<MetricAlertDocument[]> {
-    const result = await this.request<{ items: MetricAlertDocument[] }>(`/telemetry/alerts?state=${state}`);
+  async metricAlerts(state: "active" | "resolved" | "all" = "active", signal?: AbortSignal): Promise<MetricAlertDocument[]> {
+    const result = await this.request<{ items: MetricAlertDocument[] }>(`/telemetry/alerts?state=${state}`, { signal });
     return result.items;
   }
 
-  async topMetrics(metricId: string, direction: "highest" | "lowest" = "highest"): Promise<MetricSampleDocument[]> {
+  async topMetrics(metricId: string, direction: "highest" | "lowest" = "highest", signal?: AbortSignal): Promise<MetricSampleDocument[]> {
     const query = new URLSearchParams({ metric_id: metricId, direction });
-    const result = await this.request<{ items: MetricSampleDocument[] }>(`/telemetry/top?${query}`);
+    const result = await this.request<{ items: MetricSampleDocument[] }>(`/telemetry/top?${query}`, { signal });
     return result.items;
   }
 
-  async capacityForecast(entityId: string): Promise<{ forecast: TelemetryForecastDocument }> {
-    return this.request(`/telemetry/analytics/capacity/${encodeURIComponent(entityId)}`);
+  async capacityForecast(entityId: string, signal?: AbortSignal): Promise<{ forecast: TelemetryForecastDocument }> {
+    return this.request(`/telemetry/analytics/capacity/${encodeURIComponent(entityId)}`, { signal });
   }
 
-  async enduranceForecast(entityId: string): Promise<{ forecast: TelemetryForecastDocument }> {
-    return this.request(`/telemetry/analytics/endurance/${encodeURIComponent(entityId)}`);
+  async enduranceForecast(entityId: string, signal?: AbortSignal): Promise<{ forecast: TelemetryForecastDocument }> {
+    return this.request(`/telemetry/analytics/endurance/${encodeURIComponent(entityId)}`, { signal });
   }
 
-  async latencyAnalytics(entityId: string, metricId: "io.read.latency" | "io.write.latency"): Promise<LatencyAnalyticsDocument> {
+  async latencyAnalytics(entityId: string, metricId: "io.read.latency" | "io.write.latency", signal?: AbortSignal): Promise<LatencyAnalyticsDocument> {
     const query = new URLSearchParams({ metric_id: metricId });
-    return this.request(`/telemetry/analytics/latency/${encodeURIComponent(entityId)}?${query}`);
+    return this.request(`/telemetry/analytics/latency/${encodeURIComponent(entityId)}?${query}`, { signal });
   }
 
-  async telemetryAnomalies(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.request<{ items: Array<Record<string, unknown>> }>("/telemetry/analytics/anomalies");
+  async telemetryAnomalies(signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
+    const result = await this.request<{ items: Array<Record<string, unknown>> }>("/telemetry/analytics/anomalies", { signal });
     return result.items;
   }
 

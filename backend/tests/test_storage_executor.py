@@ -433,7 +433,18 @@ def test_live_identity_uses_current_path_but_requires_all_stable_fields() -> Non
     assert failure.value.code == "drive_identity_changed"
 
 
-@pytest.mark.parametrize("path", ["/", "/etc/storage", "/var/lib/hoardarr/data", "/tmp/data"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/etc/storage",
+        "/var/lib/hoardarr/data",
+        "/tmp/data",
+        "/mnt/media\n/dev/sdz /root none bind 0 0",
+        "/mnt/media with-spaces",
+        "/mnt/media\\escape",
+    ],
+)
 def test_mountpoints_are_restricted(path: str) -> None:
     with pytest.raises(ExecutorFailure) as failure:
         _safe_mountpoint(path)

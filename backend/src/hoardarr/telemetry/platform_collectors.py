@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -28,19 +30,46 @@ def _command(program: str, args: list[str], *, timeout: int = 10) -> str | None:
     if not executable:
         return None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [executable, *args],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             shell=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError:
         return None
-    if result.returncode != 0 or len(result.stdout) > MAX_PROVIDER_OUTPUT:
+    output = bytearray()
+    exceeded = threading.Event()
+
+    def drain() -> None:
+        assert process.stdout is not None
+        while chunk := process.stdout.read(64 * 1024):
+            remaining = MAX_PROVIDER_OUTPUT + 1 - len(output)
+            if remaining > 0:
+                output.extend(chunk[:remaining])
+            if len(output) > MAX_PROVIDER_OUTPUT:
+                exceeded.set()
+                with contextlib.suppress(OSError):
+                    process.kill()
+                return
+
+    reader = threading.Thread(target=drain, name="telemetry-command-output", daemon=True)
+    reader.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        reader.join(timeout=1)
         return None
-    return result.stdout
+    reader.join(timeout=1)
+    if reader.is_alive():
+        process.kill()
+        process.wait()
+        return None
+    if returncode != 0 or exceeded.is_set():
+        return None
+    return output.decode("utf-8", errors="replace")
 
 
 def parse_zpool_list(output: str) -> list[dict[str, Any]]:
@@ -169,8 +198,18 @@ def parse_ses_metrics(output: str) -> dict[str, Any]:
             locate = locate or raw.get("identify") is True
             fault = fault or raw.get("fault") is True
     descriptor = document.get("enclosure_descriptor")
+    logical_id = document.get("enclosure_logical_identifier") or document.get(
+        "primary_enclosure_logical_identifier"
+    )
+    if not isinstance(logical_id, str) or re.fullmatch(
+        r"(?:0x|naa\.)?[0-9A-Fa-f]{16,64}", logical_id
+    ) is None:
+        logical_id = None
     return {
-        "id": str(descriptor)[:512] if isinstance(descriptor, str) and descriptor else None,
+        "id": logical_id.casefold() if logical_id else None,
+        "descriptor": str(descriptor)[:256]
+        if isinstance(descriptor, str) and descriptor
+        else "Not reported",
         "health": str(document.get("status") or "Not reported")[:128],
         "temperature_c": max(temperatures) if temperatures else None,
         "fan_rpm": max(fans) if fans else None,
@@ -535,7 +574,12 @@ class LinuxStoragePlatformCollector:
                 item = parse_ses_metrics(output)
             except ValueError:
                 continue
-            stable_id = str(item.get("id") or enclosure.name)
+            stable_id = item.get("id")
+            if not isinstance(stable_id, str):
+                # SES display descriptors and kernel enclosure numbers are not
+                # permanent identities. Do not conflate or accumulate entities
+                # when the enclosure does not report a logical identifier.
+                continue
             entry = by_id.setdefault(stable_id, {**item, "paths": 0})
             entry["paths"] = int(entry["paths"]) + 1
         readings: list[MetricReading] = []
@@ -543,7 +587,7 @@ class LinuxStoragePlatformCollector:
             entity = EntityReading(
                 "enclosure",
                 f"ses:{stable_id}"[:512],
-                stable_id[:256],
+                str(item["descriptor"])[:256],
                 labels={
                     "fan_count": str(item["fan_count"]),
                     "psu_states": ",".join(item["psu_states"])[:512] or "Not reported",

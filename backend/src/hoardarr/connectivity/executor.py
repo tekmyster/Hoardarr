@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Mapping
@@ -638,23 +639,127 @@ def _targetcli(commands: list[str]) -> None:
     _run([_command("targetcli")], input_text=script, timeout=120)
 
 
+def _trusted_backing_parent(path: Path) -> int:
+    """Open a root-controlled Linux directory tree without following links."""
+
+    if os.name != "posix" or not path.is_absolute():
+        raise ExecutorFailure("connectivity_path_invalid", "Backing folder is unavailable.")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+            facts = os.fstat(descriptor)
+            if facts.st_uid != 0 or facts.st_mode & 0o022:
+                raise ExecutorFailure(
+                    "connectivity_backing_parent_untrusted",
+                    "Block-storage backing folders must be root controlled.",
+                )
+        return descriptor
+    except (OSError, ExecutorFailure):
+        os.close(descriptor)
+        raise
+
+
 def _ensure_backing_file(config: Mapping[str, Any]) -> tuple[Path, bool]:
     path = _safe_path(config["backing_path"], directory=False)
-    created = not path.exists()
-    if created:
-        usage = shutil.disk_usage(path.parent)
-        reserve = max(1024**3, int(usage.total * 0.05))
-        if usage.free < int(config["size_bytes"]) + reserve:
-            raise ExecutorFailure("connectivity_space_insufficient", "Not enough free space.")
-        _run([_command("fallocate"), "-l", str(config["size_bytes"]), str(path)], timeout=120)
-        os.chmod(path, 0o600)
-    elif path.stat().st_size != config["size_bytes"]:
-        raise ExecutorFailure(
-            "connectivity_backing_file_changed",
-            "Backing file size does not match.",
-            needs_attention=True,
-        )
-    return path, created
+    parent_fd = _trusted_backing_parent(path.parent)
+    descriptor = -1
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            usage = shutil.disk_usage(path.parent)
+            reserve = max(1024**3, int(usage.total * 0.05))
+            if usage.free < int(config["size_bytes"]) + reserve:
+                raise ExecutorFailure(
+                    "connectivity_space_insufficient", "Not enough free space."
+                ) from None
+            try:
+                descriptor = os.open(
+                    path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError as exc:
+                raise ExecutorFailure(
+                    "connectivity_backing_file_changed",
+                    "Backing file identity changed.",
+                    needs_attention=True,
+                ) from exc
+            created = True
+            try:
+                os.posix_fallocate(descriptor, 0, int(config["size_bytes"]))
+            except AttributeError:
+                os.ftruncate(descriptor, int(config["size_bytes"]))
+            except OSError as exc:
+                raise ExecutorFailure(
+                    "connectivity_backing_allocation_failed",
+                    "Backing storage could not be allocated.",
+                    needs_attention=True,
+                ) from exc
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode) or facts.st_size != config["size_bytes"]:
+            raise ExecutorFailure(
+                "connectivity_backing_file_changed",
+                "Backing file identity or size does not match.",
+                needs_attention=True,
+            )
+        named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (named.st_dev, named.st_ino) != (facts.st_dev, facts.st_ino):
+            raise ExecutorFailure(
+                "connectivity_backing_file_changed",
+                "Backing file identity changed.",
+                needs_attention=True,
+            )
+        return path, created
+    except Exception:
+        if created:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                opened = os.fstat(descriptor) if descriptor >= 0 else None
+                if opened is not None and (current.st_dev, current.st_ino) == (
+                    opened.st_dev,
+                    opened.st_ino,
+                ):
+                    os.unlink(path.name, dir_fd=parent_fd)
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _unlink_backing_file(value: object, *, missing_ok: bool) -> bool:
+    path = _safe_path(value, directory=False)
+    parent_fd = _trusted_backing_parent(path.parent)
+    try:
+        try:
+            facts = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if missing_ok:
+                return False
+            raise ExecutorFailure(
+                "connectivity_backing_file_changed", "Backing file is missing."
+            ) from None
+        if not stat.S_ISREG(facts.st_mode):
+            raise ExecutorFailure(
+                "connectivity_backing_file_changed", "Backing file identity changed."
+            )
+        os.unlink(path.name, dir_fd=parent_fd)
+        return True
+    finally:
+        os.close(parent_fd)
 
 
 def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None) -> None:
@@ -688,8 +793,8 @@ def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None)
         _targetcli(commands)
     except Exception:
         if created:
-            with contextlib.suppress(OSError):
-                path.unlink()
+            with contextlib.suppress(ExecutorFailure, OSError):
+                _unlink_backing_file(config["backing_path"], missing_ok=True)
         raise
 
 
@@ -803,8 +908,8 @@ def _apply_fcoe(service_id: str, config: Mapping[str, Any]) -> dict[str, Any]:
         with contextlib.suppress(Exception):
             _remove_fcoe(service_id, config)
         if created:
-            with contextlib.suppress(OSError):
-                path.unlink()
+            with contextlib.suppress(ExecutorFailure, OSError):
+                _unlink_backing_file(config["backing_path"], missing_ok=True)
         raise
     return {
         "interfaces": interface_details,
@@ -927,7 +1032,7 @@ def remove(
         else:
             _remove_fcoe(service_id, config)
         if delete_backing_data and protocol in {"iscsi", "fcoe"}:
-            _safe_path(config["backing_path"], directory=False).unlink(missing_ok=True)
+            _unlink_backing_file(config["backing_path"], missing_ok=True)
         _save_state(services)
     except Exception:
         if protocol in {"smb", "nfs"}:

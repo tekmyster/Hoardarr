@@ -171,15 +171,32 @@ describe("AnalyticsPage", () => {
     vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);
     vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: "2026-08-22T11:00:00Z", items: [sample], restricted_capabilities: [] });
     vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
-    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    const settingsSpy = vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
     const historySpy = vi.spyOn(api, "metricHistory").mockReturnValue(new Promise(() => undefined));
     const clearIntervalSpy = vi.spyOn(window, "clearInterval");
     const { unmount } = render(<AnalyticsPage />);
     await waitFor(() => expect(historySpy).toHaveBeenCalled());
     const signal = historySpy.mock.calls[0][0].signal;
+    const settingsSignal = settingsSpy.mock.calls[0][0];
+    expect(signal?.aborted).toBe(false);
+    expect(settingsSignal?.aborted).toBe(false);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+    expect(settingsSignal?.aborted).toBe(true);
+    expect(clearIntervalSpy).toHaveBeenCalled();
+  });
+
+  it("aborts an unfinished aggregate refresh when the page unmounts", async () => {
+    const catalogSpy = vi.spyOn(api, "metricCatalog").mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(api, "metricEntities").mockResolvedValue([]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: "2026-08-22T11:00:00Z", items: [], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    const { unmount } = render(<AnalyticsPage />);
+    await waitFor(() => expect(catalogSpy).toHaveBeenCalledTimes(1));
+    const signal = catalogSpy.mock.calls[0][0];
     expect(signal?.aborted).toBe(false);
     unmount();
     expect(signal?.aborted).toBe(true);
-    expect(clearIntervalSpy).toHaveBeenCalled();
   });
 });

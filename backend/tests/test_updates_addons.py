@@ -275,6 +275,39 @@ def test_addon_rejects_undeclared_privilege_and_tampered_payload(tmp_path: Path)
     assert exc.value.code == "payload_digest_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", "../../outside"),
+        ("version", "/tmp/outside"),
+        ("entrypoint", "provider.py\nCapabilityBoundingSet=CAP_SYS_ADMIN"),
+        ("entrypoint", "../provider.py"),
+    ],
+)
+def test_addon_manifest_rejects_unsafe_identity_and_runtime_paths(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    payload = tmp_path / "addon.zip"
+    payload.write_bytes(b"payload")
+    manifest = _manifest(payload)
+    manifest[field] = value
+
+    with pytest.raises(AddonError):
+        normalize_manifest(manifest)
+
+
+def test_addon_manifest_rejects_unsafe_ui_module_path(tmp_path: Path) -> None:
+    payload = tmp_path / "addon.zip"
+    payload.write_bytes(b"payload")
+    manifest = _manifest(payload)
+    manifest["ui"] = [{"slot": "storage", "module": "ui/view.js\n[Service]"}]
+
+    with pytest.raises(AddonError) as exc:
+        normalize_manifest(manifest)
+
+    assert exc.value.code == "ui_extension_invalid"
+
+
 def test_addon_upgrade_is_forward_only_and_requires_disable() -> None:
     validate_upgrade("1.0.0", "1.1.0", "installed")
     with pytest.raises(AddonError) as exc:
