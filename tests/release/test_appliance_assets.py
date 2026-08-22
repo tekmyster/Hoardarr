@@ -40,6 +40,10 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("requirements/hoardarr.lock", ci)
         self.assertNotIn("locked-project.txt", ci)
         self.assertIn("hoardarr-storage-test", storage)
+        self.assertIn("extended-storage-stacks:", storage)
+        self.assertIn("runs-on: ubuntu-24.04", storage)
+        self.assertIn("HOARDARR_EXTENDED_STORAGE_TESTS=1", storage)
+        self.assertIn("sudo modprobe zfs", storage)
         loop_test = (ROOT / "tests/integration/run-loop-device-tests.sh").read_text(
             encoding="utf-8"
         )
