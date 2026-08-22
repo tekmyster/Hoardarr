@@ -1,6 +1,6 @@
 # Hoardarr validation results
 
-Validated on 2026-08-22 against Hoardarr 0.3.10 Beta 1. Windows development
+Validated on 2026-08-22 against Hoardarr 0.3.11 Beta 1. Windows development
 checks were followed by repository-controlled Ubuntu 24.04/Python 3.12/systemd,
 loop-device and QEMU execution. Enterprise telemetry evidence is detailed in
 [telemetry-validation.md](telemetry-validation.md).
@@ -40,13 +40,14 @@ no-clobber link after descriptor-relative inode validation.
 
 | Workflow / job | Run | Result |
 |---|---:|---|
-| CI: backend | `32580574074` | 315 passed; Ruff, Linux telemetry, 24,000-observation memory soak, wheel/sdist, 72 bootstrap and 19 release tests passed |
-| CI: frontend | `32580574074` | 100 component/unit, 3 accessibility and 8 Playwright tests passed; TypeScript/Vite production build passed |
-| CI: Ubuntu installer | `32580574074` | 72 bootstrap tests, shell syntax and hardware detector passed |
-| CI: release bundle/systemd | `32580574074` | Bundle, 19 release tests, archive/checksum, clean wheel install and every systemd unit passed |
-| CI: installed appliance | `32580574074` | Signed bundle applied, services started, database migrated, ownership/modes and web health passed, identical reapply passed |
-| Four-device mergerFS telemetry | `32580574075` | Purpose-created loop workload, persistence, reconnect, collector restart, rollups and cleanup passed |
+| CI: backend | `32589493526` | 336 passed; Ruff, Linux telemetry, 24,000-observation memory soak and wheel/sdist passed |
+| CI: frontend | `32589493526` | 107 component/unit, 3 accessibility and 9 Playwright tests passed; TypeScript/Vite production build passed |
+| CI: Ubuntu installer | `32589493526` | 72 bootstrap tests, shell syntax and hardware detector passed |
+| CI: release bundle/systemd | `32589493526` | Bundle, 19 release tests, archive/checksum, clean wheel install and every systemd unit passed |
+| CI: installed appliance | `32589493526` | Signed 0.3.11 bundle applied, services started, database migrated, ownership/modes and web health passed, identical reapply passed |
+| Four-device mergerFS telemetry | `32589493527` | Purpose-created loop workload, persistence, reconnect, collector restart, rollups and cleanup passed |
 | Extended storage stacks | `32581789533` | Hosted Ubuntu purpose-created loops passed ext4/POSIX ACL, MD RAID6/XFS, ZFS RAIDZ2/snapshot/scrub and SnapRAID sync/status/diff/check |
+| Controller redundancy lifecycle | `32589493527` | A disposable LIO LUN started on one iSCSI path, converted to two-path DM-Multipath, replaced one controller path, survived verified continuous I/O failover/recovery on both paths, restarted multipathd, then returned to one direct path |
 | Appliance ISO/QEMU | `32580574069` | Pinned ISO build and QEMU installer-checkpoint smoke test |
 
 The conditional `disposable-block-devices` job was skipped because its separate
@@ -76,6 +77,7 @@ python3 scripts/build-release-bundle.py build --output-dir dist/releases
 python3.12 -m unittest discover -s tests/release -p 'test_*.py'
 scripts/install-release-bundle.sh --apply <verified-plan>
 tests/integration/run-mergerfs-telemetry-workload.sh
+tests/integration/run-multipath-redundancy-lifecycle.sh
 HOARDARR_EXTENDED_STORAGE_TESTS=1 tests/integration/run-loop-device-tests.sh
 scripts/build-appliance.sh ubuntu.iso <pinned-sha256> dist/hoardarr-release.tar.gz hoardarr.iso
 qemu-system-x86_64 -accel tcg ...
@@ -106,6 +108,15 @@ repeated the QEMU checkpoint. The two passes agree on the corrected code paths.
 Targeted release-gate run `32581789533` subsequently exercised ext4 ACLs, MD
 RAID6, ZFS RAIDZ2 and SnapRAID against newly created loop devices on hosted
 Ubuntu and cleaned them through the purpose-bound harness.
+
+Controller lifecycle run `32589493527` subsequently exercised Hoardarr's real
+planner and privileged executor against one purpose-created LIO LUN presented
+through three loopback iSCSI portals. The original storage entity UUID
+`577d61b3-3c67-4c00-a2ae-5f63b5e6aa18`, filesystem UUID
+`d4d53536-a6ae-4e73-9a48-b0c8ebf14264`, and public mount path remained
+unchanged through add, replacement, failover, recovery, multipathd restart and
+redundancy removal. File hashes remained valid, `fio` completed through both
+path failures, and no format command ran after Day 1 creation.
 
 ## Security validation
 

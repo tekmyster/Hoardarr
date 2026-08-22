@@ -16,6 +16,10 @@
   restart, rollups, writes-today and cleanup.
 - [x] Hosted Ubuntu disposable loops pass ext4/POSIX ACL, MD RAID6/XFS, ZFS
   RAIDZ2/snapshot/scrub and SnapRAID sync/status/diff/check execution.
+- [x] Hosted Ubuntu converts a mounted single-path LIO/iSCSI filesystem to
+  DM-Multipath without formatting or copying data, preserves its filesystem,
+  Hoardarr and mount identities, survives both path failures during verified
+  I/O, replaces a controller path, restarts multipathd and removes redundancy.
 - [x] The appliance ISO builds from the pinned Ubuntu 24.04.4 image and boots in
   QEMU/TCG to the Ubuntu installer/autoinstall checkpoint.
 - [x] Critical browser workflows and automated accessibility checks pass.
