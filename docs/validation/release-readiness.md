@@ -20,6 +20,11 @@
   DM-Multipath without formatting or copying data, preserves its filesystem,
   Hoardarr and mount identities, survives both path failures during verified
   I/O, replaces a controller path, restarts multipathd and removes redundancy.
+- [x] Two installed Ubuntu 24.04 Hoardarr nodes with four local virtual SSDs
+  and a dual-path shared LUN pass the SSD-budgeted read-heavy workload,
+  path-failover, controlled single-writer ownership handoff, API/worker
+  restart, persistent graph reconstruction, real failover annotation and
+  bounded browser/worker memory gates.
 - [x] The appliance ISO builds from the pinned Ubuntu 24.04.4 image and boots in
   QEMU/TCG to the Ubuntu installer/autoinstall checkpoint.
 - [x] Critical browser workflows and automated accessibility checks pass.

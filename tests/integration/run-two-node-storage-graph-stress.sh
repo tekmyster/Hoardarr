@@ -63,10 +63,15 @@ charge_write() {
     planned_by_device["${device}"]="${next_device}"
 }
 
-# One small deterministic dataset per local virtual SSD, one shared dataset, and
-# one short controlled write phase. Repeated stress phases are read-only.
+# One small deterministic dataset per local virtual SSD, one shared dataset,
+# one short controlled write, and a bounded 95%-read mixed phase. The mixed
+# file can land on either mergerFS member, so its full worst-case write volume
+# is reserved against both members even though only one can receive the file.
 for device in A1 A2 B1 B2; do charge_write "${device}" $((9 * 1024 * 1024)); done
-charge_write SHARED $((36 * 1024 * 1024))
+charge_write A1 $((4 * 1024 * 1024))
+charge_write A1 $((8 * 1024 * 1024))
+charge_write A2 $((8 * 1024 * 1024))
+charge_write SHARED $((32 * 1024 * 1024))
 
 curl --fail --location --proto '=https' --tlsv1.2 \
     --output "${RUN_ROOT}/${BASE_NAME}" "${BASE_URL}"
@@ -266,8 +271,8 @@ phase random_read
 remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=4k --direct=1 --ioengine=libaio --time_based=1 --runtime=12 --iodepth=16 --numjobs=${WORKLOAD_CONCURRENCY} --output-format=json" >"${OUTPUT}/fio-random-read.json"
 phase limited_write
 remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --rate=1M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
-phase mixed_read_metadata
-remote 2222 'sudo fio --name=mixed-read-shape --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bsrange=4k-1M --direct=1 --ioengine=libaio --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
+phase mixed_read_write
+remote 2222 'sudo fio --name=mixed-read-write --filename=/srv/hoardarr/a/local/mixed-io.bin --rw=randrw --rwmixread=95 --bs=64k --size=8M --io_size=8M --rate=1M --direct=0 --fsync=1 --iodepth=4 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
 
 first_path="${topology[A_SHARED_PATH_ONE]}"
 phase path_a_failover_start
@@ -282,6 +287,28 @@ remote 2222 'sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-
 phase path_a_recovered
 sleep 12
 remote 2222 'sudo cat /tmp/failover-fio.json' >"${OUTPUT}/fio-path-failover.json"
+
+second_path="${topology[A_SHARED_PATH_TWO]}"
+phase path_b_failover_start
+remote 2222 'sudo fio --name=path-b-failover-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=128k --direct=1 --ioengine=libaio --time_based=1 --runtime=20 --iodepth=8 --output=/tmp/path-b-failover-fio.json --output-format=json >/dev/null 2>&1 & echo $!' >"${OUTPUT}/path-b-failover-fio.pid"
+sleep 4
+remote 2222 "sudo multipathd fail path \$(basename ${second_path})"
+remote 2222 'sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence collect'
+phase path_b_failed
+sleep 6
+remote 2222 "sudo multipathd reinstate path \$(basename ${second_path})"
+remote 2222 'sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence collect'
+phase path_b_recovered
+sleep 12
+remote 2222 'sudo cat /tmp/path-b-failover-fio.json' >"${OUTPUT}/fio-path-b-failover.json"
+
+phase multipathd_restart_start
+remote 2222 'sudo fio --name=multipathd-restart-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=256k --direct=1 --ioengine=libaio --time_based=1 --runtime=10 --iodepth=8 --output=/tmp/multipathd-restart-fio.json --output-format=json >/dev/null 2>&1 & echo $!' >"${OUTPUT}/multipathd-restart-fio.pid"
+sleep 2
+remote 2222 'sudo systemctl restart multipathd.service; sudo systemctl is-active --quiet multipathd.service; sudo test -b /dev/mapper/hoardarr-shared'
+sleep 9
+remote 2222 'sudo cat /tmp/multipathd-restart-fio.json' >"${OUTPUT}/fio-multipathd-restart.json"
+phase multipathd_restarted
 
 phase api_disconnected_workload
 remote 2222 'sudo systemctl stop hoardarr-api.service; sudo systemctl is-active --quiet hoardarr-worker.service'
@@ -328,6 +355,7 @@ python3 - "${OUTPUT}" "${MAX_TOTAL_WRITES}" "${MAX_DEVICE_WRITES}" "${planned_to
 import json
 import pathlib
 import sys
+from datetime import datetime
 
 root = pathlib.Path(sys.argv[1])
 node_a = json.loads((root / "node-a-evidence.json").read_text())
@@ -372,6 +400,78 @@ for node in "ab":
     after = int((root / f"{node}-shared-writes-after.txt").read_text().strip())
     actual_writes[f"Node {node.upper()} shared LUN path stack"] = max(0, after - before)
 
+phase_times = {item["phase"]: datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00")) for item in phases}
+
+
+def fio_stats(filename, direction):
+    document = json.loads((root / filename).read_text())
+    jobs = document["jobs"]
+    io_bytes = sum(float(job[direction]["io_bytes"]) for job in jobs)
+    bandwidth = sum(float(job[direction]["bw_bytes"]) for job in jobs)
+    iops = sum(float(job[direction]["iops"]) for job in jobs)
+    latencies = [float(job[direction]["clat_ns"]["mean"]) / 1_000_000 for job in jobs if float(job[direction]["io_bytes"]) > 0]
+    return {
+        "bytes": int(io_bytes),
+        "average_bytes_per_second": bandwidth,
+        "average_iops": iops,
+        "mean_completion_latency_ms": sum(latencies) / len(latencies) if latencies else None,
+    }
+
+
+def telemetry_stats(node, metric_id, start_phase, end_phase):
+    start = phase_times[start_phase]
+    end = phase_times[end_phase]
+    values = [
+        float(sample["value"])
+        for sample in node["telemetry"]
+        if sample["entity_type"] == "host"
+        and sample["metric_id"] == metric_id
+        and sample["quality"] == "available"
+        and isinstance(sample["value"], (int, float))
+        and start <= datetime.fromisoformat(sample["observed_at"]) < end
+    ]
+    return {
+        "samples": len(values),
+        "mean": sum(values) / len(values) if values else None,
+        "minimum": min(values) if values else None,
+        "maximum": max(values) if values else None,
+    }
+
+
+comparisons = {}
+comparison_phases = (
+    ("sequential_read", node_a, "fio-sequential-read.json", "read", "sequential_read", "random_read"),
+    ("random_read", node_a, "fio-random-read.json", "read", "random_read", "limited_write"),
+    ("limited_write", node_a, "fio-limited-write.json", "write", "limited_write", "mixed_read_write"),
+    ("mixed_read", node_a, "fio-mixed-read.json", "read", "mixed_read_write", "path_a_failover_start"),
+    ("mixed_write", node_a, "fio-mixed-read.json", "write", "mixed_read_write", "path_a_failover_start"),
+    ("path_a_failover", node_a, "fio-path-failover.json", "read", "path_a_failover_start", "path_b_failover_start"),
+    ("path_b_failover", node_a, "fio-path-b-failover.json", "read", "path_b_failover_start", "multipathd_restart_start"),
+    ("multipathd_restart", node_a, "fio-multipathd-restart.json", "read", "multipathd_restart_start", "multipathd_restarted"),
+    ("api_disconnected", node_a, "fio-api-down.json", "read", "api_disconnected_workload", "api_reconnected"),
+    ("post_handoff", node_b, "fio-post-handoff-read.json", "read", "node_b_serving", "node_b_worker_restart"),
+)
+for name, node, filename, direction, start_phase, end_phase in comparison_phases:
+    metric_prefix = f"io.{direction}"
+    comparisons[name] = {
+        "fio": fio_stats(filename, direction),
+        "hoardarr": {
+            "bytes_per_second": telemetry_stats(node, f"{metric_prefix}.bytes_per_second", start_phase, end_phase),
+            "iops": telemetry_stats(node, f"{metric_prefix}.iops", start_phase, end_phase),
+            "latency_ms": telemetry_stats(node, f"{metric_prefix}.latency", start_phase, end_phase),
+        },
+        "window": {"start": phase_times[start_phase].isoformat(), "end": phase_times[end_phase].isoformat()},
+    }
+
+for phase_name, comparison in comparisons.items():
+    if comparison["hoardarr"]["bytes_per_second"]["maximum"] in (None, 0):
+        raise SystemExit(f"Hoardarr did not observe {phase_name} {('write' if phase_name == 'limited_write' else 'read')} activity")
+
+browser_memory = {
+    node: json.loads((root / f"node-{node}-browser-memory.json").read_text())
+    for node in ("a", "b")
+}
+
 summary = {
     "environment": "two Ubuntu 24.04 QEMU VMs with systemd",
     "device_type": "test-created virtual block devices",
@@ -383,6 +483,34 @@ summary = {
         "maximum_per_device_bytes": int(sys.argv[3]),
         "planned_payload_bytes": int(sys.argv[4]),
         "observed_local_os_write_bytes": actual_writes,
+        "observed_os_write_bytes_total": sum(actual_writes.values()),
+    },
+    "fio_hoardarr_comparison": comparisons,
+    "comparison_semantics": (
+        "fio reports IO issued by the named workload while Hoardarr host metrics summarize Linux "
+        "block-layer counters and may include mapper/path layers. Windows and sampling boundaries differ; "
+        "direction, phase shape, and order of magnitude are compared rather than byte equality."
+    ),
+    "total_fio_read_bytes": sum(
+        fio_stats(filename, "read")["bytes"]
+        for filename in (
+            "fio-sequential-read.json",
+            "fio-random-read.json",
+            "fio-mixed-read.json",
+            "fio-path-failover.json",
+            "fio-path-b-failover.json",
+            "fio-multipathd-restart.json",
+            "fio-api-down.json",
+            "fio-post-handoff-read.json",
+        )
+    ),
+    "browser_memory": browser_memory,
+    "worker_memory_files": {
+        node: {
+            "before": (root / f"node-{node}-worker-memory-before.txt").read_text().splitlines(),
+            "after": (root / f"node-{node}-worker-memory.txt").read_text().splitlines(),
+        }
+        for node in ("a", "b")
     },
     "browser_connected_during_workload": False,
     "data_integrity": "shared SHA-256 unchanged across controlled ownership handoff",

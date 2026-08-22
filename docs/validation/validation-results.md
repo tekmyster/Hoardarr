@@ -124,6 +124,33 @@ bounded journaled retry, and restores the existing mapper mount if the map
 cannot be released. Focused tests exercise retry and rollback; final run
 `32589920257` passed the complete lifecycle after that correction.
 
+Two-node graph-stress run `32599605672` booted two Ubuntu 24.04 QEMU nodes,
+installed Hoardarr 0.3.11 as systemd services, attached two local virtual SSDs
+to each node and presented one shared LUN over two controller paths to both.
+The production durable scan populated per-drive telemetry. Node A failed and
+recovered a path under fio, the API was stopped while the worker continued
+persisting, and shared ext4 ownership then moved to Node B without changing the
+WWID, filesystem UUID, mapper, mount or SHA-256. Node B restarted its worker
+and resumed collection.
+
+That run also found a release-visible defect: the 24-hour graph request selected
+an empty hourly rollup on a fresh installation even though bounded raw samples
+existed. Automatic resolution now uses the actual raw sample population while
+it fits the point budget. The focused regression added to
+`test_enterprise_telemetry.py` passed, as did the complete local suite (340
+backend passed, 3 Windows-only skipped; 110 frontend passed; 4 accessibility
+passed). The corrected CI screenshots contained real plotted series (87 and 92
+commands maximum), and 80-cycle per-node browser heap growth after warm-up was
+813,699 and 829,612 bytes. The two workers' RSS increased by 4,348 and 6,356
+KiB while their high-water marks remained unchanged.
+
+The final expanded scenario additionally fails and restores the second path,
+restarts multipathd during open-file IO and records a bounded 95%-read mixed
+phase. Its machine-readable summary performs phase-aligned fio/Linux versus
+Hoardarr comparisons and rejects any phase for which Hoardarr records no
+activity. Final run IDs and artifact digest are recorded in the completion
+report.
+
 ## Security validation
 
 - Managed repository-wide Deep Security Scan: **BLOCKED BY EXECUTION

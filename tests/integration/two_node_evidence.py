@@ -304,7 +304,7 @@ def export(args: argparse.Namespace) -> None:
         entities = {item.id: item for item in session.scalars(select(MetricEntity))}
         samples = list(
             session.scalars(
-                select(MetricSample).order_by(MetricSample.observed_at.desc()).limit(20_000)
+                select(MetricSample).order_by(MetricSample.observed_at.desc()).limit(100_000)
             )
         )
         samples.reverse()
