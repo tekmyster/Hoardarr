@@ -10,6 +10,7 @@ from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from hoardarr.core.config import Settings
@@ -107,7 +108,14 @@ class EntitlementService:
             "validated_at": status.validated_at.isoformat(),
         }
         if record is None:
-            session.add(TelemetryState(id="telemetry_license", state_json=document))
+            session.execute(
+                sqlite_insert(TelemetryState)
+                .values(id="telemetry_license", state_json=document, updated_at=now)
+                .on_conflict_do_update(
+                    index_elements=[TelemetryState.id],
+                    set_={"state_json": document, "updated_at": now},
+                )
+            )
             session.flush()
         else:
             record.state_json = document
@@ -152,9 +160,10 @@ class EntitlementService:
         try:
             raw_license = self.settings.telemetry_license_file.read_text(encoding="utf-8")
         except FileNotFoundError:
-            status = self._basic(current, "unlicensed", "Basic telemetry is active.")
-            self._cache(session, status, current)
-            return status
+            # Basic/unlicensed reads do not need a durable cache. Keeping these
+            # GET paths read-only avoids write contention when the Settings and
+            # Analytics pages request policy and catalog data concurrently.
+            return self._basic(current, "unlicensed", "Basic telemetry is active.")
         except OSError:
             return self._cached_on_io_failure(
                 session,

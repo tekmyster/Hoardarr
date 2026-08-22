@@ -28,6 +28,7 @@ from hoardarr.db.models import (
     Operation,
     StorageEntity,
     StoragePath,
+    TelemetryState,
 )
 from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.telemetry.alerts import evaluate_basic_alerts
@@ -1093,6 +1094,35 @@ def test_history_point_budget_and_policy_are_enforced_by_api(tmp_path: Path) -> 
         assert policy.status_code == 200
         assert policy.json()["history"]["maximum_graph_points"] == 1200
         assert policy.json()["storage"]["estimated_bytes_per_day"] > 0
+    engine.dispose()
+
+
+def test_unlicensed_catalog_and_settings_are_concurrent_read_only_requests(tmp_path: Path) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    with factory() as session, session.begin():
+        token = issue_setup_token(session)
+    with TestClient(create_app(settings), base_url="http://testserver") as client:
+        claim(client, token)
+        barrier = threading.Barrier(3)
+        statuses: list[int] = []
+
+        def request(path: str) -> None:
+            barrier.wait()
+            statuses.append(client.get(path).status_code)
+
+        threads = [
+            threading.Thread(target=request, args=("/api/v1/telemetry/catalog",)),
+            threading.Thread(target=request, args=("/api/v1/telemetry/settings",)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
+        assert sorted(statuses) == [200, 200]
+    with factory() as session:
+        assert session.get(TelemetryState, "telemetry_license") is None
     engine.dispose()
 
 
