@@ -476,7 +476,10 @@ def test_controller_path_replacement_adds_new_path_before_removing_old(
             "plan": plan,
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
-        paths=Paths(transaction_root=tmp_path / "transactions"),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
         inventory_provider=lambda: {"disks": [first, second_renumbered, replacement]},
         runner=lambda command, _timeout: commands.append(command),
         mapper_exists=lambda _path: True,
@@ -625,7 +628,10 @@ def test_redundancy_journal_replays_success_and_reports_command_failure(
         hardware_snapshot={"disks": [first, second]},
         action="add",
     )
-    paths = Paths(transaction_root=tmp_path / "transactions")
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        multipath_config_root=tmp_path / "multipath",
+    )
     request = {
         "operation": "apply_storage_redundancy",
         "operation_id": "11111111-1111-4111-8111-111111111111",
@@ -717,7 +723,10 @@ def test_redundancy_waits_a_bounded_time_for_the_mapper_node(
             "plan": plan,
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
-        paths=Paths(transaction_root=tmp_path / "transactions"),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            multipath_config_root=tmp_path / "multipath",
+        ),
         inventory_provider=lambda: {"disks": [first, second]},
         runner=lambda _command, _timeout: None,
         mapper_exists=mapper_exists,
@@ -760,7 +769,10 @@ def test_failed_bind_mount_rolls_back_from_mapper_to_reviewed_direct_path(
                 "plan": plan,
                 "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
             },
-            paths=Paths(transaction_root=tmp_path / "transactions"),
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                multipath_config_root=tmp_path / "multipath",
+            ),
             inventory_provider=lambda: {"disks": [first, second]},
             runner=fail_bind_once,
             mapper_exists=lambda _path: True,
