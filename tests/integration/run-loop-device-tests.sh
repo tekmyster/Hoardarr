@@ -48,7 +48,7 @@ assert_test_loop() {
 make_loop ext4 2G
 loop="$created_loop"
 assert_test_loop "$loop"
-mkfs.ext4 -F -E lazy_itable_init=1,lazy_journal_init=1 "$loop"
+mkfs.ext4 -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$loop"
 mkdir "$work/mnt"
 mount "$loop" "$work/mnt"
 mkdir "$work/mnt/Movies" "$work/mnt/TV"
@@ -97,7 +97,7 @@ make_loop snap-data 512M
 snap_data="$created_loop"
 make_loop snap-parity 512M
 snap_parity="$created_loop"
-for member in "$snap_data" "$snap_parity"; do assert_test_loop "$member"; mkfs.ext4 -F "$member"; done
+for member in "$snap_data" "$snap_parity"; do assert_test_loop "$member"; mkfs.ext4 -F -E nodiscard "$member"; done
 mkdir "$work/snap-data" "$work/snap-parity"
 mount "$snap_data" "$work/snap-data"
 mount "$snap_parity" "$work/snap-parity"
@@ -105,6 +105,7 @@ printf 'test payload\n' >"$work/snap-data/file.txt"
 cat >"$work/snapraid.conf" <<EOF
 parity $work/snap-parity/snapraid.parity
 content $work/snap-data/snapraid.content
+content $work/snap-parity/snapraid.content
 data d1 $work/snap-data
 EOF
 snapraid -c "$work/snapraid.conf" sync
