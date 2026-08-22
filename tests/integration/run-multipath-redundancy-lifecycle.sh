@@ -75,7 +75,7 @@ mkdir -p "$mountpoint" "$device_mountpoint" /etc/multipath/conf.d
 targetcli /backstores/fileio create name="$backstore" file_or_dev="$backing" size=3G write_back=false >/dev/null
 targetcli /iscsi create "$target_iqn" >/dev/null
 targetcli "/iscsi/$target_iqn/tpg1/luns" create "/backstores/fileio/$backstore" >/dev/null
-targetcli "/iscsi/$target_iqn/tpg1/acls" create "$initiator" >/dev/null
+targetcli "/iscsi/$target_iqn/tpg1/acls" create wwn="$initiator" >/dev/null
 targetcli "/iscsi/$target_iqn/tpg1/portals" delete 0.0.0.0 3260 >/dev/null 2>&1 || true
 for portal in "${portals[@]}"; do
   targetcli "/iscsi/$target_iqn/tpg1/portals" create "$portal" 3260 >/dev/null
