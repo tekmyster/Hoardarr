@@ -312,6 +312,7 @@ def test_privileged_removal_returns_to_remaining_direct_path_without_formatting(
     )
     flattened = "\n".join(" ".join(command) for command in commands)
     assert "multipathd del path sdc" in flattened
+    assert "multipathd fail path sdc" in flattened
     assert "multipath -f naa.600a098000abc" in flattened
     assert "mount /dev/sdb /mnt/hoardarr/lun7" in flattened
     assert "mkfs" not in flattened
@@ -374,12 +375,14 @@ def test_controller_path_replacement_adds_new_path_before_removing_old(
     original_id = entity.id
     original_uuid = entity.filesystem_uuid
     original_mount = entity.mountpoint
+    second_renumbered = deepcopy(second)
+    second_renumbered["kernel_path"] = "/dev/sdz"
     replacement = _path("hba-c", "/dev/sdd")
     plan = build_redundancy_plan(
         session,
         storage_entity_id=entity.id,
         hardware_snapshot_sha256="f" * 64,
-        hardware_snapshot={"disks": [first, second, replacement]},
+        hardware_snapshot={"disks": [first, second_renumbered, replacement]},
         action="replace",
         remove_path_identity=stable_path_identity(second),
     )
@@ -394,13 +397,19 @@ def test_controller_path_replacement_adds_new_path_before_removing_old(
             "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
         },
         paths=Paths(transaction_root=tmp_path / "transactions"),
-        inventory_provider=lambda: {"disks": [first, second, replacement]},
+        inventory_provider=lambda: {"disks": [first, second_renumbered, replacement]},
         runner=lambda command, _timeout: commands.append(command),
         mapper_exists=lambda _path: True,
         filesystem_uuid_provider=lambda _path: original_uuid or "",
     )
     flattened = "\n".join(" ".join(command) for command in commands)
-    assert flattened.index("multipath -v2 /dev/sdd") < flattened.index("multipathd del path sdc")
+    assert plan["removed_path"]["kernel_path"] == "/dev/sdz"
+    assert flattened.index("multipath -v2 /dev/sdd") < flattened.index(
+        "multipathd fail path sdz"
+    )
+    assert flattened.index("multipathd fail path sdz") < flattened.index(
+        "multipathd del path sdz"
+    )
     assert not any(command[0].endswith("/umount") for command in commands)
     assert not any(command[0].endswith("/mount") for command in commands)
     assert "mkfs" not in flattened

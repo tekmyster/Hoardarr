@@ -430,6 +430,7 @@ def build_redundancy_plan(
             removed_path = next(
                 item for item in existing if item.stable_path_identity == remove_path_identity
             )
+            removed_observed = observed_by_path.get(remove_path_identity)
         else:
             after = [*before, chosen]
         selected_path = {
@@ -454,9 +455,14 @@ def build_redundancy_plan(
         after = [item for item in before if item != chosen]
         removed_path = next(item for item in existing if item.stable_path_identity == chosen)
         remaining_path = next(item for item in existing if item.stable_path_identity == after[0])
+        removed_observed = observed_by_path.get(chosen)
+        remaining_observed = observed_by_path.get(remaining_path.stable_path_identity)
         selected_path = {
             "stable_path_identity": chosen,
-            "kernel_path": removed_path.kernel_path,
+            "kernel_path": str(
+                (removed_observed or {}).get("kernel_path") or removed_path.kernel_path
+            ),
+            "present": removed_observed is not None,
         }
     mapper_name = re.sub(r"[^a-zA-Z0-9_.-]", "", entity.stable_identity.split(":", 1)[1])
     plan: dict[str, Any] = {
@@ -487,7 +493,10 @@ def build_redundancy_plan(
             "presentation_device": (
                 f"/dev/mapper/{mapper_name}"
                 if len(after) > 1
-                else remaining_path.kernel_path
+                else str(
+                    (remaining_observed or {}).get("kernel_path")
+                    or remaining_path.kernel_path
+                )
                 if action == "remove"
                 else entity.presentation_device
             ),
@@ -499,7 +508,10 @@ def build_redundancy_plan(
         "removed_path": (
             {
                 "stable_path_identity": removed_path.stable_path_identity,
-                "kernel_path": removed_path.kernel_path,
+                "kernel_path": str(
+                    (removed_observed or {}).get("kernel_path") or removed_path.kernel_path
+                ),
+                "present": removed_observed is not None,
             }
             if action == "replace"
             else None

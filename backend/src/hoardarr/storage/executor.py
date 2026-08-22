@@ -2719,18 +2719,27 @@ def apply_storage_redundancy(
                 "The existing filesystem was not remounted.",
             )
 
+    def retire_path(path: Mapping[str, Any]) -> None:
+        # A path that disappeared between review and execution is already absent
+        # from the live map. Otherwise fail it first so multipath never attempts
+        # additional IO while the provider detaches the old controller path.
+        if path.get("present") is False:
+            return
+        kernel_name = PurePosixPath(str(path.get("kernel_path") or "")).name
+        if not kernel_name or kernel_name in {".", ".."}:
+            raise ExecutorFailure("path_invalid", "The path being removed is invalid.")
+        runner([_tool("multipathd"), "fail", "path", kernel_name], 30)
+        runner([_tool("multipathd"), "del", "path", kernel_name], 30)
+
     if plan["operation"] == "redundancy.replace":
         kernel_path = str(selected_devices[0].get("kernel_path") or "")
         create_and_verify_map(kernel_path)
         removed = plan.get("removed_path")
-        removed_kernel_path = PurePosixPath(
-            str(removed.get("kernel_path") if isinstance(removed, Mapping) else "")
-        ).name
-        if not removed_kernel_path:
+        if not isinstance(removed, Mapping):
             raise ExecutorFailure("path_invalid", "The path being replaced is invalid.")
         # The map and its mount remain online while the verified replacement is
         # added first and the stale path is removed afterward.
-        runner([_tool("multipathd"), "del", "path", removed_kernel_path], 30)
+        retire_path(removed)
     elif plan["operation"] == "redundancy.add":
         # Multipath cannot safely claim every provider's already-mounted raw path.
         # Use one controlled transition window: stop using the direct path, build
@@ -2791,10 +2800,7 @@ def apply_storage_redundancy(
     else:
         # Removing one path leaves the existing multipath map online. Transitioning
         # back to a direct device is allowed only when the reviewed result has one path.
-        removed_kernel_path = PurePosixPath(str(selected.get("kernel_path") or "")).name
-        if not removed_kernel_path:
-            raise ExecutorFailure("path_invalid", "The path to remove is invalid.")
-        runner([_tool("multipathd"), "del", "path", removed_kernel_path], 30)
+        retire_path(selected)
         if len(plan["after"]["path_ids"]) == 1:
             direct_text = str(plan["after"].get("presentation_device") or "")
             if not direct_text.startswith("/dev/") or ".." in PurePosixPath(direct_text).parts:

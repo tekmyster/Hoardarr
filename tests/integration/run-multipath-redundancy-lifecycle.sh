@@ -131,6 +131,9 @@ sha256sum -c "$work/existing.sha256" >/dev/null
 path_c="$(login_portal "${portals[2]}")"
 udevadm settle
 multipath -r >/dev/null
+path_a="$(wait_path "${portals[0]}")"
+path_b="$(wait_path "${portals[1]}")"
+path_c="$(wait_path "${portals[2]}")"
 replace_json="$(run_helper replace --remove-controller "${portals[1]}" \
   --path "${portals[0]}=$path_a" --path "${portals[1]}=$path_b" \
   --path "${portals[2]}=$path_c")"
@@ -164,6 +167,8 @@ sha256sum -c "$work/existing.sha256" >/dev/null
 path_c="$(login_portal "${portals[2]}")"
 udevadm settle
 multipath -r >/dev/null
+path_a="$(wait_path "${portals[0]}")"
+path_c="$(wait_path "${portals[2]}")"
 remove_json="$(run_helper remove --remove-controller "${portals[2]}" \
   --path "${portals[0]}=$path_a" --path "${portals[2]}=$path_c")"
 [[ "$(jq -r .storage_entity_id <<<"$remove_json")" == "$storage_id" ]]
