@@ -119,6 +119,17 @@ jobs:
           test -n "$release_dir"
           sudo "$release_dir/scripts/install.sh" plan
           sudo "$release_dir/scripts/install.sh" apply --yes
+      - name: Capture installer service diagnostics
+        if: ${{ failure() }}
+        run: |
+          sudo systemctl status --no-pager --full hoardarr-migrate.service || true
+          sudo journalctl --no-pager --unit hoardarr-migrate.service --lines 200 || true
+          sudo systemctl status --no-pager --full \
+            hoardarr-api.service \
+            hoardarr-worker.service \
+            hoardarr-account-executor.service \
+            hoardarr-storage-executor.service \
+            hoardarr-storage-status.service || true
       - name: Verify installed services, migration, permissions, and web health
         run: |
           systemctl is-active --quiet \
