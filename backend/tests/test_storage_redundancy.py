@@ -234,6 +234,9 @@ def test_privileged_transition_uses_multipath_and_remounts_without_formatting(
         filesystem_uuid_provider=lambda _path: "11111111-1111-4111-8111-111111111111",
     )
     flattened = "\n".join(" ".join(command) for command in commands)
+    assert flattened.index("umount /mnt/hoardarr/lun7") < flattened.index(
+        "multipath -v2 /dev/sdc"
+    )
     assert "multipath -a" in flattened
     assert "multipath -v2 /dev/sdc" in flattened
     assert "umount /media" in flattened
@@ -525,11 +528,14 @@ def test_redundancy_journal_replays_success_and_reports_command_failure(
 
     failed_request = {**request, "operation_id": "22222222-2222-4222-8222-222222222222"}
 
+    failed_commands: list[list[str]] = []
+
     def fail_create(command: list[str], _timeout: float) -> None:
+        failed_commands.append(command)
         if "-v2" in command:
             raise ExecutorFailure("multipath_failed", "Map creation failed")
 
-    with pytest.raises(ExecutorFailure, match="Map creation failed"):
+    with pytest.raises(ExecutorFailure, match="original storage path was restored"):
         apply_storage_redundancy(
             failed_request,
             paths=paths,
@@ -538,6 +544,15 @@ def test_redundancy_journal_replays_success_and_reports_command_failure(
             mapper_exists=lambda _path: True,
             filesystem_uuid_provider=lambda _path: entity.filesystem_uuid or "",
         )
+    assert ["/usr/sbin/umount", "/media"] in failed_commands
+    assert ["/usr/sbin/umount", "/mnt/hoardarr/lun7"] in failed_commands
+    assert ["/usr/sbin/mount", "/dev/sdb", "/mnt/hoardarr/lun7"] in failed_commands
+    assert failed_commands[-1] == [
+        "/usr/sbin/mount",
+        "--bind",
+        "/mnt/hoardarr/lun7",
+        "/media",
+    ]
     assert (
         storage_operation_status(failed_request["operation_id"], paths=paths)["state"]
         == "needs_attention"

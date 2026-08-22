@@ -2679,8 +2679,8 @@ def apply_storage_redundancy(
         atomic_json(journal_path, journal)
 
     runner = tracked_runner
-    if plan["operation"] in {"redundancy.add", "redundancy.replace"}:
-        kernel_path = str(selected_devices[0].get("kernel_path") or "")
+
+    def create_and_verify_map(kernel_path: str) -> None:
         if not kernel_path.startswith("/dev/") or ".." in PurePosixPath(kernel_path).parts:
             raise ExecutorFailure("path_invalid", "The new kernel path is invalid.")
         runner([_tool("multipath"), "-a", wwid], 30)
@@ -2718,42 +2718,50 @@ def apply_storage_redundancy(
                 "The multipath map does not expose the reviewed filesystem UUID. "
                 "The existing filesystem was not remounted.",
             )
-        if plan["operation"] == "redundancy.replace":
-            removed = plan.get("removed_path")
-            removed_kernel_path = PurePosixPath(
-                str(removed.get("kernel_path") if isinstance(removed, Mapping) else "")
-            ).name
-            if not removed_kernel_path:
-                raise ExecutorFailure("path_invalid", "The path being replaced is invalid.")
-            # The map and its mount remain online while the verified replacement is
-            # added first and the stale path is removed afterward.
-            runner([_tool("multipathd"), "del", "path", removed_kernel_path], 30)
-        else:
-            # The stable application path is briefly unmounted while its lower device is
-            # changed. Share definitions, ACLs, UUIDs, and application paths are untouched.
-            mapper_mounted = False
+
+    if plan["operation"] == "redundancy.replace":
+        kernel_path = str(selected_devices[0].get("kernel_path") or "")
+        create_and_verify_map(kernel_path)
+        removed = plan.get("removed_path")
+        removed_kernel_path = PurePosixPath(
+            str(removed.get("kernel_path") if isinstance(removed, Mapping) else "")
+        ).name
+        if not removed_kernel_path:
+            raise ExecutorFailure("path_invalid", "The path being replaced is invalid.")
+        # The map and its mount remain online while the verified replacement is
+        # added first and the stale path is removed afterward.
+        runner([_tool("multipathd"), "del", "path", removed_kernel_path], 30)
+    elif plan["operation"] == "redundancy.add":
+        # Multipath cannot safely claim every provider's already-mounted raw path.
+        # Use one controlled transition window: stop using the direct path, build
+        # and verify the map, then mount the same filesystem at the same public path.
+        public_unmounted = False
+        device_unmounted = False
+        mapper_mounted = False
+        try:
+            if mountpoint != device_mountpoint:
+                runner([_tool("umount"), mountpoint_text], 120)
+                public_unmounted = True
+            runner([_tool("umount"), device_mountpoint_text], 120)
+            device_unmounted = True
+            kernel_path = str(selected_devices[0].get("kernel_path") or "")
+            create_and_verify_map(kernel_path)
+            runner([_tool("mount"), mapper_text, device_mountpoint_text], 120)
+            mapper_mounted = True
+            if mountpoint != device_mountpoint:
+                runner(
+                    [_tool("mount"), "--bind", device_mountpoint_text, mountpoint_text],
+                    120,
+                )
+                public_unmounted = False
+        except ExecutorFailure as exc:
+            # Return to the exact reviewed direct path. A failed rollback is
+            # surfaced as needs-attention and is never reported as success.
             try:
-                if mountpoint != device_mountpoint:
-                    runner([_tool("umount"), mountpoint_text], 120)
-                runner([_tool("umount"), device_mountpoint_text], 120)
-                runner([_tool("mount"), mapper_text, device_mountpoint_text], 120)
-                mapper_mounted = True
-                if mountpoint != device_mountpoint:
-                    runner(
-                        [
-                            _tool("mount"),
-                            "--bind",
-                            device_mountpoint_text,
-                            mountpoint_text,
-                        ],
-                        120,
-                    )
-            except ExecutorFailure as exc:
-                # Best-effort return to the exact reviewed direct path. A failed rollback
-                # is surfaced as needs-attention and never reported as success.
-                try:
-                    if mapper_mounted:
-                        runner([_tool("umount"), device_mountpoint_text], 120)
+                if mapper_mounted:
+                    runner([_tool("umount"), device_mountpoint_text], 120)
+                    device_unmounted = True
+                if device_unmounted:
                     runner(
                         [
                             _tool("mount"),
@@ -2762,27 +2770,24 @@ def apply_storage_redundancy(
                         ],
                         120,
                     )
-                    if mountpoint != device_mountpoint:
-                        runner(
-                            [
-                                _tool("mount"),
-                                "--bind",
-                                device_mountpoint_text,
-                                mountpoint_text,
-                            ],
-                            120,
-                        )
-                except ExecutorFailure as rollback_exc:
-                    raise ExecutorFailure(
-                        "redundancy_rollback_failed",
-                        "The multipath transition failed and the original mount could not "
-                        "be restored automatically.",
-                        needs_attention=True,
-                    ) from rollback_exc
+                    device_unmounted = False
+                if mountpoint != device_mountpoint and public_unmounted:
+                    runner(
+                        [_tool("mount"), "--bind", device_mountpoint_text, mountpoint_text],
+                        120,
+                    )
+                    public_unmounted = False
+            except ExecutorFailure as rollback_exc:
                 raise ExecutorFailure(
-                    "redundancy_transition_failed",
-                    "The multipath transition failed; the original storage path was restored.",
-                ) from exc
+                    "redundancy_rollback_failed",
+                    "The multipath transition failed and the original mount could not "
+                    "be restored automatically.",
+                    needs_attention=True,
+                ) from rollback_exc
+            raise ExecutorFailure(
+                "redundancy_transition_failed",
+                "The multipath transition failed; the original storage path was restored.",
+            ) from exc
     else:
         # Removing one path leaves the existing multipath map online. Transitioning
         # back to a direct device is allowed only when the reviewed result has one path.
