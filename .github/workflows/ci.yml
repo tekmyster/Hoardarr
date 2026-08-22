@@ -152,7 +152,7 @@ jobs:
           config_permissions="$(sudo stat -c '%U:%G:%a' /etc/hoardarr/hoardarr.env)"
           echo "state_permissions=${state_permissions}"
           echo "config_permissions=${config_permissions}"
-          test "${state_permissions}" = "hoardarr:hoardarr:700"
+          test "${state_permissions}" = "root:root:700"
           test "${config_permissions}" = "root:hoardarr:640"
           test -L /usr/lib/hoardarr/current
           test -x /usr/local/bin/hoardarr
