@@ -65,7 +65,7 @@ for index in 1 2; do
     mount -o noatime "${device}" "/srv/hoardarr/${NODE_NAME,,}/member-${index}"
 done
 install -d -m 0750 "/srv/hoardarr/${NODE_NAME,,}/local"
-mergerfs -o category.create=mfs,category.search=ff,use_ino,cache.files=off \
+mergerfs -o category.create=mfs,category.search=ff,minfreespace=32M,use_ino,cache.files=off \
     "/srv/hoardarr/${NODE_NAME,,}/member-1:/srv/hoardarr/${NODE_NAME,,}/member-2" \
     "/srv/hoardarr/${NODE_NAME,,}/local"
 
