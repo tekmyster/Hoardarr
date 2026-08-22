@@ -46,6 +46,7 @@ no-clobber link after descriptor-relative inode validation.
 | CI: release bundle/systemd | `32580574074` | Bundle, 19 release tests, archive/checksum, clean wheel install and every systemd unit passed |
 | CI: installed appliance | `32580574074` | Signed bundle applied, services started, database migrated, ownership/modes and web health passed, identical reapply passed |
 | Four-device mergerFS telemetry | `32580574075` | Purpose-created loop workload, persistence, reconnect, collector restart, rollups and cleanup passed |
+| Extended storage stacks | `32581789533` | Hosted Ubuntu purpose-created loops passed ext4/POSIX ACL, MD RAID6/XFS, ZFS RAIDZ2/snapshot/scrub and SnapRAID sync/status/diff/check |
 | Appliance ISO/QEMU | `32580574069` | Pinned ISO build and QEMU installer-checkpoint smoke test |
 
 The conditional `disposable-block-devices` job was skipped because its separate
@@ -75,6 +76,7 @@ python3 scripts/build-release-bundle.py build --output-dir dist/releases
 python3.12 -m unittest discover -s tests/release -p 'test_*.py'
 scripts/install-release-bundle.sh --apply <verified-plan>
 tests/integration/run-mergerfs-telemetry-workload.sh
+HOARDARR_EXTENDED_STORAGE_TESTS=1 tests/integration/run-loop-device-tests.sh
 scripts/build-appliance.sh ubuntu.iso <pinned-sha256> dist/hoardarr-release.tar.gz hoardarr.iso
 qemu-system-x86_64 -accel tcg ...
 ```
@@ -101,6 +103,9 @@ Run `32580574074` passed all five CI jobs, including 315 backend, 100 frontend,
 `32580574075` independently recreated and destroyed four loop devices and passed
 the persistent workload. Run `32580574069` rebuilt the release and appliance and
 repeated the QEMU checkpoint. The two passes agree on the corrected code paths.
+Targeted release-gate run `32581789533` subsequently exercised ext4 ACLs, MD
+RAID6, ZFS RAIDZ2 and SnapRAID against newly created loop devices on hosted
+Ubuntu and cleaned them through the purpose-bound harness.
 
 ## Security validation
 

@@ -29,3 +29,11 @@ were not used because Linux root/boot/device ancestry and explicit disposable
 status were not established. The repository-controlled four-loop mergerFS test
 is separate software evidence; Ubuntu Actions run `32580421790` passed and
 published its complete JSON evidence.
+
+Ubuntu Actions run `32581789533` separately exercised the extended storage
+software paths on purpose-created loop devices: ext4 with POSIX ACLs, a
+four-member MD RAID6 formatted as XFS, a four-member ZFS RAIDZ2 pool with
+compression, recordsize, snapshot and scrub, and independent SnapRAID data and
+parity filesystems through sync, status, diff and parity check. Cleanup was
+limited to resources created by that run. This is isolated software evidence,
+not certification of a physical controller, enclosure or SSD model.
