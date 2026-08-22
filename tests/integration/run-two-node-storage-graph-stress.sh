@@ -177,10 +177,12 @@ install_node() {
     copy_to "${port}" "${WHEEL}" "/tmp/${WHEEL_NAME}"
     copy_to "${port}" "${ROOT}/tests/integration/two_node_evidence.py" /tmp/two_node_evidence.py
     copy_to "${port}" "${ROOT}/tests/integration/two-node/prepare-node.sh" /tmp/prepare-node.sh
+    tar -C "${ROOT}" -cf "${RUN_ROOT}/hardware-detector.tar" scripts/detect-hardware.py packaging/hardware
+    copy_to "${port}" "${RUN_ROOT}/hardware-detector.tar" /tmp/hoardarr-hardware-detector.tar
     for unit in hoardarr-migrate.service hoardarr-api.service hoardarr-worker.service; do
         copy_to "${port}" "${ROOT}/packaging/systemd/${unit}" "/tmp/${unit}"
     done
-    remote "${port}" "set -Eeuo pipefail; sudo install -d -m 0755 /usr/lib/hoardarr /usr/local/libexec /etc/hoardarr; sudo install -d -m 0700 /var/lib/hoardarr; sudo python3 -m venv /usr/lib/hoardarr/venv; sudo /usr/lib/hoardarr/venv/bin/pip install --disable-pip-version-check /tmp/${WHEEL_NAME}; sudo install -m 0755 /tmp/two_node_evidence.py /usr/local/libexec/hoardarr-two-node-evidence; sudo install -m 0755 /tmp/prepare-node.sh /usr/local/libexec/hoardarr-prepare-two-node; sudo install -m 0644 /tmp/hoardarr-*.service /etc/systemd/system/"
+    remote "${port}" "set -Eeuo pipefail; sudo install -d -m 0755 /usr/lib/hoardarr /usr/local/libexec /etc/hoardarr; sudo tar -C /usr/lib/hoardarr -xf /tmp/hoardarr-hardware-detector.tar; sudo chmod 0755 /usr/lib/hoardarr/scripts/detect-hardware.py; sudo install -d -m 0700 /var/lib/hoardarr; sudo python3 -m venv /usr/lib/hoardarr/venv; sudo /usr/lib/hoardarr/venv/bin/pip install --disable-pip-version-check /tmp/${WHEEL_NAME}; sudo install -m 0755 /tmp/two_node_evidence.py /usr/local/libexec/hoardarr-two-node-evidence; sudo install -m 0755 /tmp/prepare-node.sh /usr/local/libexec/hoardarr-prepare-two-node; sudo install -m 0644 /tmp/hoardarr-*.service /etc/systemd/system/"
     tar -C "${ROOT}/frontend/dist" -cf "${RUN_ROOT}/frontend.tar" .
     copy_to "${port}" "${RUN_ROOT}/frontend.tar" /tmp/hoardarr-frontend.tar
     remote "${port}" 'sudo install -d -m 0755 /usr/lib/hoardarr/current/frontend; sudo tar -C /usr/lib/hoardarr/current/frontend -xf /tmp/hoardarr-frontend.tar; sudo find /usr/lib/hoardarr/current/frontend -type d -exec chmod 0755 {} +; sudo find /usr/lib/hoardarr/current/frontend -type f -exec chmod 0644 {} +'
@@ -248,17 +250,17 @@ phase idle
 sleep 8
 remote 2222 'sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence collect'
 phase sequential_read
-remote 2222 'sudo fio --name=sequential-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=1M --direct=1 --time_based=1 --runtime=12 --iodepth=4 --output-format=json' >"${OUTPUT}/fio-sequential-read.json"
+remote 2222 'sudo fio --name=sequential-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=1M --direct=1 --ioengine=libaio --time_based=1 --runtime=12 --iodepth=4 --output-format=json' >"${OUTPUT}/fio-sequential-read.json"
 phase random_read
-remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=4k --direct=1 --time_based=1 --runtime=12 --iodepth=16 --numjobs=${WORKLOAD_CONCURRENCY} --output-format=json" >"${OUTPUT}/fio-random-read.json"
+remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=4k --direct=1 --ioengine=libaio --time_based=1 --runtime=12 --iodepth=16 --numjobs=${WORKLOAD_CONCURRENCY} --output-format=json" >"${OUTPUT}/fio-random-read.json"
 phase limited_write
 remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
 phase mixed_read_metadata
-remote 2222 'sudo fio --name=mixed-read-shape --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bsrange=4k-1M --direct=1 --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
+remote 2222 'sudo fio --name=mixed-read-shape --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bsrange=4k-1M --direct=1 --ioengine=libaio --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
 
 first_path="${topology[A_SHARED_PATH_ONE]}"
 phase path_a_failover_start
-remote 2222 'sudo fio --name=failover-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=128k --direct=1 --time_based=1 --runtime=20 --iodepth=8 --output=/tmp/failover-fio.json --output-format=json >/dev/null 2>&1 & echo $!' >"${OUTPUT}/failover-fio.pid"
+remote 2222 'sudo fio --name=failover-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=128k --direct=1 --ioengine=libaio --time_based=1 --runtime=20 --iodepth=8 --output=/tmp/failover-fio.json --output-format=json >/dev/null 2>&1 & echo $!' >"${OUTPUT}/failover-fio.pid"
 sleep 4
 remote 2222 "sudo multipathd fail path \$(basename ${first_path})"
 remote 2222 'sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence collect'
@@ -272,7 +274,7 @@ remote 2222 'sudo cat /tmp/failover-fio.json' >"${OUTPUT}/fio-path-failover.json
 
 phase api_disconnected_workload
 remote 2222 'sudo systemctl stop hoardarr-api.service; sudo systemctl is-active --quiet hoardarr-worker.service'
-remote 2222 'sudo fio --name=api-down-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=64k --direct=1 --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-api-down.json"
+remote 2222 'sudo fio --name=api-down-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=randread --bs=64k --direct=1 --ioengine=libaio --time_based=1 --runtime=10 --iodepth=8 --output-format=json' >"${OUTPUT}/fio-api-down.json"
 remote 2222 'sudo systemctl start hoardarr-api.service; sudo systemctl is-active --quiet hoardarr-api.service'
 phase api_reconnected
 
@@ -281,7 +283,7 @@ remote 2222 "sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-
 remote 2223 "sudo blockdev --flushbufs /dev/mapper/hoardarr-shared; sudo install -d -m 0750 /srv/hoardarr/shared; sudo mount -o noatime /dev/mapper/hoardarr-shared /srv/hoardarr/shared; sudo /usr/lib/hoardarr/venv/bin/python /usr/local/libexec/hoardarr-two-node-evidence event --node 'Node B' --peer-node 'Node A' --wwid ${SHARED_WWID} --event-type storage_transitioned --previous-state standby --resulting-state serving"
 phase node_b_serving
 remote 2223 'sudo sha256sum /srv/hoardarr/shared/media-dataset.bin' | tee "${OUTPUT}/shared-hash-after-handoff.txt"
-remote 2223 "sudo fio --name=post-handoff-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=256k --direct=1 --time_based=1 --runtime=${READ_SOAK_SECONDS} --iodepth=8 --output-format=json" >"${OUTPUT}/fio-post-handoff-read.json"
+remote 2223 "sudo fio --name=post-handoff-read --filename=/srv/hoardarr/shared/media-dataset.bin --rw=read --bs=256k --direct=1 --ioengine=libaio --time_based=1 --runtime=${READ_SOAK_SECONDS} --iodepth=8 --output-format=json" >"${OUTPUT}/fio-post-handoff-read.json"
 phase node_b_worker_restart
 remote 2223 'sudo systemctl restart hoardarr-worker.service; sudo systemctl is-active --quiet hoardarr-worker.service'
 sleep 8
@@ -326,8 +328,8 @@ metrics = {
     for sample in node["telemetry"]
 }
 required = {
-    "cpu.utilization",
-    "memory.utilization",
+    "host.cpu.utilization",
+    "host.memory.utilization",
     "io.read.bytes_per_second",
     "io.write.bytes_per_second",
     "io.read.iops",

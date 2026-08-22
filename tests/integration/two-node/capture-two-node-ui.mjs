@@ -22,6 +22,9 @@ try {
   await page.locator("#password").fill("Hoardarr-Isolated-Validation-Only-11!");
   await page.getByRole("button", { name: "Login" }).click();
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Analytics", exact: true }).click();
+  await page.getByRole("heading", { name: "Storage Analytics", exact: true }).waitFor();
+  await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-analytics-history.png`), fullPage: true });
   await page.getByRole("button", { name: "Storage", exact: true }).click();
   await page.getByRole("heading", { name: "Storage", exact: true }).waitFor();
   const sharedRow = page.locator(".redundancy-storage-row").filter({ hasText: "Shared Media" });

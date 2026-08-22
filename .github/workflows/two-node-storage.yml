@@ -56,9 +56,12 @@ jobs:
           jq -e '.write_budget.planned_payload_bytes <= .write_budget.maximum_total_bytes' "$evidence"
           jq -e '[.node_a.events[], .node_b.events[] | select(.event_type == "storage_transitioned")] | length > 0' "$evidence"
           jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "storage.path.state")] | length > 0' "$evidence"
-          jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "cpu.utilization")] | length > 0' "$evidence"
+          jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "host.cpu.utilization")] | length > 0' "$evidence"
+          jq -e '[.node_a.telemetry[], .node_b.telemetry[] | select(.metric_id == "io.queue.depth" and .entity_type == "drive")] | length > 0' "$evidence"
           test -s dist/validation/two-node-storage/node-a-reconnected-history.png
           test -s dist/validation/two-node-storage/node-b-reconnected-history.png
+          test -s dist/validation/two-node-storage/node-a-analytics-history.png
+          test -s dist/validation/two-node-storage/node-b-analytics-history.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:
