@@ -11,13 +11,12 @@ import tracemalloc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, select
-
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.migrate import upgrade_database
 from hoardarr.db.models import MetricSample
 from hoardarr.telemetry.samples import EntityReading, MetricReading
 from hoardarr.telemetry.store import apply_retention, ingest
+from sqlalchemy import func, select
 
 
 def main() -> int:

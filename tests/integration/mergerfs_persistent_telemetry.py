@@ -10,8 +10,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
-
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import issue_setup_token
 from hoardarr.core.config import Settings
@@ -22,6 +20,7 @@ from hoardarr.storage.telemetry import StorageTelemetrySampler
 from hoardarr.telemetry.collectors import HostCollector, StorageCollector
 from hoardarr.telemetry.service import TelemetryService
 from hoardarr.telemetry.store import build_rollups, history, ingest
+from sqlalchemy import func, select
 
 
 def runtime(database: Path):  # type: ignore[no-untyped-def]
