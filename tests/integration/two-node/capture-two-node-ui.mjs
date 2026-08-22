@@ -39,7 +39,9 @@ try {
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-path-topology.png`), fullPage: true });
   await page.getByRole("button", { name: "Performance" }).click();
   await page.locator(".redundancy-graph").first().waitFor();
-  await page.locator(".failover-marker").first().waitFor();
+  // SVG line annotations have zero CSS width, so Playwright correctly treats
+  // them as non-visible even though the browser renders their stroke.
+  await page.locator(".failover-marker").first().waitFor({ state: "attached" });
   await page.screenshot({ path: path.join(outputDirectory, `${nodeSlug}-reconnected-history.png`), fullPage: true });
 
   const heap = async () => {
