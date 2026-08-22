@@ -46,7 +46,7 @@ done
 
 mkdir "$pool"
 branches="$(IFS=:; echo "${member_mounts[*]}")"
-mergerfs -o category.create=mfs,moveonenospc=true,cache.files=partial,dropcacheonclose=true \
+mergerfs -o category.create=mfs,minfreespace=32M,moveonenospc=true,cache.files=partial,dropcacheonclose=true \
   "$branches" "$pool"
 mountpoint -q "$pool"
 
@@ -76,7 +76,7 @@ inventory = {"pools": {"items": [{
     "total_bytes": sum(item["capacity_bytes"] for item in disks),
     "used_bytes": 0, "free_bytes": sum(item["capacity_bytes"] for item in disks),
 }]}, "controllers": {"items": []}, "topology": {"nodes": []}}
-json.dump({"environment": "Ubuntu 24.04 disposable GitHub runner", "hardware": {"disks": disks}, "inventory": inventory, "branches": branches, "mountpoint": pool, "policy": "category.create=mfs"}, open(output, "w"), indent=2)
+json.dump({"environment": "Ubuntu 24.04 disposable GitHub runner", "hardware": {"disks": disks}, "inventory": inventory, "branches": branches, "mountpoint": pool, "policy": "category.create=mfs,minfreespace=32M"}, open(output, "w"), indent=2)
 PY
 
 phase_file="$work/phases.json"

@@ -448,7 +448,7 @@ METRICS: tuple[MetricDefinition, ...] = (
     _m(
         "drive.nvme.controller_busy_time",
         "NVMe controller busy time",
-        "nvme_device",
+        "drive|nvme_device",
         "minutes",
         source="NVMe SMART",
         interval=300,
@@ -458,7 +458,7 @@ METRICS: tuple[MetricDefinition, ...] = (
     _m(
         "drive.nvme.power_cycles",
         "NVMe power cycles",
-        "nvme_device",
+        "drive|nvme_device",
         "count",
         source="NVMe SMART",
         interval=300,
@@ -468,7 +468,7 @@ METRICS: tuple[MetricDefinition, ...] = (
     _m(
         "drive.nvme.error_log_entries",
         "NVMe error log entries",
-        "nvme_device",
+        "drive|nvme_device",
         "count",
         source="NVMe SMART",
         interval=300,

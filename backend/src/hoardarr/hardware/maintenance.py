@@ -81,9 +81,12 @@ def enrich_maintenance_capabilities(
 ) -> dict[str, Any]:
     result = deepcopy(payload)
     disks = result.get("disks")
-    if not isinstance(disks, list) or (os.name == "nt" and probe is bounded_probe):
+    if not isinstance(disks, list):
         return result
+    effective_probe = (
+        (lambda _command: None) if os.name == "nt" and probe is bounded_probe else probe
+    )
     for disk in disks:
         if isinstance(disk, dict):
-            disk["maintenance_capabilities"] = detect_capability(disk, probe=probe)
+            disk["maintenance_capabilities"] = detect_capability(disk, probe=effective_probe)
     return result

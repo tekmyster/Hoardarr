@@ -176,6 +176,17 @@ InventoryProvider = Callable[[], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
 
 
+def _executor_uid() -> int:
+    """Return the identity that must own private executor state.
+
+    The production storage services run as root, so this remains UID 0 there.
+    Using the effective process identity also permits the same fail-closed checks
+    to be exercised by an unprivileged test process without weakening modes.
+    """
+
+    return os.geteuid() if hasattr(os, "geteuid") else 0
+
+
 def _tool(name: str) -> str:
     path = shutil.which(name, path="/usr/sbin:/usr/bin:/sbin:/bin")
     if path is None:
@@ -1081,7 +1092,7 @@ def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -
             "updated_at": None,
         }
     if not stat.S_ISREG(details.st_mode) or (
-        os.name != "nt" and (details.st_uid != 0 or details.st_mode & 0o022)
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o022)
     ):
         raise ExecutorFailure(
             "transaction_journal_unsafe", "The storage transaction journal is unsafe."
@@ -2006,7 +2017,7 @@ def apply_storage_plan(
             needs_attention=True,
         ) from exc
     if not stat.S_ISDIR(details.st_mode) or (
-        os.name != "nt" and (details.st_uid != 0 or details.st_mode & 0o077)
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
     ):
         raise ExecutorFailure(
             "transaction_journal_unsafe",
@@ -2177,7 +2188,8 @@ def apply_device_maintenance(
             needs_attention=True,
         ) from exc
     if not stat.S_ISDIR(transaction_details.st_mode) or (
-        os.name != "nt" and (transaction_details.st_uid != 0 or transaction_details.st_mode & 0o077)
+        os.name != "nt"
+        and (transaction_details.st_uid != _executor_uid() or transaction_details.st_mode & 0o077)
     ):
         raise ExecutorFailure(
             "transaction_journal_unsafe",
@@ -2327,7 +2339,7 @@ def apply_snapraid_replacement(
             "transaction_journal_unavailable", "Storage activity tracking is unavailable."
         ) from exc
     if not stat.S_ISDIR(details.st_mode) or (
-        os.name != "nt" and (details.st_uid != 0 or details.st_mode & 0o077)
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
     ):
         raise ExecutorFailure("transaction_journal_unsafe", "Storage activity tracking is unsafe.")
     journal_path = _journal_path(paths, operation_id)

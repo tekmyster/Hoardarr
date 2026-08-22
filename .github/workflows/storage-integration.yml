@@ -4,6 +4,12 @@ on:
     branches:
       - rc/0.3.10-validation
   workflow_dispatch:
+    inputs:
+      run_extended_self_hosted:
+        description: Run the privileged extended suite on a labeled disposable runner
+        required: false
+        default: false
+        type: boolean
 jobs:
   mergerfs-persistent-telemetry:
     runs-on: ubuntu-24.04
@@ -27,6 +33,7 @@ jobs:
           name: mergerfs-persistent-telemetry-evidence
           path: dist/validation/mergerfs-persistent-telemetry.json
   disposable-block-devices:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_extended_self_hosted
     runs-on: [self-hosted, linux, hoardarr-storage-test]
     timeout-minutes: 90
     steps:

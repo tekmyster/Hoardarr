@@ -65,6 +65,15 @@ jobs:
       - run: uv sync --project backend --locked --all-groups
       - run: npm ci --prefix frontend --no-audit --no-fund
       - run: python3 scripts/build-release-bundle.py build --output-dir dist/releases
+      - run: python3.12 -m unittest discover -s tests/release -p 'test_*.py'
+      - name: Create checksummed release-candidate archive
+        run: |
+          release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
+          test -n "$release_dir"
+          archive="dist/$(basename "$release_dir").tar.gz"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf "$archive" -C "$(dirname "$release_dir")" "$(basename "$release_dir")"
+          sha256sum "$archive" >"$archive.sha256"
       - name: Install the built wheel into an empty Python 3.12 environment
         run: |
           release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
@@ -81,4 +90,9 @@ jobs:
           sudo install -m 0555 scripts/detect-hardware.py /usr/lib/hoardarr/scripts/detect-hardware.py
       - name: Verify every Hoardarr systemd unit against installed entry points
         run: systemd-analyze verify packaging/systemd/hoardarr-*.service
-      - run: python3.12 -m unittest discover -s tests/release -p 'test_*.py'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoardarr-release-candidate
+          path: |
+            dist/hoardarr-*.tar.gz
+            dist/hoardarr-*.tar.gz.sha256

@@ -808,6 +808,13 @@ def test_authenticated_hardware_worker_and_wizard_flow(
                 "connection": {"transport": "usb", "protocol": "uas"},
                 "partitions": [],
                 "signatures": [],
+                "maintenance_capabilities": {
+                    "ata_secure_erase": False,
+                    "nvme_block_erase": False,
+                    "sector_format_passthrough": False,
+                    "supported_logical_sector_bytes": [],
+                    "source": "Not reported",
+                },
             }
         ],
     }

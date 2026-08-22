@@ -376,11 +376,12 @@ class InstallerPlanTests(unittest.TestCase):
 
             result = subprocess.run(
                 ["bash", str(bundle / "scripts" / "install.sh"), "plan"],
-                check=True,
+                check=False,
                 capture_output=True,
                 text=True,
                 env={**os.environ, "LANG": "C"},
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Plan (no changes made)", result.stdout)
             self.assertIn("0.1.0-test", result.stdout)
 

@@ -1112,6 +1112,7 @@
       "availability": "When the named local source/provider reports the value",
       "capability": "metrics.drive.advanced",
       "entity_types": [
+        "drive",
         "nvme_device"
       ],
       "formula": null,
@@ -1131,6 +1132,7 @@
       "availability": "When the named local source/provider reports the value",
       "capability": "metrics.drive.advanced",
       "entity_types": [
+        "drive",
         "nvme_device"
       ],
       "formula": null,
@@ -1150,6 +1152,7 @@
       "availability": "When the named local source/provider reports the value",
       "capability": "metrics.drive.advanced",
       "entity_types": [
+        "drive",
         "nvme_device"
       ],
       "formula": null,

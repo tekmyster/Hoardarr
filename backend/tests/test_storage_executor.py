@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
@@ -308,6 +309,11 @@ def test_mixed_layout_executor_revalidates_and_builds_component_pools_before_mer
     monkeypatch.setattr(executor, "_revalidate", revalidate)
     monkeypatch.setattr(
         executor,
+        "_safe_mountpoint",
+        lambda value: tmp_path / "managed" / value.lstrip("/"),
+    )
+    monkeypatch.setattr(
+        executor,
         "_stable_path",
         lambda _paths, disk: PurePosixPath(f"/dev/disk/by-id/{disk['id']}"),
     )
@@ -506,7 +512,7 @@ def test_storage_progress_includes_live_drive_work_and_estimate(
 ) -> None:
     operation_id = "11111111-1111-4111-8111-111111111111"
     paths = Paths(transaction_root=tmp_path / "transactions")
-    paths.transaction_root.mkdir()
+    paths.transaction_root.mkdir(mode=0o700)
     action_id = f"surface:{DEVICE_ID}"
     (paths.transaction_root / f"{operation_id}.json").write_text(
         json.dumps(
@@ -593,6 +599,29 @@ def test_executor_reports_unavailable_transaction_journal_before_drive_work(
         )
 
     assert failure.value.code == "transaction_journal_unavailable"
+    assert failure.value.needs_attention is True
+    assert not paths.lock_root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode enforcement")
+def test_executor_rejects_group_or_world_accessible_transaction_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _document()
+    paths = Paths(
+        quarantine_marker=tmp_path / "quarantine.json",
+        transaction_root=tmp_path / "transactions",
+        lock_root=tmp_path / "locks",
+    )
+    paths.transaction_root.mkdir(mode=0o755)
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+
+    with pytest.raises(ExecutorFailure) as failure:
+        apply_storage_plan(
+            _request(document), paths=paths, inventory_provider=lambda: {"disks": []}
+        )
+
+    assert failure.value.code == "transaction_journal_unsafe"
     assert failure.value.needs_attention is True
     assert not paths.lock_root.exists()
 
