@@ -155,11 +155,11 @@ jobs:
           test "${state_permissions}" = "root:root:700"
           test "${config_permissions}" = "root:hoardarr:640"
           readlink /usr/lib/hoardarr/current
-          ls -ld /usr/lib/hoardarr/current /usr/lib/hoardarr/current/frontend
-          ls -l /usr/local/bin/hoardarr /usr/lib/hoardarr/current/frontend/index.html
+          sudo ls -ld /usr/lib/hoardarr/current /usr/lib/hoardarr/current/frontend
+          sudo ls -l /usr/local/bin/hoardarr /usr/lib/hoardarr/current/frontend/index.html
           test -L /usr/lib/hoardarr/current || { echo "current release link is missing"; exit 1; }
           test -x /usr/local/bin/hoardarr || { echo "CLI wrapper is not executable"; exit 1; }
-          test -f /usr/lib/hoardarr/current/frontend/index.html || {
+          sudo test -f /usr/lib/hoardarr/current/frontend/index.html || {
             echo "installed frontend entry point is missing"
             exit 1
           }

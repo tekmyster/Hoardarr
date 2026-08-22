@@ -185,8 +185,8 @@ def test_transfer_does_not_replace_destination_created_during_copy(
     plan = plan_transfer(
         {
             "workload": "usenet",
-            "source": str(source),
-            "destination": str(destination),
+            "source": "/data/downloads/movie.bin",
+            "destination": "/data/media/movie.bin",
             "source_identity": "source-volume",
             "destination_identity": "destination-volume",
             "method": "copy",
@@ -196,6 +196,8 @@ def test_transfer_does_not_replace_destination_created_during_copy(
             "completed_steps": ["download", "repair", "unpack", "verify"],
         }
     )
+    object.__setattr__(plan, "source", str(source))
+    object.__setattr__(plan, "destination", str(destination))
     real_link = os.link
 
     def competing_link(source_name: str, destination_name: str, **kwargs: object) -> None:
