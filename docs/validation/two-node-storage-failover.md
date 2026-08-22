@@ -29,6 +29,10 @@ The default hard limits are:
   mergerFS destination members;
 - repeated stress and soak phases are read-only.
 
+The mixed phase uses an existing member-backed file through the mergerFS mount. The disposable VM
+syncs and drops its page cache immediately beforehand so first-pass reads reach the block layer;
+mergerFS/FUSE does not accept the libaio direct-I/O form used by the shared-LUN phases.
+
 The harness calculates the plan before booting the workload and exits before IO if either limit is
 exceeded. It records Linux block-layer write-counter deltas separately because filesystem metadata
 means observed OS writes can be larger than payload bytes.
