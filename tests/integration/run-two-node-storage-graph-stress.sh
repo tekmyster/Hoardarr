@@ -409,7 +409,11 @@ phase_times = {item["phase"]: datetime.fromisoformat(item["timestamp"].replace("
 
 
 def fio_stats(filename, direction):
-    document = json.loads((root / filename).read_text())
+    payload = (root / filename).read_text()
+    document_start = payload.find("{")
+    if document_start < 0:
+        raise SystemExit(f"fio evidence {filename} did not contain a JSON document")
+    document = json.loads(payload[document_start:])
     jobs = document["jobs"]
     io_bytes = sum(float(job[direction]["io_bytes"]) for job in jobs)
     bandwidth = sum(float(job[direction]["bw_bytes"]) for job in jobs)

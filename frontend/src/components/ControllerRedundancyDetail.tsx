@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type {
   LogicalStorageDocument,
@@ -135,8 +135,14 @@ export function ControllerRedundancyDetail({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<StorageRedundancySettings | null>(storage.redundancy_settings ?? null);
+  const historyCache = useRef<{ storageId: string; loadedAt: number } | null>(null);
 
   useEffect(() => setSettings(storage.redundancy_settings ?? null), [storage.id, storage.redundancy_settings]);
+
+  useEffect(() => {
+    setHistories({});
+    historyCache.current = null;
+  }, [storage.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -182,6 +188,8 @@ export function ControllerRedundancyDetail({
 
   useEffect(() => {
     if (tab !== "performance" || entities.length === 0) return;
+    const cached = historyCache.current;
+    if (cached?.storageId === storage.id && Date.now() - cached.loadedAt < 30_000) return;
     const controller = new AbortController();
     const end = new Date();
     const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
@@ -201,12 +209,15 @@ export function ControllerRedundancyDetail({
       });
       return [`${entity.id}:${metric.id}`, history] as const;
     })).then((pairs) => {
-      if (!controller.signal.aborted) setHistories(Object.fromEntries(pairs));
+      if (!controller.signal.aborted) {
+        setHistories(Object.fromEntries(pairs));
+        historyCache.current = { storageId: storage.id, loadedAt: Date.now() };
+      }
     }).catch((requestError) => {
       if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Path graphs could not be loaded.");
     });
     return () => controller.abort();
-  }, [entities, logicalEntity, tab]);
+  }, [entities, logicalEntity, storage.id, tab]);
 
   const samples = useMemo(() => new Map(current.map((sample) => [`${sample.entity.id}:${sample.metric_id}`, sample])), [current]);
   const summary = storage.redundancy_summary ?? {

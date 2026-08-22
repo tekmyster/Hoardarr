@@ -171,6 +171,9 @@ describe("ControllerRedundancyDetail", () => {
     await userEvent.click(screen.getByRole("button", { name: "Events" }));
     expect(screen.getByText("controller failover")).toBeInTheDocument();
     expect(screen.getByText(/fully_redundant → failed_over/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Performance" }));
+    expect(screen.getByRole("img", { name: "Read throughput by controller path" })).toBeInTheDocument();
+    expect(api.metricHistory).toHaveBeenCalledTimes(14);
   });
 
   it("reviews supported settings through the real configure workflow", async () => {
