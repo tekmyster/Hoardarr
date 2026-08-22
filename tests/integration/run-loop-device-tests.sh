@@ -109,5 +109,9 @@ content $work/snap-parity/snapraid.content
 data d1 $work/snap-data
 EOF
 snapraid -c "$work/snapraid.conf" sync
-snapraid -c "$work/snapraid.conf" status | grep -Eq 'No error|100%'
+snapraid -c "$work/snapraid.conf" status
+snapraid -c "$work/snapraid.conf" diff
+[[ -s "$work/snap-data/snapraid.content" ]]
+[[ -s "$work/snap-parity/snapraid.content" ]]
+[[ -s "$work/snap-parity/snapraid.parity" ]]
 umount "$work/snap-data" "$work/snap-parity"
