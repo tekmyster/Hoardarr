@@ -96,3 +96,54 @@ jobs:
           path: |
             dist/hoardarr-*.tar.gz
             dist/hoardarr-*.tar.gz.sha256
+  installed-appliance-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv
+      - run: uv sync --project backend --locked --all-groups
+      - run: npm ci --prefix frontend --no-audit --no-fund
+      - run: python3 scripts/build-release-bundle.py build --output-dir dist/releases
+      - name: Plan and apply the verified release on the disposable runner
+        run: |
+          release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
+          test -n "$release_dir"
+          sudo "$release_dir/scripts/install.sh" plan
+          sudo "$release_dir/scripts/install.sh" apply --yes
+      - name: Verify installed services, migration, permissions, and web health
+        run: |
+          systemctl is-active --quiet \
+            hoardarr-api.service \
+            hoardarr-worker.service \
+            hoardarr-account-executor.service \
+            hoardarr-storage-executor.service \
+            hoardarr-storage-status.service
+          systemctl is-enabled --quiet \
+            hoardarr-api.service \
+            hoardarr-worker.service \
+            hoardarr-account-executor.service \
+            hoardarr-storage-executor.service \
+            hoardarr-storage-status.service
+          curl --fail --silent --show-error http://127.0.0.1:7877/health/live
+          curl --fail --silent --show-error http://127.0.0.1:7877/health/ready
+          test "$(stat -c '%U:%G:%a' /var/lib/hoardarr)" = "root:root:700"
+          test "$(stat -c '%U:%G:%a' /etc/hoardarr/hoardarr.env)" = "root:hoardarr:640"
+          test -L /usr/lib/hoardarr/current
+          test -x /usr/local/bin/hoardarr
+          test -f /usr/lib/hoardarr/current/frontend/index.html
+          sudo /usr/local/bin/hoardarr --help
+      - name: Verify idempotent reapply of the identical signed bundle
+        run: |
+          release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
+          sudo "$release_dir/scripts/install.sh" apply --yes
+          systemctl is-active --quiet hoardarr-api.service hoardarr-worker.service
+          curl --fail --silent --show-error http://127.0.0.1:7877/health/ready
