@@ -2531,6 +2531,7 @@ def apply_storage_redundancy(
     runner: CommandRunner = _run,
     mapper_exists: Callable[[Path], bool] = Path.exists,
     filesystem_uuid_provider: Callable[[Path], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Change only the access layer from one path to a verified multipath map."""
 
@@ -2690,7 +2691,14 @@ def apply_storage_redundancy(
         create_command.append(kernel_path)
         runner(create_command, 120)
         runner([_tool("multipathd"), "reconfigure"], 30)
-        if not mapper_exists(mapper):
+        # Device Mapper publishes the verified alias asynchronously through udev.
+        # Keep the propagation wait bounded so a broken daemon cannot hold the
+        # operation forever.
+        for _ in range(50):
+            if mapper_exists(mapper):
+                break
+            sleep(0.2)
+        else:
             journal["state"] = "needs_attention"
             journal["updated_at"] = time.time()
             atomic_json(journal_path, journal)

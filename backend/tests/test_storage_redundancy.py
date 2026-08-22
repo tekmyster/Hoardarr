@@ -544,6 +544,46 @@ def test_redundancy_journal_replays_success_and_reports_command_failure(
     )
 
 
+def test_redundancy_waits_a_bounded_time_for_the_mapper_node(
+    session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entity, first = _registered(session)
+    second = _path("hba-b", "/dev/sdc")
+    plan = build_redundancy_plan(
+        session,
+        storage_entity_id=entity.id,
+        hardware_snapshot_sha256="d" * 64,
+        hardware_snapshot={"disks": [first, second]},
+        action="add",
+    )
+    checks = 0
+    waits: list[float] = []
+
+    def mapper_exists(_path: Path) -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 4
+
+    monkeypatch.setattr("hoardarr.storage.executor._tool", lambda name: f"/usr/sbin/{name}")
+    apply_storage_redundancy(
+        {
+            "operation": "apply_storage_redundancy",
+            "operation_id": "66666666-6666-4666-8666-666666666666",
+            "plan_sha256": plan["plan_sha256"],
+            "plan": plan,
+            "confirmation_sha256": document_hash({"confirmation": "APPLY"}),
+        },
+        paths=Paths(transaction_root=tmp_path / "transactions"),
+        inventory_provider=lambda: {"disks": [first, second]},
+        runner=lambda _command, _timeout: None,
+        mapper_exists=mapper_exists,
+        filesystem_uuid_provider=lambda _path: entity.filesystem_uuid or "",
+        sleep=waits.append,
+    )
+    assert checks == 4
+    assert waits == [0.2, 0.2, 0.2]
+
+
 def test_failed_bind_mount_rolls_back_from_mapper_to_reviewed_direct_path(
     session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
