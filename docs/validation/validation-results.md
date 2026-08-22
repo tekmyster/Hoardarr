@@ -40,15 +40,15 @@ no-clobber link after descriptor-relative inode validation.
 
 | Workflow / job | Run | Result |
 |---|---:|---|
-| CI: backend | `32589493526` | 336 passed; Ruff, Linux telemetry, 24,000-observation memory soak and wheel/sdist passed |
-| CI: frontend | `32589493526` | 107 component/unit, 3 accessibility and 9 Playwright tests passed; TypeScript/Vite production build passed |
-| CI: Ubuntu installer | `32589493526` | 72 bootstrap tests, shell syntax and hardware detector passed |
-| CI: release bundle/systemd | `32589493526` | Bundle, 19 release tests, archive/checksum, clean wheel install and every systemd unit passed |
-| CI: installed appliance | `32589493526` | Signed 0.3.11 bundle applied, services started, database migrated, ownership/modes and web health passed, identical reapply passed |
-| Four-device mergerFS telemetry | `32589493527` | Purpose-created loop workload, persistence, reconnect, collector restart, rollups and cleanup passed |
+| CI: backend | `32589920251` | 337 passed; Ruff, Linux telemetry, 24,000-observation memory soak and wheel/sdist passed |
+| CI: frontend | `32589920251` | 107 component/unit, 3 accessibility and 9 Playwright tests passed; TypeScript/Vite production build passed |
+| CI: Ubuntu installer | `32589920251` | 72 bootstrap tests, shell syntax and hardware detector passed |
+| CI: release bundle/systemd | `32589920251` | Bundle, 19 release tests, archive/checksum, clean wheel install and every systemd unit passed |
+| CI: installed appliance | `32589920251` | Signed 0.3.11 bundle applied, services started, database migrated, ownership/modes and web health passed, identical reapply passed |
+| Four-device mergerFS telemetry | `32589920257` | Purpose-created loop workload, persistence, reconnect, collector restart, rollups and cleanup passed |
 | Extended storage stacks | `32581789533` | Hosted Ubuntu purpose-created loops passed ext4/POSIX ACL, MD RAID6/XFS, ZFS RAIDZ2/snapshot/scrub and SnapRAID sync/status/diff/check |
-| Controller redundancy lifecycle | `32589493527` | A disposable LIO LUN started on one iSCSI path, converted to two-path DM-Multipath, replaced one controller path, survived verified continuous I/O failover/recovery on both paths, restarted multipathd, then returned to one direct path |
-| Appliance ISO/QEMU | `32580574069` | Pinned ISO build and QEMU installer-checkpoint smoke test |
+| Controller redundancy lifecycle | `32589920257` | A disposable LIO LUN started on one iSCSI path, converted to two-path DM-Multipath, replaced one controller path, survived verified continuous I/O failover/recovery on both paths, restarted multipathd, then returned to one direct path |
+| Appliance ISO/QEMU | `32589920245` | Pinned Ubuntu 24.04.4 ISO rebuilt and reached the QEMU installer/autoinstall checkpoint |
 
 The conditional `disposable-block-devices` job was skipped because its separate
 self-hosted profile was not requested; the ordinary GitHub-hosted
@@ -109,14 +109,20 @@ Targeted release-gate run `32581789533` subsequently exercised ext4 ACLs, MD
 RAID6, ZFS RAIDZ2 and SnapRAID against newly created loop devices on hosted
 Ubuntu and cleaned them through the purpose-bound harness.
 
-Controller lifecycle run `32589493527` subsequently exercised Hoardarr's real
-planner and privileged executor against one purpose-created LIO LUN presented
+Controller lifecycle run `32589493527` and final reconfirmation `32589920257`
+exercised Hoardarr's real planner and privileged executor against one purpose-created LIO LUN presented
 through three loopback iSCSI portals. The original storage entity UUID
 `577d61b3-3c67-4c00-a2ae-5f63b5e6aa18`, filesystem UUID
 `d4d53536-a6ae-4e73-9a48-b0c8ebf14264`, and public mount path remained
 unchanged through add, replacement, failover, recovery, multipathd restart and
 redundancy removal. File hashes remained valid, `fio` completed through both
 path failures, and no format command ran after Day 1 creation.
+
+An intervening adversarial rerun exposed a transient Device Mapper busy result
+while returning from two paths to one. Hoardarr now settles udev, performs a
+bounded journaled retry, and restores the existing mapper mount if the map
+cannot be released. Focused tests exercise retry and rollback; final run
+`32589920257` passed the complete lifecycle after that correction.
 
 ## Security validation
 
