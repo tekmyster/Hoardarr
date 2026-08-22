@@ -272,7 +272,7 @@ remote 2222 "sudo fio --name=random-read --filename=/srv/hoardarr/shared/media-d
 phase limited_write
 remote 2222 'sudo fio --name=limited-write --filename=/srv/hoardarr/a/local/limited-write.bin --rw=write --bs=1M --size=4M --io_size=4M --rate=1M --direct=0 --fsync=1 --output-format=json' >"${OUTPUT}/fio-limited-write.json"
 phase mixed_read_write
-remote 2222 'sudo sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; sudo fio --name=mixed-read-write --filename=/srv/hoardarr/a/local/dataset/large.bin --rw=randrw --rwmixread=95 --bs=64k --size=8M --time_based=1 --runtime=12 --rate=1M --direct=0 --fsync=1 --iodepth=1 --invalidate=1 --output-format=json' >"${OUTPUT}/fio-mixed-read.json"
+remote 2222 'sudo sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; sudo fio --name=mixed-read-write --filename=/srv/hoardarr/a/local/dataset/large.bin --rw=randrw --rwmixread=95 --bs=64k --size=8M --time_based=1 --runtime=12 --rate=1M --direct=0 --iodepth=1 --invalidate=1 --output-format=json; sudo sync' >"${OUTPUT}/fio-mixed-read.json"
 
 first_path="${topology[A_SHARED_PATH_ONE]}"
 phase path_a_failover_start
