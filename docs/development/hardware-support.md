@@ -50,17 +50,39 @@ change. Hoardarr therefore stores these separately:
 identities. A shelf's user-settable display number is useful metadata, but is
 not the enclosure key.
 
-Every location assertion carries its source and confidence:
+Every location assertion carries its source, last-confirmed time, and one
+normalized confidence value:
 
-- `confirmed`: independent SES/SMP sources agree, or an operator confirmed an
-  identify-light check.
-- `reported`: one authoritative standards or vendor source reports the slot.
-- `profiled`: a tested model profile translates a reported element into a
-  physical label.
-- `uncertain`: only a component index or path inference is available.
+- `high` (shown as **Confirmed**): a direct Linux enclosure-device association,
+  independent SES/SMP sources agree, or an operator confirmed an identify-light
+  check.
+- `medium` (shown as **Inferred**): one authoritative standards/vendor source or
+  a validated topology/HCTL relationship reports the association.
+- `low` (shown as **Inferred**): a hardware profile or bounded heuristic supplies
+  a candidate association that still needs confirmation.
+- `unknown` (shown as **Not reported**): no trustworthy association exists.
+
+The stored source remains visible so `medium` and `low` never become facts by
+presentation alone. Empty enclosure slots keep their own slot-source evidence;
+they do not imply a disk association.
 
 Destructive workflows accept only a policy-approved confidence level and
 re-resolve device identity immediately before execution.
+
+## SAS PHY evidence and slow links
+
+For the exact SAS PHY present in a disk's Linux transport path, Hoardarr reads
+the kernel SAS transport attributes for minimum, negotiated, and maximum link
+rates plus invalid DWORD, running-disparity, loss-of-sync, and PHY-reset
+counters. Missing files remain `Not reported`; they are never converted to
+zero. The same stable SAS-address/PHY identity is used by persistent telemetry
+so historical counters and the live topology refer to the same physical link.
+
+When the negotiated rate is below the reported path capability, the UI calls
+out the rate difference without declaring a failure. A 3 Gb/s device on a
+12 Gb/s-capable path can be operating exactly as designed. Diagnosis must also
+consider the device-side link, expander link, and HBA uplink rather than assume
+the drive is at fault.
 
 The unprivileged bootstrap detector implements the read-only first layer of
 this contract. Its `disks` records keep `id` and `identity` separate from the

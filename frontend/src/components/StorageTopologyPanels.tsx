@@ -45,8 +45,18 @@ function health(node: StorageTopologyNode): "healthy" | "warning" | "critical" |
   return node.health_status ?? "unknown";
 }
 
-function DriveBay({ node, slot, status, locate, fault }: { node: StorageTopologyNode | undefined; slot: string | null; status?: string | null; locate?: boolean | null; fault?: boolean | null }) {
-  if (!node) return <article className="shelf-bay shelf-bay-empty"><header><span>Bay {slot ?? "—"}</span><small>{status ?? "Empty"}</small></header><strong>Empty</strong></article>;
+function mappingLabel(confidence: StorageTopologyNode["mapping_confidence"]): string {
+  if (confidence === "high") return "Confirmed";
+  if (confidence === "medium" || confidence === "low") return "Inferred";
+  return "Not reported";
+}
+
+function DriveBay({ node, slot, status, locate, fault, mappingSource, mappingConfidence, mappingLastConfirmedAt }: { node: StorageTopologyNode | undefined; slot: string | null; status?: string | null; locate?: boolean | null; fault?: boolean | null; mappingSource?: string | null; mappingConfidence?: StorageTopologyNode["mapping_confidence"]; mappingLastConfirmedAt?: string | null }) {
+  if (!node) return <article className="shelf-bay shelf-bay-empty">
+    <header><span>Bay {slot ?? "—"} · {mappingLabel(mappingConfidence)}</span><small>{status ?? "Empty"}</small></header>
+    <strong>Empty</strong>
+    <small title={mappingLastConfirmedAt ?? undefined}>{mappingSource ?? "No trustworthy bay mapping source was reported"}</small>
+  </article>;
   const driveHealth = health(node);
   const fill = fillPercent(node);
   return <article
@@ -54,12 +64,13 @@ function DriveBay({ node, slot, status, locate, fault }: { node: StorageTopology
     style={{ "--drive-fill": `${fill ?? 0}%` } as CSSProperties}
   >
     <span className="shelf-bay-fill" aria-hidden="true" />
-    <header><span>Bay {slot ?? "—"}</span>{node.system_disk ? <span className="system-drive-badge">System</span> : <StatusBadge status={driveHealth} />}</header>
+    <header><span>Bay {slot ?? "—"} · {mappingLabel(mappingConfidence ?? node.mapping_confidence)}</span>{node.system_disk ? <span className="system-drive-badge">System</span> : <StatusBadge status={driveHealth} />}</header>
     <strong title={node.label}>{node.label}</strong>
     <code title={node.serial}>{node.serial ?? "Serial not reported"}</code>
     <div className="shelf-bay-meta"><span>{node.capacity_bytes ? humanCapacity(node.capacity_bytes) : "Not reported"}</span><span>{fill == null ? "Not reported" : `${fill}% used`}</span></div>
     <div className="shelf-bay-meta"><span>{node.temperature_c == null ? "Not reported" : `${node.temperature_c} °C`}</span><span>{node.negotiated_speed_gbps == null ? node.protocol : `${node.negotiated_speed_gbps} Gb/s`}</span></div>
     {(locate != null || fault != null) && <div className="shelf-bay-meta"><span>Locate {locate == null ? "Not reported" : locate ? "On" : "Off"}</span><span>Fault {fault == null ? "Not reported" : fault ? "On" : "Off"}</span></div>}
+    <small title={mappingLastConfirmedAt ?? node.mapping_last_confirmed_at ?? undefined}>{mappingSource ?? node.mapping_source ?? "No trustworthy bay mapping source was reported"}</small>
   </article>;
 }
 
@@ -69,7 +80,7 @@ function EnclosureMap({ enclosure, nodes }: { enclosure: StorageEnclosure; nodes
       <div><strong>{enclosure.label}</strong><code>{enclosure.address}</code></div>
       <div className="enclosure-protocols">{enclosure.protocols.map((protocol) => <span className={`protocol-chip protocol-${protocolClass(protocol)}`} key={protocol}>{protocol}</span>)}</div>
     </header>
-    <div className="shelf-bays">{enclosure.bays.map((bay, index) => <DriveBay key={`${bay.slot ?? "slot"}-${index}`} node={bay.drive_id ? nodes.get(bay.drive_id) : undefined} slot={bay.slot} status={bay.status} locate={bay.locate} fault={bay.fault} />)}</div>
+    <div className="shelf-bays">{enclosure.bays.map((bay, index) => <DriveBay key={`${bay.slot ?? "slot"}-${index}`} node={bay.drive_id ? nodes.get(bay.drive_id) : undefined} slot={bay.slot} status={bay.status} locate={bay.locate} fault={bay.fault} mappingSource={bay.mapping_source} mappingConfidence={bay.mapping_confidence} mappingLastConfirmedAt={bay.mapping_last_confirmed_at} />)}</div>
   </article>;
 }
 
@@ -83,6 +94,7 @@ function LinkRail({ link }: { link: StorageTopologyLink }) {
 
 function DriveNode({ node }: { node: StorageTopologyNode }) {
   const driveHealth = health(node);
+  const belowCapability = node.negotiated_speed_gbps != null && node.capable_speed_gbps != null && node.negotiated_speed_gbps < node.capable_speed_gbps;
   return <article className={`topology-drive health-${driveHealth}`}>
     <header><div><strong>{node.label}</strong><code>{node.serial}</code></div><StatusBadge status={driveHealth} /></header>
     <dl>
@@ -92,11 +104,29 @@ function DriveNode({ node }: { node: StorageTopologyNode }) {
       <div><dt>Controller</dt><dd><code>{node.controller_id ?? "Not reported"}</code></dd></div>
       <div><dt>Enclosure</dt><dd><code>{node.enclosure_id ?? "Not reported"}</code></dd></div>
       <div><dt>Bay</dt><dd>{node.slot ?? "Not reported"}</dd></div>
+      <div><dt>Bay mapping</dt><dd>{mappingLabel(node.mapping_confidence)}{node.mapping_source ? ` · ${node.mapping_source}` : ""}</dd></div>
+      <div><dt>Last confirmed</dt><dd>{node.mapping_last_confirmed_at ? new Date(node.mapping_last_confirmed_at).toLocaleString() : "Not reported"}</dd></div>
       <div><dt>Capable</dt><dd>{node.capable_speed_gbps == null ? "Not reported" : `${node.capable_speed_gbps} Gb/s`}</dd></div>
       <div><dt>Negotiated</dt><dd>{node.negotiated_speed_gbps == null ? "Not reported" : `${node.negotiated_speed_gbps} Gb/s`}</dd></div>
       <div><dt>Temperature</dt><dd>{node.temperature_c == null ? "Not reported" : `${node.temperature_c} °C`}</dd></div>
       <div><dt>Use</dt><dd>{node.system_disk ? "System" : fillPercent(node) == null ? "Not reported" : `${fillPercent(node)}%`}</dd></div>
     </dl>
+    {belowCapability && <p className="inline-notice warning">This link is operating at {node.negotiated_speed_gbps} Gb/s while the reported path capability is {node.capable_speed_gbps} Gb/s. A lower-rate drive or intermediate link can make this normal.</p>}
+  </article>;
+}
+
+function PhysicalNode({ node }: { node: StorageTopologyNode }) {
+  return <article className={`topology-logical-node topology-${node.kind}`}>
+    <header><div><span>{node.kind === "phy" ? "SAS PHY" : node.kind}</span><strong>{node.label}</strong>{node.address && <code>{node.address}</code>}</div><StatusBadge status={node.status ?? "detected"} /></header>
+    {node.kind === "phy" && <dl>
+      <div><dt>SAS address</dt><dd><code>{node.sas_address ?? "Not reported"}</code></dd></div>
+      <div><dt>PHY identifier</dt><dd>{node.phy_identifier ?? "Not reported"}</dd></div>
+      <div><dt>Link rates</dt><dd>{speedLabel(node.negotiated_speed_gbps, node.capable_speed_gbps)}{node.minimum_speed_gbps == null ? "" : ` · ${node.minimum_speed_gbps} Gb/s minimum`}</dd></div>
+      <div><dt>Invalid DWORDs</dt><dd>{node.invalid_dwords ?? "Not reported"}</dd></div>
+      <div><dt>Disparity errors</dt><dd>{node.disparity_errors ?? "Not reported"}</dd></div>
+      <div><dt>Loss of sync</dt><dd>{node.loss_of_sync ?? "Not reported"}</dd></div>
+      <div><dt>Reset problems</dt><dd>{node.reset_problems ?? "Not reported"}</dd></div>
+    </dl>}
   </article>;
 }
 
@@ -110,7 +140,7 @@ function TopologyBranch({ link, target, linksBySource, nodes, visited = new Set<
   const childLinks = linksBySource.get(target.id) ?? [];
   return <div className="topology-branch">
     <LinkRail link={link} />
-    {target.kind === "drive" ? <><DriveNode node={target} />{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null; })}</> : target.kind !== "enclosure" ? <><LogicalNode node={target} />{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null; })}</> : <article className="topology-enclosure-node">
+    {target.kind === "drive" ? <><DriveNode node={target} />{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null; })}</> : target.kind !== "enclosure" ? <>{["port", "phy", "expander", "path"].includes(target.kind) ? <PhysicalNode node={target} /> : <LogicalNode node={target} />}{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null; })}</> : <article className="topology-enclosure-node">
       <header><div><strong>{target.label}</strong><code>{target.address}</code></div><StatusBadge status={target.status ?? "detected"} /></header>
       <div className="topology-enclosure-drives">{childLinks.map((child) => {
         const childNode = nodes.get(child.target);

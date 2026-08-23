@@ -175,9 +175,20 @@ class HardwareFixtureTests(unittest.TestCase):
                 "enclosure_vendor": None,
                 "expander_id": None,
                 "hba_port": None,
+                "minimum_speed_gbps": None,
+                "mapping_confidence": "unknown",
+                "mapping_last_confirmed_at": None,
+                "mapping_source": None,
                 "negotiated_speed_gbps": None,
                 "path_components": [],
                 "path_id": None,
+                "phy_disparity_errors": None,
+                "phy_id": None,
+                "phy_identifier": None,
+                "phy_invalid_dwords": None,
+                "phy_loss_of_sync": None,
+                "phy_reset_problems": None,
+                "phy_sas_address": None,
                 "presentation": "hyperv-scsi",
                 "protocol": "uas",
                 "slot": None,
@@ -391,12 +402,8 @@ class LiveSysfsTests(unittest.TestCase):
             write_sysfs_value(
                 root,
                 "proc/self/mountinfo",
-                "\n".join(
-                    (
-                        "36 25 8:1 / / rw - ext4 /dev/sda1 rw",
-                        "37 36 8:17 / /boot/efi rw - vfat /dev/sdb1 rw",
-                    )
-                ),
+                "36 25 8:1 / / rw - ext4 /dev/sda1 rw\n"
+                "37 36 8:17 / /boot/efi rw - vfat /dev/sdb1 rw",
             )
             write_sysfs_value(
                 root,

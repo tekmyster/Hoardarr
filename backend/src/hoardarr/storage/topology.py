@@ -373,6 +373,7 @@ def build_storage_topology(
         physical_parent_id = controller_id
         for kind, value in (
             ("port", _text(connection.get("hba_port"))),
+            ("phy", _text(connection.get("phy_id"))),
             ("expander", _text(connection.get("expander_id"))),
             ("path", _text(connection.get("path_id"))),
         ):
@@ -393,6 +394,30 @@ def build_storage_topology(
                     else [],
                 },
             )
+            if kind == "phy":
+                nodes[physical_node_id].update(
+                    {
+                        "sas_address": _text(connection.get("phy_sas_address")),
+                        "phy_identifier": _text(connection.get("phy_identifier")),
+                        "minimum_speed_gbps": _number(
+                            connection.get("minimum_speed_gbps")
+                        ),
+                        "capable_speed_gbps": _number(
+                            connection.get("capable_speed_gbps")
+                        ),
+                        "negotiated_speed_gbps": _number(
+                            connection.get("negotiated_speed_gbps")
+                        ),
+                        "invalid_dwords": _number(connection.get("phy_invalid_dwords")),
+                        "disparity_errors": _number(
+                            connection.get("phy_disparity_errors")
+                        ),
+                        "loss_of_sync": _number(connection.get("phy_loss_of_sync")),
+                        "reset_problems": _number(
+                            connection.get("phy_reset_problems")
+                        ),
+                    }
+                )
             physical_link_id = f"{physical_parent_id}->{physical_node_id}"
             links.setdefault(
                 physical_link_id,
@@ -427,6 +452,9 @@ def build_storage_topology(
             "serial": serial,
             "path": path,
             "slot": _text(connection.get("slot")),
+            "mapping_source": _text(connection.get("mapping_source")),
+            "mapping_confidence": _text(connection.get("mapping_confidence")) or "unknown",
+            "mapping_last_confirmed_at": _text(connection.get("mapping_last_confirmed_at")),
             "controller_id": controller_id,
             "enclosure_id": (
                 f"enclosure:{_text(connection.get('enclosure_id'))}"
@@ -540,6 +568,9 @@ def build_storage_topology(
                     "fault": connection.get("fault")
                     if isinstance(connection.get("fault"), bool)
                     else None,
+                    "mapping_source": nodes[disk_id]["mapping_source"],
+                    "mapping_confidence": nodes[disk_id]["mapping_confidence"],
+                    "mapping_last_confirmed_at": nodes[disk_id]["mapping_last_confirmed_at"],
                 }
             )
             parent_id = enclosure_node_id
@@ -628,6 +659,9 @@ def build_storage_topology(
                             "status": _text(bay.get("status")),
                             "locate": bay.get("locate"),
                             "fault": bay.get("fault"),
+                            "mapping_source": "sysfs enclosure slot",
+                            "mapping_confidence": "high",
+                            "mapping_last_confirmed_at": None,
                         }
                     )
         controller_address = _text(live_enclosure.get("controller_address"))

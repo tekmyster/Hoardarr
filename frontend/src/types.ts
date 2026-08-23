@@ -90,7 +90,7 @@ export type StorageTopologyProtocol = "SAS" | "SATA" | "FC" | "FCoE" | "NVMe" | 
 
 export interface StorageTopologyNode {
   id: string;
-  kind: "controller" | "port" | "expander" | "path" | "enclosure" | "drive" | "pool" | "filesystem" | "share";
+  kind: "controller" | "port" | "phy" | "expander" | "path" | "enclosure" | "drive" | "pool" | "filesystem" | "share";
   label: string;
   address?: string | null;
   bus?: string | null;
@@ -102,6 +102,9 @@ export interface StorageTopologyNode {
   serial?: string;
   path?: string | null;
   slot?: string | null;
+  mapping_source?: string | null;
+  mapping_confidence?: "high" | "medium" | "low" | "unknown";
+  mapping_last_confirmed_at?: string | null;
   controller_id?: string | null;
   enclosure_id?: string | null;
   pool_type?: string | null;
@@ -115,6 +118,13 @@ export interface StorageTopologyNode {
   temperature_c?: number | null;
   capable_speed_gbps?: number | null;
   negotiated_speed_gbps?: number | null;
+  minimum_speed_gbps?: number | null;
+  sas_address?: string | null;
+  phy_identifier?: string | null;
+  invalid_dwords?: number | null;
+  disparity_errors?: number | null;
+  loss_of_sync?: number | null;
+  reset_problems?: number | null;
   system_disk?: boolean;
 }
 
@@ -136,7 +146,16 @@ export interface StorageEnclosure {
   status: string;
   protocols: StorageTopologyProtocol[];
   controller_ids: string[];
-  bays: Array<{ slot: string | null; drive_id: string | null; status?: string | null; locate?: boolean | null; fault?: boolean | null }>;
+  bays: Array<{
+    slot: string | null;
+    drive_id: string | null;
+    status?: string | null;
+    locate?: boolean | null;
+    fault?: boolean | null;
+    mapping_source?: string | null;
+    mapping_confidence?: "high" | "medium" | "low" | "unknown";
+    mapping_last_confirmed_at?: string | null;
+  }>;
 }
 
 export interface StorageTopology {

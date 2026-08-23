@@ -79,6 +79,7 @@ VMBUS_ADDRESS_RE = re.compile(
 NON_PHYSICAL_BLOCK_PREFIXES = ("dm-", "fd", "loop", "md", "nbd", "ram", "rbd", "zd", "zram")
 HEALTH_STATUSES = {"available", "conflicting", "unavailable"}
 HEALTH_CONFIDENCE = {"high", "medium", "low", "conflicting", "unavailable"}
+MAPPING_CONFIDENCE = {"high", "medium", "low", "unknown"}
 
 
 class DetectionError(RuntimeError):
@@ -125,8 +126,7 @@ def _normalize_hex(value: Any, width: int, field: str) -> str | None:
     text = str(value).strip().lower()
     if not text:
         return None
-    if text.startswith("0x"):
-        text = text[2:]
+    text = text.removeprefix("0x")
     try:
         number = int(text, 16)
     except ValueError as exc:
@@ -224,8 +224,7 @@ def _canonical_identifier(value: str | None) -> str | None:
     if value is None:
         return None
     text = value.strip().lower()
-    if text.startswith("0x"):
-        text = text[2:]
+    text = text.removeprefix("0x")
     text = re.sub(r"[^a-z0-9._:-]+", "", text)
     return text or None
 
@@ -465,10 +464,24 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
             "enclosure_model",
             "enclosure_status",
             "hba_port",
+            "phy_id",
+            "phy_sas_address",
+            "phy_identifier",
             "expander_id",
             "path_id",
+            "mapping_source",
+            "mapping_confidence",
+            "mapping_last_confirmed_at",
         )
     }
+    normalized_connection["mapping_confidence"] = (
+        normalized_connection["mapping_confidence"] or "unknown"
+    )
+    if normalized_connection["mapping_confidence"] not in MAPPING_CONFIDENCE:
+        raise DetectionError(
+            f"{field}.connection.mapping_confidence must be one of "
+            f"{sorted(MAPPING_CONFIDENCE)}"
+        )
     path_components = connection.get("path_components", [])
     if not isinstance(path_components, list) or len(path_components) > 64:
         raise DetectionError(f"{field}.connection.path_components must be a bounded list")
@@ -490,6 +503,18 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
         connection.get("negotiated_speed_gbps"),
         f"{field}.connection.negotiated_speed_gbps",
     )
+    normalized_connection["minimum_speed_gbps"] = _optional_nonnegative_number(
+        connection.get("minimum_speed_gbps"), f"{field}.connection.minimum_speed_gbps"
+    )
+    for counter_name in (
+        "phy_invalid_dwords",
+        "phy_disparity_errors",
+        "phy_loss_of_sync",
+        "phy_reset_problems",
+    ):
+        normalized_connection[counter_name] = _optional_nonnegative_int(
+            connection.get(counter_name), f"{field}.connection.{counter_name}"
+        )
     partitions = raw.get("partitions", [])
     signatures = raw.get("signatures", [])
     if not isinstance(partitions, list):
@@ -787,7 +812,7 @@ def _discover_pci(
         if (
             not (
                 isinstance(class_code, str)
-                and (class_code.startswith("0x01") or class_code.startswith("0x0c04"))
+                and class_code.startswith(("0x01", "0x0c04"))
             )
             and record["kernel_driver"] not in known_provider_drivers
         ):
@@ -1082,8 +1107,18 @@ def _discover_enclosure(
             if enclosure_root
             else None,
             "status": _read_text(candidate / "status"),
+            "mapping_source": "sysfs enclosure_device",
+            "mapping_confidence": "high",
         }
-    return {"id": None, "slot": None, "vendor": None, "model": None, "status": None}
+    return {
+        "id": None,
+        "slot": None,
+        "vendor": None,
+        "model": None,
+        "status": None,
+        "mapping_source": None,
+        "mapping_confidence": "unknown",
+    }
 
 
 def _discover_link_speeds(
@@ -1141,6 +1176,36 @@ def _discover_link_speeds(
     return None, None
 
 
+def _discover_sas_phy(
+    topology_names: Sequence[str], sysfs_root: pathlib.Path
+) -> dict[str, Any]:
+    """Return only counters reported for the exact SAS PHY in this device path."""
+    phy_name = next((name for name in reversed(topology_names) if name.startswith("phy-")), None)
+    if phy_name is None:
+        return {
+            "id": None,
+            "sas_address": None,
+            "identifier": None,
+            "minimum_speed_gbps": None,
+            "invalid_dwords": None,
+            "disparity_errors": None,
+            "loss_of_sync": None,
+            "reset_problems": None,
+        }
+    phy = sysfs_root / "class" / "sas_phy" / phy_name
+    return {
+        "id": phy_name,
+        "sas_address": _read_text(phy / "sas_address")
+        or _read_text(phy / "device" / "sas_address"),
+        "identifier": _read_text(phy / "phy_identifier"),
+        "minimum_speed_gbps": _parse_speed_gbps(_read_text(phy / "minimum_linkrate_hw")),
+        "invalid_dwords": _read_int(phy / "invalid_dword_count"),
+        "disparity_errors": _read_int(phy / "running_disparity_error_count"),
+        "loss_of_sync": _read_int(phy / "loss_of_dword_sync_count"),
+        "reset_problems": _read_int(phy / "phy_reset_problem_count"),
+    }
+
+
 def _nvme_controller_name(kernel_name: str) -> str | None:
     match = re.match(r"^(nvme[0-9]+)n[0-9]+", kernel_name)
     return match.group(1) if match else None
@@ -1151,6 +1216,7 @@ def _discover_connection(
     kernel_name: str,
     sysfs_root: pathlib.Path,
     properties: Mapping[str, str],
+    captured_at: str,
 ) -> dict[str, Any]:
     topology = _topology_components(block_path, sysfs_root)
     topology_names = [item.name for item in topology]
@@ -1216,6 +1282,7 @@ def _discover_connection(
     capable_speed, negotiated_speed = _discover_link_speeds(
         topology_names, transport_host, sysfs_root
     )
+    sas_phy = _discover_sas_phy(topology_names, sysfs_root)
     return {
         "capable_speed_gbps": capable_speed,
         "controller_address": controller_address,
@@ -1225,7 +1292,20 @@ def _discover_connection(
         "enclosure_vendor": enclosure["vendor"],
         "expander_id": expander_id,
         "hba_port": hba_port,
+        "phy_id": sas_phy["id"],
+        "phy_sas_address": sas_phy["sas_address"],
+        "phy_identifier": sas_phy["identifier"],
+        "minimum_speed_gbps": sas_phy["minimum_speed_gbps"],
+        "phy_invalid_dwords": sas_phy["invalid_dwords"],
+        "phy_disparity_errors": sas_phy["disparity_errors"],
+        "phy_loss_of_sync": sas_phy["loss_of_sync"],
+        "phy_reset_problems": sas_phy["reset_problems"],
         "negotiated_speed_gbps": negotiated_speed,
+        "mapping_confidence": enclosure["mapping_confidence"],
+        "mapping_last_confirmed_at": (
+            captured_at if enclosure["mapping_confidence"] != "unknown" else None
+        ),
+        "mapping_source": enclosure["mapping_source"],
         "presentation": presentation,
         "path_components": topology_names[-64:],
         "path_id": path_id,
@@ -1506,7 +1586,9 @@ def _discover_disks(
             ),
         }
         disk_id, stable_identity = _disk_id(identity, vendor, model, kernel_name)
-        connection = _discover_connection(block_path, kernel_name, sysfs_root, properties)
+        connection = _discover_connection(
+            block_path, kernel_name, sysfs_root, properties, captured_at
+        )
         signatures = _udev_signatures(properties)
         kernel_path = f"/dev/{kernel_name}"
         disks.append(
@@ -1884,7 +1966,7 @@ def detect(
         usage = provider_usage.get(provider["id"])
         if usage is None:
             continue
-        item = _provider_summary(provider, sorted(usage["tiers"])[0])
+        item = _provider_summary(provider, min(usage["tiers"]))
         item["controller_addresses"] = sorted(usage["controller_addresses"])
         item["match_tiers"] = sorted(usage["tiers"])
         item["transport_host_addresses"] = sorted(usage["transport_host_addresses"])
