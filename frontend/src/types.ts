@@ -578,6 +578,21 @@ export interface StorageExpansionAssessment {
     purpose: string;
     backend_count: number;
     raw_capacity_bytes: number | null;
+    capacity: {
+      total_bytes: number | null;
+      used_bytes: number | null;
+      free_bytes: number | null;
+      quality: "available" | "not_reported";
+      source: string | null;
+    };
+    distribution: {
+      reported_members: number;
+      minimum_utilization_percent: number | null;
+      maximum_utilization_percent: number | null;
+      spread_percentage_points: number | null;
+      methodology: string;
+    };
+    protection: { data_backends: number; parity_backends: number; summary: string };
     preferred_backend_id: string | null;
   }>;
   available_disks: Array<{

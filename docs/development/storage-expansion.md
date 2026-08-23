@@ -7,6 +7,10 @@ a disk.
 `GET /api/v1/storage/expansion` returns:
 
 - currently unassigned registered disks and their stable identities;
+- current Storage Group namespace total/used/free capacity when its filesystem reports it;
+- per-member utilization spread using distinct filesystem identities, explicitly presented as
+  context rather than a defect;
+- configured data/parity backend counts;
 - health and presence blockers;
 - existing-data state from partition, signature, and signature-scan evidence;
 - detected mergerFS, SnapRAID, and ZFS capabilities;

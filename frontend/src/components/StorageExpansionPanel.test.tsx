@@ -17,6 +17,9 @@ const assessment: StorageExpansionAssessment = {
     purpose: "media",
     backend_count: 2,
     raw_capacity_bytes: 16_000_000_000_000,
+    capacity: { total_bytes: 16_000_000_000_000, used_bytes: 8_000_000_000_000, free_bytes: 8_000_000_000_000, quality: "available", source: "statvfs Storage Group namespace" },
+    distribution: { reported_members: 2, minimum_utilization_percent: 40, maximum_utilization_percent: 60, spread_percentage_points: 20, methodology: "Maximum minus minimum utilization." },
+    protection: { data_backends: 2, parity_backends: 1, summary: "1 parity backend configured" },
     preferred_backend_id: "33333333-3333-4333-8333-333333333333",
   }],
   available_disks: [{
@@ -70,6 +73,9 @@ describe("StorageExpansionPanel", () => {
     render(<StorageExpansionPanel onPlan={onPlan} snapshotId="snapshot-one" />);
 
     const candidate = await screen.findByLabelText("Add capacity to Media");
+    expect(screen.getByText("8 TB free of 16 TB")).toBeInTheDocument();
+    expect(screen.getByText("20.0 point member-usage spread")).toBeInTheDocument();
+    expect(screen.getByText("1 parity backend configured")).toBeInTheDocument();
     expect(within(candidate).getAllByText("8 TB", { exact: true })).toHaveLength(2);
     expect(screen.getByText(/SnapRAID protection must be resynchronized/)).toBeInTheDocument();
     await user.click(screen.getByText("Restrictions and calculation details"));

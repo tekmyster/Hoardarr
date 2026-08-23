@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import Base, HardwareSnapshot, Operation
 from hoardarr.operations.service import document_hash
-from hoardarr.storage.expansion import build_expansion_assessment
+from hoardarr.storage.expansion import FilesystemUsage, build_expansion_assessment
 from hoardarr.storage.groups import assign_backend, create_group, register_disk, transition_backend
 
 
@@ -121,6 +121,33 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
             principal=actor,
             reason="fixture",
         )
+        member_two, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:member-two",
+                "kernel_path": "/dev/sdc",
+                "capacity_bytes": 4_000_000_000,
+                "media_type": "hdd",
+                "health_state": "healthy",
+            },
+        )
+        second_backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=member_two.id,
+            storage_entity_id=None,
+            namespace_path="/srv/hoardarr/backends/member-two",
+            role="data",
+            principal=actor,
+        )
+        transition_backend(
+            session,
+            group_id=group.id,
+            backend_id=second_backend.id,
+            target_state="active",
+            principal=actor,
+            reason="fixture",
+        )
         fresh, _ = register_disk(
             session,
             {
@@ -133,7 +160,11 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
         )
         snapshot = _snapshot(
             session,
-            [_observation("wwn:current"), _observation("wwn:fresh")],
+            [
+                _observation("wwn:current"),
+                _observation("wwn:member-two"),
+                _observation("wwn:fresh"),
+            ],
         )
         result = build_expansion_assessment(
             session,
@@ -146,6 +177,15 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
                     ]
                 }
             },
+            filesystem_probe=lambda path: {
+                "/srv/hoardarr/media": FilesystemUsage(900, 4_000, 1_500, 2_500),
+                "/srv/hoardarr/backends/current": FilesystemUsage(
+                    901, 4_000, 3_000, 1_000
+                ),
+                "/srv/hoardarr/backends/member-two": FilesystemUsage(
+                    902, 4_000, 1_000, 3_000
+                ),
+            }[path],
         )
         available = result["available_disks"]
         assert [item["id"] for item in available] == [fresh.id]
@@ -158,6 +198,21 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
         assert "resynchronized" in candidates["add_mergerfs_member"]["protection_impact"]
         assert candidates["add_download_tier"]["setup_mode"] == "cache"
         assert candidates["new_storage_group"]["recommended"] is False
+        current_state = result["storage_groups"][0]
+        assert current_state["capacity"] == {
+            "total_bytes": 4_000,
+            "used_bytes": 1_500,
+            "free_bytes": 2_500,
+            "quality": "available",
+            "source": "statvfs Storage Group namespace",
+        }
+        assert current_state["distribution"]["reported_members"] == 2
+        assert current_state["distribution"]["minimum_utilization_percent"] == 25
+        assert current_state["distribution"]["maximum_utilization_percent"] == 75
+        assert current_state["distribution"]["spread_percentage_points"] == 50
+        assert current_state["protection"]["summary"] == (
+            "No parity backend is configured in this Storage Group."
+        )
 
 
 def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import os
+import shutil
+from collections.abc import Callable, Iterable
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -8,6 +12,19 @@ from sqlalchemy.orm import Session
 
 from hoardarr.db.models import HardwareSnapshot, PhysicalDisk, StorageBackend, StorageGroup
 from hoardarr.operations.service import document_hash
+
+
+@dataclass(frozen=True)
+class FilesystemUsage:
+    device_number: int
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+
+
+def inspect_filesystem_usage(path: str) -> FilesystemUsage:
+    usage = shutil.disk_usage(path)
+    return FilesystemUsage(os.stat(path).st_dev, usage.total, usage.used, usage.free)
 
 
 def _snapshot_disks(snapshot: HardwareSnapshot) -> dict[str, dict[str, Any]]:
@@ -145,10 +162,12 @@ def build_expansion_assessment(
     *,
     snapshot: HardwareSnapshot,
     storage_inventory: dict[str, Any] | None = None,
+    filesystem_probe: Callable[[str], FilesystemUsage] | None = None,
 ) -> dict[str, Any]:
     """Describe safe expansion choices without claiming that an unapproved change occurred."""
 
     observations = _snapshot_disks(snapshot)
+    filesystem_probe = filesystem_probe or inspect_filesystem_usage
     assigned_ids = {
         value
         for value in session.scalars(
@@ -349,11 +368,38 @@ def build_expansion_assessment(
             )
         )
         capacities = []
+        member_usage: list[tuple[str, FilesystemUsage]] = []
         for backend in backends:
             if backend.physical_disk_id:
                 disk = session.get(PhysicalDisk, backend.physical_disk_id)
                 if disk and disk.capacity_bytes:
                     capacities.append(disk.capacity_bytes)
+            if backend.namespace_path and backend.lifecycle_state != "retired":
+                try:
+                    usage = filesystem_probe(backend.namespace_path)
+                except OSError:
+                    continue
+                if not any(item.device_number == usage.device_number for _, item in member_usage):
+                    member_usage.append((backend.id, usage))
+        aggregate_usage = None
+        with suppress(OSError):
+            aggregate_usage = filesystem_probe(group.namespace_path)
+        utilizations = [
+            item.used_bytes / item.total_bytes * 100
+            for _, item in member_usage
+            if item.total_bytes > 0
+        ]
+        spread = max(utilizations) - min(utilizations) if len(utilizations) >= 2 else None
+        parity = [
+            item
+            for item in backends
+            if item.role == "parity" and item.lifecycle_state != "retired"
+        ]
+        data = [
+            item
+            for item in backends
+            if item.role in {"data", "archive"} and item.lifecycle_state != "retired"
+        ]
         group_documents.append(
             {
                 "id": group.id,
@@ -362,6 +408,32 @@ def build_expansion_assessment(
                 "purpose": group.purpose,
                 "backend_count": len(backends),
                 "raw_capacity_bytes": sum(capacities) if capacities else None,
+                "capacity": {
+                    "total_bytes": aggregate_usage.total_bytes if aggregate_usage else None,
+                    "used_bytes": aggregate_usage.used_bytes if aggregate_usage else None,
+                    "free_bytes": aggregate_usage.free_bytes if aggregate_usage else None,
+                    "quality": "available" if aggregate_usage else "not_reported",
+                    "source": "statvfs Storage Group namespace" if aggregate_usage else None,
+                },
+                "distribution": {
+                    "reported_members": len(utilizations),
+                    "minimum_utilization_percent": min(utilizations) if utilizations else None,
+                    "maximum_utilization_percent": max(utilizations) if utilizations else None,
+                    "spread_percentage_points": spread,
+                    "methodology": (
+                        "Maximum minus minimum used percentage across distinct reported member "
+                        "filesystems. Uneven use is context, not a failure."
+                    ),
+                },
+                "protection": {
+                    "data_backends": len(data),
+                    "parity_backends": len(parity),
+                    "summary": (
+                        f"{len(parity)} parity backend{'s' if len(parity) != 1 else ''} configured"
+                        if parity
+                        else "No parity backend is configured in this Storage Group."
+                    ),
+                },
                 "preferred_backend_id": next(
                     (item.id for item in backends if item.lifecycle_state == "preferred_write"),
                     None,
