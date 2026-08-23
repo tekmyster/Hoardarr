@@ -289,6 +289,10 @@ class StorageDrainPreviewRequest(StrictModel):
     destination_backend_ids: list[str] = Field(min_length=1, max_length=64)
     verification_mode: Literal["fast", "accurate", "paranoid"] = "accurate"
     reserve_bytes: int = Field(default=1_073_741_824, ge=0, le=10**15)
+    enforce_source_read_only: bool = False
+    bandwidth_limit_mib_per_second: int | None = Field(default=None, ge=1, le=10_240)
+    start_at: datetime | None = None
+    maintenance_window_minutes: int | None = Field(default=None, ge=15, le=7 * 24 * 60)
 
 
 class StorageDrainApplyRequest(StrictModel):

@@ -134,6 +134,14 @@ describe("StorageGroupsPanel", () => {
       }],
       verification: { mode: "accurate", full_hashes: true, additional_read_pass: false },
       capacity: { required_bytes: 8_000, destination_free_bytes: 20_000, reserve_bytes: 1_073_741_824 },
+      controls: {
+        enforce_source_read_only: true,
+        source_read_only_capability: { supported: true, currently_read_only: false, reason: "Exact test mount." },
+        bandwidth_limit_mib_per_second: 64,
+        start_at: null,
+        maintenance_window_minutes: null,
+        maintenance_window_end: null,
+      },
       blockers: [],
       warnings: [],
       ready: true,
@@ -165,6 +173,10 @@ describe("StorageGroupsPanel", () => {
     const user = userEvent.setup();
     render(<StorageGroupsPanel />);
 
+    await user.click(await screen.findByText("Drain scheduling and limits"));
+    await user.clear(screen.getByLabelText("Copy speed limit (MiB/s)"));
+    await user.type(screen.getByLabelText("Copy speed limit (MiB/s)"), "64");
+    await user.click(screen.getByLabelText("Temporarily enforce a read-only source mount"));
     const drainButtons = await screen.findAllByRole("button", { name: "Preview drain" });
     await user.click(drainButtons[0]);
     await waitFor(() => expect(preview).toHaveBeenCalledWith(group.id, {
@@ -172,6 +184,10 @@ describe("StorageGroupsPanel", () => {
       destination_backend_ids: [drainGroup.backends[1].id],
       verification_mode: "accurate",
       reserve_bytes: 1_073_741_824,
+      enforce_source_read_only: true,
+      bandwidth_limit_mib_per_second: 64,
+      start_at: null,
+      maintenance_window_minutes: null,
     }));
     expect(screen.getByText("Drain preflight")).toBeInTheDocument();
     expect(screen.getByText(/This preview does not move or delete files/)).toBeInTheDocument();

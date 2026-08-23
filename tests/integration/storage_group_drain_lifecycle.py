@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import timedelta
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from hoardarr.auth.service import Principal
@@ -140,6 +141,10 @@ def main() -> int:
             destination_backend_ids=[backend_ids[1]],
             verification_mode="accurate",
             reserve_bytes=8 * 1024 * 1024,
+            enforce_source_read_only=True,
+            bandwidth_limit_mib_per_second=16,
+            start_at=datetime.now(UTC) - timedelta(minutes=1),
+            maintenance_window_minutes=60,
         )
         if not plan["ready"]:
             raise RuntimeError(f"disposable drain preflight blocked: {plan['blockers']}")
@@ -277,6 +282,8 @@ def main() -> int:
             "restart_recovered": True,
             "checkpoint_manifest_preserved": True,
             "source_lifecycle": source_backend.lifecycle_state,
+            "source_mount_read_only": bool(os.statvfs(source).f_flag & os.ST_RDONLY),
+            "bandwidth_limit_mib_per_second": job.report_json.get("bandwidth_limit_mib_per_second"),
             "entry_states": sorted({entry.status for entry in entries}),
             "operation_events": [event.event_type for event in events],
             "report": job.report_json,

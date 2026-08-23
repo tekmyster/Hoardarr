@@ -178,6 +178,7 @@ export interface OperationDocument {
   resource?: { type: string; id: string } | null;
   result?: { snapshot_id?: string; [key: string]: unknown } | null;
   error?: { code?: string; message?: string; detail?: string } | null;
+  not_before?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -550,6 +551,14 @@ export interface StorageDrainPlan {
   }>;
   verification: { mode: "fast" | "accurate" | "paranoid"; full_hashes: boolean; additional_read_pass: boolean };
   capacity: { required_bytes: number; destination_free_bytes: number; reserve_bytes: number };
+  controls: {
+    enforce_source_read_only: boolean;
+    source_read_only_capability: { supported: boolean; currently_read_only: boolean | null; reason: string };
+    bandwidth_limit_mib_per_second: number | null;
+    start_at: string | null;
+    maintenance_window_minutes: number | null;
+    maintenance_window_end: string | null;
+  };
   blockers: Array<{ code: string; message: string }>;
   warnings: Array<{ code: string; message: string }>;
   ready: boolean;

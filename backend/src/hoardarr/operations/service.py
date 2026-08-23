@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -85,6 +85,7 @@ def create_operation(
     idempotency_key: str,
     resource_type: str | None = None,
     resource_id: str | None = None,
+    not_before: datetime | None = None,
 ) -> tuple[Operation, bool]:
     request_sha256 = document_hash(request)
     idempotency_query = select(Operation).where(
@@ -106,6 +107,7 @@ def create_operation(
         idempotency_key=idempotency_key,
         request_sha256=request_sha256,
         request_json=request,
+        not_before=not_before,
     )
     try:
         # The savepoint lets a concurrent duplicate lose the unique-key race
@@ -127,9 +129,13 @@ def create_operation(
 
 
 def claim_next_operation(session: Session, worker_id: str) -> Operation | None:
+    now = utc_now()
     candidate = session.scalar(
         select(Operation)
-        .where(Operation.status == "queued")
+        .where(
+            Operation.status == "queued",
+            or_(Operation.not_before.is_(None), Operation.not_before <= now),
+        )
         .order_by(Operation.created_at)
         .limit(1)
     )
@@ -141,9 +147,9 @@ def claim_next_operation(session: Session, worker_id: str) -> Operation | None:
         .values(
             status="running",
             lease_owner=worker_id,
-            leased_at=utc_now(),
-            heartbeat_at=utc_now(),
-            updated_at=utc_now(),
+            leased_at=now,
+            heartbeat_at=now,
+            updated_at=now,
         )
     )
     if claimed.rowcount != 1:

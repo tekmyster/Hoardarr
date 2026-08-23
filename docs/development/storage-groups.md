@@ -37,6 +37,20 @@ source and destination hashes, and `paranoid` adds a second complete destination
 The durable per-file manifest records checkpoints so a worker restart resumes without treating
 unverified files as complete.
 
+An approved plan can include a durable scheduled start, a bounded copy-rate limit, and a maintenance
+window. The worker does not claim a scheduled operation before `not_before`; the database index keeps
+that queue lookup bounded. A maintenance window pauses at the next file/chunk checkpoint. Each
+explicit resume receives a fresh window of the immutable duration, so an expired first window cannot
+trap a resumable job in an immediate-pause loop. Copy limiting is applied to actual bytes written and
+does not build an in-memory work queue.
+
+Linux exact-mount sources can optionally be remounted read-only while inventory, copy, and
+verification run. Hoardarr will not remount a parent filesystem or guess at mount ownership. It
+verifies the kernel's observed flag after every remount, briefly restores write access only while
+removing already verified source files, and restores read-only access in a `finally` boundary even
+when finalization fails. The source stays read-only after retirement. Unsupported hosts and paths are
+reported as unavailable rather than silently weakening the requested plan.
+
 Before that mover copies its first byte, `begin_drain_placement` atomically changes the source to
 `draining`, records the owning operation and immutable plan digest, mirrors the state to a physical
 disk when present, and guarantees another backend is preferred for new files. Replaying the same
@@ -79,5 +93,7 @@ The stable Storage Group namespace remains unchanged when the source backend is 
 The isolated Linux proof uses two purpose-created loop-backed ext4 filesystems. It writes and hashes
 four deterministic files, pauses and resumes the job, simulates a worker crash after inventory,
 recovers the stale operation from its durable manifest, finishes verification, retires the source,
-and confirms the namespace and all hashes are unchanged. This proves the software workflow in
-isolation; it is not physical-disk certification.
+and confirms the namespace and all hashes are unchanged. The extended proof schedules the operation,
+applies a 16 MiB/s bound, verifies the source mount is actually read-only during movement, and checks
+the completed report. This proves the software workflow in isolation; it is not physical-disk
+certification.

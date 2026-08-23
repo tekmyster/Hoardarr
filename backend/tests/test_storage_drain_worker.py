@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +21,12 @@ from hoardarr.db.models import (
 )
 from hoardarr.operations.service import document_hash, recover_stale_operations
 from hoardarr.storage.drain_worker import (
+    BandwidthLimiter,
     DrainPaused,
+    _execution_deadline,
+    _finalize,
+    _job_control,
+    _set_source_mount_read_only,
     execute_drain,
     mark_drain_paused,
     resume_drain,
@@ -144,6 +149,18 @@ def _seed_job(session_factory, tmp_path: Path) -> tuple[str, dict[str, object], 
             },
             "open_use": {"quality": "available", "open_handles": 0, "processes": []},
             "arr_activity": {"quality": "available", "active_writes": 0},
+            "controls": {
+                "enforce_source_read_only": False,
+                "source_read_only_capability": {
+                    "supported": False,
+                    "currently_read_only": None,
+                    "reason": "Not requested in this fixture.",
+                },
+                "bandwidth_limit_mib_per_second": None,
+                "start_at": None,
+                "maintenance_window_minutes": None,
+                "maintenance_window_end": None,
+            },
             "blockers": [],
             "warnings": [],
             "ready": True,
@@ -263,3 +280,99 @@ def test_interrupted_drain_is_requeued_from_durable_checkpoint(tmp_path: Path) -
         assert operation is not None and operation.status == "queued"
         assert operation.lease_owner is None
         assert job is not None and job.status == "queued" and job.phase == "copying"
+
+
+def test_bandwidth_limiter_uses_a_bounded_sleep_budget() -> None:
+    now = 0.0
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    def sleeper(value: float) -> None:
+        nonlocal now
+        sleeps.append(value)
+        now += value
+
+    limiter = BandwidthLimiter(100, clock=clock, sleeper=sleeper)
+    limiter.consume(50)
+    limiter.consume(50)
+    limiter.consume(500)
+    assert sleeps[:2] == [0.5, 0.5]
+    assert all(0 < value <= 1.0 for value in sleeps)
+
+
+def test_maintenance_window_expiry_persists_a_safe_pause(tmp_path: Path) -> None:
+    session_factory = _runtime(tmp_path)
+    operation_id, _plan, _source, _destination = _seed_job(session_factory, tmp_path)
+    with pytest.raises(DrainPaused):
+        _job_control(session_factory, operation_id, utc_now() - timedelta(seconds=1))
+    with session_factory() as session:
+        job = session.get(StorageDrainJob, operation_id)
+        assert job is not None and job.pause_requested is True
+        assert job.report_json["pause_reason"] == "maintenance_window_ended"
+
+
+def test_each_resumed_execution_receives_a_fresh_maintenance_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("hoardarr.storage.drain_worker.utc_now", lambda: now)
+    assert _execution_deadline({"maintenance_window_minutes": 45}) == now + timedelta(
+        minutes=45
+    )
+    assert _execution_deadline({"maintenance_window_minutes": None}) is None
+
+
+def test_source_mount_access_change_is_structured_and_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    read_only = False
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal read_only
+        calls.append(command)
+        read_only = command[2] == "remount,ro"
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hoardarr.storage.drain_worker.subprocess.run", run)
+    monkeypatch.setattr(os, "ST_RDONLY", 1, raising=False)
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda _path: SimpleNamespace(f_flag=os.ST_RDONLY if read_only else 0),
+        raising=False,
+    )
+    _set_source_mount_read_only("/srv/hoardarr/backends/source", True)
+    _set_source_mount_read_only("/srv/hoardarr/backends/source", False)
+    assert calls == [
+        ["mount", "-o", "remount,ro", "/srv/hoardarr/backends/source"],
+        ["mount", "-o", "remount,rw", "/srv/hoardarr/backends/source"],
+    ]
+
+
+def test_finalization_restores_read_only_mount_when_source_open_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    access: list[bool] = []
+    monkeypatch.setattr(
+        "hoardarr.storage.drain_worker._set_source_mount_read_only",
+        lambda _path, read_only: access.append(read_only),
+    )
+    monkeypatch.setattr(os, "O_DIRECTORY", 0, raising=False)
+    monkeypatch.setattr(
+        "hoardarr.storage.drain_worker.os.open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected open failure")),
+    )
+    with pytest.raises(OSError, match="injected open failure"):
+        _finalize(
+            lambda: None,  # type: ignore[arg-type]
+            "operation-id",
+            {
+                "source": {"path": "/srv/hoardarr/backends/source"},
+                "controls": {"enforce_source_read_only": True},
+            },
+            deadline=None,
+        )
+    assert access == [False, True]

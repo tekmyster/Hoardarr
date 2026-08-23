@@ -413,6 +413,10 @@ class HoardarrApi {
       destination_backend_ids: string[];
       verification_mode: "fast" | "accurate" | "paranoid";
       reserve_bytes: number;
+      enforce_source_read_only: boolean;
+      bandwidth_limit_mib_per_second: number | null;
+      start_at: string | null;
+      maintenance_window_minutes: number | null;
     },
   ): Promise<StorageDrainPlan> {
     const result = await this.request<{ plan: StorageDrainPlan }>(

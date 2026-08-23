@@ -3,7 +3,11 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import subprocess
+import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -35,6 +39,25 @@ COPY_CHUNK_BYTES = 1024 * 1024
 INVENTORY_BATCH_SIZE = 250
 
 
+@dataclass
+class BandwidthLimiter:
+    """Bound copy throughput without retaining samples or building a work queue."""
+
+    bytes_per_second: int
+    clock: Callable[[], float] = time.monotonic
+    sleeper: Callable[[float], None] = time.sleep
+
+    def __post_init__(self) -> None:
+        self._started = self.clock()
+        self._bytes = 0
+
+    def consume(self, byte_count: int) -> None:
+        self._bytes += byte_count
+        delay = (self._bytes / self.bytes_per_second) - (self.clock() - self._started)
+        if delay > 0:
+            self.sleeper(min(delay, 1.0))
+
+
 class SessionFactory(Protocol):
     def __call__(self) -> Session: ...
 
@@ -49,6 +72,41 @@ class DrainExecutionError(RuntimeError):
 
 class DrainPaused(RuntimeError):
     pass
+
+
+def _execution_deadline(controls: dict[str, Any]) -> datetime | None:
+    """Give each started or resumed run its own bounded maintenance window."""
+
+    window = controls.get("maintenance_window_minutes")
+    if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+        return None
+    return utc_now() + timedelta(minutes=window)
+
+
+def _set_source_mount_read_only(path: str, read_only: bool) -> None:
+    option = "remount,ro" if read_only else "remount,rw"
+    try:
+        completed = subprocess.run(
+            ["mount", "-o", option, path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        observed = bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DrainExecutionError(
+            "source_read_only_failed",
+            "Hoardarr could not safely change the source mount access mode.",
+            needs_attention=True,
+        ) from exc
+    if completed.returncode != 0 or observed is not read_only:
+        raise DrainExecutionError(
+            "source_read_only_failed",
+            "Hoardarr could not verify the requested source mount access mode.",
+            needs_attention=True,
+        )
 
 
 def _principal(operation: Operation) -> Principal:
@@ -70,7 +128,12 @@ def _relative_path(value: str) -> PurePosixPath:
     return path
 
 
-def _job_control(session_factory: SessionFactory, operation_id: str) -> None:
+def _job_control(
+    session_factory: SessionFactory,
+    operation_id: str,
+    deadline: datetime | None = None,
+) -> None:
+    expired = False
     with session_factory() as session, session.begin():
         job = session.get(StorageDrainJob, operation_id)
         operation = session.get(Operation, operation_id)
@@ -82,8 +145,25 @@ def _job_control(session_factory: SessionFactory, operation_id: str) -> None:
             # Drain cancellation is a safe pause. Verified source data is never
             # deleted until finalization and can be resumed through the same job.
             raise DrainPaused()
-        operation.heartbeat_at = utc_now()
-        operation.updated_at = utc_now()
+        now = utc_now()
+        if deadline is not None:
+            comparable_deadline = deadline.replace(tzinfo=None) if now.tzinfo is None else deadline
+            if now >= comparable_deadline:
+                job.pause_requested = True
+                job.report_json = {
+                    **job.report_json,
+                    "pause_reason": "maintenance_window_ended",
+                    "maintenance_window_end": deadline.isoformat(),
+                }
+                expired = True
+            else:
+                operation.heartbeat_at = now
+                operation.updated_at = now
+        else:
+            operation.heartbeat_at = now
+            operation.updated_at = now
+    if expired:
+        raise DrainPaused()
 
 
 def _set_phase(
@@ -142,6 +222,20 @@ def _preflight_and_exclude(
                     destination_backend_ids=list(destinations),
                     verification_mode=str(plan.get("verification", {}).get("mode")),
                     reserve_bytes=int(plan.get("capacity", {}).get("reserve_bytes", -1)),
+                    enforce_source_read_only=bool(
+                        plan.get("controls", {}).get("enforce_source_read_only", False)
+                    ),
+                    bandwidth_limit_mib_per_second=plan.get("controls", {}).get(
+                        "bandwidth_limit_mib_per_second"
+                    ),
+                    start_at=(
+                        datetime.fromisoformat(plan["controls"]["start_at"])
+                        if plan.get("controls", {}).get("start_at")
+                        else None
+                    ),
+                    maintenance_window_minutes=plan.get("controls", {}).get(
+                        "maintenance_window_minutes"
+                    ),
                 )
                 if not fresh["ready"]:
                     raise DrainExecutionError(
@@ -153,9 +247,7 @@ def _preflight_and_exclude(
                     raise DrainExecutionError(
                         "source_identity_changed", "The drain source identity changed."
                     )
-                fresh_destinations = {
-                    item["backend_id"]: item for item in fresh["destinations"]
-                }
+                fresh_destinations = {item["backend_id"]: item for item in fresh["destinations"]}
                 for backend_id, expected in destinations.items():
                     observed = fresh_destinations.get(backend_id, {})
                     if any(observed.get(key) != expected.get(key) for key in identity_fields):
@@ -255,7 +347,13 @@ def _flush_inventory(
         operation.heartbeat_at = utc_now()
 
 
-def _inventory(session_factory: SessionFactory, operation_id: str, plan: dict[str, Any]) -> None:
+def _inventory(
+    session_factory: SessionFactory,
+    operation_id: str,
+    plan: dict[str, Any],
+    *,
+    deadline: datetime | None,
+) -> None:
     source = plan["source"]
     root = Path(source["path"])
     try:
@@ -297,7 +395,7 @@ def _inventory(session_factory: SessionFactory, operation_id: str, plan: dict[st
     batch_bytes = 0
     for index, (relative, facts) in enumerate(_walk_source(root)):
         if index % INVENTORY_BATCH_SIZE == 0:
-            _job_control(session_factory, operation_id)
+            _job_control(session_factory, operation_id, deadline)
         eligible = [item for item in remaining if remaining[item] >= facts.st_size]
         if not eligible:
             raise DrainExecutionError(
@@ -380,12 +478,11 @@ def _copy_entry(
     entry: StorageDrainEntry,
     *,
     control: Callable[[], None],
+    limiter: BandwidthLimiter | None = None,
 ) -> str:
     relative = _relative_path(entry.relative_path)
     source_parent = _open_directory(source_root_fd, relative.parts[:-1], create=False)
-    destination_parent = _open_directory(
-        destination_root_fd, relative.parts[:-1], create=True
-    )
+    destination_parent = _open_directory(destination_root_fd, relative.parts[:-1], create=True)
     source_fd = temporary_fd = -1
     temporary = f".hoardarr-drain-{entry.job_id}-{entry.id}.partial"
     try:
@@ -447,6 +544,8 @@ def _copy_entry(
         while chunk := os.read(source_fd, COPY_CHUNK_BYTES):
             digest.update(chunk)
             _write_all(temporary_fd, chunk)
+            if limiter is not None:
+                limiter.consume(len(chunk))
             chunks += 1
             if chunks % 16 == 0:
                 control()
@@ -536,12 +635,17 @@ def _checkpoint_copy(
         operation.heartbeat_at = utc_now()
 
 
-def _copy(session_factory: SessionFactory, operation_id: str, plan: dict[str, Any]) -> None:
+def _copy(
+    session_factory: SessionFactory,
+    operation_id: str,
+    plan: dict[str, Any],
+    *,
+    deadline: datetime | None,
+    limiter: BandwidthLimiter | None,
+) -> None:
     source_root = Path(plan["source"]["path"])
     destinations = _plan_destinations(plan)
-    source_fd = os.open(
-        source_root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-    )
+    source_fd = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     destination_fds: dict[str, int] = {}
     try:
         for backend_id, item in destinations.items():
@@ -550,7 +654,7 @@ def _copy(session_factory: SessionFactory, operation_id: str, plan: dict[str, An
                 os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
             )
         while entry := _next_entry(session_factory, operation_id, "pending"):
-            _job_control(session_factory, operation_id)
+            _job_control(session_factory, operation_id, deadline)
             with session_factory() as session:
                 if arr_activity(session)["active_writes"]:
                     raise DrainPaused()
@@ -558,7 +662,8 @@ def _copy(session_factory: SessionFactory, operation_id: str, plan: dict[str, An
                 source_fd,
                 destination_fds[entry.destination_backend_id],
                 entry,
-                control=lambda: _job_control(session_factory, operation_id),
+                control=lambda: _job_control(session_factory, operation_id, deadline),
+                limiter=limiter,
             )
             _checkpoint_copy(session_factory, operation_id, entry.id, digest)
     finally:
@@ -609,9 +714,7 @@ def _verify_entry(
         os.close(parent)
 
 
-def _checkpoint_verified(
-    session_factory: SessionFactory, operation_id: str, entry_id: int
-) -> None:
+def _checkpoint_verified(session_factory: SessionFactory, operation_id: str, entry_id: int) -> None:
     with session_factory() as session, session.begin():
         entry = session.get(StorageDrainEntry, entry_id)
         job = session.get(StorageDrainJob, operation_id)
@@ -627,7 +730,13 @@ def _checkpoint_verified(
         operation.heartbeat_at = utc_now()
 
 
-def _verify(session_factory: SessionFactory, operation_id: str, plan: dict[str, Any]) -> None:
+def _verify(
+    session_factory: SessionFactory,
+    operation_id: str,
+    plan: dict[str, Any],
+    *,
+    deadline: datetime | None,
+) -> None:
     with session_factory() as session, session.begin():
         job = session.get(StorageDrainJob, operation_id)
         operation = session.get(Operation, operation_id)
@@ -651,12 +760,12 @@ def _verify(session_factory: SessionFactory, operation_id: str, plan: dict[str, 
     }
     try:
         while entry := _next_entry(session_factory, operation_id, "copied"):
-            _job_control(session_factory, operation_id)
+            _job_control(session_factory, operation_id, deadline)
             _verify_entry(
                 destination_fds[entry.destination_backend_id],
                 entry,
                 str(plan["verification"]["mode"]),
-                control=lambda: _job_control(session_factory, operation_id),
+                control=lambda: _job_control(session_factory, operation_id, deadline),
             )
             _checkpoint_verified(session_factory, operation_id, entry.id)
     finally:
@@ -705,9 +814,7 @@ def _remove_source(source_root_fd: int, entry: StorageDrainEntry) -> None:
         os.close(parent)
 
 
-def _checkpoint_removed(
-    session_factory: SessionFactory, operation_id: str, entry_id: int
-) -> None:
+def _checkpoint_removed(session_factory: SessionFactory, operation_id: str, entry_id: int) -> None:
     with session_factory() as session, session.begin():
         entry = session.get(StorageDrainEntry, entry_id)
         job = session.get(StorageDrainJob, operation_id)
@@ -721,19 +828,30 @@ def _checkpoint_removed(
 
 
 def _finalize(
-    session_factory: SessionFactory, operation_id: str, plan: dict[str, Any]
+    session_factory: SessionFactory,
+    operation_id: str,
+    plan: dict[str, Any],
+    *,
+    deadline: datetime | None,
 ) -> dict[str, Any]:
-    source_fd = os.open(
-        plan["source"]["path"],
-        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-    )
+    read_only_requested = bool(plan.get("controls", {}).get("enforce_source_read_only"))
+    if read_only_requested:
+        _set_source_mount_read_only(plan["source"]["path"], False)
+    source_fd = -1
     try:
+        source_fd = os.open(
+            plan["source"]["path"],
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
         while entry := _next_entry(session_factory, operation_id, "verified"):
-            _job_control(session_factory, operation_id)
+            _job_control(session_factory, operation_id, deadline)
             _remove_source(source_fd, entry)
             _checkpoint_removed(session_factory, operation_id, entry.id)
     finally:
-        os.close(source_fd)
+        if source_fd >= 0:
+            os.close(source_fd)
+        if read_only_requested:
+            _set_source_mount_read_only(plan["source"]["path"], True)
 
     with session_factory() as session, session.begin():
         job = session.get(StorageDrainJob, operation_id)
@@ -757,7 +875,10 @@ def _finalize(
             operation_id=operation_id,
             target_state="read_only",
             principal=actor,
-            details={"filesystem_enforced": False, "source_files_removed": True},
+            details={
+                "filesystem_enforced": read_only_requested,
+                "source_files_removed": True,
+            },
         )
         advance_drain_lifecycle(
             session,
@@ -778,7 +899,11 @@ def _finalize(
             "namespace_path": plan["storage_group_namespace"],
             "namespace_preserved": True,
             "source_files_removed_after_verification": True,
-            "filesystem_read_only_enforced": False,
+            "filesystem_read_only_enforced": read_only_requested,
+            "bandwidth_limit_mib_per_second": plan.get("controls", {}).get(
+                "bandwidth_limit_mib_per_second"
+            ),
+            "scheduled_start": plan.get("controls", {}).get("start_at"),
         }
         job.status = "succeeded"
         job.phase = "completed"
@@ -803,8 +928,18 @@ def execute_drain(
         validate_drain_plan(plan)
     except DrainPlanError as exc:
         raise DrainExecutionError(exc.code, str(exc)) from exc
-    _job_control(session_factory, operation_id)
+    controls = plan.get("controls", {})
+    deadline = _execution_deadline(controls)
+    bandwidth = controls.get("bandwidth_limit_mib_per_second")
+    limiter = (
+        BandwidthLimiter(int(bandwidth) * 1024 * 1024)
+        if isinstance(bandwidth, int) and bandwidth > 0
+        else None
+    )
+    _job_control(session_factory, operation_id, deadline)
     _preflight_and_exclude(session_factory, operation_id, plan)
+    if controls.get("enforce_source_read_only"):
+        _set_source_mount_read_only(plan["source"]["path"], True)
     with session_factory() as session:
         job = session.get(StorageDrainJob, operation_id)
         if job is None:
@@ -813,22 +948,22 @@ def execute_drain(
     if phase_hook:
         phase_hook(phase)
     if phase in {"preflight", "inventory"}:
-        _inventory(session_factory, operation_id, plan)
+        _inventory(session_factory, operation_id, plan, deadline=deadline)
         phase = "copying"
     if phase_hook:
         phase_hook(phase)
     if phase == "copying":
-        _copy(session_factory, operation_id, plan)
+        _copy(session_factory, operation_id, plan, deadline=deadline, limiter=limiter)
         phase = "verifying"
     if phase_hook:
         phase_hook(phase)
     if phase == "verifying":
-        _verify(session_factory, operation_id, plan)
+        _verify(session_factory, operation_id, plan, deadline=deadline)
         phase = "finalizing"
     if phase_hook:
         phase_hook(phase)
     if phase == "finalizing":
-        return _finalize(session_factory, operation_id, plan)
+        return _finalize(session_factory, operation_id, plan, deadline=deadline)
     with session_factory() as session:
         job = session.get(StorageDrainJob, operation_id)
         if job is not None and job.status == "succeeded":

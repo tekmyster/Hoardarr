@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
@@ -255,6 +256,10 @@ def preview_storage_group_drain(
             destination_backend_ids=payload.destination_backend_ids,
             verification_mode=payload.verification_mode,
             reserve_bytes=payload.reserve_bytes,
+            enforce_source_read_only=payload.enforce_source_read_only,
+            bandwidth_limit_mib_per_second=payload.bandwidth_limit_mib_per_second,
+            start_at=payload.start_at,
+            maintenance_window_minutes=payload.maintenance_window_minutes,
         )
     except DrainPlanError as exc:
         raise _drain_problem(exc) from exc
@@ -301,6 +306,18 @@ def start_storage_group_drain(
         "plan_sha256": payload.plan_sha256,
         "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
     }
+    controls = payload.plan.get("controls")
+    not_before = None
+    if isinstance(controls, dict) and controls.get("start_at"):
+        try:
+            not_before = datetime.fromisoformat(str(controls["start_at"]))
+        except ValueError as exc:
+            raise Problem(
+                422,
+                "schedule_invalid",
+                "Invalid schedule",
+                "Preview the drain again.",
+            ) from exc
     try:
         operation, created = create_operation(
             session,
@@ -310,6 +327,7 @@ def start_storage_group_drain(
             idempotency_key=key,
             resource_type="storage_group",
             resource_id=group_id,
+            not_before=not_before,
         )
     except OperationConflict as exc:
         raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc

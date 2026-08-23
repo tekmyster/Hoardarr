@@ -242,6 +242,10 @@ describe("hardware snapshot normalization", () => {
       destination_backend_ids: ["22222222-2222-4222-8222-222222222222"],
       verification_mode: "accurate" as const,
       reserve_bytes: 1_073_741_824,
+      enforce_source_read_only: true,
+      bandwidth_limit_mib_per_second: 64,
+      start_at: "2026-08-24T02:00:00.000Z",
+      maintenance_window_minutes: 120,
     };
 
     await expect(api.previewStorageGroupDrain("33333333-3333-4333-8333-333333333333", input))

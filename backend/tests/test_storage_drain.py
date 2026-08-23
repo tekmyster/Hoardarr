@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,80 @@ def test_drain_preflight_rejects_duplicate_and_cross_group_destinations() -> Non
             assert exc.code == "source_destination_filesystem_same"
         else:
             raise AssertionError("same-filesystem drain destination was accepted")
+
+
+def test_drain_controls_are_immutable_bounded_and_capability_aware() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        group_id, source_id, destination_id = _group_with_backends(session)
+        start = datetime.now(UTC) + timedelta(hours=1)
+        plan = build_drain_plan(
+            session,
+            group_id=group_id,
+            source_backend_id=source_id,
+            destination_backend_ids=[destination_id],
+            verification_mode="accurate",
+            reserve_bytes=2_000,
+            enforce_source_read_only=True,
+            bandwidth_limit_mib_per_second=64,
+            start_at=start,
+            maintenance_window_minutes=120,
+            filesystem_probe=_facts,
+            open_use_probe=lambda _path: {
+                "quality": "available",
+                "open_handles": 0,
+                "processes": [],
+            },
+            read_only_capability_probe=lambda _path: {
+                "supported": True,
+                "currently_read_only": False,
+                "reason": "Exact disposable mount.",
+            },
+        )
+        assert plan["ready"] is True
+        assert plan["controls"]["bandwidth_limit_mib_per_second"] == 64
+        assert plan["controls"]["enforce_source_read_only"] is True
+        assert (
+            plan["controls"]["maintenance_window_end"]
+            == (start + timedelta(minutes=120)).isoformat()
+        )
+        validate_drain_plan(plan)
+
+        blocked = build_drain_plan(
+            session,
+            group_id=group_id,
+            source_backend_id=source_id,
+            destination_backend_ids=[destination_id],
+            verification_mode="accurate",
+            reserve_bytes=2_000,
+            enforce_source_read_only=True,
+            filesystem_probe=_facts,
+            open_use_probe=lambda _path: {
+                "quality": "available",
+                "open_handles": 0,
+                "processes": [],
+            },
+            read_only_capability_probe=lambda _path: {
+                "supported": False,
+                "currently_read_only": None,
+                "reason": "Not an exact mount.",
+            },
+        )
+        assert blocked["ready"] is False
+        assert {item["code"] for item in blocked["blockers"]} == {"source_read_only_unsupported"}
+
+        with pytest.raises(DrainPlanError, match="requires a scheduled start"):
+            build_drain_plan(
+                session,
+                group_id=group_id,
+                source_backend_id=source_id,
+                destination_backend_ids=[destination_id],
+                verification_mode="fast",
+                reserve_bytes=0,
+                maintenance_window_minutes=30,
+                filesystem_probe=_facts,
+            )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires Linux /proc and POSIX paths")

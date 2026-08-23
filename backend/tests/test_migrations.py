@@ -92,6 +92,7 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
         "storage_drain_jobs",
         "storage_drain_entries",
     } <= set(inspect(engine).get_table_names())
+    assert "not_before" in {column["name"] for column in inspect(engine).get_columns("operations")}
     engine.dispose()
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT username FROM users").fetchone() == ("owner",)

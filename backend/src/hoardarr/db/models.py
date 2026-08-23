@@ -98,6 +98,7 @@ class Operation(Base):
     __tablename__ = "operations"
     __table_args__ = (
         UniqueConstraint("actor_id", "kind", "idempotency_key", name="uq_operation_idempotency"),
+        Index("ix_operations_status_not_before", "status", "not_before"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -117,6 +118,7 @@ class Operation(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

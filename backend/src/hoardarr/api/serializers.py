@@ -60,6 +60,7 @@ def operation_document(operation: Operation) -> dict[str, object]:
         "result": operation.result_json,
         "error": operation.error_json,
         "cancel_requested": operation.cancel_requested,
+        "not_before": operation.not_before,
         "created_at": operation.created_at,
         "updated_at": operation.updated_at,
     }

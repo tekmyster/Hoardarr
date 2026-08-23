@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -37,6 +39,7 @@ class FilesystemFacts:
 
 FilesystemProbe = Callable[[str], FilesystemFacts]
 OpenUseProbe = Callable[[str], dict[str, Any]]
+ReadOnlyCapabilityProbe = Callable[[str], dict[str, Any]]
 
 
 def _path_without_symlinks(value: str) -> Path:
@@ -131,6 +134,51 @@ def inspect_open_use(
     }
 
 
+def inspect_read_only_capability(value: str) -> dict[str, Any]:
+    """Determine whether an exact Linux mount can be safely remounted read-only."""
+
+    mountinfo = Path("/proc/self/mountinfo")
+    if os.name != "posix" or not mountinfo.is_file() or shutil.which("mount") is None:
+        return {
+            "supported": False,
+            "currently_read_only": None,
+            "reason": "Exact mount read-only control is not available on this host.",
+        }
+    path = str(_path_without_symlinks(value))
+    try:
+        lines = mountinfo.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {
+            "supported": False,
+            "currently_read_only": None,
+            "reason": "Linux mount information could not be read.",
+        }
+    escaped = {"\\040": " ", "\\011": "\t", "\\012": "\n", "\\134": "\\"}
+    for line in lines[:16_384]:
+        fields = line.split()
+        if len(fields) < 7 or "-" not in fields:
+            continue
+        mountpoint = fields[4]
+        for source, replacement in escaped.items():
+            mountpoint = mountpoint.replace(source, replacement)
+        if mountpoint != path:
+            continue
+        options = set(fields[5].split(","))
+        return {
+            "supported": True,
+            "currently_read_only": "ro" in options,
+            "reason": "The backend path is an exact Linux mount point.",
+        }
+    return {
+        "supported": False,
+        "currently_read_only": None,
+        "reason": (
+            "The backend path is not an exact mount point; Hoardarr will not remount a "
+            "parent filesystem."
+        ),
+    }
+
+
 def _backend_path(session: Session, backend: StorageBackend) -> str:
     if backend.namespace_path:
         return backend.namespace_path
@@ -200,15 +248,43 @@ def build_drain_plan(
     destination_backend_ids: list[str],
     verification_mode: str,
     reserve_bytes: int,
+    enforce_source_read_only: bool = False,
+    bandwidth_limit_mib_per_second: int | None = None,
+    start_at: datetime | None = None,
+    maintenance_window_minutes: int | None = None,
     filesystem_probe: FilesystemProbe | None = None,
     open_use_probe: OpenUseProbe | None = None,
+    read_only_capability_probe: ReadOnlyCapabilityProbe | None = None,
 ) -> dict[str, Any]:
     filesystem_probe = filesystem_probe or inspect_filesystem
     open_use_probe = open_use_probe or inspect_open_use
+    read_only_capability_probe = read_only_capability_probe or inspect_read_only_capability
     if verification_mode not in {"fast", "accurate", "paranoid"}:
         raise DrainPlanError("verification_mode_invalid", "Unknown drain verification mode.")
     if reserve_bytes < 0 or reserve_bytes > 10**15:
         raise DrainPlanError("reserve_invalid", "The destination reserve is outside safe bounds.")
+    if bandwidth_limit_mib_per_second is not None and not (
+        1 <= bandwidth_limit_mib_per_second <= 10_240
+    ):
+        raise DrainPlanError(
+            "bandwidth_limit_invalid", "The bandwidth limit is outside safe bounds."
+        )
+    if maintenance_window_minutes is not None and start_at is None:
+        raise DrainPlanError(
+            "maintenance_window_invalid", "A maintenance window requires a scheduled start time."
+        )
+    if maintenance_window_minutes is not None and not (15 <= maintenance_window_minutes <= 10_080):
+        raise DrainPlanError(
+            "maintenance_window_invalid", "The maintenance window is outside safe bounds."
+        )
+    if start_at is not None:
+        if start_at.tzinfo is None:
+            raise DrainPlanError("schedule_invalid", "The scheduled start must include a timezone.")
+        start_at = start_at.astimezone(UTC)
+        if start_at > datetime.now(UTC) + timedelta(days=365):
+            raise DrainPlanError(
+                "schedule_invalid", "The scheduled start is more than one year away."
+            )
     if not destination_backend_ids or len(destination_backend_ids) > 64:
         raise DrainPlanError(
             "destination_required", "Select between one and 64 destination backends."
@@ -352,6 +428,16 @@ def build_drain_plan(
                 "message": "Not every connected ARR application reported active-write state.",
             }
         )
+    read_only = read_only_capability_probe(source_path)
+    if enforce_source_read_only and read_only.get("supported") is not True:
+        blockers.append(
+            {
+                "code": "source_read_only_unsupported",
+                "message": str(
+                    read_only.get("reason") or "Source read-only control is unavailable."
+                ),
+            }
+        )
 
     document: dict[str, Any] = {
         "schema_version": 1,
@@ -380,6 +466,18 @@ def build_drain_plan(
         },
         "open_use": source_use,
         "arr_activity": arr,
+        "controls": {
+            "enforce_source_read_only": enforce_source_read_only,
+            "source_read_only_capability": read_only,
+            "bandwidth_limit_mib_per_second": bandwidth_limit_mib_per_second,
+            "start_at": start_at.isoformat() if start_at else None,
+            "maintenance_window_minutes": maintenance_window_minutes,
+            "maintenance_window_end": (
+                (start_at + timedelta(minutes=maintenance_window_minutes)).isoformat()
+                if start_at is not None and maintenance_window_minutes is not None
+                else None
+            ),
+        },
         "blockers": blockers,
         "warnings": warnings,
         "ready": not blockers,
@@ -422,6 +520,7 @@ def validate_drain_plan(document: dict[str, Any]) -> None:
     destinations = document.get("destinations")
     verification = document.get("verification")
     capacity = document.get("capacity")
+    controls = document.get("controls")
     if (
         not bounded_text(group_id, maximum=64)
         or not absolute_path(namespace)
@@ -430,6 +529,7 @@ def validate_drain_plan(document: dict[str, Any]) -> None:
         or not 1 <= len(destinations) <= 64
         or not isinstance(verification, dict)
         or not isinstance(capacity, dict)
+        or not isinstance(controls, dict)
         or document.get("ready") is not True
         or not isinstance(document.get("blockers"), list)
         or document.get("blockers")
@@ -487,3 +587,47 @@ def validate_drain_plan(document: dict[str, Any]) -> None:
             raise DrainPlanError("drain_plan_invalid", "The drain capacity values are invalid.")
     if capacity["required_bytes"] != source["required_bytes"]:
         raise DrainPlanError("drain_plan_invalid", "The drain capacity values disagree.")
+    enforce_read_only = controls.get("enforce_source_read_only")
+    read_only_capability = controls.get("source_read_only_capability")
+    bandwidth = controls.get("bandwidth_limit_mib_per_second")
+    start_value = controls.get("start_at")
+    window = controls.get("maintenance_window_minutes")
+    end_value = controls.get("maintenance_window_end")
+    if not isinstance(enforce_read_only, bool) or not isinstance(read_only_capability, dict):
+        raise DrainPlanError("drain_plan_invalid", "The drain controls are invalid.")
+    if enforce_read_only and read_only_capability.get("supported") is not True:
+        raise DrainPlanError(
+            "source_read_only_unsupported", "Source read-only control is unavailable."
+        )
+    if bandwidth is not None and (
+        not isinstance(bandwidth, int)
+        or isinstance(bandwidth, bool)
+        or not 1 <= bandwidth <= 10_240
+    ):
+        raise DrainPlanError("bandwidth_limit_invalid", "The bandwidth limit is invalid.")
+    if start_value is None:
+        if window is not None or end_value is not None:
+            raise DrainPlanError("maintenance_window_invalid", "The maintenance window is invalid.")
+    else:
+        if not bounded_text(start_value, maximum=64):
+            raise DrainPlanError("schedule_invalid", "The scheduled start is invalid.")
+        try:
+            scheduled = datetime.fromisoformat(str(start_value))
+        except ValueError as exc:
+            raise DrainPlanError("schedule_invalid", "The scheduled start is invalid.") from exc
+        if scheduled.tzinfo is None:
+            raise DrainPlanError("schedule_invalid", "The scheduled start must include a timezone.")
+        if window is not None:
+            if (
+                not isinstance(window, int)
+                or isinstance(window, bool)
+                or not 15 <= window <= 10_080
+            ):
+                raise DrainPlanError(
+                    "maintenance_window_invalid", "The maintenance window is invalid."
+                )
+            expected_end = (scheduled + timedelta(minutes=window)).isoformat()
+            if end_value != expected_end:
+                raise DrainPlanError(
+                    "maintenance_window_invalid", "The maintenance window changed."
+                )
