@@ -205,8 +205,9 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(
         },
     )
     assert preview.status_code == 200, preview.text
-    assert preview.json()["plan"]["ready"] is True
-    assert len(preview.json()["plan"]["plan_sha256"]) == 64
+    drain_plan = preview.json()["plan"]
+    assert drain_plan["ready"] is True
+    assert len(drain_plan["plan_sha256"]) == 64
     guarded = client.post(
         f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/transition",
         headers=headers,
@@ -214,6 +215,46 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(
     )
     assert guarded.status_code == 422
     assert guarded.json()["code"] == "durable_operation_required"
+
+    started = client.post(
+        f"/api/v1/storage/groups/{group_id}/drain",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "storage-drain-0001"}),
+        json={
+            "plan": drain_plan,
+            "plan_sha256": drain_plan["plan_sha256"],
+            "confirmation": "I AGREE",
+        },
+    )
+    assert started.status_code == 202, started.text
+    drain_operation_id = started.json()["operation"]["id"]
+    progress = client.get(f"/api/v1/operations/{drain_operation_id}/progress")
+    assert progress.status_code == 200, progress.text
+    assert progress.json()["phase"] == "preflight"
+    assert progress.json()["files"] == {"total": 0, "copied": 0, "verified": 0}
+    paused = client.post(
+        f"/api/v1/operations/{drain_operation_id}/pause",
+        headers=headers,
+    )
+    assert paused.status_code == 202, paused.text
+    assert paused.json()["status"] == "paused"
+    resumed = client.post(
+        f"/api/v1/operations/{drain_operation_id}/resume",
+        headers=headers,
+    )
+    assert resumed.status_code == 202, resumed.text
+    assert resumed.json()["status"] == "queued"
+    replayed = client.post(
+        f"/api/v1/storage/groups/{group_id}/drain",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "storage-drain-0001"}),
+        json={
+            "plan": drain_plan,
+            "plan_sha256": drain_plan["plan_sha256"],
+            "confirmation": "I AGREE",
+        },
+    )
+    assert replayed.status_code == 202
+    assert replayed.json()["replayed"] is True
+    assert replayed.json()["operation"]["id"] == drain_operation_id
 
     document = client.get("/api/v1/storage/groups").json()["items"][0]
     assert document["namespace_path"] == "/srv/hoardarr/media"

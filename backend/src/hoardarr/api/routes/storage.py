@@ -21,6 +21,7 @@ from hoardarr.api.schemas import (
     SnapraidReplacementPreviewRequest,
     StorageBackendAssignRequest,
     StorageBackendTransitionRequest,
+    StorageDrainApplyRequest,
     StorageDrainPreviewRequest,
     StorageGroupCreateRequest,
     StorageRedundancyApplyRequest,
@@ -32,9 +33,9 @@ from hoardarr.api.schemas import (
 from hoardarr.api.serializers import operation_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
-from hoardarr.db.models import HardwareSnapshot, Operation
+from hoardarr.db.models import HardwareSnapshot, Operation, StorageDrainJob
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
-from hoardarr.storage.drain import DrainPlanError, build_drain_plan
+from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
 from hoardarr.storage.groups import (
     StorageGroupError,
     assign_backend,
@@ -245,6 +246,88 @@ def preview_storage_group_drain(
     except DrainPlanError as exc:
         raise _drain_problem(exc) from exc
     return {"plan": plan}
+
+
+@router.post("/groups/{group_id}/drain", status_code=202)
+def start_storage_group_drain(
+    group_id: str,
+    payload: StorageDrainApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Queue an approved immutable drain; file deletion begins only after verification."""
+
+    try:
+        validate_drain_plan(payload.plan)
+    except DrainPlanError as exc:
+        raise _drain_problem(exc) from exc
+    if payload.plan.get("plan_sha256") != payload.plan_sha256:
+        raise Problem(409, "drain_plan_changed", "Plan changed", "Preview the drain again.")
+    if payload.plan.get("storage_group_id") != group_id:
+        raise Problem(
+            409,
+            "drain_group_changed",
+            "Storage Group changed",
+            "The drain plan belongs to another Storage Group.",
+        )
+    if payload.plan.get("ready") is not True:
+        raise Problem(
+            409,
+            "drain_preflight_blocked",
+            "Drain is blocked",
+            "Resolve every preflight blocker before starting the drain.",
+        )
+    source = payload.plan.get("source")
+    verification = payload.plan.get("verification")
+    if not isinstance(source, dict) or not isinstance(verification, dict):
+        raise Problem(422, "drain_plan_invalid", "Invalid drain plan", "Preview the drain again.")
+    operation_request = {
+        "plan": payload.plan,
+        "plan_sha256": payload.plan_sha256,
+        "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
+    }
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.drain",
+            principal=principal,
+            request=operation_request,
+            idempotency_key=key,
+            resource_type="storage_group",
+            resource_id=group_id,
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        session.add(
+            StorageDrainJob(
+                id=operation.id,
+                storage_group_id=group_id,
+                source_backend_id=str(source.get("backend_id")),
+                plan_sha256=payload.plan_sha256,
+                verification_mode=str(verification.get("mode")),
+                status="queued",
+                phase="preflight",
+                report_json={},
+            )
+        )
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.drain",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="storage_group",
+            target_id=group_id,
+            details={
+                "source_backend_id": source.get("backend_id"),
+                "verification_mode": verification.get("mode"),
+                "plan_sha256": payload.plan_sha256,
+            },
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
 
 
 @router.get("/disks")

@@ -254,6 +254,33 @@ describe("hardware snapshot normalization", () => {
     expect(JSON.parse(String(request.body))).toEqual(input);
   });
 
+  it("starts, pauses, and resumes a durable storage drain", async () => {
+    const plan = {
+      kind: "storage.drain",
+      schema_version: 1,
+      storage_group_id: "33333333-3333-4333-8333-333333333333",
+      plan_sha256: "a".repeat(64),
+    } as never;
+    const operation = { id: "44444444-4444-4444-8444-444444444444", kind: "storage.drain", status: "queued" };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(
+      JSON.stringify({ operation }),
+      { status: 202, headers: { "Content-Type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.startStorageGroupDrain(plan)).resolves.toEqual(operation);
+    await api.pauseOperation(operation.id);
+    await api.resumeOperation(operation.id);
+    const startRequest = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(startRequest.body))).toEqual({
+      plan,
+      plan_sha256: "a".repeat(64),
+      confirmation: "I AGREE",
+    });
+    expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/operations\/.*\/pause$/);
+    expect(String(fetchMock.mock.calls[2][0])).toMatch(/\/operations\/.*\/resume$/);
+  });
+
   it("restores a browser session and uses its renewed request token", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

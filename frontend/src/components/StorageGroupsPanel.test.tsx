@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { PhysicalDiskDocument, StorageGroupDocument } from "../types";
+import type { PhysicalDiskDocument, StorageDrainPlan, StorageGroupDocument } from "../types";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
 
 const disk: PhysicalDiskDocument = {
@@ -109,7 +109,7 @@ describe("StorageGroupsPanel", () => {
     };
     vi.spyOn(api, "storageGroups").mockResolvedValue([drainGroup]);
     vi.spyOn(api, "registeredDisks").mockResolvedValue([]);
-    const preview = vi.spyOn(api, "previewStorageGroupDrain").mockResolvedValue({
+    const drainPlan: StorageDrainPlan = {
       schema_version: 1,
       kind: "storage.drain",
       storage_group_id: group.id,
@@ -139,6 +139,28 @@ describe("StorageGroupsPanel", () => {
       ready: true,
       phases: ["preflight", "copy", "verify"],
       plan_sha256: "a".repeat(64),
+    };
+    const preview = vi.spyOn(api, "previewStorageGroupDrain").mockResolvedValue(drainPlan);
+    const startedOperation = {
+      id: "77777777-7777-4777-8777-777777777777",
+      kind: "storage.drain",
+      status: "queued" as const,
+    };
+    const start = vi.spyOn(api, "startStorageGroupDrain").mockResolvedValue(startedOperation);
+    vi.spyOn(api, "operation").mockResolvedValue({ ...startedOperation, status: "paused" });
+    vi.spyOn(api, "storageOperationProgress").mockResolvedValue({
+      operation_id: startedOperation.id,
+      state: "paused",
+      phase: "copying",
+      completed_steps: 0,
+      total_steps: 2,
+      percent: 35,
+      completed_actions: [],
+      notices: [],
+      current_action: null,
+      estimate: null,
+      updated_at: 1,
+      files: { total: 2, copied: 1, verified: 0 },
     });
     const user = userEvent.setup();
     render(<StorageGroupsPanel />);
@@ -153,6 +175,12 @@ describe("StorageGroupsPanel", () => {
     }));
     expect(screen.getByText("Drain preflight")).toBeInTheDocument();
     expect(screen.getByText(/This preview does not move or delete files/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start durable drain" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Drain destructive confirmation"), "I AGREE");
+    await user.click(screen.getByRole("button", { name: "Start durable drain" }));
+    await waitFor(() => expect(start).toHaveBeenCalledWith(drainPlan));
+    expect(await screen.findByText("Drain and retire source")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Resume drain" })).toBeInTheDocument());
   });
 
   it("aborts initial history requests when the panel unmounts", () => {

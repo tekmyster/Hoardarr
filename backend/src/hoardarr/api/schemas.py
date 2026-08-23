@@ -289,3 +289,9 @@ class StorageDrainPreviewRequest(StrictModel):
     destination_backend_ids: list[str] = Field(min_length=1, max_length=64)
     verification_mode: Literal["fast", "accurate", "paranoid"] = "accurate"
     reserve_bytes: int = Field(default=1_073_741_824, ge=0, le=10**15)
+
+
+class StorageDrainApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["I AGREE"]

@@ -521,6 +521,64 @@ def begin_drain_placement(
     return source
 
 
+def advance_drain_lifecycle(
+    session: Session,
+    *,
+    group_id: str,
+    source_backend_id: str,
+    operation_id: str,
+    target_state: str,
+    principal: Principal,
+    details: dict[str, Any] | None = None,
+) -> StorageBackend:
+    """Advance only the drain-owned terminal sequence with ownership checks."""
+
+    allowed = {
+        "draining": "verifying",
+        "verifying": "read_only",
+        "read_only": "retired",
+    }
+    group = session.get(StorageGroup, group_id)
+    source = session.get(StorageBackend, source_backend_id)
+    if group is None or source is None or source.storage_group_id != group.id:
+        raise StorageGroupError("backend_not_found", "The drain source does not exist.")
+    drain = source.config_json.get("drain")
+    if not isinstance(drain, dict) or drain.get("operation_id") != operation_id:
+        raise StorageGroupError(
+            "drain_operation_changed", "The drain source is owned by another operation."
+        )
+    if source.lifecycle_state == target_state:
+        return source
+    expected = allowed.get(source.lifecycle_state)
+    if expected != target_state:
+        raise StorageGroupError(
+            "drain_phase_invalid",
+            f"Cannot advance a drain from {source.lifecycle_state} to {target_state}.",
+        )
+    previous = source.lifecycle_state
+    source.lifecycle_state = target_state
+    source.config_json = {
+        **source.config_json,
+        "drain": {**drain, "phase": target_state, **(details or {})},
+    }
+    if source.physical_disk_id:
+        disk = session.get(PhysicalDisk, source.physical_disk_id)
+        if disk is not None:
+            disk.lifecycle_state = target_state
+    _event(
+        session,
+        group=group,
+        backend=source,
+        principal=principal,
+        event_type=f"backend_{target_state}",
+        previous_state=previous,
+        resulting_state=target_state,
+        details={"operation_id": operation_id, **(details or {})},
+    )
+    session.flush()
+    return source
+
+
 def group_documents(session: Session) -> list[dict[str, Any]]:
     groups = list(session.scalars(select(StorageGroup).order_by(StorageGroup.name)))
     documents: list[dict[str, Any]] = []

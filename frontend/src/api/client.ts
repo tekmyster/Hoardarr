@@ -417,6 +417,22 @@ class HoardarrApi {
     return result.plan;
   }
 
+  async startStorageGroupDrain(plan: StorageDrainPlan): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      `/storage/groups/${encodeURIComponent(plan.storage_group_id)}/drain`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({
+          plan,
+          plan_sha256: plan.plan_sha256,
+          confirmation: "I AGREE",
+        }),
+      },
+    );
+    return result.operation;
+  }
+
   async transitionStorageBackend(
     groupId: string,
     backendId: string,
@@ -865,6 +881,20 @@ class HoardarrApi {
   async storageOperationProgress(operationId: string): Promise<StorageOperationProgress> {
     return this.request<StorageOperationProgress>(
       `/operations/${encodeURIComponent(operationId)}/progress`,
+    );
+  }
+
+  async pauseOperation(operationId: string): Promise<OperationDocument> {
+    return this.request<OperationDocument>(
+      `/operations/${encodeURIComponent(operationId)}/pause`,
+      { method: "POST" },
+    );
+  }
+
+  async resumeOperation(operationId: string): Promise<OperationDocument> {
+    return this.request<OperationDocument>(
+      `/operations/${encodeURIComponent(operationId)}/resume`,
+      { method: "POST" },
     );
   }
 

@@ -309,6 +309,10 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .storage-drain-preview h3 { display: inline-block; margin: 0 10px 8px 0; }
 .storage-drain-preview p { max-width: 86ch; }
 .storage-drain-preview > small { display: block; overflow-wrap: anywhere; }
+.storage-drain-operation { margin-top: 16px; padding: 18px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 4px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.storage-drain-operation .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.storage-drain-operation .section-heading h3 { margin: 2px 0 0; }
+.storage-drain-operation code { overflow-wrap: anywhere; }
 .event-list { margin: 10px 0 0; padding-left: 20px; }
 .event-list time { color: var(--muted); font-variant-numeric: tabular-nums; }
 @media (max-width: 720px) { .storage-group > header, .storage-group-assign { align-items: stretch; flex-direction: column; } }

@@ -448,6 +448,75 @@ class StorageLifecycleEvent(Base):
     )
 
 
+class StorageDrainJob(Base):
+    """Durable control record for one resumable Storage Group evacuation."""
+
+    __tablename__ = "storage_drain_jobs"
+    __table_args__ = (
+        Index("ix_storage_drain_jobs_group_status", "storage_group_id", "status"),
+        Index("ix_storage_drain_jobs_updated_at", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("operations.id", ondelete="CASCADE"), primary_key=True
+    )
+    storage_group_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_groups.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_backend_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_backends.id", ondelete="RESTRICT"), nullable=False
+    )
+    plan_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    phase: Mapped[str] = mapped_column(String(32), nullable=False, default="preflight")
+    verification_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    pause_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    files_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    files_copied: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    files_verified: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    bytes_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    bytes_copied: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_relative_path: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    report_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class StorageDrainEntry(Base):
+    """One immutable source-file observation and its durable drain checkpoint."""
+
+    __tablename__ = "storage_drain_entries"
+    __table_args__ = (
+        UniqueConstraint("job_id", "relative_path", name="uq_storage_drain_entry_path"),
+        Index("ix_storage_drain_entries_job_status_id", "job_id", "status", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_drain_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    relative_path: Mapped[str] = mapped_column(String(4096), nullable=False)
+    destination_backend_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_backends.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_mtime_ns: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    digest_algorithm: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    digest_hex: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    copied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class StorageRedundancyEvent(Base):
     """Durable, user-visible controller/path lifecycle history."""
 

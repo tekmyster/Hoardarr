@@ -2,9 +2,9 @@
 
 ## Scope
 
-This batch expanded the existing 120-row roadmap without renumbering it and implemented the first
-safe Storage Group lifecycle slices. Drain planning and new-write exclusion are implemented; the
-checkpointed copy/verify/finalize engine remains dependency-ordered work.
+This batch expanded the existing 120-row roadmap without renumbering it and implements the Storage
+Group lifecycle through the durable drain/move/verify/retire workflow. Physical-drive certification
+remains separate; the Cisco SSDs on the beta bench were not modified.
 
 ## Roadmap
 
@@ -25,8 +25,19 @@ Implemented UI behavior includes loading/error/empty states, group creation, sta
 registered-disk assignment, activation, preferred-write selection, backend state, and recent
 lifecycle events. Immutable drain preflight is visible without implying movement. The internal
 new-write exclusion boundary atomically marks a source `draining`, binds it to one operation and
-plan digest, and selects a replacement preferred writer before copying. Drain apply/retire remains
-unavailable until the checkpointed mover exists.
+plan digest, and selects a replacement preferred writer before copying.
+
+Migration `0011_storage_drain_jobs` adds durable job and per-file manifest/checkpoint records. The
+Linux mover uses descriptor-relative, no-follow traversal, stages to a temporary file, publishes
+with an atomic no-replace hard link, verifies the selected mode, and deletes only the corresponding
+verified source. Long file copies and hash passes refresh the worker heartbeat. Pause/resume and
+stale-worker recovery preserve the manifest and phase. Completion transitions the source through
+verifying and read-only to retired while retaining the Storage Group namespace.
+
+The Storage Groups UI now includes exact approval, live phase/file/byte/rate progress, safe pause
+and resume, needs-attention handling, and the durable completion report. It does not create sample
+storage on the beta bench. A purpose-created two-loop ext4 workflow is part of the Linux storage CI;
+until its remote execution completes, that specific result remains pending rather than inferred.
 
 ## GitHub Actions notification incident
 

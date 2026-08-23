@@ -15,6 +15,7 @@ from hoardarr.db.models import (
     IntegrationConnection,
     Operation,
     OperationEvent,
+    StorageDrainJob,
     utc_now,
 )
 
@@ -210,6 +211,12 @@ def request_cancellation(session: Session, operation: Operation) -> None:
 
 
 def mark_cancelled_resource(session: Session, operation: Operation) -> None:
+    if operation.kind == "storage.drain":
+        job = session.get(StorageDrainJob, operation.id)
+        if job is not None:
+            job.status = "cancelled"
+            job.updated_at = utc_now()
+        return
     if operation.resource_type == "connectivity_service" and operation.resource_id:
         service = session.get(ConnectivityService, operation.resource_id)
         if service is not None:
@@ -296,6 +303,24 @@ def recover_stale_operations(
             - timedelta(seconds=max_age_by_kind.get(operation.kind, max_age_seconds))
         ]
     for operation in stale:
+        if operation.kind == "storage.drain":
+            job = session.get(StorageDrainJob, operation.id)
+            if job is not None and job.status != "succeeded":
+                job.status = "queued"
+                job.pause_requested = False
+                job.updated_at = utc_now()
+                operation.status = "queued"
+                operation.lease_owner = None
+                operation.leased_at = None
+                operation.heartbeat_at = None
+                operation.updated_at = utc_now()
+                append_event(
+                    session,
+                    operation,
+                    "recovered",
+                    "Interrupted storage drain queued from its last durable checkpoint",
+                )
+                continue
         mark_failed_resource(session, operation, "worker_interrupted")
         fail_operation(
             session,

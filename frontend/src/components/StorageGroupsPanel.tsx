@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { PhysicalDiskDocument, StorageDrainPlan, StorageGroupDocument } from "../types";
+import type {
+  OperationDocument,
+  PhysicalDiskDocument,
+  StorageDrainPlan,
+  StorageGroupDocument,
+  StorageOperationProgress,
+} from "../types";
 import { Card, Notice, StatusBadge } from "./ui";
 
 type Purpose = "media" | "downloads" | "archive" | "backup" | "general";
@@ -29,6 +35,10 @@ export function StorageGroupsPanel() {
   const [selectedDisks, setSelectedDisks] = useState<Record<string, string>>(Object.create(null));
   const [backendPaths, setBackendPaths] = useState<Record<string, string>>(Object.create(null));
   const [drainPlan, setDrainPlan] = useState<StorageDrainPlan | null>(null);
+  const [drainVerification, setDrainVerification] = useState<"fast" | "accurate" | "paranoid">("accurate");
+  const [drainConfirmation, setDrainConfirmation] = useState("");
+  const [drainOperation, setDrainOperation] = useState<OperationDocument | null>(null);
+  const [drainProgress, setDrainProgress] = useState<StorageOperationProgress | null>(null);
 
   const load = async (signal?: AbortSignal) => {
     const [nextGroups, nextDisks] = await Promise.all([
@@ -52,6 +62,33 @@ export function StorageGroupsPanel() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!drainOperation || ["succeeded", "failed", "cancelled", "needs_attention"].includes(drainOperation.status)) return;
+    const controller = new AbortController();
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const [operation, progress] = await Promise.all([
+          api.operation(drainOperation.id),
+          api.storageOperationProgress(drainOperation.id),
+        ]);
+        if (stopped) return;
+        setDrainOperation(operation);
+        setDrainProgress(progress);
+        if (["succeeded", "failed", "cancelled", "needs_attention"].includes(operation.status)) await load(controller.signal);
+      } catch (requestError) {
+        if (!stopped && !controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Drain progress could not be loaded.");
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1_000);
+    return () => {
+      stopped = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [drainOperation?.id, drainOperation?.status]);
 
   const assignedDiskIds = useMemo(
     () => new Set(groups.flatMap((group) => group.backends.map((backend) => backend.physical_disk_id).filter(Boolean))),
@@ -101,11 +138,43 @@ export function StorageGroupsPanel() {
       setDrainPlan(await api.previewStorageGroupDrain(group.id, {
         source_backend_id: sourceBackendId,
         destination_backend_ids: destinations,
-        verification_mode: "accurate",
+        verification_mode: drainVerification,
         reserve_bytes: 1_073_741_824,
       }));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Drain preflight could not be completed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startDrain = async () => {
+    if (!drainPlan || drainConfirmation !== "I AGREE") return;
+    setBusy(true);
+    setError(null);
+    try {
+      const operation = await api.startStorageGroupDrain(drainPlan);
+      setDrainOperation(operation);
+      setDrainProgress(null);
+      setDrainConfirmation("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The drain could not be started.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pauseOrResumeDrain = async () => {
+    if (!drainOperation) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const operation = ["paused", "failed", "needs_attention"].includes(drainOperation.status)
+        ? await api.resumeOperation(drainOperation.id)
+        : await api.pauseOperation(drainOperation.id);
+      setDrainOperation(operation);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The drain state could not be changed.");
     } finally {
       setBusy(false);
     }
@@ -154,7 +223,8 @@ export function StorageGroupsPanel() {
         {group.events.length > 0 && <details><summary>Recent lifecycle activity</summary><ol className="event-list">{group.events.slice(0, 8).map((event) => <li key={event.id}><time dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString()}</time> {event.event_type.replaceAll("_", " ")}</li>)}</ol></details>}
       </section>)}
     </div>}
-    {drainPlan && <section className="storage-drain-preview" aria-live="polite"><h3>Drain preflight</h3><StatusBadge status={drainPlan.ready ? "ready" : "blocked"} /><p>Move and verify {formatBytes(drainPlan.capacity.required_bytes)} from <code>{drainPlan.source.path}</code>. {formatBytes(drainPlan.capacity.destination_free_bytes)} is currently available across {drainPlan.destinations.length} destination{drainPlan.destinations.length === 1 ? "" : "s"}; {formatBytes(drainPlan.capacity.reserve_bytes)} remains reserved.</p><p>Verification: full file hashes. This preview does not move or delete files.</p>{drainPlan.blockers.length > 0 && <ul>{drainPlan.blockers.map((item) => <li key={item.code}>{item.message}</li>)}</ul>}{drainPlan.warnings.length > 0 && <details><summary>Preflight warnings</summary><ul>{drainPlan.warnings.map((item) => <li key={item.code}>{item.message}</li>)}</ul></details>}<small>Immutable plan <code>{drainPlan.plan_sha256}</code></small></section>}
+    {drainPlan && <section className="storage-drain-preview" aria-live="polite"><h3>Drain preflight</h3><StatusBadge status={drainPlan.ready ? "ready" : "blocked"} /><p>Move and verify {formatBytes(drainPlan.capacity.required_bytes)} from <code>{drainPlan.source.path}</code>. {formatBytes(drainPlan.capacity.destination_free_bytes)} is currently available across {drainPlan.destinations.length} destination{drainPlan.destinations.length === 1 ? "" : "s"}; {formatBytes(drainPlan.capacity.reserve_bytes)} remains reserved.</p><p>Verification: {drainPlan.verification.mode === "fast" ? "size and modified time" : drainPlan.verification.mode === "paranoid" ? "two full checksum read passes (high CPU and I/O)" : "full file checksums"}. Source files are removed only after their destination copy is verified. This preview does not move or delete files.</p>{drainPlan.blockers.length > 0 && <ul>{drainPlan.blockers.map((item) => <li key={item.code}>{item.message}</li>)}</ul>}{drainPlan.warnings.length > 0 && <details><summary>Preflight warnings</summary><ul>{drainPlan.warnings.map((item) => <li key={item.code}>{item.message}</li>)}</ul></details>}<small>Immutable plan <code>{drainPlan.plan_sha256}</code></small>{drainPlan.ready && !drainOperation && <div className="form-grid"><label>Verification strength<select value={drainVerification} onChange={(event) => { setDrainVerification(event.target.value as typeof drainVerification); setDrainPlan(null); }}><option value="fast">Fast — size and time</option><option value="accurate">Accurate — full checksums</option><option value="paranoid">Make My CPU Bleed — two reads</option></select><small>Changing this requires a fresh preflight.</small></label><label>Type I AGREE to start<input aria-label="Drain destructive confirmation" value={drainConfirmation} onChange={(event) => setDrainConfirmation(event.target.value)} autoComplete="off" /></label><div className="button-row"><button type="button" className="button button-primary" disabled={busy || drainConfirmation !== "I AGREE"} onClick={() => void startDrain()}>Start durable drain</button><button type="button" className="button button-secondary" onClick={() => { setDrainPlan(null); setDrainConfirmation(""); }}>Cancel</button></div></div>}</section>}
+    {drainOperation && <section className="storage-drain-operation" aria-live="polite" aria-labelledby="drain-operation-title"><div className="section-heading"><div><p className="eyebrow">Storage lifecycle</p><h3 id="drain-operation-title">Drain and retire source</h3></div><StatusBadge status={drainProgress?.state ?? drainOperation.status} /></div><p>{drainProgress?.phase ? drainProgress.phase.replaceAll("_", " ") : "Waiting for the durable worker"}</p><div className="operation-progress-track" role="progressbar" aria-label="Storage drain progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={drainProgress?.percent ?? 0}><span style={{ width: `${drainProgress?.percent ?? 0}%` }} /></div><p><strong>{drainProgress?.percent ?? 0}%</strong>{drainProgress?.files ? ` · ${drainProgress.files.copied}/${drainProgress.files.total} copied · ${drainProgress.files.verified}/${drainProgress.files.total} verified` : ""}</p>{drainProgress?.current_action?.id && <p>Current file: <code>{drainProgress.current_action.id}</code></p>}{drainOperation.error && <Notice tone="danger" title="Drain needs attention">{drainOperation.error.detail || drainOperation.error.message || "The operation stopped safely."}</Notice>}{drainProgress?.report && <Notice tone="success" title="Drain completed">Moved and verified {String(drainProgress.report.files_moved ?? 0)} files while preserving <code>{String(drainProgress.report.namespace_path ?? "the Storage Group namespace")}</code>.</Notice>}<div className="button-row">{["queued", "running", "paused"].includes(drainOperation.status) && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void pauseOrResumeDrain()}>{drainOperation.status === "paused" ? "Resume drain" : "Pause drain"}</button>}{["succeeded", "failed", "cancelled", "needs_attention"].includes(drainOperation.status) && <button className="button button-secondary" type="button" onClick={() => { setDrainOperation(null); setDrainProgress(null); setDrainPlan(null); }}>Close report</button>}{["failed", "needs_attention"].includes(drainOperation.status) && <button className="button button-primary" type="button" disabled={busy} onClick={() => void pauseOrResumeDrain()}>Resume from checkpoint</button>}</div></section>}
     <Notice tone="info" title="Drain and retire safely">Those actions become available only through a durable move-and-verify operation; Hoardarr does not allow skipping directly to a retired state.</Notice>
   </Card>;
 }

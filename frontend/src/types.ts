@@ -174,7 +174,7 @@ export interface MediaAccountProvisionResult {
 export interface OperationDocument {
   id: string;
   kind: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "needs_attention";
+  status: "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled" | "needs_attention";
   resource?: { type: string; id: string } | null;
   result?: { snapshot_id?: string; [key: string]: unknown } | null;
   error?: { code?: string; message?: string; detail?: string } | null;
@@ -287,6 +287,9 @@ export interface StorageOperationProgress {
     remaining_bytes: number | null;
   } | null;
   updated_at: number | null;
+  files?: { total: number; copied: number; verified: number };
+  bytes?: { total: number; copied: number };
+  report?: Record<string, unknown> | null;
 }
 
 export interface NetworkInterface {

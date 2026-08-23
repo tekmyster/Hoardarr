@@ -31,6 +31,7 @@ from hoardarr.db.models import (
     Operation,
     Plan,
     PlanApproval,
+    StorageDrainJob,
     UpdateState,
     WizardSession,
     utc_now,
@@ -60,6 +61,12 @@ from hoardarr.storage.client import (
     apply_storage_plan,
     apply_storage_redundancy,
     storage_operation_status,
+)
+from hoardarr.storage.drain_worker import (
+    DrainExecutionError,
+    DrainPaused,
+    execute_drain,
+    mark_drain_paused,
 )
 from hoardarr.storage.groups import reconcile_snapshot_disks
 from hoardarr.storage.redundancy import (
@@ -98,6 +105,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.maintenance",
         "storage.snapraid.replace",
         "storage.redundancy.apply",
+        "storage.drain",
         "connectivity.apply",
         "connectivity.remove",
         "update.apply",
@@ -209,6 +217,11 @@ class TierTransferExecution:
 
 
 @dataclass(frozen=True)
+class DrainExecution:
+    result: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class MaintenanceExecution:
     result: dict[str, Any]
 
@@ -233,6 +246,7 @@ ExecutionResult = (
     | ServarrApplyExecution
     | StorageExecution
     | TierTransferExecution
+    | DrainExecution
     | MaintenanceExecution
     | RedundancyExecution
     | ConnectivityExecution
@@ -1032,6 +1046,25 @@ def _execute_work(
             code = exc.code if isinstance(exc, TieringError) else "transfer_failed"
             raise WorkFailure(code, "The storage transfer could not be completed") from exc
         return TierTransferExecution(result)
+    if item.kind == "storage.drain":
+        value = item.request.get("plan")
+        confirmation_sha256 = item.request.get("confirmation_sha256")
+        if (
+            not isinstance(value, dict)
+            or value.get("plan_sha256") != item.request.get("plan_sha256")
+            or confirmation_sha256 != document_hash({"confirmation": "I AGREE"})
+            or item.resource_type != "storage_group"
+            or item.resource_id != value.get("storage_group_id")
+        ):
+            raise WorkFailure("drain_plan_changed", "The storage drain request is invalid")
+        try:
+            return DrainExecution(execute_drain(session_factory, item.operation_id, value))
+        except DrainExecutionError as exc:
+            raise WorkFailure(
+                exc.code,
+                exc.safe_message,
+                needs_attention=exc.needs_attention,
+            ) from exc
     if item.kind == "storage.transfer.cleanup":
         value = item.request.get("plan")
         if (
@@ -1201,6 +1234,10 @@ def _finalize_success(
             return
 
         if isinstance(execution, TierTransferExecution):
+            complete_operation(session, operation, execution.result)
+            return
+
+        if isinstance(execution, DrainExecution):
             complete_operation(session, operation, execution.result)
             return
 
@@ -1383,6 +1420,15 @@ def _finalize_failure(
                     "message": failure.safe_message,
                 }
                 state.updated_at = utc_now()
+        elif item.kind == "storage.drain":
+            job = session.get(StorageDrainJob, operation.id)
+            if job is not None:
+                job.status = "needs_attention" if failure.needs_attention else "failed"
+                job.report_json = {
+                    **job.report_json,
+                    "error": {"code": failure.code, "message": failure.safe_message},
+                }
+                job.updated_at = utc_now()
         fail_operation(
             session,
             operation,
@@ -1416,6 +1462,16 @@ def _finalize_with_retry(operation_id: str, callback: Callable[[], None]) -> Non
     # The durable lease remains running and periodic stale recovery will move it
     # to needs_attention instead of terminating the worker process.
     LOGGER.error("Operation %s finalization exhausted its retries", operation_id)
+
+
+def _finalize_paused(
+    session_factory: SessionFactory, item: WorkItem, worker_id: str
+) -> None:
+    with session_factory() as session, session.begin():
+        operation = _leased_operation(session, item, worker_id)
+        if operation is None:
+            return
+        mark_drain_paused(session, operation)
 
 
 def run_once(
@@ -1453,6 +1509,11 @@ def run_once(
             snapraid_replacement_applier,
             connectivity_applier,
             connectivity_remover,
+        )
+    except DrainPaused:
+        _finalize_with_retry(
+            item.operation_id,
+            partial(_finalize_paused, session_factory, item, effective_worker_id),
         )
     except WorkFailure as failure:
         _finalize_with_retry(

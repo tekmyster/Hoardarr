@@ -159,7 +159,7 @@ def _backend_health(session: Session, backend: StorageBackend) -> str:
     return "not_reported"
 
 
-def _arr_activity(session: Session) -> dict[str, Any]:
+def arr_activity(session: Session) -> dict[str, Any]:
     connections = list(
         session.scalars(
             select(IntegrationConnection).where(IntegrationConnection.adapter == "servarr")
@@ -337,7 +337,7 @@ def build_drain_plan(
                 "message": "Open-file activity could not be confirmed.",
             }
         )
-    arr = _arr_activity(session)
+    arr = arr_activity(session)
     if arr["active_writes"]:
         blockers.append(
             {
@@ -405,3 +405,85 @@ def validate_drain_plan(document: dict[str, Any]) -> None:
         raise DrainPlanError("drain_plan_changed", "The immutable drain plan was modified.")
     if document.get("kind") != "storage.drain" or document.get("schema_version") != 1:
         raise DrainPlanError("drain_plan_invalid", "The drain plan schema is unsupported.")
+
+    def bounded_text(value: object, *, maximum: int = 4096) -> bool:
+        return (
+            isinstance(value, str)
+            and 0 < len(value) <= maximum
+            and not any(ord(character) < 32 for character in value)
+        )
+
+    def absolute_path(value: object) -> bool:
+        return bounded_text(value) and PurePosixPath(str(value)).is_absolute()
+
+    group_id = document.get("storage_group_id")
+    namespace = document.get("storage_group_namespace")
+    source = document.get("source")
+    destinations = document.get("destinations")
+    verification = document.get("verification")
+    capacity = document.get("capacity")
+    if (
+        not bounded_text(group_id, maximum=64)
+        or not absolute_path(namespace)
+        or not isinstance(source, dict)
+        or not isinstance(destinations, list)
+        or not 1 <= len(destinations) <= 64
+        or not isinstance(verification, dict)
+        or not isinstance(capacity, dict)
+        or document.get("ready") is not True
+        or not isinstance(document.get("blockers"), list)
+        or document.get("blockers")
+        or not isinstance(document.get("warnings"), list)
+    ):
+        raise DrainPlanError("drain_plan_invalid", "The drain plan structure is invalid.")
+
+    def valid_filesystem(item: object, *, source_item: bool) -> bool:
+        if not isinstance(item, dict):
+            return False
+        required_numbers = ["filesystem_device"]
+        required_numbers.append("required_bytes" if source_item else "free_bytes")
+        return (
+            bounded_text(item.get("backend_id"), maximum=64)
+            and bounded_text(item.get("stable_identity"), maximum=512)
+            and absolute_path(item.get("path"))
+            and all(
+                isinstance(item.get(field), int)
+                and not isinstance(item.get(field), bool)
+                and int(item[field]) >= 0
+                for field in required_numbers
+            )
+        )
+
+    if not valid_filesystem(source, source_item=True):
+        raise DrainPlanError("drain_plan_invalid", "The drain source is invalid.")
+    source_id = str(source["backend_id"])
+    destination_ids: set[str] = set()
+    destination_paths: list[PurePosixPath] = []
+    for item in destinations:
+        if not valid_filesystem(item, source_item=False):
+            raise DrainPlanError("drain_plan_invalid", "A drain destination is invalid.")
+        backend_id = str(item["backend_id"])
+        path = PurePosixPath(str(item["path"]))
+        if backend_id == source_id or backend_id in destination_ids:
+            raise DrainPlanError("drain_plan_invalid", "Drain backend identities must be unique.")
+        if item["filesystem_device"] == source["filesystem_device"]:
+            raise DrainPlanError(
+                "drain_plan_invalid", "The source and destination filesystems must differ."
+            )
+        if path == PurePosixPath(str(source["path"])) or any(
+            path in previous.parents or previous in path.parents
+            for previous in [PurePosixPath(str(source["path"])), *destination_paths]
+        ):
+            raise DrainPlanError("drain_plan_invalid", "Drain paths cannot overlap.")
+        destination_ids.add(backend_id)
+        destination_paths.append(path)
+
+    mode = verification.get("mode")
+    if mode not in {"fast", "accurate", "paranoid"}:
+        raise DrainPlanError("verification_mode_invalid", "The verification mode is invalid.")
+    for field in ("required_bytes", "destination_free_bytes", "reserve_bytes"):
+        value = capacity.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise DrainPlanError("drain_plan_invalid", "The drain capacity values are invalid.")
+    if capacity["required_bytes"] != source["required_bytes"]:
+        raise DrainPlanError("drain_plan_invalid", "The drain capacity values disagree.")

@@ -17,9 +17,14 @@ from hoardarr.api.serializers import event_document, operation_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.core.config import Settings
-from hoardarr.db.models import Operation, OperationEvent
+from hoardarr.db.models import Operation, OperationEvent, StorageDrainJob, utc_now
 from hoardarr.operations.service import OperationConflict, request_cancellation
 from hoardarr.storage.client import StorageExecutorError, storage_operation_status
+from hoardarr.storage.drain_worker import (
+    DrainExecutionError,
+    request_drain_pause,
+    resume_drain,
+)
 from hoardarr.updates.service import UpdatePaths
 
 router = APIRouter(prefix="/operations", tags=["operations"])
@@ -30,6 +35,71 @@ def visible_operation(session: Session, operation_id: str, principal: Principal)
     if operation is None or (not principal.is_admin and operation.actor_id != principal.user_id):
         raise Problem(404, "operation_not_found", "Not found", "Operation was not found.")
     return operation
+
+
+def drain_progress_document(job: StorageDrainJob, operation: Operation) -> dict[str, object]:
+    if job.phase in {"preflight", "inventory", "paused"}:
+        percent = 0 if job.phase == "preflight" else 5
+    elif job.phase == "copying":
+        percent = 5 + round(60 * job.bytes_copied / max(job.bytes_total, 1))
+    elif job.phase == "verifying":
+        percent = 65 + round(25 * job.files_verified / max(job.files_total, 1))
+    elif job.phase == "finalizing":
+        percent = 95
+    else:
+        percent = 100 if job.status == "succeeded" else 0
+    elapsed_seconds = 0
+    if job.started_at is not None:
+        started = job.started_at
+        now = utc_now()
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=now.tzinfo)
+        elapsed_seconds = max(int((now - started).total_seconds()), 0)
+    bytes_per_second = job.bytes_copied / elapsed_seconds if elapsed_seconds else 0
+    remaining_bytes = max(job.bytes_total - job.bytes_copied, 0)
+    remaining_seconds = round(remaining_bytes / bytes_per_second) if bytes_per_second > 0 else None
+    return {
+        "operation_id": operation.id,
+        "state": job.status,
+        "phase": job.phase,
+        "completed_steps": job.files_verified,
+        "total_steps": job.files_total,
+        "percent": min(max(percent, 0), 100),
+        "completed_actions": [],
+        "notices": [],
+        "current_action": {
+            "id": job.current_relative_path,
+            "type": job.phase,
+            "progress": {
+                "kind": "bytes",
+                "device": job.source_backend_id,
+                "processed_bytes": job.bytes_copied,
+                "total_bytes": job.bytes_total,
+                "percent": round(100 * job.bytes_copied / max(job.bytes_total, 1)),
+                "elapsed_seconds": elapsed_seconds,
+                "bytes_per_second": round(bytes_per_second),
+                "estimated_seconds_remaining": remaining_seconds,
+            },
+        }
+        if job.current_relative_path
+        else None,
+        "estimate": {
+            "scope": "storage drain copy",
+            "estimated_seconds_remaining": remaining_seconds,
+            "estimated_completion_at": int(utc_now().timestamp()) + remaining_seconds,
+            "remaining_bytes": remaining_bytes,
+        }
+        if remaining_seconds is not None
+        else None,
+        "updated_at": int(job.updated_at.timestamp()) if job.updated_at else None,
+        "files": {
+            "total": job.files_total,
+            "copied": job.files_copied,
+            "verified": job.files_verified,
+        },
+        "bytes": {"total": job.bytes_total, "copied": job.bytes_copied},
+        "report": job.report_json if job.status == "succeeded" else None,
+    }
 
 
 @router.get("")
@@ -75,6 +145,16 @@ def get_operation_progress(
     settings: Settings = Depends(settings_from_request),
 ) -> dict[str, object]:
     operation = visible_operation(session, operation_id, principal)
+    if operation.kind == "storage.drain":
+        job = session.get(StorageDrainJob, operation.id)
+        if job is None:
+            raise Problem(
+                503,
+                "drain_job_missing",
+                "Drain progress unavailable",
+                "The durable drain checkpoint is unavailable.",
+            )
+        return drain_progress_document(job, operation)
     if operation.kind == "update.apply":
         current = settings.frontend_dir.parent
         paths = UpdatePaths(
@@ -132,6 +212,54 @@ def get_operation_progress(
             or f"Storage ended with status {operation.status}.",
         }
     return progress
+
+
+@router.post("/{operation_id}/pause", status_code=202)
+def pause_operation(
+    operation_id: str,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    operation = visible_operation(session, operation_id, principal)
+    try:
+        request_drain_pause(session, operation)
+    except DrainExecutionError as exc:
+        raise Problem(409, exc.code, "Operation cannot be paused", exc.safe_message) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="operation.pause",
+        outcome="accepted",
+        correlation_id=request.state.request_id,
+        target_type="operation",
+        target_id=operation.id,
+    )
+    return operation_document(operation)
+
+
+@router.post("/{operation_id}/resume", status_code=202)
+def resume_operation(
+    operation_id: str,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    operation = visible_operation(session, operation_id, principal)
+    try:
+        resume_drain(session, operation)
+    except DrainExecutionError as exc:
+        raise Problem(409, exc.code, "Operation cannot be resumed", exc.safe_message) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="operation.resume",
+        outcome="accepted",
+        correlation_id=request.state.request_id,
+        target_type="operation",
+        target_id=operation.id,
+    )
+    return operation_document(operation)
 
 
 @router.post("/{operation_id}/cancel", status_code=202)

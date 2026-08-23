@@ -89,6 +89,8 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
         "physical_disks",
         "storage_backends",
         "storage_lifecycle_events",
+        "storage_drain_jobs",
+        "storage_drain_entries",
     } <= set(inspect(engine).get_table_names())
     engine.dispose()
     with sqlite3.connect(database) as connection:
