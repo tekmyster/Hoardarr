@@ -265,6 +265,16 @@ export interface StorageOperationProgress {
   percent: number;
   completed_actions: string[];
   notices: Array<{ action_id?: string; device_id?: string; code: string; message: string }>;
+  action_results?: Array<{
+    action_id: string;
+    device_id?: string;
+    outcome: "passed" | "failed" | "skipped";
+    code: string;
+    message: string;
+    test_kind?: "short" | "extended";
+    started_at?: number;
+    finished_at?: number;
+  }>;
   current_action: {
     id?: string;
     type?: string;
@@ -273,12 +283,15 @@ export interface StorageOperationProgress {
     progress?: {
       kind: string;
       device: string;
-      processed_bytes: number;
-      total_bytes: number;
+      test_kind?: "short" | "extended";
+      state?: string;
+      processed_bytes?: number;
+      total_bytes?: number;
       percent: number;
       elapsed_seconds: number;
-      bytes_per_second: number;
+      bytes_per_second?: number;
       estimated_seconds_remaining: number | null;
+      expected_finish_at?: number | null;
     };
   } | null;
   estimate: {
@@ -387,6 +400,12 @@ export interface Drive {
   metrics: DriveMetric[];
   observations: DriveObservation[];
   tests: DriveTestResult[];
+  smartSelfTest?: {
+    status: "available" | "unsupported" | "not_reported";
+    shortMinutes: number | null;
+    extendedMinutes: number | null;
+    source: string;
+  };
 }
 
 export interface HardwareSnapshot {

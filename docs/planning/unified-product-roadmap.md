@@ -260,7 +260,7 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| HW-01 | P1 | SMART short/long orchestration | Detect support, start tests, track ETA/state/result, and represent passthrough limitations honestly. | QUEUED |
+| HW-01 | P1 | SMART short/long orchestration | Detect support, start tests, track ETA/state/result, and represent passthrough limitations honestly. | SOFTWARE VERIFIED — bounded `smartctl -j -c` capability detection exposes supported/unsupported/not-reported plus drive-reported durations; immutable short/extended actions publish real progress, expected finish, pass/skip result and durable Activity evidence; mock command execution and real browser workflow pass, while matching physical-drive execution remains HW-16 certification |
 | HW-02 | P1 | Capability-aware sanitization reports | Support metadata clear, overwrite, ATA/NVMe/SCSI sanitize, and legitimate crypto erase with immutable approval and reports. | QUEUED |
 | HW-03 | P1 | Full physical topology model | Represent PCI BDF → HBA/controller → SAS host/PHY → expander → enclosure/bay → disk → path/logical storage/group. | QUEUED |
 | HW-04 | P1 | Standards-first SCSI/SAS discovery | Integrate sysfs, SCSI VPD, SES/AES, SMP, HCTL, PCI, and stable hardware identity evidence. | QUEUED |

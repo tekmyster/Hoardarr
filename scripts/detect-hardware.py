@@ -535,6 +535,17 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
         raise DetectionError(
             f"{field}.maintenance_capabilities.supported_logical_sector_bytes is invalid"
         )
+    smart_self_test = maintenance.get("smart_self_test", {})
+    if not isinstance(smart_self_test, dict):
+        raise DetectionError(f"{field}.maintenance_capabilities.smart_self_test is invalid")
+    smart_status = _optional_string(
+        smart_self_test.get("status", "not_reported"),
+        f"{field}.maintenance_capabilities.smart_self_test.status",
+    )
+    if smart_status not in {"available", "unsupported", "not_reported"}:
+        raise DetectionError(
+            f"{field}.maintenance_capabilities.smart_self_test.status is invalid"
+        )
     disk_mountpoints = raw.get("mountpoints", [])
     if not isinstance(disk_mountpoints, list) or len(disk_mountpoints) > 256:
         raise DetectionError(f"{field}.mountpoints must be a bounded list")
@@ -585,6 +596,22 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
                 maintenance.get("source"), f"{field}.maintenance_capabilities.source"
             )
             or "Not reported",
+            "smart_self_test": {
+                "status": smart_status,
+                "short_minutes": _optional_nonnegative_int(
+                    smart_self_test.get("short_minutes"),
+                    f"{field}.maintenance_capabilities.smart_self_test.short_minutes",
+                ),
+                "extended_minutes": _optional_nonnegative_int(
+                    smart_self_test.get("extended_minutes"),
+                    f"{field}.maintenance_capabilities.smart_self_test.extended_minutes",
+                ),
+                "source": _optional_string(
+                    smart_self_test.get("source"),
+                    f"{field}.maintenance_capabilities.smart_self_test.source",
+                )
+                or "Not reported",
+            },
         },
         "partitions": sorted(
             normalized_partitions,
@@ -861,6 +888,12 @@ def _maintenance_capabilities(
         if logical_bytes in {512, 520, 528, 4096}
         else [],
         "source": "Not reported",
+        "smart_self_test": {
+            "status": "not_reported",
+            "short_minutes": None,
+            "extended_minutes": None,
+            "source": "Not reported",
+        },
     }
 
 
@@ -1079,10 +1112,14 @@ def _discover_link_speeds(
             rates = [
                 (
                     _parse_speed_gbps(
-                        _read_text(sysfs_root / "class" / "sas_phy" / phy.name / "maximum_linkrate_hw")
+                        _read_text(
+                            sysfs_root / "class" / "sas_phy" / phy.name / "maximum_linkrate_hw"
+                        )
                     ),
                     _parse_speed_gbps(
-                        _read_text(sysfs_root / "class" / "sas_phy" / phy.name / "negotiated_linkrate")
+                        _read_text(
+                            sysfs_root / "class" / "sas_phy" / phy.name / "negotiated_linkrate"
+                        )
                     ),
                 )
                 for phy in phys
@@ -1133,7 +1170,11 @@ def _discover_connection(
         (name for name in reversed(topology_names) if re.fullmatch(r"host[0-9]+", name)), None
     )
     hba_port = next(
-        (name for name in reversed(topology_names) if re.fullmatch(r"port-[0-9]+(?::[0-9]+)+", name)),
+        (
+            name
+            for name in reversed(topology_names)
+            if re.fullmatch(r"port-[0-9]+(?::[0-9]+)+", name)
+        ),
         None,
     )
     expander_id = next(

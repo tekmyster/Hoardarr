@@ -817,6 +817,33 @@ def test_smart_action_waits_for_a_passing_completed_result(
     _run_smart_test(Path("/dev/sdz"), "short")
 
 
+def test_smart_action_reports_drive_estimate_progress_and_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            "# 1 Short offline Completed without error",
+            "Please wait 10 minutes for test to complete.",
+            "Self-test routine in progress... 90% of test remaining.",
+            "Self-test status: complete",
+            "# 1 Short offline Completed without error",
+        ]
+    )
+    progress: list[dict[str, object]] = []
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "_smartctl", lambda _command, **_kwargs: next(responses))
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = _run_smart_test(Path("/dev/sdz"), "short", progress_callback=progress.append)
+
+    assert result["outcome"] == "passed"
+    assert result["test_kind"] == "short"
+    assert progress[0]["estimated_seconds_remaining"] == 600
+    assert progress[1]["percent"] == 10.0
+    assert progress[-1]["state"] == "passed"
+    assert progress[-1]["percent"] == 100.0
+
+
 def test_smart_action_rejects_an_unknown_or_failed_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

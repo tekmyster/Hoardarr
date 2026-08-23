@@ -1187,9 +1187,15 @@ def test_authenticated_hardware_worker_and_wizard_flow(
                     "ata_secure_erase": False,
                     "nvme_block_erase": False,
                     "sector_format_passthrough": False,
-                    "supported_logical_sector_bytes": [],
-                    "source": "Not reported",
-                },
+                        "supported_logical_sector_bytes": [],
+                        "source": "Not reported",
+                        "smart_self_test": {
+                            "status": "not_reported",
+                            "short_minutes": None,
+                            "extended_minutes": None,
+                            "source": "Not reported",
+                        },
+                    },
             }
         ],
     }

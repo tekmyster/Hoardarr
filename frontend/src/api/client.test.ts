@@ -29,6 +29,14 @@ describe("hardware snapshot normalization", () => {
           partitions: [{ kernel_name: "sdb1", kernel_path: "/dev/sdb1", start_bytes: 1_048_576, size_bytes: 239_000_000_000, filesystem: { type: "ntfs" } }],
           signatures: [{ type: "gpt", usage: "partition_table" }],
           signature_scan: { status: "partial", source: "udev", reason: "A full on-media scan has not run." },
+          maintenance_capabilities: {
+            smart_self_test: {
+              status: "available",
+              short_minutes: 2,
+              extended_minutes: 381,
+              source: "smartctl -j -c",
+            },
+          },
           health: {
             power_on_hours: {
               status: "conflicting",
@@ -69,6 +77,12 @@ describe("hardware snapshot normalization", () => {
     });
     expect(drives[0].partitions[0]).toMatchObject({ path: "/dev/sdb1", filesystem: "ntfs" });
     expect(drives[0].signatures).toEqual(["gpt"]);
+    expect(drives[0].smartSelfTest).toEqual({
+      status: "available",
+      shortMinutes: 2,
+      extendedMinutes: 381,
+      source: "smartctl -j -c",
+    });
     expect(drives[0].metrics[0]).toMatchObject({
       available: false,
       value: null,

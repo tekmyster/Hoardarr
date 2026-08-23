@@ -44,4 +44,47 @@ describe("StorageProgressDetails", () => {
     expect(screen.getByText("Time remaining")).toBeInTheDocument();
     expect(screen.queryByText("Estimate basis")).not.toBeInTheDocument();
   });
+
+  it("shows SMART state, drive-reported finish, and durable result", () => {
+    render(<StorageProgressDetails progress={{
+      operation_id: "smart-operation",
+      state: "running",
+      phase: "Checking and preparing drives",
+      completed_steps: 0,
+      total_steps: 1,
+      percent: 35,
+      completed_actions: [],
+      notices: [],
+      action_results: [{
+        action_id: "smart-short",
+        device_id: "wwn:test",
+        outcome: "passed",
+        code: "smart_self_test_passed",
+        message: "Completed.",
+        test_kind: "short",
+        finished_at: 2_000_000_000,
+      }],
+      current_action: {
+        id: "smart-short",
+        type: "drive.smart.short",
+        progress: {
+          kind: "smart_self_test",
+          device: "/dev/sdb",
+          test_kind: "short",
+          state: "running",
+          percent: 35,
+          elapsed_seconds: 60,
+          estimated_seconds_remaining: 120,
+          expected_finish_at: 2_000_000_000,
+        },
+      },
+      estimate: null,
+      updated_at: 1,
+    }} />);
+
+    expect(screen.getByText("Short · running")).toBeInTheDocument();
+    expect(screen.getByText("35.0%")).toBeInTheDocument();
+    expect(screen.getByText("Short SMART result")).toBeInTheDocument();
+    expect(screen.getByText(/Passed/)).toBeInTheDocument();
+  });
 });

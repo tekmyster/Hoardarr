@@ -252,6 +252,18 @@ The authoritative machine-readable map is
 | `sdparm` | `sdparm` | SCSI identity and capabilities | Allowlisted reads |
 | `mdadm` | `mdadm` | MD/VROC inventory and health | Status-only during discovery |
 | `dmidecode` | `dmidecode` | Chassis and platform inventory | Read-only |
+
+### SMART self-tests
+
+Hoardarr probes `smartctl -j -c` with a bounded read-only command. The UI reports
+short and extended self-tests as `Supported`, `Unsupported`, or `Not reported`;
+`Not reported` is never converted to failure. When smartmontools supplies its
+recommended polling duration, the review and Activity views show that
+drive-reported estimate. Applied self-tests use argv-only `smartctl -t short` or
+`smartctl -t long`, poll the device's own state, and persist start, progress,
+expected finish, and final pass/skip evidence in the storage operation journal.
+USB/RAID/controller paths that hide the self-test log are recorded as an honest
+skip with guidance to use a capable direct path.
 | `freeipmi-tools`, `ipmitool` | `ipmi-fru`, `ipmi-sensors`, `ipmitool` | Platform FRU and sensor corroboration | Read-only |
 | `usbutils` | `lsusb` | USB bridge and physical-path inventory | Read-only |
 

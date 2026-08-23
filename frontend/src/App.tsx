@@ -80,6 +80,16 @@ function speedLabel(speed: number | null): string {
   return `${speed} Mb/s`;
 }
 
+function smartTestCapabilityLabel(drive: Drive, kind: "short" | "extended"): string {
+  const capability = drive.smartSelfTest;
+  if (!capability || capability.status === "not_reported") {
+    return "Not reported — Hoardarr will verify support before starting";
+  }
+  if (capability.status === "unsupported") return "Not supported by the detected drive/connection";
+  const minutes = kind === "short" ? capability.shortMinutes : capability.extendedMinutes;
+  return minutes ? `Supported · drive-reported estimate ${minutes} min` : "Supported · duration not reported";
+}
+
 function checkboxToggle(values: string[], value: string): string[] {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
 }
@@ -1836,6 +1846,7 @@ export default function App() {
             <CheckOption checked={testSmartShort} onChange={setTestSmartShort} title="SMART short self-test" detail="Run only when the drive and transport expose the command." />
             <CheckOption checked={testSmartExtended} onChange={setTestSmartExtended} title="SMART extended self-test" detail="May take hours. Hoardarr records whether the command is actually supported." />
           </div>
+          {(testSmartShort || testSmartExtended) && <div className="table-scroll"><table className="data-table"><thead><tr><th>Drive</th><th>Short self-test</th><th>Extended self-test</th><th>Capability source</th></tr></thead><tbody>{selectedDrives.map((drive) => <tr key={drive.id}><td>{drive.model} <code>{drive.serial}</code></td><td>{smartTestCapabilityLabel(drive, "short")}</td><td>{smartTestCapabilityLabel(drive, "extended")}</td><td>{drive.smartSelfTest?.source ?? "Not reported"}</td></tr>)}</tbody></table></div>}
           {mode === "advanced" && <div className="advanced-panel"><CheckOption checked={testDestructive} onChange={setTestDestructive} title="Destructive write/read qualification" detail="Write test patterns across the device, then verify them. This erases every byte." />{testDestructive && <><Notice tone="danger" title="ARE YOU SURE?">This test destroys all partitions, filesystems, files, and recovery data on the selected drives. Type <strong>I AGREE</strong> exactly to make it eligible for the plan.</Notice><Field label='Type “I AGREE”'><input value={destructiveTestAck} onChange={(event) => setDestructiveTestAck(event.target.value)} autoComplete="off" /></Field></>}</div>}
         </Card>
         <Card title="Planned drive checks — not yet run" description="These checks run when you apply the immutable plan. No pass or fail result exists until the storage worker completes them.">

@@ -137,6 +137,8 @@ function normalizeDrive(raw: unknown, index: number): Drive {
   const tests = Array.isArray(item.tests) ? item.tests : [];
   const rawPartitions = Array.isArray(item.partitions) ? item.partitions : [];
   const signatureScan = record(item.signatureScan ?? item.signature_scan);
+  const maintenance = record(item.maintenance_capabilities ?? item.maintenanceCapabilities);
+  const smartSelfTest = record(maintenance.smart_self_test ?? maintenance.smartSelfTest);
   const serial = text(item.serial ?? item.serial_number ?? identity.serial, "Not reported");
   const stableIdentity = item.stable_identity === true || item.stableIdentity === true;
   const readOnly = item.read_only === true || item.readOnly === true;
@@ -245,6 +247,14 @@ function normalizeDrive(raw: unknown, index: number): Drive {
       };
     }),
     tests: tests as Drive["tests"],
+    smartSelfTest: {
+      status: ["available", "unsupported", "not_reported"].includes(text(smartSelfTest.status))
+        ? text(smartSelfTest.status) as NonNullable<Drive["smartSelfTest"]>["status"]
+        : "not_reported",
+      shortMinutes: optionalPositiveNumber(smartSelfTest.short_minutes ?? smartSelfTest.shortMinutes),
+      extendedMinutes: optionalPositiveNumber(smartSelfTest.extended_minutes ?? smartSelfTest.extendedMinutes),
+      source: text(smartSelfTest.source, "Not reported"),
+    },
   };
 }
 

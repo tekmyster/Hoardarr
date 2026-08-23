@@ -80,6 +80,14 @@ async function storageWizardServer(page: Page): Promise<void> {
     signatures: [],
     signature_scan: { status: "complete", source: "wipefs", reason: null },
     discard: { granularity_bytes: 4096, max_bytes: 1_073_741_824 },
+    maintenance_capabilities: {
+      smart_self_test: {
+        status: "available",
+        short_minutes: 2,
+        extended_minutes: 381,
+        source: "smartctl -j -c",
+      },
+    },
   }));
   const snapshot = { id: "snap-storage", captured_at: now, sha256: "c".repeat(64), hardware: { disks: drives } };
   let revision = 0;
@@ -466,6 +474,22 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByLabel("Protection layout")).toHaveValue("raidz2");
     await expect(dialog.getByLabel("Drives per vdev")).toHaveValue("4");
     await expect(dialog.locator(".selected-drives article")).toHaveCount(4);
+  });
+
+  test("shows real SMART support and drive-reported durations before a drive check", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByLabel("Actions for /dev/sdb").click();
+    await page.getByRole("menuitem", { name: /Run drive checks/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.getByRole("heading", { name: "Choose drive checks" })).toBeVisible();
+    await dialog.getByRole("checkbox", { name: "SMART short self-test" }).check();
+    await dialog.getByRole("checkbox", { name: "SMART extended self-test" }).check();
+    await expect(dialog.getByText("Supported · drive-reported estimate 2 min")).toBeVisible();
+    await expect(dialog.getByText("Supported · drive-reported estimate 381 min")).toBeVisible();
+    await expect(dialog.getByText("smartctl -j -c")).toBeVisible();
   });
 
   test("reserves and releases an expansion disk through the real Storage UI", async ({ page }) => {

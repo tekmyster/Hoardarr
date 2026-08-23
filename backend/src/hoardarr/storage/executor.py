@@ -282,7 +282,31 @@ def _smartctl(command: list[str], *, allow_unsupported_log: bool = False) -> str
     return output
 
 
-def _run_smart_test(device: Path, kind: str) -> dict[str, str]:
+def _smart_test_minutes(output: str) -> int | None:
+    matches = [
+        int(value)
+        for value in re.findall(
+            r"(?:please wait|recommended polling time:)\s*(?:\(\s*)?(\d+)\s*(?:\))?\s*minutes?",
+            output,
+            flags=re.IGNORECASE,
+        )
+    ]
+    return max(matches) if matches else None
+
+
+def _smart_test_remaining_percent(output: str) -> int | None:
+    match = re.search(r"(\d{1,3})%\s+of\s+test\s+remaining", output, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return min(max(int(match.group(1)), 0), 100)
+
+
+def _run_smart_test(
+    device: Path,
+    kind: str,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     existing_log = _smartctl(
         [_tool("smartctl"), "-l", "selftest", os.fspath(device)],
         allow_unsupported_log=True,
@@ -307,13 +331,64 @@ def _run_smart_test(device: Path, kind: str) -> dict[str, str]:
             ),
         }
     maximum_seconds = 3600 if kind == "short" else 13 * 24 * 3600
-    _smartctl([_tool("smartctl"), "-t", kind, os.fspath(device)])
+    started_at = time.time()
+    start_output = _smartctl([_tool("smartctl"), "-t", kind, os.fspath(device)])
+    expected_minutes = _smart_test_minutes(start_output)
+    expected_seconds = expected_minutes * 60 if expected_minutes is not None else None
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "kind": "smart_self_test",
+                "device": os.fspath(device),
+                "test_kind": "extended" if kind == "long" else kind,
+                "state": "running",
+                "percent": 0.0,
+                "elapsed_seconds": 0,
+                "estimated_seconds_remaining": expected_seconds,
+                "expected_finish_at": started_at + expected_seconds
+                if expected_seconds is not None
+                else None,
+            }
+        )
     deadline = time.monotonic() + maximum_seconds
     time.sleep(5)
     while True:
-        capabilities = _smartctl([_tool("smartctl"), "-c", os.fspath(device)]).casefold()
+        capabilities_output = _smartctl([_tool("smartctl"), "-c", os.fspath(device)])
+        capabilities = capabilities_output.casefold()
         if "in progress" not in capabilities and "in_progress" not in capabilities:
             break
+        remaining_percent = _smart_test_remaining_percent(capabilities_output)
+        elapsed = max(0, int(time.time() - started_at))
+        if remaining_percent is not None:
+            percent = float(100 - remaining_percent)
+            remaining_seconds = (
+                round(elapsed * remaining_percent / max(percent, 1.0))
+                if elapsed
+                else expected_seconds
+            )
+        else:
+            percent = min(
+                99.0,
+                elapsed * 100 / expected_seconds,
+            ) if expected_seconds else 0.0
+            remaining_seconds = (
+                max(expected_seconds - elapsed, 0) if expected_seconds is not None else None
+            )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "kind": "smart_self_test",
+                    "device": os.fspath(device),
+                    "test_kind": "extended" if kind == "long" else kind,
+                    "state": "running",
+                    "percent": round(percent, 1),
+                    "elapsed_seconds": elapsed,
+                    "estimated_seconds_remaining": remaining_seconds,
+                    "expected_finish_at": time.time() + remaining_seconds
+                    if remaining_seconds is not None
+                    else None,
+                }
+            )
         if time.monotonic() >= deadline:
             raise ExecutorFailure(
                 "smart_test_timeout", "The SMART self-test did not finish in its allowed time."
@@ -331,7 +406,28 @@ def _run_smart_test(device: Path, kind: str) -> dict[str, str]:
             "smart_test_result_failed",
             "The completed SMART self-test did not report a passing result.",
         )
-    return {"outcome": "passed", "code": "smart_self_test_passed", "message": ""}
+    result = {
+        "outcome": "passed",
+        "code": "smart_self_test_passed",
+        "message": "The SMART self-test completed without a reported error.",
+        "test_kind": "extended" if kind == "long" else kind,
+        "started_at": started_at,
+        "finished_at": time.time(),
+    }
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "kind": "smart_self_test",
+                "device": os.fspath(device),
+                "test_kind": result["test_kind"],
+                "state": "passed",
+                "percent": 100.0,
+                "elapsed_seconds": max(0, int(result["finished_at"] - started_at)),
+                "estimated_seconds_remaining": 0,
+                "expected_finish_at": result["finished_at"],
+            }
+        )
+    return result
 
 
 def _live_inventory(paths: Paths) -> dict[str, Any]:
@@ -1018,6 +1114,18 @@ def _work_estimate(
     if not isinstance(actions, list):
         return None
     completed = set(completed_actions)
+    if isinstance(action_progress, Mapping) and action_progress.get("kind") == "smart_self_test":
+        remaining = action_progress.get("estimated_seconds_remaining")
+        expected = action_progress.get("expected_finish_at")
+        if isinstance(remaining, (int, float)) and remaining >= 0:
+            return {
+                "scope": f"SMART {action_progress.get('test_kind', 'self-test')}",
+                "estimated_seconds_remaining": round(remaining),
+                "estimated_completion_at": expected
+                if isinstance(expected, (int, float))
+                else time.time() + remaining,
+                "remaining_bytes": None,
+            }
     if not isinstance(action_progress, Mapping):
         remaining_seconds = 30
         for action in actions:
@@ -1095,6 +1203,7 @@ def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -
             "percent": 0,
             "completed_actions": [],
             "notices": [],
+            "action_results": [],
             "current_action": None,
             "estimate": None,
             "updated_at": None,
@@ -1137,7 +1246,9 @@ def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -
     notices = journal.get("notices")
     if not isinstance(notices, list):
         notices = []
-    action_progress = None
+    action_progress = current.get("progress") if isinstance(current, dict) else None
+    if not isinstance(action_progress, Mapping):
+        action_progress = None
     if current and current.get("type") == "drive.surface.read":
         expected_device = _work_action_device(paths, operation_id, current.get("id"))
         action_progress = _active_surface_read_progress(expected_device)
@@ -1150,6 +1261,10 @@ def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -
                         (completed + float(action_progress.get("percent", 0)) / 100) * 100 / total
                     ),
                 )
+    elif action_progress is not None and action_progress.get("kind") == "smart_self_test":
+        current_percent = action_progress.get("percent")
+        if total and isinstance(current_percent, (int, float)):
+            percent = min(99, round((completed + current_percent / 100) * 100 / total))
     estimate = _work_estimate(
         paths,
         operation_id,
@@ -1167,6 +1282,11 @@ def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -
         "percent": percent,
         "completed_actions": [item for item in completed_actions if isinstance(item, str)],
         "notices": [item for item in notices if isinstance(item, dict)],
+        "action_results": [
+            item for item in journal.get("action_results", []) if isinstance(item, dict)
+        ]
+        if isinstance(journal.get("action_results"), list)
+        else [],
         "current_action": current,
         "estimate": estimate,
         "updated_at": journal.get("updated_at"),
@@ -1537,6 +1657,13 @@ def _execute_actions(
     partitions: dict[str, Path] = {}
     completed: list[str] = []
 
+    def smart_progress(progress: dict[str, Any]) -> None:
+        current = journal.get("current_action")
+        if isinstance(current, dict):
+            current["progress"] = progress
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+
     for action_index, action in enumerate(storage["actions"]):
         action_type = action["type"]
         journal["phase"] = "Checking and preparing drives"
@@ -1560,7 +1687,10 @@ def _execute_actions(
         elif action_type == "drive.surface.read":
             runner([_tool("badblocks"), "-sv", os.fspath(device)], 7 * 24 * 3600)
         elif action_type == "drive.smart.short":
-            smart_outcome = _run_smart_test(device, "short")
+            smart_outcome = _run_smart_test(device, "short", progress_callback=smart_progress)
+            journal.setdefault("action_results", []).append(
+                {"action_id": action["action_id"], "device_id": identifier, **smart_outcome}
+            )
             if smart_outcome["outcome"] == "skipped":
                 journal.setdefault("notices", []).append(
                     {
@@ -1571,7 +1701,10 @@ def _execute_actions(
                     }
                 )
         elif action_type == "drive.smart.extended":
-            smart_outcome = _run_smart_test(device, "long")
+            smart_outcome = _run_smart_test(device, "long", progress_callback=smart_progress)
+            journal.setdefault("action_results", []).append(
+                {"action_id": action["action_id"], "device_id": identifier, **smart_outcome}
+            )
             if smart_outcome["outcome"] == "skipped":
                 journal.setdefault("notices", []).append(
                     {
@@ -1647,6 +1780,7 @@ def _execute_actions(
             "mountpoint": None,
             "completed_actions": completed,
             "notices": list(journal.get("notices", [])),
+            "action_results": list(journal.get("action_results", [])),
             "replayed": False,
         }
 
@@ -2126,6 +2260,7 @@ def apply_storage_plan(
             "updated_at": time.time(),
             "completed_actions": [],
             "notices": [],
+            "action_results": [],
             "phase": "Validating plan and drive identities",
             "completed_steps": 0,
             "total_steps": (
