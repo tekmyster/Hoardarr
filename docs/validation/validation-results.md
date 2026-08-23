@@ -47,6 +47,7 @@ no-clobber link after descriptor-relative inode validation.
 | CI: installed appliance | `32589920251` | Signed 0.3.11 bundle applied, services started, database migrated, ownership/modes and web health passed, identical reapply passed |
 | Four-device mergerFS telemetry | `32589920257` | Purpose-created loop workload, persistence, reconnect, collector restart, rollups and cleanup passed |
 | Extended storage stacks | `32581789533` | Hosted Ubuntu purpose-created loops passed ext4/POSIX ACL, MD RAID6/XFS, ZFS RAIDZ2/snapshot/scrub and SnapRAID sync/status/diff/check |
+| SnapRAID failed-data replacement | `32663073443` | Hosted Ubuntu production executor partitioned and formatted a purpose-created replacement loop through a persistent by-id alias, then completed status, targeted fix, audit-only check, sync, independent recovered-file SHA-256 verification, current parity, and a succeeded durable journal |
 | Controller redundancy lifecycle | `32589920257` | A disposable LIO LUN started on one iSCSI path, converted to two-path DM-Multipath, replaced one controller path, survived verified continuous I/O failover/recovery on both paths, restarted multipathd, then returned to one direct path |
 | Appliance ISO/QEMU | `32589920245` | Pinned Ubuntu 24.04.4 ISO rebuilt and reached the QEMU installer/autoinstall checkpoint |
 

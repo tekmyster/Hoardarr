@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from hoardarr.storage.topology import add_logical_topology, build_storage_topology
 
 
@@ -197,3 +200,50 @@ def test_logical_topology_does_not_guess_a_share_parent() -> None:
     )
     assert result["status"] == "available"
     assert result["links"] == []
+
+
+def test_sanitized_mixed_hba_shelf_topology_preserves_realistic_evidence() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "hardware" / "sas_topology_sanitized.json"
+    hardware = json.loads(fixture.read_text(encoding="utf-8"))
+
+    result = build_storage_topology(hardware, include_live_state=False)
+
+    controllers = {
+        item["label"]: item for item in result["nodes"] if item["kind"] == "controller"
+    }
+    assert set(controllers) == {"LSI SAS2308", "LSI SAS3008"}
+    assert controllers["LSI SAS2308"]["negotiated_speed_gbps"] == 6.0
+    assert controllers["LSI SAS3008"]["capable_speed_gbps"] == 12.0
+    assert controllers["LSI SAS3008"]["negotiated_speed_gbps"] == 6.0
+
+    enclosures = {item["model"]: item for item in result["enclosures"]}
+    assert set(enclosures) == {"DS424IOM6", "DS224IOM6"}
+    assert [item["slot"] for item in enclosures["DS424IOM6"]["bays"]] == ["03", "04"]
+    assert enclosures["DS424IOM6"]["bays"][0]["mapping_confidence"] == "high"
+    unknown = next(
+        item for item in enclosures["DS224IOM6"]["bays"] if item["drive_id"].endswith("04")
+    )
+    assert unknown["slot"] is None
+    assert unknown["mapping_confidence"] == "unknown"
+    assert unknown["mapping_source"] is None
+
+    drives = {item["serial"]: item for item in result["nodes"] if item["kind"] == "drive"}
+    assert drives["SAN-SATA-0001"]["protocol"] == "SATA"
+    assert drives["SAN-SATA-0001"]["negotiated_speed_gbps"] == 3.0
+    assert drives["SAN-SATA-0001"]["capable_speed_gbps"] == 6.0
+    assert drives["SAN-SAS-0004"]["mapping_confidence"] == "unknown"
+
+    phys = {item["sas_address"]: item for item in result["nodes"] if item["kind"] == "phy"}
+    assert phys["0x500605b000000003"]["invalid_dwords"] == 14.0
+    assert phys["0x500605b000000003"]["disparity_errors"] == 3.0
+    assert phys["0x500605b000000003"]["loss_of_sync"] == 1.0
+    assert phys["0x500605b000000003"]["reset_problems"] == 1.0
+    assert {item["kind"] for item in result["nodes"]} >= {
+        "controller",
+        "port",
+        "phy",
+        "expander",
+        "path",
+        "enclosure",
+        "drive",
+    }
