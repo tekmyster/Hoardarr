@@ -48,6 +48,7 @@ jobs:
           name: controller-redundancy-browser-evidence
           path: |
             frontend/test-results/**/controller-redundancy-*.png
+            frontend/test-results/**/storage-lifecycle-*.png
             frontend/test-results/**/trace.zip
           if-no-files-found: warn
   ubuntu-installer:

@@ -8,11 +8,12 @@ The persistent lifecycle is:
 
 `discovered → assigned → active → preferred_write → draining → verifying → read_only → retired`
 
-The first production slices implement registration, assignment, activation, single preferred-write
-placement, immutable drain preflight, and the mover's atomic new-write exclusion boundary. Moving a
-preference atomically demotes the previous preferred backend. Drain execution, verification,
-retirement, reuse, and wipe states cannot be entered through the direct transition API: a durable
-operation must own them so copy or verification safety cannot be skipped.
+The production workflow implements registration, assignment, activation, single preferred-write
+placement, immutable drain preflight, atomic new-write exclusion, checkpointed movement,
+verification, and retirement. Moving a preference atomically demotes the previous preferred
+backend. Drain execution, verification, retirement, reuse, and wipe states cannot be entered through
+the direct transition API: a durable operation must own them so copy or verification safety cannot
+be skipped.
 
 ## Drain preflight
 
@@ -31,9 +32,10 @@ applications contribute active-write state only when their stored provider state
 it; missing provider data is a warning, not a fabricated zero. Active open handles, reported ARR
 writes, unhealthy destinations, or insufficient capacity make the plan `ready: false`.
 
-Verification modes are explicit: `fast` retains size/mtime methodology, `accurate` requires full
-file hashes, and `paranoid` adds another full read pass. The checkpointed mover will implement these
-methods under `DRAIN-04`, `DRAIN-07`, and `DRAIN-09`.
+Verification modes are explicit: `fast` verifies size and mtime, `accurate` requires full SHA-256
+source and destination hashes, and `paranoid` adds a second complete destination read and hash pass.
+The durable per-file manifest records checkpoints so a worker restart resumes without treating
+unverified files as complete.
 
 Before that mover copies its first byte, `begin_drain_placement` atomically changes the source to
 `draining`, records the owning operation and immutable plan digest, mirrors the state to a physical
@@ -59,6 +61,10 @@ checkpointed mover would leave an operator with placement changed but no evacuat
 - `POST /api/v1/storage/groups/{group_id}/backends`
 - `POST /api/v1/storage/groups/{group_id}/backends/{backend_id}/transition`
 - `POST /api/v1/storage/groups/{group_id}/drain/preview`
+- `POST /api/v1/storage/groups/{group_id}/drain`
+- `GET /api/v1/operations/{operation_id}/progress`
+- `POST /api/v1/operations/{operation_id}/pause`
+- `POST /api/v1/operations/{operation_id}/resume`
 - `GET /api/v1/storage/disks`
 - `POST /api/v1/storage/disks/reconcile`
 
@@ -66,5 +72,12 @@ Reads require authentication. Mutations require the `operate` scope and normal b
 checks. Unsafe lifecycle skips return Problem Details with `durable_operation_required`.
 
 The UI exposes **Preview drain** only when another active data/archive backend and a source mount
-path exist. It labels the result as preflight-only. Apply remains unavailable until the durable,
-checkpointed mover tracked by `DRAIN-04` through `DRAIN-12` is complete.
+path exist. It shows the immutable-plan facts, requires exact `I AGREE` approval, starts the durable
+operation, and displays real phase/file/byte/rate/ETA progress with pause/resume and final report.
+The stable Storage Group namespace remains unchanged when the source backend is retired.
+
+The isolated Linux proof uses two purpose-created loop-backed ext4 filesystems. It writes and hashes
+four deterministic files, pauses and resumes the job, simulates a worker crash after inventory,
+recovers the stale operation from its durable manifest, finishes verification, retires the source,
+and confirms the namespace and all hashes are unchanged. This proves the software workflow in
+isolation; it is not physical-disk certification.

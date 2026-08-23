@@ -36,8 +36,16 @@ verifying and read-only to retired while retaining the Storage Group namespace.
 
 The Storage Groups UI now includes exact approval, live phase/file/byte/rate progress, safe pause
 and resume, needs-attention handling, and the durable completion report. It does not create sample
-storage on the beta bench. A purpose-created two-loop ext4 workflow is part of the Linux storage CI;
-until its remote execution completes, that specific result remains pending rather than inferred.
+storage on the beta bench. GitHub Actions run `32649916042`, job
+`storage-group-drain-lifecycle`, executed the purpose-created two-loop ext4 workflow successfully.
+Artifact `storage-group-drain-lifecycle-evidence` records 4 files and 7,733,293 bytes, identical
+before/after SHA-256 hashes, pause/resume, stale-worker recovery, source retirement, and unchanged
+namespace `/srv/hoardarr/media`. Classification: **VERIFIED IN ISOLATION**.
+
+The browser workflow exercises the production Storage page from immutable review through exact
+approval, start, pause, resume, completion, source retirement, and stable namespace. Its screenshots
+are uploaded by ordinary CI; no fake Storage Groups or storage telemetry are seeded on the beta
+bench.
 
 ## GitHub Actions notification incident
 
@@ -73,3 +81,16 @@ Wheel SHA-256:
 
 The three backend skips are Windows-host limitations for descriptor-relative POSIX operations and
 POSIX ownership/mode enforcement. They were pre-existing and remain covered by Linux workflows.
+
+### Storage lifecycle increment (`2813c30dba1ac3f6882d2060f1e0e9786b81b7ac`)
+
+| Evidence | Result |
+|---|---|
+| GitHub Actions CI `32649915997` | Passed |
+| Appliance build `32649916013` | Passed |
+| Isolated storage integration `32649916042` | Passed; all four storage jobs green |
+| Backend suite | 353 passed, 5 skipped, 1 dependency warning |
+| Frontend unit/component suite | 116 passed |
+| Accessibility gate | 4 passed |
+| Production frontend build | Passed; 58 modules transformed |
+| Chromium E2E after terminal-state refresh correction | 11 passed, including complete lifecycle workflow |

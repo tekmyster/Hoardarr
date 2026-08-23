@@ -74,9 +74,19 @@ export function StorageGroupsPanel() {
           api.storageOperationProgress(drainOperation.id),
         ]);
         if (stopped) return;
+        const completedSource = operation.status === "succeeded" || progress.state === "succeeded"
+          ? progress.report?.source_backend_id
+          : null;
+        if (typeof completedSource === "string") {
+          setGroups((current) => current.map((group) => ({
+            ...group,
+            backends: group.backends.map((backend) => backend.id === completedSource
+              ? { ...backend, lifecycle_state: "retired" }
+              : backend),
+          })));
+        }
         setDrainOperation(operation);
         setDrainProgress(progress);
-        if (["succeeded", "failed", "cancelled", "needs_attention"].includes(operation.status)) await load(controller.signal);
       } catch (requestError) {
         if (!stopped && !controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Drain progress could not be loaded.");
       }
@@ -88,6 +98,15 @@ export function StorageGroupsPanel() {
       controller.abort();
       window.clearInterval(timer);
     };
+  }, [drainOperation?.id, drainOperation?.status]);
+
+  useEffect(() => {
+    if (!drainOperation || !["succeeded", "failed", "cancelled", "needs_attention"].includes(drainOperation.status)) return;
+    const controller = new AbortController();
+    void load(controller.signal).catch((requestError) => {
+      if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Storage Group state could not be refreshed.");
+    });
+    return () => controller.abort();
   }, [drainOperation?.id, drainOperation?.status]);
 
   const assignedDiskIds = useMemo(
