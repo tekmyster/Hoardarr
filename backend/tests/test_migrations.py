@@ -82,7 +82,14 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
     upgrade_database(database_url)
     engine = create_database_engine(database_url)
     assert database_is_current(engine, database_url)
-    assert {"plan_approvals", "connectivity_services"} <= set(inspect(engine).get_table_names())
+    assert {
+        "plan_approvals",
+        "connectivity_services",
+        "storage_groups",
+        "physical_disks",
+        "storage_backends",
+        "storage_lifecycle_events",
+    } <= set(inspect(engine).get_table_names())
     engine.dispose()
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT username FROM users").fetchone() == ("owner",)

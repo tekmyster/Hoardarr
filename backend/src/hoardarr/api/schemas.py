@@ -234,3 +234,51 @@ class StorageRedundancyApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     confirmation: Literal["APPLY"]
+
+
+class StorageGroupCreateRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=128)
+    namespace_path: str = Field(min_length=2, max_length=4096)
+    purpose: Literal["media", "downloads", "archive", "backup", "general"] = "media"
+
+
+class PhysicalDiskObservationRequest(StrictModel):
+    stable_identity: str = Field(min_length=3, max_length=512)
+    kernel_path: str | None = Field(default=None, max_length=4096)
+    serial: str | None = Field(default=None, max_length=256)
+    wwn: str | None = Field(default=None, max_length=256)
+    vendor: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=256)
+    capacity_bytes: int | None = Field(default=None, ge=0)
+    logical_sector_bytes: int | None = Field(default=None, ge=128, le=65536)
+    physical_sector_bytes: int | None = Field(default=None, ge=128, le=65536)
+    media_type: Literal["hdd", "ssd", "nvme", "removable", "unknown"] | None = None
+    health_state: Literal["healthy", "warning", "critical", "not_reported", "unsupported"] = (
+        "not_reported"
+    )
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PhysicalDiskReconcileRequest(StrictModel):
+    items: list[PhysicalDiskObservationRequest] = Field(min_length=1, max_length=1024)
+
+
+class StorageBackendAssignRequest(StrictModel):
+    physical_disk_id: str | None = Field(default=None, min_length=36, max_length=36)
+    storage_entity_id: str | None = Field(default=None, min_length=36, max_length=36)
+    namespace_path: str | None = Field(default=None, min_length=2, max_length=4096)
+    role: Literal["data", "parity", "cache", "archive", "landing"] = "data"
+
+
+class StorageBackendTransitionRequest(StrictModel):
+    target_state: Literal[
+        "active",
+        "preferred_write",
+        "draining",
+        "verifying",
+        "read_only",
+        "retired",
+        "reuse_ready",
+        "wipe_pending",
+    ]
+    reason: str | None = Field(default=None, max_length=512)

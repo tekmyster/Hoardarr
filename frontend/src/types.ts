@@ -480,6 +480,48 @@ export interface LogicalStorageDocument {
   }>;
 }
 
+export interface PhysicalDiskDocument {
+  id: string;
+  stable_identity: string;
+  kernel_path: string | null;
+  serial: string | null;
+  wwn: string | null;
+  vendor: string | null;
+  model: string | null;
+  capacity_bytes: number | null;
+  media_type: string | null;
+  health_state: string;
+  lifecycle_state: string;
+  last_seen_at: string;
+}
+
+export interface StorageGroupDocument {
+  id: string;
+  name: string;
+  namespace_path: string;
+  purpose: string;
+  state: string;
+  policy: Record<string, unknown>;
+  backends: Array<{
+    id: string;
+    stable_identity: string;
+    physical_disk_id: string | null;
+    storage_entity_id: string | null;
+    namespace_path: string | null;
+    role: string;
+    lifecycle_state: string;
+  }>;
+  events: Array<{
+    id: string;
+    event_type: string;
+    backend_id: string | null;
+    previous_state: string | null;
+    resulting_state: string;
+    reason: string | null;
+    occurred_at: string;
+  }>;
+}
+
 export interface StorageRedundancyPlan {
   schema_version: 1;
   operation: "redundancy.add" | "redundancy.remove" | "redundancy.replace" | "redundancy.configure";

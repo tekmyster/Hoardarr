@@ -16,8 +16,12 @@ from hoardarr.api.problem import Problem
 from hoardarr.api.schemas import (
     DeviceMaintenanceApplyRequest,
     DeviceMaintenancePreviewRequest,
+    PhysicalDiskReconcileRequest,
     SnapraidReplacementApplyRequest,
     SnapraidReplacementPreviewRequest,
+    StorageBackendAssignRequest,
+    StorageBackendTransitionRequest,
+    StorageGroupCreateRequest,
     StorageRedundancyApplyRequest,
     StorageRedundancyPreviewRequest,
     TierTransferApplyRequest,
@@ -29,6 +33,15 @@ from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import HardwareSnapshot, Operation
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
+from hoardarr.storage.groups import (
+    StorageGroupError,
+    assign_backend,
+    create_group,
+    disk_documents,
+    group_documents,
+    register_disk,
+    transition_backend,
+)
 from hoardarr.storage.inventory import discover_storage_inventory
 from hoardarr.storage.maintenance import MaintenanceError, build_plan, validate_plan
 from hoardarr.storage.mergerfs import discover_mergerfs
@@ -49,6 +62,17 @@ from hoardarr.storage.telemetry import storage_telemetry
 from hoardarr.storage.tiering import TieringError, plan_transfer
 
 router = APIRouter(prefix="/storage", tags=["storage"])
+
+
+def _group_problem(exc: StorageGroupError) -> Problem:
+    status = (
+        404
+        if exc.code.endswith("_not_found")
+        else 409
+        if "conflict" in exc.code or "already" in exc.code
+        else 422
+    )
+    return Problem(status, exc.code, "Storage lifecycle request rejected", str(exc))
 
 
 def _latest_hardware(session: Session) -> HardwareSnapshot:
@@ -86,6 +110,148 @@ def storage_inventory(
             hardware_snapshot=snapshot.payload_json if snapshot is not None else None
         ),
         "active_operations": active_storage_reservations(session),
+    }
+
+
+@router.get("/groups")
+def storage_groups(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    return {"items": group_documents(session)}
+
+
+@router.post("/groups", status_code=201)
+def add_storage_group(
+    payload: StorageGroupCreateRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        group = create_group(
+            session,
+            name=payload.name,
+            namespace_path=payload.namespace_path,
+            purpose=payload.purpose,
+            principal=principal,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.group.create",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="storage_group",
+        target_id=group.id,
+        details={"namespace_path": group.namespace_path, "purpose": group.purpose},
+    )
+    return {"item": next(item for item in group_documents(session) if item["id"] == group.id)}
+
+
+@router.post("/groups/{group_id}/backends", status_code=201)
+def add_storage_backend(
+    group_id: str,
+    payload: StorageBackendAssignRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        backend = assign_backend(
+            session,
+            group_id=group_id,
+            physical_disk_id=payload.physical_disk_id,
+            storage_entity_id=payload.storage_entity_id,
+            namespace_path=payload.namespace_path,
+            role=payload.role,
+            principal=principal,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.backend.assign",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="storage_backend",
+        target_id=backend.id,
+        details={"group_id": group_id, "stable_identity": backend.stable_identity},
+    )
+    return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
+
+
+@router.post("/groups/{group_id}/backends/{backend_id}/transition")
+def change_storage_backend_state(
+    group_id: str,
+    backend_id: str,
+    payload: StorageBackendTransitionRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        backend = transition_backend(
+            session,
+            group_id=group_id,
+            backend_id=backend_id,
+            target_state=payload.target_state,
+            principal=principal,
+            reason=payload.reason,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.backend.transition",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="storage_backend",
+        target_id=backend.id,
+        details={"group_id": group_id, "target_state": payload.target_state},
+    )
+    return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
+
+
+@router.get("/disks")
+def registered_disks(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    return {"items": disk_documents(session)}
+
+
+@router.post("/disks/reconcile")
+def reconcile_registered_disks(
+    payload: PhysicalDiskReconcileRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    created = 0
+    try:
+        for item in payload.items:
+            _disk, was_created = register_disk(session, item.model_dump())
+            created += int(was_created)
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.disks.reconcile",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="physical_disk_registry",
+        details={"observed": len(payload.items), "created": created},
+    )
+    return {
+        "items": disk_documents(session),
+        "created": created,
+        "updated": len(payload.items) - created,
     }
 
 

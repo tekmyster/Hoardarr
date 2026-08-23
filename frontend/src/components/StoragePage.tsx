@@ -7,6 +7,7 @@ import { StorageProgressDetails } from "./StorageProgressDetails";
 import { StorageTopologyPanels } from "./StorageTopologyPanels";
 import { StoragePerformance } from "./StoragePerformance";
 import { StorageRedundancyPanel } from "./StorageRedundancyPanel";
+import { StorageGroupsPanel } from "./StorageGroupsPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -202,6 +203,8 @@ export function StoragePage({
     </div>
 
     <StoragePerformance />
+
+    <StorageGroupsPanel />
 
     <StorageTopologyPanels topology={storageInventory?.topology} />
 

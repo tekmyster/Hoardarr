@@ -92,6 +92,71 @@ def test_authenticated_read_only_settings_requests_do_not_require_csrf_origin(
     assert response.json() == {"items": []}
 
 
+def test_storage_group_api_preserves_identity_and_guards_lifecycle(api_runtime: Any) -> None:
+    client, _app, setup_token, _secret_box = api_runtime
+    assert client.get("/api/v1/storage/groups").status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    headers = _state_headers(csrf)
+
+    reconciled = client.post(
+        "/api/v1/storage/disks/reconcile",
+        headers=headers,
+        json={
+            "items": [
+                {
+                    "stable_identity": "wwn:5000c500feed0001",
+                    "kernel_path": "/dev/sdb",
+                    "serial": "SANITIZED-0001",
+                    "model": "Media Disk",
+                    "capacity_bytes": 8_000_000_000_000,
+                    "health_state": "healthy",
+                }
+            ]
+        },
+    )
+    assert reconciled.status_code == 200, reconciled.text
+    disk_id = reconciled.json()["items"][0]["id"]
+
+    created = client.post(
+        "/api/v1/storage/groups",
+        headers=headers,
+        json={
+            "name": "Media",
+            "namespace_path": "/srv/hoardarr/media",
+            "purpose": "media",
+        },
+    )
+    assert created.status_code == 201, created.text
+    group_id = created.json()["item"]["id"]
+    assigned = client.post(
+        f"/api/v1/storage/groups/{group_id}/backends",
+        headers=headers,
+        json={"physical_disk_id": disk_id, "role": "data"},
+    )
+    assert assigned.status_code == 201, assigned.text
+    backend_id = assigned.json()["item"]["backends"][0]["id"]
+
+    for state in ("active", "preferred_write"):
+        response = client.post(
+            f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/transition",
+            headers=headers,
+            json={"target_state": state},
+        )
+        assert response.status_code == 200, response.text
+    guarded = client.post(
+        f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/transition",
+        headers=headers,
+        json={"target_state": "draining"},
+    )
+    assert guarded.status_code == 422
+    assert guarded.json()["code"] == "durable_operation_required"
+
+    document = client.get("/api/v1/storage/groups").json()["items"][0]
+    assert document["namespace_path"] == "/srv/hoardarr/media"
+    assert document["backends"][0]["stable_identity"] == "disk:wwn:5000c500feed0001"
+    assert document["backends"][0]["lifecycle_state"] == "preferred_write"
+
+
 def test_device_maintenance_preview_apply_and_worker_are_bound(api_runtime: Any) -> None:
     client, app, setup_token, secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)
@@ -1410,9 +1475,7 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
         "last_failover": None,
         "time_degraded_seconds": 0,
     }
-    event_history = client.get(
-        f"/api/v1/storage/logical/{storage_id}/redundancy/events"
-    )
+    event_history = client.get(f"/api/v1/storage/logical/{storage_id}/redundancy/events")
     assert event_history.status_code == 200
     assert event_history.json() == {"items": []}
 

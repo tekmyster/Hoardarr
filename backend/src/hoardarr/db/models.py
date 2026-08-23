@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -326,6 +327,124 @@ class StorageEntity(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class StorageGroup(Base):
+    """A user-facing stable namespace composed from one or more storage backends."""
+
+    __tablename__ = "storage_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    namespace_path: Mapped[str] = mapped_column(String(4096), nullable=False, unique=True)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False, default="media")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
+    policy_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class PhysicalDisk(Base):
+    """Durable disk registry; kernel paths are observations, never identity."""
+
+    __tablename__ = "physical_disks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    stable_identity: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    kernel_path: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    serial: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    wwn: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    vendor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    capacity_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    logical_sector_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    physical_sector_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    health_state: Mapped[str] = mapped_column(String(32), nullable=False, default="not_reported")
+    lifecycle_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="discovered", index=True
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, index=True
+    )
+
+
+class StorageBackend(Base):
+    """A lifecycle-managed backend assigned to a stable Storage Group namespace."""
+
+    __tablename__ = "storage_backends"
+    __table_args__ = (
+        UniqueConstraint("storage_group_id", "stable_identity", name="uq_group_backend_identity"),
+        UniqueConstraint("physical_disk_id", name="uq_storage_backend_physical_disk"),
+        UniqueConstraint("storage_entity_id", name="uq_storage_backend_storage_entity"),
+        Index("ix_storage_backends_group_state", "storage_group_id", "lifecycle_state"),
+        Index(
+            "uq_storage_backends_preferred_write",
+            "storage_group_id",
+            unique=True,
+            sqlite_where=text("lifecycle_state = 'preferred_write'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    storage_group_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    storage_entity_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("storage_entities.id", ondelete="SET NULL"), nullable=True
+    )
+    physical_disk_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("physical_disks.id", ondelete="SET NULL"), nullable=True
+    )
+    stable_identity: Mapped[str] = mapped_column(String(512), nullable=False)
+    namespace_path: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="data")
+    lifecycle_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="assigned", index=True
+    )
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class StorageLifecycleEvent(Base):
+    __tablename__ = "storage_lifecycle_events"
+    __table_args__ = (
+        Index("ix_storage_lifecycle_events_group_time", "storage_group_id", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    storage_group_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    storage_backend_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("storage_backends.id", ondelete="SET NULL"), nullable=True
+    )
+    physical_disk_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("physical_disks.id", ondelete="SET NULL"), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    previous_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resulting_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
     )
 
 

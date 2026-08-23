@@ -31,10 +31,12 @@ import type {
   OperationEvent,
   OverviewDocument,
   PlanDocument,
+  PhysicalDiskDocument,
   ResourceUsageDocument,
   SetupStatus,
   StorageOperationProgress,
   StorageInventory,
+  StorageGroupDocument,
   StorageRedundancyPlan,
   StorageRedundancyEventDocument,
   StorageRedundancySettings,
@@ -353,6 +355,50 @@ class HoardarrApi {
     if (demoMode) return [];
     const result = await this.request<{ items: LogicalStorageDocument[] }>("/storage/logical");
     return result.items;
+  }
+
+  async storageGroups(signal?: AbortSignal): Promise<StorageGroupDocument[]> {
+    if (demoMode) return [];
+    const result = await this.request<{ items: StorageGroupDocument[] }>("/storage/groups", { signal });
+    return result.items;
+  }
+
+  async registeredDisks(signal?: AbortSignal): Promise<PhysicalDiskDocument[]> {
+    if (demoMode) return [];
+    const result = await this.request<{ items: PhysicalDiskDocument[] }>("/storage/disks", { signal });
+    return result.items;
+  }
+
+  async createStorageGroup(input: {
+    name: string;
+    namespace_path: string;
+    purpose: "media" | "downloads" | "archive" | "backup" | "general";
+  }): Promise<StorageGroupDocument> {
+    const result = await this.request<{ item: StorageGroupDocument }>("/storage/groups", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return result.item;
+  }
+
+  async assignStorageGroupDisk(groupId: string, physicalDiskId: string): Promise<StorageGroupDocument> {
+    const result = await this.request<{ item: StorageGroupDocument }>(
+      `/storage/groups/${encodeURIComponent(groupId)}/backends`,
+      { method: "POST", body: JSON.stringify({ physical_disk_id: physicalDiskId, role: "data" }) },
+    );
+    return result.item;
+  }
+
+  async transitionStorageBackend(
+    groupId: string,
+    backendId: string,
+    targetState: "active" | "preferred_write",
+  ): Promise<StorageGroupDocument> {
+    const result = await this.request<{ item: StorageGroupDocument }>(
+      `/storage/groups/${encodeURIComponent(groupId)}/backends/${encodeURIComponent(backendId)}/transition`,
+      { method: "POST", body: JSON.stringify({ target_state: targetState }) },
+    );
+    return result.item;
   }
 
   async previewStorageRedundancy(input: {

@@ -61,6 +61,7 @@ from hoardarr.storage.client import (
     apply_storage_redundancy,
     storage_operation_status,
 )
+from hoardarr.storage.groups import reconcile_snapshot_disks
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     matching_devices,
@@ -1152,6 +1153,7 @@ def _finalize_success(
             )
             session.add(snapshot)
             session.flush()
+            disk_registry = reconcile_snapshot_disks(session, execution.payload)
             operation.resource_id = snapshot.id
             complete_operation(
                 session,
@@ -1161,6 +1163,7 @@ def _finalize_success(
                     "sha256": snapshot.sha256,
                     "schema_version": snapshot.detector_schema_version,
                     "source": snapshot.source,
+                    "disk_registry": disk_registry,
                 },
             )
             return

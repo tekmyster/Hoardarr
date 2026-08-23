@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,12 @@ from hoardarr.db.models import (
     IntegrationConnection,
     Operation,
     OperationEvent,
+    PhysicalDisk,
     Plan,
     WizardSession,
     utc_now,
 )
+from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError
 from hoardarr.operations.service import (
     OperationConflict,
@@ -104,7 +107,25 @@ def test_running_host_mutation_cannot_be_recorded_as_cancelled(tmp_path: Path) -
 def test_hardware_scan_creates_an_immutable_snapshot(tmp_path: Path) -> None:
     settings, session_factory = _runtime(tmp_path)
     operation_id = _enqueue(session_factory, kind="hardware.scan")
-    payload = {"schema_version": 1, "source": {"kind": "sysfs"}, "controllers": []}
+    payload = {
+        "schema_version": 1,
+        "source": {"kind": "sysfs"},
+        "controllers": [],
+        "disks": [
+            {
+                "id": "wwn:5000c500feed0001",
+                "stable_identity": True,
+                "kernel_path": "/dev/sdb",
+                "identity": {"serial": "SANITIZED-0001", "wwn": "5000c500feed0001"},
+                "vendor": "EXAMPLE",
+                "model": "MEDIA-HDD",
+                "capacity_bytes": 8_000_000_000_000,
+                "rotational": True,
+                "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+                "connection": {"transport": "sas", "protocol": "sas", "slot": 3},
+            }
+        ],
+    }
 
     def detector(*_args: object, **_kwargs: object) -> tuple[dict[str, Any], str]:
         # A second writer succeeding here proves the claim transaction was committed
@@ -136,13 +157,20 @@ def test_hardware_scan_creates_an_immutable_snapshot(tmp_path: Path) -> None:
         )
         assert operation is not None and operation.status == "succeeded"
         assert snapshot is not None
-        assert snapshot.payload_json == payload
-        assert snapshot.sha256 == document_hash(payload)
+        expected_payload = enrich_maintenance_capabilities(deepcopy(payload))
+        assert snapshot.payload_json == expected_payload
+        assert snapshot.sha256 == document_hash(expected_payload)
+        disk = session.scalar(select(PhysicalDisk))
+        assert disk is not None
+        assert disk.stable_identity == "wwn:5000c500feed0001"
+        assert disk.kernel_path == "/dev/sdb"
+        assert disk.media_type == "hdd"
         assert operation.result_json == {
             "snapshot_id": snapshot.id,
             "sha256": snapshot.sha256,
             "schema_version": 1,
             "source": "sysfs",
+            "disk_registry": {"observed": 1, "created": 1, "updated": 0, "skipped": 0},
         }
     assert not run_once(
         session_factory=session_factory,

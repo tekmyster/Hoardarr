@@ -295,6 +295,18 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .wizard-footer-right { display: flex; align-items: center; gap: 8px; }
 
 .button { border: 1px solid transparent; border-radius: 3px; padding: 8px 14px; font-size: 13px; font-weight: 600; transition: background .12s, border .12s; }
+.storage-group-create > summary { display: inline-block; list-style: none; }
+.storage-group-create > summary::-webkit-details-marker { display: none; }
+.storage-group-form { margin-top: 14px; align-items: end; }
+.storage-group-list { display: grid; gap: 14px; margin-top: 16px; }
+.storage-group { padding: 15px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-soft); }
+.storage-group > header, .storage-group-assign { display: flex; align-items: end; justify-content: space-between; gap: 14px; }
+.storage-group > header h3 { margin: 0 0 4px; }
+.storage-group-assign { margin-top: 12px; justify-content: flex-start; }
+.storage-group-assign label { min-width: min(100%, 420px); }
+.event-list { margin: 10px 0 0; padding-left: 20px; }
+.event-list time { color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) { .storage-group > header, .storage-group-assign { align-items: stretch; flex-direction: column; } }
 .button-primary { color: #fff; background: var(--accent-dark); border-color: #1565c0; }
 .button-primary:hover:not(:disabled) { background: #1565c0; }
 .button-secondary { color: #34464f; background: #fff; border-color: #bcc7cc; }

@@ -1,8 +1,8 @@
 name: Two-node storage graph stress
 on:
-  push:
-    branches:
-      - rc/0.3.11-validation
+  # This is an intentionally expensive, notification-producing release gate.
+  # Normal pushes are covered by ci.yml; dispatch this workflow for changes to
+  # the two-node/storage evidence path or as part of a release validation pass.
   workflow_dispatch:
     inputs:
       read_soak_seconds:
@@ -11,8 +11,10 @@ on:
         default: "45"
         type: string
 concurrency:
-  group: two-node-storage-${{ github.ref }}
-  cancel-in-progress: true
+  group: two-node-storage-${{ github.ref_name }}
+  # A deliberately started evidence run should finish and produce artifacts.
+  # Cancelling it on another dispatch creates noisy, non-actionable mail.
+  cancel-in-progress: false
 jobs:
   two-node-virtual-storage:
     runs-on: ubuntu-24.04
