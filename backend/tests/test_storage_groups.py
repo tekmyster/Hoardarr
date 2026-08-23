@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import Base, PhysicalDisk, StorageBackend, StorageLifecycleEvent
+from hoardarr.storage import groups as group_service
 from hoardarr.storage.groups import (
     StorageGroupError,
+    activate_backend,
     advance_drain_lifecycle,
     assign_backend,
     begin_drain_placement,
+    build_backend_activation_plan,
     create_group,
     disk_documents,
     group_documents,
@@ -188,6 +192,125 @@ def test_group_assignment_activation_and_single_preferred_writer() -> None:
         states = {item["id"]: item["lifecycle_state"] for item in document["backends"]}
         assert states == {backend_a.id: "active", backend_b.id: "preferred_write"}
         assert len(list(session.scalars(select(StorageLifecycleEvent)))) == 8
+
+
+def test_activation_binds_exact_mount_identity_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    evidence = {
+        "path": "/srv/hoardarr/backends/a",
+        "filesystem_device": 101,
+        "mount_source": "/dev/sdb1",
+        "exact_mount": True,
+        "identity_match": True,
+        "identity_basis": "test-created mount source matches registered disk",
+        "total_bytes": 8_000_000_000_000,
+        "free_bytes": 7_000_000_000_000,
+    }
+    monkeypatch.setattr(
+        group_service,
+        "inspect_backend_activation",
+        lambda *_args, **_kwargs: dict(evidence),
+    )
+    with Session(engine) as session:
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        disk, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:disk-a",
+                "kernel_path": "/dev/sdb",
+                "health_state": "healthy",
+            },
+        )
+        backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=disk.id,
+            storage_entity_id=None,
+            namespace_path=evidence["path"],
+            role="data",
+            principal=actor,
+        )
+        plan = build_backend_activation_plan(session, group_id=group.id, backend_id=backend.id)
+        assert plan["ready"] is True
+        assert plan["evidence"]["identity_match"] is True
+        evidence["free_bytes"] -= 4096
+
+        activated = activate_backend(
+            session,
+            group_id=group.id,
+            backend_id=backend.id,
+            plan_sha256=plan["plan_sha256"],
+            principal=actor,
+            reason="verified test mount",
+        )
+        assert activated.lifecycle_state == "active"
+        assert activated.config_json["activation"]["plan_sha256"] == plan["plan_sha256"]
+        assert activated.config_json["activation"]["evidence"]["mount_source"] == "/dev/sdb1"
+
+
+def test_activation_fails_closed_when_mounted_identity_does_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    monkeypatch.setattr(
+        group_service,
+        "inspect_backend_activation",
+        lambda *_args, **_kwargs: {
+            "path": "/srv/hoardarr/backends/a",
+            "filesystem_device": 101,
+            "mount_source": "/dev/sdz1",
+            "exact_mount": True,
+            "identity_match": False,
+            "identity_basis": "mounted source does not match registered disk",
+            "total_bytes": 8_000_000_000_000,
+            "free_bytes": 7_000_000_000_000,
+        },
+    )
+    with Session(engine) as session:
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        disk, _ = register_disk(
+            session,
+            {"stable_identity": "wwn:disk-a", "kernel_path": "/dev/sdb"},
+        )
+        backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=disk.id,
+            storage_entity_id=None,
+            namespace_path="/srv/hoardarr/backends/a",
+            role="data",
+            principal=actor,
+        )
+        plan = build_backend_activation_plan(session, group_id=group.id, backend_id=backend.id)
+        assert plan["ready"] is False
+        with pytest.raises(StorageGroupError, match="failed its activation safety review"):
+            activate_backend(
+                session,
+                group_id=group.id,
+                backend_id=backend.id,
+                plan_sha256=plan["plan_sha256"],
+                principal=actor,
+                reason=None,
+            )
+        assert backend.lifecycle_state == "assigned"
 
 
 def test_drain_owned_states_cannot_be_set_without_durable_operation() -> None:

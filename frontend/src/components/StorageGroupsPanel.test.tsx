@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { PhysicalDiskDocument, StorageDrainPlan, StorageGroupDocument } from "../types";
+import type { PhysicalDiskDocument, StorageBackendActivationPlan, StorageDrainPlan, StorageGroupDocument } from "../types";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
 
 const disk: PhysicalDiskDocument = {
@@ -75,7 +75,31 @@ describe("StorageGroupsPanel", () => {
   it("renders lifecycle state and activates an assigned backend", async () => {
     vi.spyOn(api, "storageGroups").mockResolvedValue([group]);
     vi.spyOn(api, "registeredDisks").mockResolvedValue([disk]);
-    const transition = vi.spyOn(api, "transitionStorageBackend").mockResolvedValue({
+    const plan: StorageBackendActivationPlan = {
+      schema_version: 1,
+      kind: "storage.backend.activate",
+      storage_group_id: group.id,
+      storage_group_namespace: group.namespace_path,
+      backend_id: group.backends[0].id,
+      stable_identity: group.backends[0].stable_identity,
+      lifecycle_state: "assigned",
+      health: "healthy",
+      evidence: {
+        path: "/srv/hoardarr/backends/a",
+        filesystem_device: 101,
+        mount_source: "/dev/sdb1",
+        exact_mount: true,
+        identity_match: true,
+        identity_basis: "mounted source belongs to the registered disk",
+        total_bytes: 8_000_000_000_000,
+        free_bytes: 7_000_000_000_000,
+      },
+      blockers: [],
+      ready: true,
+      plan_sha256: "a".repeat(64),
+    };
+    vi.spyOn(api, "previewStorageBackendActivation").mockResolvedValue(plan);
+    const activate = vi.spyOn(api, "activateStorageBackend").mockResolvedValue({
       ...group,
       backends: [{ ...group.backends[0], lifecycle_state: "active" }],
     });
@@ -84,12 +108,11 @@ describe("StorageGroupsPanel", () => {
 
     expect(await screen.findByText("/srv/hoardarr/media")).toBeInTheDocument();
     expect(screen.getByText("assigned")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Activate" }));
-    await waitFor(() => expect(transition).toHaveBeenCalledWith(
-      group.id,
-      group.backends[0].id,
-      "active",
-    ));
+    await user.click(screen.getByRole("button", { name: "Review activation" }));
+    expect(await screen.findByText("Matches assigned storage")).toBeInTheDocument();
+    expect(screen.getByText(/does not format, mount, or write/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Activate verified storage" }));
+    await waitFor(() => expect(activate).toHaveBeenCalledWith(plan));
   });
 
   it("releases only a verified retired assignment after explicit confirmation", async () => {

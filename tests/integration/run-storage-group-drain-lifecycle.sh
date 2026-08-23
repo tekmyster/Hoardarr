@@ -36,6 +36,8 @@ python="${HOARDARR_TEST_PYTHON:-$repo/backend/.venv/bin/python}"
 "$python" "$repo/tests/integration/storage_group_drain_lifecycle.py" \
   --source "$work/source" \
   --destination "$work/destination" \
+  --source-device "${loops[0]}" \
+  --destination-device "${loops[1]}" \
   --state "$work/state" \
   --evidence "$repo/dist/validation/storage-group-drain-lifecycle.json"
 jq -e '.classification == "VERIFIED IN ISOLATION"' "$repo/dist/validation/storage-group-drain-lifecycle.json"

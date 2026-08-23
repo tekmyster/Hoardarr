@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 import hoardarr.api.routes.auth as auth_routes
 import hoardarr.storage.drain as drain_service
+import hoardarr.storage.groups as group_service
 from hoardarr import __version__
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import create_initial_owner, issue_setup_token
@@ -259,11 +260,43 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(
         if item["id"] != backend_id
     )
 
-    for selected_backend, state in (
-        (backend_id, "active"),
-        (destination_id, "active"),
-        (backend_id, "preferred_write"),
-    ):
+    bypass = client.post(
+        f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/transition",
+        headers=headers,
+        json={"target_state": "active"},
+    )
+    assert bypass.status_code == 422
+    assert bypass.json()["code"] == "activation_preflight_required"
+
+    monkeypatch.setattr(
+        group_service,
+        "inspect_backend_activation",
+        lambda path, **_kwargs: {
+            "path": path,
+            "filesystem_device": 101 if path.endswith("source") else 202,
+            "mount_source": "/dev/sdb1" if path.endswith("source") else "/dev/sdc1",
+            "exact_mount": True,
+            "identity_match": True,
+            "identity_basis": "API test mounted-source fixture",
+            "total_bytes": 20_000,
+            "free_bytes": 12_000 if path.endswith("source") else 19_000,
+        },
+    )
+    for selected_backend in (backend_id, destination_id):
+        preview = client.post(
+            f"/api/v1/storage/groups/{group_id}/backends/{selected_backend}/activation/preview",
+            headers=headers,
+            json={},
+        )
+        assert preview.status_code == 200, preview.text
+        plan = preview.json()["plan"]
+        response = client.post(
+            f"/api/v1/storage/groups/{group_id}/backends/{selected_backend}/activation",
+            headers=headers,
+            json={"plan_sha256": plan["plan_sha256"]},
+        )
+        assert response.status_code == 200, response.text
+    for selected_backend, state in ((backend_id, "preferred_write"),):
         response = client.post(
             f"/api/v1/storage/groups/{group_id}/backends/{selected_backend}/transition",
             headers=headers,

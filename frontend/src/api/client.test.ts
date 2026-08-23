@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, apiProblemMessage, drivesFromSnapshot, HARDWARE_SCAN_TIMEOUT_MS } from "./client";
 import { demoSnapshot } from "../demo/fixture";
+import type { StorageBackendActivationPlan } from "../types";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -270,6 +271,52 @@ describe("hardware snapshot normalization", () => {
     const request = fetchMock.mock.calls[0][1] as RequestInit;
     expect(request.method).toBe("POST");
     expect(JSON.parse(String(request.body))).toEqual(input);
+  });
+
+  it("reviews and activates only the immutable mounted-storage evidence", async () => {
+    const plan: StorageBackendActivationPlan = {
+      schema_version: 1,
+      kind: "storage.backend.activate",
+      storage_group_id: "33333333-3333-4333-8333-333333333333",
+      storage_group_namespace: "/srv/hoardarr/media",
+      backend_id: "44444444-4444-4444-8444-444444444444",
+      stable_identity: "disk:wwn:assigned",
+      lifecycle_state: "assigned",
+      health: "healthy",
+      evidence: {
+        path: "/srv/hoardarr/backends/a",
+        filesystem_device: 101,
+        mount_source: "/dev/sdb1",
+        exact_mount: true,
+        identity_match: true,
+        identity_basis: "mounted source belongs to registered disk",
+        total_bytes: 1000,
+        free_bytes: 900,
+      },
+      blockers: [],
+      plan_sha256: "a".repeat(64),
+      ready: true,
+    };
+    const item = { id: plan.storage_group_id };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ plan }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ item }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.previewStorageBackendActivation(plan.storage_group_id, plan.backend_id))
+      .resolves.toEqual(plan);
+    await expect(api.activateStorageBackend(plan)).resolves.toEqual(item);
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/activation\/preview$/);
+    expect(JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))).toEqual({
+      plan_sha256: "a".repeat(64),
+      reason: "Mounted storage identity reviewed and verified.",
+    });
   });
 
   it("starts, pauses, and resumes a durable storage drain", async () => {

@@ -21,6 +21,7 @@ from hoardarr.api.schemas import (
     PhysicalDiskReservationRequest,
     SnapraidReplacementApplyRequest,
     SnapraidReplacementPreviewRequest,
+    StorageBackendActivationRequest,
     StorageBackendAssignRequest,
     StorageBackendRetirementRequest,
     StorageBackendTransitionRequest,
@@ -42,7 +43,9 @@ from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_dr
 from hoardarr.storage.expansion import build_expansion_assessment
 from hoardarr.storage.groups import (
     StorageGroupError,
+    activate_backend,
     assign_backend,
+    build_backend_activation_plan,
     create_group,
     disk_documents,
     group_documents,
@@ -219,6 +222,13 @@ def change_storage_backend_state(
     principal: Principal = Depends(require_state_scope("operate")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
+    if payload.target_state == "active":
+        raise Problem(
+            422,
+            "activation_preflight_required",
+            "Activation safety review required",
+            "Review the mounted storage identity before activating this backend.",
+        )
     try:
         backend = transition_backend(
             session,
@@ -239,6 +249,57 @@ def change_storage_backend_state(
         target_type="storage_backend",
         target_id=backend.id,
         details={"group_id": group_id, "target_state": payload.target_state},
+    )
+    return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
+
+
+@router.post("/groups/{group_id}/backends/{backend_id}/activation/preview")
+def preview_storage_backend_activation(
+    group_id: str,
+    backend_id: str,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        plan = build_backend_activation_plan(
+            session,
+            group_id=group_id,
+            backend_id=backend_id,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    return {"plan": plan}
+
+
+@router.post("/groups/{group_id}/backends/{backend_id}/activation")
+def apply_storage_backend_activation(
+    group_id: str,
+    backend_id: str,
+    payload: StorageBackendActivationRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        backend = activate_backend(
+            session,
+            group_id=group_id,
+            backend_id=backend_id,
+            plan_sha256=payload.plan_sha256,
+            principal=principal,
+            reason=payload.reason,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.backend.activate",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="storage_backend",
+        target_id=backend.id,
+        details={"group_id": group_id, "plan_sha256": payload.plan_sha256},
     )
     return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
 

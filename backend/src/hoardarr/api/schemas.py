@@ -288,6 +288,11 @@ class StorageBackendTransitionRequest(StrictModel):
     reason: str | None = Field(default=None, max_length=512)
 
 
+class StorageBackendActivationRequest(StrictModel):
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str | None = Field(default=None, max_length=512)
+
+
 class StorageBackendRetirementRequest(StrictModel):
     action: Literal["release_for_reuse"]
     confirmation: Literal["RELEASE"]

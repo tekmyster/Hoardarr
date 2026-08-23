@@ -31,7 +31,9 @@ from hoardarr.storage.drain_worker import (
     resume_drain,
 )
 from hoardarr.storage.groups import (
+    activate_backend,
     assign_backend,
+    build_backend_activation_plan,
     create_group,
     register_disk,
     transition_backend,
@@ -51,6 +53,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--source-device", type=Path, required=True)
+    parser.add_argument("--destination-device", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
@@ -89,6 +93,7 @@ def main() -> int:
         auth_type="session",
         scopes=frozenset({"operate"}),
     )
+    activation_evidence: list[dict[str, object]] = []
     with session_factory() as session, session.begin():
         group = create_group(
             session,
@@ -98,11 +103,15 @@ def main() -> int:
             principal=actor,
         )
         backend_ids: list[str] = []
-        for suffix, path in (("source", source), ("destination", destination)):
+        for suffix, path, device in (
+            ("source", source, args.source_device),
+            ("destination", destination, args.destination_device),
+        ):
             disk, _created = register_disk(
                 session,
                 {
                     "stable_identity": f"loop-integration:{path.stat().st_dev}:{suffix}",
+                    "kernel_path": str(device),
                     "health_state": "healthy",
                     "capacity_bytes": 512 * 1024 * 1024,
                     "media_type": "virtual",
@@ -117,11 +126,28 @@ def main() -> int:
                 role="data",
                 principal=actor,
             )
-            transition_backend(
+            activation_plan = build_backend_activation_plan(
                 session,
                 group_id=group.id,
                 backend_id=backend.id,
-                target_state="active",
+            )
+            if not activation_plan["ready"]:
+                raise RuntimeError(
+                    f"disposable backend activation blocked: {activation_plan['blockers']}"
+                )
+            activation_evidence.append(
+                {
+                    "backend_id": backend.id,
+                    "plan_sha256": activation_plan["plan_sha256"],
+                    "stable_identity": activation_plan["stable_identity"],
+                    "evidence": activation_plan["evidence"],
+                }
+            )
+            activate_backend(
+                session,
+                group_id=group.id,
+                backend_id=backend.id,
+                plan_sha256=activation_plan["plan_sha256"],
                 principal=actor,
                 reason="disposable loop filesystem mounted",
             )
@@ -272,6 +298,7 @@ def main() -> int:
             "storage_group_id": group_id,
             "namespace_before": "/srv/hoardarr/media",
             "namespace_after": group.namespace_path,
+            "activation_preflight": activation_evidence,
             "source_device": source.stat().st_dev,
             "destination_device": destination.stat().st_dev,
             "files": len(files),

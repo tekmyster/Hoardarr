@@ -35,6 +35,7 @@ import type {
   ResourceUsageDocument,
   SetupStatus,
   StorageOperationProgress,
+  StorageBackendActivationPlan,
   StorageInventory,
   StorageDrainPlan,
   StorageExpansionAssessment,
@@ -472,6 +473,33 @@ class HoardarrApi {
     const result = await this.request<{ item: StorageGroupDocument }>(
       `/storage/groups/${encodeURIComponent(groupId)}/backends/${encodeURIComponent(backendId)}/transition`,
       { method: "POST", body: JSON.stringify({ target_state: targetState }) },
+    );
+    return result.item;
+  }
+
+  async previewStorageBackendActivation(
+    groupId: string,
+    backendId: string,
+  ): Promise<StorageBackendActivationPlan> {
+    const result = await this.request<{ plan: StorageBackendActivationPlan }>(
+      `/storage/groups/${encodeURIComponent(groupId)}/backends/${encodeURIComponent(backendId)}/activation/preview`,
+      { method: "POST", body: "{}" },
+    );
+    return result.plan;
+  }
+
+  async activateStorageBackend(
+    plan: StorageBackendActivationPlan,
+  ): Promise<StorageGroupDocument> {
+    const result = await this.request<{ item: StorageGroupDocument }>(
+      `/storage/groups/${encodeURIComponent(plan.storage_group_id)}/backends/${encodeURIComponent(plan.backend_id)}/activation`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          plan_sha256: plan.plan_sha256,
+          reason: "Mounted storage identity reviewed and verified.",
+        }),
+      },
     );
     return result.item;
   }

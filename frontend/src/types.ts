@@ -565,6 +565,30 @@ export interface StorageGroupDocument {
   }>;
 }
 
+export interface StorageBackendActivationPlan {
+  schema_version: 1;
+  kind: "storage.backend.activate";
+  storage_group_id: string;
+  storage_group_namespace: string;
+  backend_id: string;
+  stable_identity: string;
+  lifecycle_state: "assigned";
+  health: string;
+  evidence: {
+    path: string;
+    filesystem_device: number;
+    mount_source: string;
+    exact_mount: true;
+    identity_match: boolean;
+    identity_basis: string;
+    total_bytes: number;
+    free_bytes: number;
+  };
+  blockers: Array<{ code: string; message: string }>;
+  ready: boolean;
+  plan_sha256: string;
+}
+
 export interface StorageDrainPlan {
   schema_version: 1;
   kind: "storage.drain";

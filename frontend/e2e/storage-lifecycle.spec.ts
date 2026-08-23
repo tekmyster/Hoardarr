@@ -11,7 +11,9 @@ async function storageLifecycleServer(page: Page) {
   let resumedPolls = 0;
   let submittedConfirmation: string | null = null;
   let groupReads = 0;
-  let lastGroupLifecycle = "preferred_write";
+  let sourceLifecycle = "assigned";
+  let destinationLifecycle = "assigned";
+  let lastGroupLifecycle = "assigned";
   let released = false;
   const group = () => ({
     id: groupId,
@@ -28,7 +30,7 @@ async function storageLifecycleServer(page: Page) {
         storage_entity_id: null,
         namespace_path: "/srv/hoardarr/backends/source",
         role: "data",
-        lifecycle_state: operationStatus === "succeeded" ? "retired" : "preferred_write",
+        lifecycle_state: operationStatus === "succeeded" ? "retired" : sourceLifecycle,
       },
       {
         id: destinationId,
@@ -37,7 +39,7 @@ async function storageLifecycleServer(page: Page) {
         storage_entity_id: null,
         namespace_path: "/srv/hoardarr/backends/destination",
         role: "data",
-        lifecycle_state: "preferred_write",
+        lifecycle_state: destinationLifecycle,
       },
     ].filter((backend) => !(released && backend.id === sourceId)),
     events: released
@@ -97,6 +99,35 @@ async function storageLifecycleServer(page: Page) {
     }
     if (pathname.endsWith("/storage/disks")) return json({ items: released ? [{ id: "66666666-6666-4666-8666-666666666666", stable_identity: "wwn:source", kernel_path: "/dev/loop0", serial: "DISPOSABLE-SOURCE", wwn: "source", vendor: "Test", model: "Virtual disk", capacity_bytes: 1_000_000_000, media_type: "ssd", health_state: "healthy", lifecycle_state: "reuse_ready", last_seen_at: now }] : [] });
     if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "lifecycle-snapshot", hardware_snapshot_sha256: "f".repeat(64), captured_at: now, storage_groups: [], available_disks: [], reserved_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
+    const activationMatch = pathname.match(/\/storage\/groups\/[^/]+\/backends\/([^/]+)\/activation(?:\/preview)?$/);
+    if (activationMatch && pathname.endsWith("/preview")) {
+      const selected = activationMatch[1];
+      const source = selected === sourceId;
+      return json({ plan: {
+        schema_version: 1,
+        kind: "storage.backend.activate",
+        storage_group_id: groupId,
+        storage_group_namespace: "/srv/hoardarr/media",
+        backend_id: selected,
+        stable_identity: source ? "disk:wwn:source" : "disk:wwn:destination",
+        lifecycle_state: "assigned",
+        health: "healthy",
+        evidence: { path: source ? "/srv/hoardarr/backends/source" : "/srv/hoardarr/backends/destination", filesystem_device: source ? 101 : 202, mount_source: source ? "/dev/loop0" : "/dev/loop1", exact_mount: true, identity_match: true, identity_basis: "disposable loop mount matches the registered stable device", total_bytes: 1_000_000_000, free_bytes: 900_000_000 },
+        blockers: [],
+        ready: true,
+        plan_sha256: (source ? "b" : "c").repeat(64),
+      } });
+    }
+    if (activationMatch) {
+      if (activationMatch[1] === sourceId) sourceLifecycle = "active";
+      if (activationMatch[1] === destinationId) destinationLifecycle = "active";
+      return json({ item: group() });
+    }
+    if (pathname.endsWith(`/storage/groups/${groupId}/backends/${sourceId}/transition`)) {
+      sourceLifecycle = "preferred_write";
+      destinationLifecycle = "active";
+      return json({ item: group() });
+    }
     if (pathname.endsWith(`/storage/groups/${groupId}/drain/preview`)) return json({ plan });
     if (pathname.endsWith(`/storage/groups/${groupId}/drain`)) {
       const body = request.postDataJSON() as { confirmation: string };
@@ -169,6 +200,15 @@ test("drains and retires a Storage Group source through the real browser workflo
   await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
   await expect(page.getByRole("heading", { name: "Storage", level: 1 })).toBeVisible();
   await expect(page.getByLabel("Media", { exact: true }).getByText("/srv/hoardarr/media")).toBeVisible();
+  await page.getByRole("button", { name: "Review activation" }).first().click();
+  await expect(page.getByRole("heading", { name: "Review mounted storage" })).toBeVisible();
+  await expect(page.getByText("Matches assigned storage")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("storage-lifecycle-activation.png"), fullPage: true });
+  await page.getByRole("button", { name: "Activate verified storage" }).click();
+  await page.getByRole("button", { name: "Review activation" }).first().click();
+  await page.getByRole("button", { name: "Activate verified storage" }).click();
+  await page.getByRole("button", { name: "Prefer new files here" }).first().click();
+  await expect(page.getByText("Preferred for new files")).toBeVisible();
   await page.getByRole("button", { name: "Preview drain" }).first().click();
   await expect(page.getByText("Drain preflight")).toBeVisible();
   await expect(page.getByText(/Source files are removed only after/)).toBeVisible();

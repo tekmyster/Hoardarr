@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import shutil
+import stat
+import subprocess
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import select, update
@@ -16,6 +20,7 @@ from hoardarr.db.models import (
     StorageGroup,
     StorageLifecycleEvent,
 )
+from hoardarr.operations.service import document_hash
 
 SAFE_TRANSITIONS = {
     "assigned": {"active"},
@@ -36,6 +41,241 @@ class StorageGroupError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _decode_mount_field(value: str) -> str:
+    for escaped, decoded in (("\\040", " "), ("\\011", "\t"), ("\\012", "\n"), ("\\134", "\\")):
+        value = value.replace(escaped, decoded)
+    return value
+
+
+def _mount_source_for(path: str) -> str | None:
+    mountinfo = Path("/proc/self/mountinfo")
+    if os.name != "posix" or not mountinfo.is_file():
+        return None
+    try:
+        lines = mountinfo.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines[:16_384]:
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            continue
+        separator = fields.index("-")
+        if separator + 2 >= len(fields):
+            continue
+        if _decode_mount_field(fields[4]) == path:
+            return _decode_mount_field(fields[separator + 2])
+    return None
+
+
+def _source_matches_device(source: str, kernel_path: str) -> bool:
+    try:
+        if os.path.realpath(source) == os.path.realpath(kernel_path):
+            return True
+    except OSError:
+        return False
+    if shutil.which("lsblk") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["lsblk", "--noheadings", "--paths", "--output", "PKNAME", source],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    parents = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    return os.path.realpath(kernel_path) in {os.path.realpath(item) for item in parents}
+
+
+def inspect_backend_activation(
+    path_value: str,
+    *,
+    expected_kernel_path: str | None,
+    expected_entity_mountpoint: str | None,
+) -> dict[str, Any]:
+    """Collect read-only evidence that an assigned backend is its intended mounted storage."""
+
+    path = normalize_namespace(path_value)
+    allowed_roots = (PurePosixPath("/data"), PurePosixPath("/mnt"), PurePosixPath("/srv"))
+    pure_path = PurePosixPath(path)
+    if not any(pure_path == root or root in pure_path.parents for root in allowed_roots):
+        raise StorageGroupError(
+            "activation_path_outside_managed_storage",
+            "The backend path must be beneath /data, /mnt, or /srv.",
+        )
+    current = Path(Path(path).anchor)
+    for component in Path(path).parts[1:]:
+        current /= component
+        try:
+            details = current.lstat()
+        except FileNotFoundError as exc:
+            raise StorageGroupError(
+                "activation_path_unavailable", "The configured backend path does not exist."
+            ) from exc
+        except OSError as exc:
+            raise StorageGroupError(
+                "activation_path_unavailable", "The configured backend path cannot be inspected."
+            ) from exc
+        if stat.S_ISLNK(details.st_mode):
+            raise StorageGroupError(
+                "activation_path_symlink", "The configured backend path contains a symbolic link."
+            )
+    try:
+        details = Path(path).stat()
+        usage = os.statvfs(path)
+    except OSError as exc:
+        raise StorageGroupError(
+            "activation_path_unavailable", "The configured backend path cannot be inspected."
+        ) from exc
+    if not stat.S_ISDIR(details.st_mode):
+        raise StorageGroupError(
+            "activation_path_not_directory", "The configured backend path is not a directory."
+        )
+    source = _mount_source_for(path)
+    if source is None:
+        raise StorageGroupError(
+            "activation_exact_mount_required",
+            "Activation requires the backend path to be an exact mounted filesystem.",
+        )
+    if expected_kernel_path is not None:
+        identity_match = _source_matches_device(source, expected_kernel_path)
+        identity_basis = "mounted source or its lsblk parent matches the registered kernel device"
+    elif expected_entity_mountpoint is not None:
+        identity_match = path == expected_entity_mountpoint
+        identity_basis = "backend path matches the registered logical-storage mount"
+    else:
+        identity_match = False
+        identity_basis = "no registered device or logical-storage mount was available"
+    total = usage.f_blocks * usage.f_frsize
+    free = usage.f_bavail * usage.f_frsize
+    return {
+        "path": path,
+        "filesystem_device": details.st_dev,
+        "mount_source": source,
+        "exact_mount": True,
+        "identity_match": identity_match,
+        "identity_basis": identity_basis,
+        "total_bytes": total,
+        "free_bytes": free,
+    }
+
+
+def build_backend_activation_plan(
+    session: Session,
+    *,
+    group_id: str,
+    backend_id: str,
+) -> dict[str, Any]:
+    group = session.get(StorageGroup, group_id)
+    backend = session.get(StorageBackend, backend_id)
+    if group is None or backend is None or backend.storage_group_id != group.id:
+        raise StorageGroupError("backend_not_found", "The Storage Group backend does not exist.")
+    if backend.lifecycle_state != "assigned":
+        raise StorageGroupError(
+            "backend_not_assigned", "Only an assigned backend can be reviewed for activation."
+        )
+    disk = (
+        session.get(PhysicalDisk, backend.physical_disk_id) if backend.physical_disk_id else None
+    )
+    entity = (
+        session.get(StorageEntity, backend.storage_entity_id)
+        if backend.storage_entity_id
+        else None
+    )
+    path = backend.namespace_path or (entity.mountpoint if entity is not None else None)
+    if path is None:
+        raise StorageGroupError(
+            "activation_path_required", "Configure the backend mount path before activation."
+        )
+    evidence = inspect_backend_activation(
+        path,
+        expected_kernel_path=disk.kernel_path if disk is not None else None,
+        expected_entity_mountpoint=entity.mountpoint if entity is not None else None,
+    )
+    blockers: list[dict[str, str]] = []
+    if not evidence["identity_match"]:
+        blockers.append(
+            {
+                "code": "activation_identity_mismatch",
+                "message": (
+                    "The mounted filesystem cannot be proven to belong to the assigned stable "
+                    "storage identity."
+                ),
+            }
+        )
+    health = disk.health_state if disk is not None else "not_reported"
+    if health == "critical":
+        blockers.append(
+            {
+                "code": "activation_health_critical",
+                "message": "A disk reporting critical health cannot enter active placement.",
+            }
+        )
+    document: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "storage.backend.activate",
+        "storage_group_id": group.id,
+        "storage_group_namespace": group.namespace_path,
+        "backend_id": backend.id,
+        "stable_identity": backend.stable_identity,
+        "lifecycle_state": backend.lifecycle_state,
+        "health": health,
+        "evidence": evidence,
+        "blockers": blockers,
+        "ready": not blockers,
+    }
+    # Free space is shown to the operator but is not an identity property and
+    # can legitimately change between review and apply. Bind activation to the
+    # stable mount/device evidence instead of making ordinary filesystem writes
+    # invalidate an otherwise safe review.
+    hashed_evidence = {key: value for key, value in evidence.items() if key != "free_bytes"}
+    document["plan_sha256"] = document_hash({**document, "evidence": hashed_evidence})
+    return document
+
+
+def activate_backend(
+    session: Session,
+    *,
+    group_id: str,
+    backend_id: str,
+    plan_sha256: str,
+    principal: Principal,
+    reason: str | None,
+) -> StorageBackend:
+    plan = build_backend_activation_plan(session, group_id=group_id, backend_id=backend_id)
+    if plan["plan_sha256"] != plan_sha256:
+        raise StorageGroupError(
+            "activation_plan_changed",
+            "The mounted-storage evidence changed; review activation again.",
+        )
+    if not plan["ready"]:
+        raise StorageGroupError(
+            "activation_blocked", "The backend failed its activation safety review."
+        )
+    backend = transition_backend(
+        session,
+        group_id=group_id,
+        backend_id=backend_id,
+        target_state="active",
+        principal=principal,
+        reason=reason,
+    )
+    backend.config_json = {
+        **backend.config_json,
+        "activation": {
+            "plan_sha256": plan_sha256,
+            "verified_at": datetime.now(UTC).isoformat(),
+            "evidence": plan["evidence"],
+        },
+    }
+    session.flush()
+    return backend
 
 
 def normalize_namespace(value: str) -> str:
