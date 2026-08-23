@@ -102,7 +102,7 @@ jobs:
       - run: uv sync --project backend --locked --all-groups
       - name: Install disposable filesystem and storage-stack tools
         run: sudo apt-get update && sudo apt-get install -y acl e2fsprogs jq mdadm snapraid xfsprogs zfsutils-linux
-      - name: Validate ACLs, MD RAID6, existing-ZFS expansion, and SnapRAID on test-created loops
+      - name: Validate ACLs, array replacement, expansion, and SnapRAID on test-created loops
         run: |
           sudo touch /.hoardarr-disposable-runner
           sudo modprobe loop
@@ -116,13 +116,19 @@ jobs:
             dist/validation/zfs-expansion.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .journal_state == "succeeded" and .parity_state == "current" and .recovered_sha256 == .expected_sha256 and .stable_alias_partition_used and .command_order == ["snapraid:status", "snapraid:fix", "snapraid:check", "snapraid:sync"]' \
             dist/validation/snapraid-replacement.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .provider == "linux_md" and .journal_state == "succeeded" and (.final_degraded | not) and .target_identity_before == .target_identity_after' \
+            dist/validation/md-replacement.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .provider == "zfs" and .journal_state == "succeeded" and (.final_degraded | not) and .target_identity_before == .target_identity_after' \
+            dist/validation/zfs-replacement.json
       - uses: actions/upload-artifact@v4
         with:
           name: storage-expansion-evidence
           path: |
             dist/validation/snapraid-expansion.json
             dist/validation/snapraid-replacement.json
+            dist/validation/md-replacement.json
             dist/validation/zfs-expansion.json
+            dist/validation/zfs-replacement.json
   disposable-block-devices:
     if: github.event_name == 'workflow_dispatch' && inputs.run_extended_self_hosted
     runs-on: [self-hosted, linux, hoardarr-storage-test]
