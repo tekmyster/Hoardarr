@@ -24,6 +24,13 @@ def test_sas_shelf_topology_keeps_bays_speeds_and_drive_identity() -> None:
                 "model": "ST8000NM",
                 "capacity_bytes": 8_000_000_000_000,
                 "identity": {"serial": "ZA123456"},
+                "identity_evidence": {
+                    "scsi_vpd_page_83": {
+                        "quality": "available",
+                        "source": "sysfs vpd_pg83",
+                        "identity_conflict": False,
+                    }
+                },
                 "connection": {
                     "controller_address": "0000:01:00.0",
                     "transport": "sas",
@@ -42,12 +49,26 @@ def test_sas_shelf_topology_keeps_bays_speeds_and_drive_identity() -> None:
                     "phy_loss_of_sync": 3,
                     "phy_reset_problems": 1,
                     "expander_id": "expander-6:0",
+                    "expander_sas_address": "500a098000000424",
+                    "smp": {
+                        "quality": "available",
+                        "source": "smp_discover --summary --dsn",
+                        "expander_sas_address": "500a098000000424",
+                        "phys": [
+                            {
+                                "phy_id": 0,
+                                "attached_sas_address": "5000c50012345678",
+                            }
+                        ],
+                    },
                     "path_id": "end_device-6:0:12",
                     "path_components": ["host6", "port-6:0", "expander-6:0", "end_device-6:0:12"],
                     "slot": "12",
                     "mapping_source": "sysfs enclosure_device",
                     "mapping_confidence": "high",
                     "mapping_last_confirmed_at": "2026-08-23T12:00:00Z",
+                    "target_port_identifier": "5000c50087654321",
+                    "target_port_identifier_type": "naa",
                     "capable_speed_gbps": 12.0,
                     "negotiated_speed_gbps": 6.0,
                 },
@@ -78,6 +99,8 @@ def test_sas_shelf_topology_keeps_bays_speeds_and_drive_identity() -> None:
     assert drive["negotiated_speed_gbps"] == 6.0
     assert drive["mapping_confidence"] == "high"
     assert drive["mapping_source"] == "sysfs enclosure_device"
+    assert drive["identity_evidence_quality"] == "available"
+    assert drive["identity_evidence_source"] == "sysfs vpd_pg83"
     assert {item["protocol"] for item in result["links"]} == {"SAS"}
     assert {item["kind"] for item in result["nodes"]} >= {
         "controller",
@@ -94,6 +117,14 @@ def test_sas_shelf_topology_keeps_bays_speeds_and_drive_identity() -> None:
     assert phy["disparity_errors"] == 7
     assert phy["loss_of_sync"] == 3
     assert phy["reset_problems"] == 1
+    path = next(item for item in result["nodes"] if item["kind"] == "path")
+    assert path["target_port_identifier"] == "5000c50087654321"
+    assert path["target_port_identifier_type"] == "naa"
+    expander = next(item for item in result["nodes"] if item["kind"] == "expander")
+    assert expander["sas_address"] == "500a098000000424"
+    assert expander["smp_quality"] == "available"
+    assert expander["smp_phy_count"] == 1
+    assert expander["smp_attached_phy_count"] == 1
     assert any(
         item["source"].startswith("port:") and item["target"].startswith("phy:")
         for item in result["links"]

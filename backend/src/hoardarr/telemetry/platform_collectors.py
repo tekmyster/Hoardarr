@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hoardarr.hardware.providers import ProviderError, parse_ses
 from hoardarr.telemetry.collectors import ResetSafeCounterRates, _health_value, _reading
 from hoardarr.telemetry.samples import EntityReading, MetricReading
 
@@ -164,65 +165,29 @@ def read_sas_phys(sys_root: Path) -> list[dict[str, Any]]:
 
 def parse_ses_metrics(output: str) -> dict[str, Any]:
     """Normalize explicitly reported sg_ses JSON sensor elements."""
-    if len(output) > MAX_PROVIDER_OUTPUT:
-        raise ValueError("SES output is too large")
     try:
-        document = json.loads(output)
-    except json.JSONDecodeError as exc:
-        raise ValueError("SES output is not valid JSON") from exc
-    if not isinstance(document, Mapping) or not isinstance(document.get("elements"), list):
-        raise ValueError("SES elements are missing")
-    temperatures: list[float] = []
-    fans: list[int] = []
-    psu_states: list[str] = []
-    voltages: list[float] = []
-    locate = False
-    fault = False
-    expander_states: list[str] = []
-    slots = 0
-    for raw in document["elements"]:
-        if not isinstance(raw, Mapping):
-            continue
-        kind = str(raw.get("element_type") or "").casefold()
-        status = str(raw.get("status") or "Not reported")[:128]
-        if "temperature" in kind and isinstance(raw.get("temperature_c"), (int, float)):
-            temperatures.append(float(raw["temperature_c"]))
-        elif "cooling" in kind and isinstance(raw.get("speed_rpm"), (int, float)):
-            fans.append(max(0, int(raw["speed_rpm"])))
-        elif "power supply" in kind:
-            psu_states.append(status)
-        elif "voltage" in kind and isinstance(raw.get("voltage_v"), (int, float)):
-            voltages.append(float(raw["voltage_v"]))
-        elif "expander" in kind:
-            expander_states.append(status)
-        elif kind in {"array device slot", "device slot"}:
-            slots += 1
-            locate = locate or raw.get("identify") is True
-            fault = fault or raw.get("fault") is True
-    descriptor = document.get("enclosure_descriptor")
-    logical_id = document.get("enclosure_logical_identifier") or document.get(
-        "primary_enclosure_logical_identifier"
-    )
-    if (
-        not isinstance(logical_id, str)
-        or re.fullmatch(r"(?:0x|naa\.)?[0-9A-Fa-f]{16,64}", logical_id) is None
-    ):
-        logical_id = None
+        parsed = parse_ses(output)["enclosures"][0]
+    except (ProviderError, IndexError, KeyError) as exc:
+        raise ValueError("SES elements are missing or invalid") from exc
     return {
-        "id": logical_id.casefold() if logical_id else None,
-        "descriptor": str(descriptor)[:256]
-        if isinstance(descriptor, str) and descriptor
-        else "Not reported",
-        "health": str(document.get("status") or "Not reported")[:128],
-        "temperature_c": max(temperatures) if temperatures else None,
-        "fan_rpm": max(fans) if fans else None,
-        "fan_count": len(fans),
-        "psu_states": psu_states,
-        "voltages": voltages,
-        "locate": locate,
-        "fault": fault,
-        "expander_states": expander_states,
-        "slot_count": slots,
+        "id": parsed["id"] if parsed["id"] != "Not reported" else None,
+        "descriptor": parsed["descriptor"],
+        "health": parsed["health"],
+        "temperature_c": (
+            parsed["temperature_c"] if parsed["temperature_c"] != "Not reported" else None
+        ),
+        "fan_rpm": parsed["fan_rpm"] if parsed["fan_rpm"] != "Not reported" else None,
+        "fan_count": parsed["fan_count"] if parsed["fan_count"] != "Not reported" else 0,
+        "psu_states": (
+            parsed["power_supplies"] if parsed["power_supplies"] != "Not reported" else []
+        ),
+        "voltages": parsed["voltages"] if parsed["voltages"] != "Not reported" else [],
+        "locate": parsed["locate"],
+        "fault": parsed["fault"],
+        "expander_states": parsed["expanders"]
+        if parsed["expanders"] != "Not reported"
+        else [],
+        "slot_count": len(parsed["slots"]),
     }
 
 
@@ -611,7 +576,11 @@ class LinuxStoragePlatformCollector:
             generic = next(iter(enclosure.glob("device/scsi_generic/*")), None)
             if generic is None:
                 continue
-            output = _command("sg_ses", ["--json", f"/dev/{generic.name}"], timeout=15)
+            output = _command(
+                "sg_ses",
+                ["--join", "--json", "--readonly", f"/dev/{generic.name}"],
+                timeout=15,
+            )
             if output is None:
                 continue
             try:

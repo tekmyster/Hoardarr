@@ -55,6 +55,18 @@ def write_sysfs_value(root: pathlib.Path, relative: str, value: str) -> None:
     path.write_text(value + "\n", encoding="utf-8")
 
 
+def vpd_page(page_code: int, payload: bytes) -> bytes:
+    return bytes((0, page_code)) + len(payload).to_bytes(2, "big") + payload
+
+
+def vpd_designator(
+    value: bytes, *, association: int, designator_type: int, protocol: int = 6
+) -> bytes:
+    return bytes(
+        ((protocol << 4) | 1, 0x80 | (association << 4) | designator_type, 0, len(value))
+    ) + value
+
+
 class HardwareFixtureTests(unittest.TestCase):
     def test_dell_oem_generation_resolution_precedes_generic_drivers(self) -> None:
         payload, _ = detect_fixture("dell-generations.json")
@@ -174,6 +186,7 @@ class HardwareFixtureTests(unittest.TestCase):
                 "enclosure_status": None,
                 "enclosure_vendor": None,
                 "expander_id": None,
+                "expander_sas_address": None,
                 "hba_port": None,
                 "minimum_speed_gbps": None,
                 "mapping_confidence": "unknown",
@@ -192,6 +205,14 @@ class HardwareFixtureTests(unittest.TestCase):
                 "presentation": "hyperv-scsi",
                 "protocol": "uas",
                 "slot": None,
+                "smp": {
+                    "quality": "not_reported",
+                    "source": "Not reported",
+                    "expander_sas_address": None,
+                    "phys": [],
+                },
+                "target_port_identifier": None,
+                "target_port_identifier_type": None,
                 "transport": "usb",
                 "transport_host": None,
             },
@@ -493,6 +514,74 @@ class LiveSysfsTests(unittest.TestCase):
         self.assertEqual(power_on_hours["status"], "unavailable")
         self.assertIsNone(power_on_hours["value"])
         self.assertIn("attachment duration", power_on_hours["reason"])
+
+    def test_scsi_vpd_identity_and_target_port_are_decoded_from_read_only_sysfs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            disk = root / "class/block/sda"
+            write_sysfs_value(root, "class/block/sda/dev", "8:0")
+            write_sysfs_value(root, "class/block/sda/size", "2048")
+            write_sysfs_value(root, "class/block/sda/device/type", "0")
+            write_sysfs_value(root, "class/block/sda/device/vendor", "SEAGATE")
+            write_sysfs_value(root, "class/block/sda/device/model", "ST8000NM")
+            logical_unit = bytes.fromhex("5000c50012345678")
+            target_port = bytes.fromhex("5000c50087654321")
+            page_83 = vpd_page(
+                0x83,
+                vpd_designator(logical_unit, association=0, designator_type=3)
+                + vpd_designator(target_port, association=1, designator_type=3),
+            )
+            (disk / "device/vpd_pg83").write_bytes(page_83)
+            (disk / "device/vpd_pg80").write_bytes(vpd_page(0x80, b"SANITIZED-001"))
+
+            result = invoke_detector(sysfs_root=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            discovered = json.loads(result.stdout)["disks"][0]
+
+        self.assertEqual(discovered["id"], "wwn:5000c50012345678")
+        self.assertEqual(discovered["identity"]["serial"], "SANITIZED-001")
+        self.assertEqual(discovered["identity"]["wwn"], "5000c50012345678")
+        evidence = discovered["identity_evidence"]["scsi_vpd_page_83"]
+        self.assertEqual(evidence["quality"], "available")
+        self.assertFalse(evidence["identity_conflict"])
+        self.assertEqual(evidence["logical_unit_identifier_type"], "naa")
+        self.assertEqual(evidence["target_port_identifier"], "5000c50087654321")
+        self.assertEqual(
+            discovered["connection"]["target_port_identifier"], "5000c50087654321"
+        )
+
+    def test_malformed_or_conflicting_scsi_vpd_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            disk = root / "class/block/sda"
+            write_sysfs_value(root, "class/block/sda/dev", "8:0")
+            write_sysfs_value(root, "class/block/sda/size", "2048")
+            write_sysfs_value(root, "class/block/sda/device/type", "0")
+            write_sysfs_value(root, "class/block/sda/device/vendor", "SEAGATE")
+            write_sysfs_value(root, "class/block/sda/device/model", "ST8000NM")
+            write_sysfs_value(root, "class/block/sda/device/wwid", "naa.5000c500aaaaaaaa")
+            conflicting = vpd_page(
+                0x83,
+                vpd_designator(
+                    bytes.fromhex("5000c500bbbbbbbb"), association=0, designator_type=3
+                ),
+            )
+            (disk / "device/vpd_pg83").write_bytes(conflicting)
+            (disk / "device/vpd_pg80").write_bytes(b"\x00\x80\x00\x10truncated")
+
+            result = invoke_detector(sysfs_root=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            discovered = json.loads(result.stdout)["disks"][0]
+
+        self.assertEqual(discovered["id"], "wwn:naa.5000c500aaaaaaaa")
+        self.assertEqual(discovered["identity"]["wwn"], "naa.5000c500aaaaaaaa")
+        self.assertTrue(
+            discovered["identity_evidence"]["scsi_vpd_page_83"]["identity_conflict"]
+        )
+        self.assertEqual(
+            discovered["identity_evidence"]["scsi_vpd_page_80"]["quality"],
+            "temporarily_unavailable",
+        )
 
     def test_hyperv_live_sysfs_filters_unrelated_vmbus_devices(self) -> None:
         fixture = json.loads((FIXTURES / "hyperv-live-sysfs.json").read_text(encoding="utf-8"))

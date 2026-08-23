@@ -13,6 +13,7 @@ from hoardarr.hardware.providers import (
     parse_areca,
     parse_mdadm_detail,
     parse_ses,
+    parse_smp_discover,
     parse_snapraid_status,
     parse_ssacli,
     parse_storcli,
@@ -91,7 +92,8 @@ def test_vendor_and_enclosure_parsers_keep_missing_values_explicit() -> None:
         '{"element_type":"Voltage sensor","voltage_v":12.1},'
         '{"element_type":"SAS expander","status":"OK"},'
         '{"element_type":"Array device slot","slot":4,"status":"OK",'
-        '"identify":false,"fault":false}]}'
+        '"identify":false,"fault":false,"sas_address":"0x5000c50012345678",'
+        '"attached_sas_address":"0x500a098000000424"}]}'
     )
     enclosure = ses["enclosures"][0]
     assert enclosure["slots"][0]["slot"] == 4
@@ -101,6 +103,87 @@ def test_vendor_and_enclosure_parsers_keep_missing_values_explicit() -> None:
     assert enclosure["power_supplies"] == ["healthy"]
     assert enclosure["voltages"] == [12.1]
     assert enclosure["expanders"] == ["healthy"]
+    assert enclosure["slots"][0]["sas_address"] == "5000c50012345678"
+    assert enclosure["slots"][0]["attached_sas_address"] == "500a098000000424"
+    assert enclosure["slots"][0]["mapping_confidence"] == "high"
+
+
+def test_joined_sg_ses_json_correlates_aes_slot_sas_address() -> None:
+    result = parse_ses(
+        json.dumps(
+            {
+                "enclosure_status_diagnostic_page": {
+                    "primary_enclosure_logical_identifier": "0x500a098000000424",
+                    "enclosure_descriptor": "DS424IOM6",
+                    "element_type_list": [
+                        {
+                            "element_type": {"i": 23, "meaning": "Array device slot"},
+                            "individual_status_element_list": [
+                                {
+                                    "status_code": {"i": 1, "meaning": "OK"},
+                                    "element_index": 3,
+                                    "additional_element_status_descriptor": {
+                                        "device_slot_number": 3,
+                                        "phy_descriptor_list": [
+                                            {
+                                                "attached_sas_address": "0x500a098000000424",
+                                                "sas_address": "0x5000c50012345678",
+                                            }
+                                        ],
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    enclosure = result["enclosures"][0]
+    assert enclosure["id"] == "0x500a098000000424"
+    assert enclosure["descriptor"] == "DS424IOM6"
+    assert enclosure["slots"] == [
+        {
+            "slot": 3,
+            "status": "healthy",
+            "identify": NOT_REPORTED,
+            "fault": NOT_REPORTED,
+            "sas_address": "5000c50012345678",
+            "attached_sas_address": "500a098000000424",
+            "mapping_source": "SES Additional Element Status SAS address",
+            "mapping_confidence": "high",
+        }
+    ]
+
+
+def test_smp_discover_parser_preserves_reported_phy_state_and_slot() -> None:
+    result = parse_smp_discover(
+        "Expander at SAS address: 500a098000000424\n"
+        " phy 0:D 12 Gbps attached:[5000c50012345678:01 t(SSP)] dsn=3\n"
+        " phy 1:T reset problem attached:[0000000000000000:00]\n"
+        " phy 2:S disabled\n"
+    )
+    assert result["expander_sas_address"] == "500a098000000424"
+    assert result["phys"][0] == {
+        "phy_id": 0,
+        "routing": "D",
+        "state": "attached",
+        "negotiated_rate_gbps": 12.0,
+        "attached_sas_address": "5000c50012345678",
+        "attached_phy_id": 1,
+        "attached_details": "t(SSP)",
+        "device_slot_number": 3,
+    }
+    assert result["phys"][1]["state"] == "reset_problem"
+    assert result["phys"][1]["attached_sas_address"] is None
+    assert result["phys"][2]["state"] == "disabled"
+
+
+def test_smp_discover_parser_rejects_unidentified_or_oversized_output() -> None:
+    with pytest.raises(ProviderError, match="identity"):
+        parse_smp_discover("phy 0:D disabled")
+    with pytest.raises(ProviderError, match="exceeded"):
+        parse_smp_discover("x" * (2 * 1024 * 1024 + 1))
 
 
 def test_snapraid_status_never_reports_stale_parity_as_current() -> None:

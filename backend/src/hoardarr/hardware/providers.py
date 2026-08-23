@@ -37,6 +37,7 @@ PROVIDERS = (
     ProviderDefinition("zpool", "zfs", ("zpool",), "pool.health"),
     ProviderDefinition("snapraid", "snapraid", ("snapraid",), "pool.health"),
     ProviderDefinition("ses", "generic_ses", ("sg_ses",), "enclosure.health"),
+    ProviderDefinition("smp", "generic_sas_expander", ("smp_discover",), "enclosure.topology"),
 )
 
 
@@ -147,6 +148,89 @@ def _bounded_text(output: str, provider: str, *, limit: int = 4 * 1024 * 1024) -
     return output
 
 
+def _ses_scalar(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    for key in ("meaning", "name", "value", "i", "hex"):
+        if key in value and not isinstance(value[key], (Mapping, list)):
+            return value[key]
+    return None
+
+
+def _ses_walk(value: Any) -> list[Mapping[str, Any]]:
+    """Return a bounded view of mappings in untrusted sg_ses JSON."""
+
+    result: list[Mapping[str, Any]] = []
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack and len(result) < 16_384:
+        current, depth = stack.pop()
+        if depth > 16:
+            continue
+        if isinstance(current, Mapping):
+            result.append(current)
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current[:4096])
+    return result
+
+
+def _ses_nested(item: Mapping[str, Any], *keys: str) -> Any:
+    wanted = {key.casefold() for key in keys}
+    for candidate in _ses_walk(item):
+        for key, value in candidate.items():
+            if str(key).casefold() in wanted:
+                scalar = _ses_scalar(value)
+                if scalar is not None:
+                    return scalar
+    return None
+
+
+def _ses_elements(document: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Accept Hoardarr-normalized fixtures and joined sg_ses JSON structures."""
+
+    direct = document.get("elements")
+    if isinstance(direct, list):
+        return [dict(item) for item in direct[:4096] if isinstance(item, Mapping)]
+    result: list[dict[str, Any]] = []
+    for group in _ses_walk(document):
+        element_type = _ses_scalar(group.get("element_type"))
+        if not isinstance(element_type, str):
+            continue
+        individual = group.get("individual_status_element_list")
+        records = individual if isinstance(individual, list) else [group]
+        for record in records[:4096]:
+            if not isinstance(record, Mapping):
+                continue
+            result.append(
+                {
+                    "element_type": element_type,
+                    "status": _ses_nested(record, "status", "status_code"),
+                    "slot": _ses_nested(
+                        record, "slot", "device_slot_number", "element_index"
+                    ),
+                    "identify": _ses_nested(record, "identify", "ident"),
+                    "fault": _ses_nested(record, "fault", "fault_requested"),
+                    "temperature_c": _ses_nested(
+                        record, "temperature_c", "temperature", "temperature_in_celsius"
+                    ),
+                    "speed_rpm": _ses_nested(record, "speed_rpm", "actual_speed"),
+                    "voltage_v": _ses_nested(record, "voltage_v", "voltage"),
+                    "sas_address": _ses_nested(record, "sas_address"),
+                    "attached_sas_address": _ses_nested(record, "attached_sas_address"),
+                }
+            )
+    # Joined pages can repeat a type group. Keep bounded unique records without
+    # treating absence as a zero-valued sensor.
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in result:
+        key = json.dumps(item, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
 def parse_ssacli(output: str) -> dict[str, Any]:
     text = _bounded_text(output, "ssacli")
     controllers: list[dict[str, Any]] = []
@@ -214,8 +298,8 @@ def parse_ses(output: str) -> dict[str, Any]:
     document = _json_document(output, "sg_ses")
     if not isinstance(document, Mapping):
         raise ProviderError("output_invalid", "sg_ses enclosure output is incomplete")
-    elements = document.get("elements")
-    if not isinstance(elements, list):
+    elements = _ses_elements(document)
+    if not elements and not isinstance(document.get("elements"), list):
         raise ProviderError("output_invalid", "sg_ses enclosure elements are missing")
     slots: list[dict[str, Any]] = []
     temperatures: list[float] = []
@@ -234,6 +318,18 @@ def parse_ses(output: str) -> dict[str, Any]:
             slot = item.get("slot")
             identify = item.get("identify")
             slot_fault = item.get("fault")
+            sas_address_value = str(item.get("sas_address") or "")
+            sas_address = (
+                sas_address_value.removeprefix("0x").casefold()
+                if re.fullmatch(r"(?:0x)?[0-9A-Fa-f]{16}", sas_address_value)
+                else None
+            )
+            attached_value = str(item.get("attached_sas_address") or "")
+            attached_sas_address = (
+                attached_value.removeprefix("0x").casefold()
+                if re.fullmatch(r"(?:0x)?[0-9A-Fa-f]{16}", attached_value)
+                else None
+            )
             locate = locate or identify is True
             fault = fault or slot_fault is True
             slots.append(
@@ -242,6 +338,14 @@ def parse_ses(output: str) -> dict[str, Any]:
                     "status": status,
                     "identify": identify if isinstance(identify, bool) else NOT_REPORTED,
                     "fault": slot_fault if isinstance(slot_fault, bool) else NOT_REPORTED,
+                    "sas_address": sas_address or NOT_REPORTED,
+                    "attached_sas_address": attached_sas_address or NOT_REPORTED,
+                    "mapping_source": (
+                        "SES Additional Element Status SAS address"
+                        if sas_address is not None
+                        else NOT_REPORTED
+                    ),
+                    "mapping_confidence": "high" if sas_address is not None else "unknown",
                 }
             )
         elif "temperature" in element_type and isinstance(
@@ -256,9 +360,17 @@ def parse_ses(output: str) -> dict[str, Any]:
             voltages.append(float(item["voltage_v"]))
         elif "expander" in element_type:
             expanders.append(status)
-    descriptor = document.get("enclosure_descriptor")
-    logical_id = document.get("enclosure_logical_identifier") or document.get(
-        "primary_enclosure_logical_identifier"
+    descriptor = document.get("enclosure_descriptor") or _ses_nested(
+        document, "enclosure_descriptor", "enclosure_name"
+    )
+    logical_id = (
+        document.get("enclosure_logical_identifier")
+        or document.get("primary_enclosure_logical_identifier")
+        or _ses_nested(
+            document,
+            "enclosure_logical_identifier",
+            "primary_enclosure_logical_identifier",
+        )
     )
     if not isinstance(logical_id, str) or re.fullmatch(
         r"(?:0x|naa\.)?[0-9A-Fa-f]{16,64}", logical_id
@@ -286,6 +398,69 @@ def parse_ses(output: str) -> dict[str, Any]:
                 "expanders": expanders or NOT_REPORTED,
             }
         ],
+    }
+
+
+def parse_smp_discover(output: str) -> dict[str, Any]:
+    """Normalize the documented smp_discover summary format without guessing phys."""
+
+    text = _bounded_text(output, "smp_discover", limit=2 * 1024 * 1024)
+    expander_match = re.search(
+        r"(?:expander|SMP\s+target)[^\r\n]*?\b(?:0x)?([0-9A-Fa-f]{16})\b", text, re.I
+    )
+    if expander_match is None:
+        raise ProviderError("output_invalid", "smp_discover expander identity is missing")
+    phys: list[dict[str, Any]] = []
+    for raw in text.splitlines()[:4096]:
+        phy_match = re.match(r"^\s*phy\s+(\d+)\s*:\s*([DSTU])?\s*(.*)$", raw, re.I)
+        if phy_match is None:
+            continue
+        phy_id = int(phy_match.group(1))
+        if phy_id > 254:
+            continue
+        detail = phy_match.group(3).strip()
+        rate_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*Gbps\b", detail, re.I)
+        attached_match = re.search(
+            r"attached:\[([0-9A-Fa-f]{16}):([0-9A-Fa-f]{2})\b([^\]]*)\]", detail, re.I
+        )
+        slot_match = re.search(r"\bdsn=(\d{1,3})\b", detail, re.I)
+        state = next(
+            (
+                value
+                for value in ("disabled", "reset problem", "spinup hold")
+                if value in detail.casefold()
+            ),
+            "attached" if attached_match is not None else "not_reported",
+        )
+        attached_address = attached_match.group(1).casefold() if attached_match else None
+        phys.append(
+            {
+                "phy_id": phy_id,
+                "routing": (phy_match.group(2) or "Not reported").upper(),
+                "state": state.replace(" ", "_"),
+                "negotiated_rate_gbps": float(rate_match.group(1)) if rate_match else None,
+                "attached_sas_address": (
+                    attached_address
+                    if attached_address and attached_address != "0000000000000000"
+                    else None
+                ),
+                "attached_phy_id": int(attached_match.group(2), 16)
+                if attached_match
+                else None,
+                "attached_details": attached_match.group(3).strip()[:256]
+                if attached_match
+                else None,
+                "device_slot_number": (
+                    int(slot_match.group(1))
+                    if slot_match and int(slot_match.group(1)) < 255
+                    else None
+                ),
+            }
+        )
+    return {
+        "provider": "smp_discover",
+        "expander_sas_address": expander_match.group(1).casefold(),
+        "phys": sorted(phys, key=lambda item: int(item["phy_id"])),
     }
 
 

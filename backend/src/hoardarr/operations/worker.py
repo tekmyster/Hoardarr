@@ -40,6 +40,7 @@ from hoardarr.db.models import (
 )
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError, run_hardware_detector
+from hoardarr.hardware.smp import enrich_smp_topology
 from hoardarr.integrations.media import (
     MEDIA_PRODUCTS,
     correlate_library_storage,
@@ -959,6 +960,7 @@ def _execute_hardware(
         LOGGER.error("Hardware detector failed: %s", exc)
         raise WorkFailure("hardware_scan_failed", "Hardware scan could not be completed") from exc
     payload = enrich_maintenance_capabilities(payload)
+    payload = enrich_smp_topology(payload)
     return HardwareExecution(payload=payload, sha256=document_hash(payload))
 
 

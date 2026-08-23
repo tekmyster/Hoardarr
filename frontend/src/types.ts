@@ -162,6 +162,25 @@ export interface StorageTopologyNode {
   disparity_errors?: number | null;
   loss_of_sync?: number | null;
   reset_problems?: number | null;
+  target_port_identifier?: string | null;
+  target_port_identifier_type?: string | null;
+  identity_evidence_quality?: string | null;
+  identity_evidence_source?: string | null;
+  identity_evidence_conflict?: boolean;
+  smp_quality?: string | null;
+  smp_source?: string | null;
+  smp_phy_count?: number;
+  smp_attached_phy_count?: number;
+  smp_phys?: Array<{
+    phy_id: number;
+    routing: string | null;
+    state: string | null;
+    negotiated_rate_gbps: number | null;
+    attached_sas_address: string | null;
+    attached_phy_id: number | null;
+    attached_details: string | null;
+    device_slot_number: number | null;
+  }>;
   system_disk?: boolean;
 }
 

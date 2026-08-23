@@ -130,7 +130,7 @@ def test_sas_transport_and_ses_parsers_preserve_reported_values(tmp_path: Path) 
     )
     assert ses["temperature_c"] == 42
     assert ses["fan_rpm"] == 8200
-    assert ses["psu_states"] == ["OK"]
+    assert ses["psu_states"] == ["healthy"]
     assert ses["locate"] is True
     assert ses["id"] == "0x5000c50012345678"
     descriptor_only = parse_ses_metrics(

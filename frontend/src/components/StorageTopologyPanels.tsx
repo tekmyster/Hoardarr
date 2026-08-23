@@ -107,6 +107,7 @@ function DriveNode({ node, actionable, managed, onDriveAction, onManageLifecycle
       <div><dt>Enclosure</dt><dd><code>{node.enclosure_id ?? "Not reported"}</code></dd></div>
       <div><dt>Bay</dt><dd>{node.slot ?? "Not reported"}</dd></div>
       <div><dt>Bay mapping</dt><dd>{mappingLabel(node.mapping_confidence)}{node.mapping_source ? ` · ${node.mapping_source}` : ""}</dd></div>
+      <div><dt>Stable-ID evidence</dt><dd>{node.identity_evidence_quality === "available" ? `VPD confirmed · ${node.identity_evidence_source ?? "SCSI VPD"}` : node.identity_evidence_quality === "temporarily_unavailable" ? "VPD unreadable" : "Not reported"}</dd></div>
       <div><dt>Last confirmed</dt><dd>{node.mapping_last_confirmed_at ? new Date(node.mapping_last_confirmed_at).toLocaleString() : "Not reported"}</dd></div>
       <div><dt>Capable</dt><dd>{node.capable_speed_gbps == null ? "Not reported" : `${node.capable_speed_gbps} Gb/s`}</dd></div>
       <div><dt>Negotiated</dt><dd>{node.negotiated_speed_gbps == null ? "Not reported" : `${node.negotiated_speed_gbps} Gb/s`}</dd></div>
@@ -114,6 +115,7 @@ function DriveNode({ node, actionable, managed, onDriveAction, onManageLifecycle
       <div><dt>Use</dt><dd>{node.system_disk ? "System" : fillPercent(node) == null ? "Not reported" : `${fillPercent(node)}%`}</dd></div>
     </dl>
     {belowCapability && <p className="inline-notice warning">This link is operating at {node.negotiated_speed_gbps} Gb/s while the reported path capability is {node.capable_speed_gbps} Gb/s. A lower-rate drive or intermediate link can make this normal.</p>}
+    {node.identity_evidence_conflict && <p className="inline-notice warning">SCSI identity sources disagree. Hoardarr will not use the conflicting value to authorize storage changes.</p>}
     {node.system_disk !== true && <div className="button-row topology-drive-actions" aria-label={`Actions for ${node.label}`}>
       {managed
         ? <button type="button" className="button button-secondary" onClick={onManageLifecycle}>Manage lifecycle</button>
@@ -137,6 +139,15 @@ function PhysicalNode({ node }: { node: StorageTopologyNode }) {
       <div><dt>Disparity errors</dt><dd>{node.disparity_errors ?? "Not reported"}</dd></div>
       <div><dt>Loss of sync</dt><dd>{node.loss_of_sync ?? "Not reported"}</dd></div>
       <div><dt>Reset problems</dt><dd>{node.reset_problems ?? "Not reported"}</dd></div>
+    </dl>}
+    {node.kind === "path" && <dl>
+      <div><dt>Target port identity</dt><dd><code>{node.target_port_identifier ?? "Not reported"}</code></dd></div>
+      <div><dt>Identity type</dt><dd>{node.target_port_identifier_type?.toUpperCase() ?? "Not reported"}</dd></div>
+    </dl>}
+    {node.kind === "expander" && <dl>
+      <div><dt>Expander SAS address</dt><dd><code>{node.sas_address ?? "Not reported"}</code></dd></div>
+      <div><dt>SMP discovery</dt><dd>{node.smp_quality === "available" ? `${node.smp_attached_phy_count ?? 0} attached of ${node.smp_phy_count ?? 0} reported PHYs` : node.smp_quality === "temporarily_unavailable" ? "Temporarily unavailable" : "Not reported"}</dd></div>
+      <div><dt>Source</dt><dd>{node.smp_source ?? "Not reported"}</dd></div>
     </dl>}
   </article>;
 }

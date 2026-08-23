@@ -111,11 +111,18 @@ The discovery service follows this sequence:
    - `0x0a` Additional Element Status (AES) for device-slot numbers, SAS
      addresses, and phys.
 
-3. Read disk identity and target-port designators from SCSI VPD and the kernel
-   SAS transport.
+3. Read the kernel-cached binary `vpd_pg80` and `vpd_pg83` sysfs attributes.
+   Hoardarr decodes only bounded, complete SPC descriptors, distinguishes
+   logical-unit association from target-port association, and does not execute
+   an extra inquiry command for each disk. A logical-unit NAA/EUI may fill a
+   missing WWN; it never silently replaces a conflicting identity already
+   reported by udev.
 4. Prefer the Linux enclosure-class device link when it is present, then
-   correlate AES SAS addresses. Use `smp_discover --dsn` to cross-check the
-   expander phy, attached SAS address, and device-slot number.
+   correlate AES SAS addresses. Run the bounded, structured
+   `smp_discover --summary --dsn /dev/bsg/expander-N:N` read once per discovered
+   expander to cross-check the expander identity, phy, attached SAS address,
+   negotiated link rate, and reported device-slot number. Absent BSG access is
+   **Not reported**; timeout or malformed output is **Temporarily unavailable**.
 5. Collapse redundant enclosure-service endpoints by logical enclosure ID while
    retaining the health and route of every endpoint.
 6. Publish the slot only with its provenance. A model profile may translate
@@ -127,10 +134,12 @@ slot/device links and locate/fault attributes. The raw SES result remains the
 source of truth because the kernel enclosure `slot` attribute falls back to an
 element number when a real device-slot number is absent.
 
-The initial `sg_ses` adapter uses JSON where the installed version supports it
-and retains a raw diagnostic-page capture for troubleshooting. Human-readable
-output is not a stable API. Captured `sg_ses --page=all -HHHH` fixtures allow
-decoder regression tests without requiring the shelf in CI.
+The live `sg_ses` adapter executes the allowlisted read-only command
+`sg_ses --join --json --readonly /dev/sgN` and recursively normalizes joined
+status and Additional Element Status facts. Human-readable output is not a
+stable API. Bounded joined-JSON and malformed-output fixtures allow decoder
+regression tests without requiring the shelf in CI. Unknown or incomplete
+slot/SAS associations remain **Not reported** instead of becoming a guessed bay.
 
 References:
 
@@ -185,7 +194,8 @@ can conflict. The SES logical ID or shelf UID is canonical. IOM A and IOM B are
 kept as independent paths so a partial cabling, IOM, or expander failure remains
 visible.
 
-The live SES health provider runs bounded, read-only `sg_ses --json` probes at
+The live SES health provider runs bounded, read-only
+`sg_ses --join --json --readonly` probes at
 the slow hardware-health cadence. It exposes only reported enclosure health,
 temperature, fan RPM/count, PSU state, voltage, locate/fault state, expander
 state, slots, and independent enclosure path count. A display descriptor is not

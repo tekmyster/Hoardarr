@@ -56,8 +56,9 @@ def test_enclosure_health_collects_reported_ses_sensors_and_fails_closed(
             '{"element_type":"Voltage sensor","voltage_v":12.0},'
             '{"element_type":"SAS expander","status":"OK"},'
             '{"element_type":"Array device slot","slot":3,"status":"OK",'
-            '"identify":true,"fault":false}]}'
-            if name == "sg_ses" and arguments == ["--json", "/dev/sg4"]
+            '"identify":true,"fault":false,"sas_address":"5000c50012345678"}]}'
+            if name == "sg_ses"
+            and arguments == ["--join", "--json", "--readonly", "/dev/sg4"]
             else None
         ),
     )
@@ -71,7 +72,18 @@ def test_enclosure_health_collects_reported_ses_sensors_and_fails_closed(
             "id": "0x500a098000000424",
             "descriptor": "DS424IOM6",
             "health": "healthy",
-            "slots": [{"slot": 3, "status": "healthy", "identify": True, "fault": False}],
+            "slots": [
+                {
+                    "slot": 3,
+                    "status": "healthy",
+                    "identify": True,
+                    "fault": False,
+                    "sas_address": "5000c50012345678",
+                    "attached_sas_address": "Not reported",
+                    "mapping_source": "SES Additional Element Status SAS address",
+                    "mapping_confidence": "high",
+                }
+            ],
             "temperature_c": 38.0,
             "fan_rpm": 7600,
             "fan_count": 1,

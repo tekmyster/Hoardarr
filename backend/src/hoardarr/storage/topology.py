@@ -447,6 +447,36 @@ def build_storage_topology(
                         ),
                     }
                 )
+            elif kind == "expander":
+                smp = _mapping(connection.get("smp"))
+                smp_phys = smp.get("phys") if isinstance(smp.get("phys"), list) else []
+                nodes[physical_node_id].update(
+                    {
+                        "sas_address": _text(smp.get("expander_sas_address"))
+                        or _text(connection.get("expander_sas_address")),
+                        "smp_quality": _text(smp.get("quality")) or "not_reported",
+                        "smp_source": _text(smp.get("source")),
+                        "smp_phy_count": len(smp_phys),
+                        "smp_attached_phy_count": sum(
+                            1
+                            for item in smp_phys
+                            if isinstance(item, Mapping)
+                            and _text(item.get("attached_sas_address"))
+                        ),
+                        "smp_phys": smp_phys,
+                    }
+                )
+            elif kind == "path":
+                nodes[physical_node_id].update(
+                    {
+                        "target_port_identifier": _text(
+                            connection.get("target_port_identifier")
+                        ),
+                        "target_port_identifier_type": _text(
+                            connection.get("target_port_identifier_type")
+                        ),
+                    }
+                )
             physical_link_id = f"{physical_parent_id}->{physical_node_id}"
             links.setdefault(
                 physical_link_id,
@@ -461,6 +491,8 @@ def build_storage_topology(
             )
             physical_parent_id = physical_node_id
         disk_identity = _mapping(disk.get("identity"))
+        identity_evidence = _mapping(disk.get("identity_evidence"))
+        vpd_page_83 = _mapping(identity_evidence.get("scsi_vpd_page_83"))
         stable_id = _text(disk.get("id")) or f"disk-{index + 1}"
         disk_id = f"drive:{stable_id}"
         path = _text(disk.get("kernel_path"))
@@ -480,6 +512,9 @@ def build_storage_topology(
             "vendor": vendor,
             "model": model,
             "serial": serial,
+            "identity_evidence_quality": _text(vpd_page_83.get("quality")),
+            "identity_evidence_source": _text(vpd_page_83.get("source")),
+            "identity_evidence_conflict": vpd_page_83.get("identity_conflict") is True,
             "path": path,
             "slot": _text(connection.get("slot")),
             "mapping_source": _text(connection.get("mapping_source")),

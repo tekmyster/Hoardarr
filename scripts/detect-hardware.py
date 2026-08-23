@@ -80,6 +80,7 @@ NON_PHYSICAL_BLOCK_PREFIXES = ("dm-", "fd", "loop", "md", "nbd", "ram", "rbd", "
 HEALTH_STATUSES = {"available", "conflicting", "unavailable"}
 HEALTH_CONFIDENCE = {"high", "medium", "low", "conflicting", "unavailable"}
 MAPPING_CONFIDENCE = {"high", "medium", "low", "unknown"}
+VPD_QUALITY = {"available", "not_reported", "temporarily_unavailable"}
 
 
 class DetectionError(RuntimeError):
@@ -92,6 +93,153 @@ def _read_text(path: pathlib.Path) -> str | None:
     except (OSError, UnicodeError):
         return None
     return value or None
+
+
+def _read_binary(path: pathlib.Path, *, limit: int = 64 * 1024) -> bytes | None:
+    """Read one bounded sysfs binary attribute without opening the block device."""
+
+    try:
+        with path.open("rb") as handle:
+            value = handle.read(limit + 1)
+    except OSError:
+        return None
+    return value if 0 < len(value) <= limit else None
+
+
+_VPD_ASSOCIATIONS = {
+    0: "logical_unit",
+    1: "target_port",
+    2: "target_device",
+}
+_VPD_DESIGNATOR_TYPES = {
+    1: "t10_vendor_id",
+    2: "eui",
+    3: "naa",
+    4: "relative_target_port",
+    5: "target_port_group",
+    6: "logical_unit_group",
+    7: "md5_logical_unit",
+    8: "scsi_name",
+    9: "protocol_specific_port",
+    10: "uuid",
+}
+_VPD_PROTOCOLS = {
+    0: "fibre_channel",
+    5: "iscsi",
+    6: "sas",
+    8: "ata",
+    9: "usb",
+    14: "pcie",
+}
+
+
+def _vpd_identifier(code_set: int, value: bytes) -> str | None:
+    if not value or len(value) > 256:
+        return None
+    if code_set == 1:
+        return value.hex()
+    if code_set not in {2, 3}:
+        return None
+    try:
+        text = value.decode("ascii" if code_set == 2 else "utf-8", errors="strict").strip()
+    except UnicodeError:
+        return None
+    if not text or any(ord(character) < 0x20 for character in text):
+        return None
+    return text[:256]
+
+
+def _parse_vpd_page_83(value: bytes | None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "quality": "not_reported" if value is None else "temporarily_unavailable",
+        "source": "sysfs vpd_pg83",
+        "designators": [],
+        "logical_unit_identifier": None,
+        "logical_unit_identifier_type": None,
+        "target_port_identifier": None,
+        "target_port_identifier_type": None,
+    }
+    if value is None:
+        return result
+    if len(value) < 4 or value[1] != 0x83:
+        return result
+    end = 4 + int.from_bytes(value[2:4], "big")
+    if end != len(value) or end > 64 * 1024:
+        return result
+    designators: list[dict[str, Any]] = []
+    offset = 4
+    while offset < end:
+        if offset + 4 > end:
+            return result
+        descriptor_length = value[offset + 3]
+        descriptor_end = offset + 4 + descriptor_length
+        if descriptor_length == 0 or descriptor_end > end:
+            return result
+        code_set = value[offset] & 0x0F
+        protocol_number = value[offset] >> 4
+        association_number = (value[offset + 1] >> 4) & 0x03
+        designator_number = value[offset + 1] & 0x0F
+        identifier = _vpd_identifier(code_set, value[offset + 4 : descriptor_end])
+        if identifier is not None:
+            designators.append(
+                {
+                    "association": _VPD_ASSOCIATIONS.get(
+                        association_number, f"reserved_{association_number}"
+                    ),
+                    "designator_type": _VPD_DESIGNATOR_TYPES.get(
+                        designator_number, f"reserved_{designator_number}"
+                    ),
+                    "identifier": identifier,
+                    "protocol": _VPD_PROTOCOLS.get(
+                        protocol_number, f"protocol_{protocol_number}"
+                    )
+                    if value[offset + 1] & 0x80
+                    else None,
+                }
+            )
+        offset = descriptor_end
+    if not designators:
+        return result
+    result["quality"] = "available"
+    result["designators"] = designators[:128]
+    for association, field_prefix in (
+        ("logical_unit", "logical_unit"),
+        ("target_port", "target_port"),
+    ):
+        selected = next(
+            (
+                item
+                for kind in ("naa", "eui", "scsi_name", "t10_vendor_id")
+                for item in designators
+                if item["association"] == association and item["designator_type"] == kind
+            ),
+            None,
+        )
+        if selected is not None:
+            result[f"{field_prefix}_identifier"] = selected["identifier"]
+            result[f"{field_prefix}_identifier_type"] = selected["designator_type"]
+    return result
+
+
+def _parse_vpd_page_80(value: bytes | None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "quality": "not_reported" if value is None else "temporarily_unavailable",
+        "source": "sysfs vpd_pg80",
+        "unit_serial": None,
+    }
+    if value is None or len(value) < 4 or value[1] != 0x80:
+        return result
+    end = 4 + int.from_bytes(value[2:4], "big")
+    if end != len(value) or end > 64 * 1024:
+        return result
+    try:
+        serial = value[4:end].decode("ascii", errors="strict").strip("\x00 \t\r\n")
+    except UnicodeError:
+        return result
+    if not serial or len(serial) > 256 or any(ord(character) < 0x20 for character in serial):
+        return result
+    result.update({"quality": "available", "unit_serial": serial})
+    return result
 
 
 def _read_driver(path: pathlib.Path) -> str | None:
@@ -227,6 +375,142 @@ def _canonical_identifier(value: str | None) -> str | None:
     text = text.removeprefix("0x")
     text = re.sub(r"[^a-z0-9._:-]+", "", text)
     return text or None
+
+
+def _normalize_vpd_evidence(raw: Any, field: str) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise DetectionError(f"{field} must be an object")
+    quality = _optional_string(raw.get("quality", "not_reported"), f"{field}.quality")
+    if quality not in VPD_QUALITY:
+        raise DetectionError(f"{field}.quality must be one of {sorted(VPD_QUALITY)}")
+    raw_designators = raw.get("designators", [])
+    if not isinstance(raw_designators, list) or len(raw_designators) > 128:
+        raise DetectionError(f"{field}.designators must be a bounded list")
+    designators: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_designators):
+        if not isinstance(item, dict):
+            raise DetectionError(f"{field}.designators[{index}] must be an object")
+        association = _optional_string(
+            item.get("association"), f"{field}.designators[{index}].association"
+        )
+        designator_type = _optional_string(
+            item.get("designator_type"), f"{field}.designators[{index}].designator_type"
+        )
+        identifier = _optional_string(
+            item.get("identifier"), f"{field}.designators[{index}].identifier"
+        )
+        if not association or not designator_type or not identifier or len(identifier) > 256:
+            raise DetectionError(f"{field}.designators[{index}] is incomplete")
+        designators.append(
+            {
+                "association": association,
+                "designator_type": designator_type,
+                "identifier": identifier,
+                "protocol": _optional_string(
+                    item.get("protocol"), f"{field}.designators[{index}].protocol"
+                ),
+            }
+        )
+    return {
+        "quality": quality,
+        "source": _optional_string(raw.get("source"), f"{field}.source") or "Not reported",
+        "designators": designators,
+        "logical_unit_identifier": _optional_string(
+            raw.get("logical_unit_identifier"), f"{field}.logical_unit_identifier"
+        ),
+        "logical_unit_identifier_type": _optional_string(
+            raw.get("logical_unit_identifier_type"), f"{field}.logical_unit_identifier_type"
+        ),
+        "target_port_identifier": _optional_string(
+            raw.get("target_port_identifier"), f"{field}.target_port_identifier"
+        ),
+        "target_port_identifier_type": _optional_string(
+            raw.get("target_port_identifier_type"), f"{field}.target_port_identifier_type"
+        ),
+        "identity_conflict": _optional_bool(
+            raw.get("identity_conflict", False), f"{field}.identity_conflict"
+        )
+        is True,
+    }
+
+
+def _normalize_unit_serial_evidence(raw: Any, field: str) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise DetectionError(f"{field} must be an object")
+    quality = _optional_string(raw.get("quality", "not_reported"), f"{field}.quality")
+    if quality not in VPD_QUALITY:
+        raise DetectionError(f"{field}.quality must be one of {sorted(VPD_QUALITY)}")
+    return {
+        "quality": quality,
+        "source": _optional_string(raw.get("source"), f"{field}.source") or "Not reported",
+        "unit_serial": _optional_string(raw.get("unit_serial"), f"{field}.unit_serial"),
+        "identity_conflict": _optional_bool(
+            raw.get("identity_conflict", False), f"{field}.identity_conflict"
+        )
+        is True,
+    }
+
+
+def _normalize_smp_evidence(raw: Any, field: str) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise DetectionError(f"{field} must be an object")
+    quality = _optional_string(raw.get("quality", "not_reported"), f"{field}.quality")
+    if quality not in VPD_QUALITY:
+        raise DetectionError(f"{field}.quality must be one of {sorted(VPD_QUALITY)}")
+    raw_phys = raw.get("phys", [])
+    if not isinstance(raw_phys, list) or len(raw_phys) > 255:
+        raise DetectionError(f"{field}.phys must be a bounded list")
+    phys: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_phys):
+        if not isinstance(item, dict):
+            raise DetectionError(f"{field}.phys[{index}] must be an object")
+        phys.append(
+            {
+                "phy_id": _optional_nonnegative_int(
+                    item.get("phy_id"), f"{field}.phys[{index}].phy_id"
+                ),
+                "routing": _optional_string(
+                    item.get("routing"), f"{field}.phys[{index}].routing"
+                ),
+                "state": _optional_string(item.get("state"), f"{field}.phys[{index}].state"),
+                "negotiated_rate_gbps": _optional_nonnegative_number(
+                    item.get("negotiated_rate_gbps"),
+                    f"{field}.phys[{index}].negotiated_rate_gbps",
+                ),
+                "attached_sas_address": _canonical_identifier(
+                    _optional_string(
+                        item.get("attached_sas_address"),
+                        f"{field}.phys[{index}].attached_sas_address",
+                    )
+                ),
+                "attached_phy_id": _optional_nonnegative_int(
+                    item.get("attached_phy_id"), f"{field}.phys[{index}].attached_phy_id"
+                ),
+                "attached_details": _optional_string(
+                    item.get("attached_details"), f"{field}.phys[{index}].attached_details"
+                ),
+                "device_slot_number": _optional_nonnegative_int(
+                    item.get("device_slot_number"),
+                    f"{field}.phys[{index}].device_slot_number",
+                ),
+            }
+        )
+    return {
+        "quality": quality,
+        "source": _optional_string(raw.get("source"), f"{field}.source") or "Not reported",
+        "expander_sas_address": _canonical_identifier(
+            _optional_string(
+                raw.get("expander_sas_address"), f"{field}.expander_sas_address"
+            )
+        ),
+        "phys": phys,
+    }
 
 
 def _disk_id(
@@ -438,6 +722,19 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
             _optional_string(raw_identity.get("wwn"), f"{field}.identity.wwn")
         ),
     }
+    raw_identity_evidence = raw.get("identity_evidence", {})
+    if not isinstance(raw_identity_evidence, dict):
+        raise DetectionError(f"{field}.identity_evidence must be an object")
+    identity_evidence = {
+        "scsi_vpd_page_83": _normalize_vpd_evidence(
+            raw_identity_evidence.get("scsi_vpd_page_83"),
+            f"{field}.identity_evidence.scsi_vpd_page_83",
+        ),
+        "scsi_vpd_page_80": _normalize_unit_serial_evidence(
+            raw_identity_evidence.get("scsi_vpd_page_80"),
+            f"{field}.identity_evidence.scsi_vpd_page_80",
+        ),
+    }
     generated_id, generated_stable = _disk_id(identity, vendor, model, kernel_name)
     disk_id = _optional_string(raw.get("id"), f"{field}.id") or generated_id
     stable_identity = _optional_bool(raw.get("stable_identity"), f"{field}.stable_identity")
@@ -468,10 +765,13 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
             "phy_sas_address",
             "phy_identifier",
             "expander_id",
+            "expander_sas_address",
             "path_id",
             "mapping_source",
             "mapping_confidence",
             "mapping_last_confirmed_at",
+            "target_port_identifier",
+            "target_port_identifier_type",
         )
     }
     normalized_connection["mapping_confidence"] = (
@@ -496,6 +796,9 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
             )
         normalized_path_components.append(normalized_item)
     normalized_connection["path_components"] = normalized_path_components
+    normalized_connection["smp"] = _normalize_smp_evidence(
+        connection.get("smp"), f"{field}.connection.smp"
+    )
     normalized_connection["capable_speed_gbps"] = _optional_nonnegative_number(
         connection.get("capable_speed_gbps"), f"{field}.connection.capable_speed_gbps"
     )
@@ -596,6 +899,7 @@ def _normalize_disk(raw: Any, index: int) -> dict[str, Any]:
         "health": {"power_on_hours": power_on_hours},
         "id": disk_id,
         "identity": identity,
+        "identity_evidence": identity_evidence,
         "kernel_name": kernel_name,
         "kernel_path": _optional_string(raw.get("kernel_path"), f"{field}.kernel_path")
         or f"/dev/{kernel_name}",
@@ -1247,6 +1551,14 @@ def _discover_connection(
         (name for name in reversed(topology_names) if name.startswith("expander-")),
         None,
     )
+    expander_sas_address = (
+        _read_text(sysfs_root / "class" / "sas_device" / expander_id / "sas_address")
+        or _read_text(
+            sysfs_root / "class" / "sas_device" / str(expander_id) / "device" / "sas_address"
+        )
+        if expander_id
+        else None
+    )
     path_id = next(
         (
             name
@@ -1291,6 +1603,7 @@ def _discover_connection(
         "enclosure_status": enclosure["status"],
         "enclosure_vendor": enclosure["vendor"],
         "expander_id": expander_id,
+        "expander_sas_address": expander_sas_address,
         "hba_port": hba_port,
         "phy_id": sas_phy["id"],
         "phy_sas_address": sas_phy["sas_address"],
@@ -1311,9 +1624,46 @@ def _discover_connection(
         "path_id": path_id,
         "protocol": protocol,
         "slot": enclosure["slot"],
+        "smp": {
+            "quality": "not_reported",
+            "source": "Not reported",
+            "expander_sas_address": None,
+            "phys": [],
+        },
+        "target_port_identifier": None,
+        "target_port_identifier_type": None,
         "transport": transport or "unknown",
         "transport_host": transport_host,
     }
+
+
+def _discover_scsi_identity(
+    block_path: pathlib.Path, identity: dict[str, str | None]
+) -> dict[str, dict[str, Any]]:
+    page_83 = _parse_vpd_page_83(_read_binary(block_path / "device" / "vpd_pg83"))
+    page_80 = _parse_vpd_page_80(_read_binary(block_path / "device" / "vpd_pg80"))
+
+    logical_unit = _canonical_identifier(page_83.get("logical_unit_identifier"))
+    logical_unit_type = page_83.get("logical_unit_identifier_type")
+    if logical_unit and logical_unit_type in {"naa", "eui"}:
+        current = _canonical_identifier(identity.get("wwn"))
+        if current is None:
+            identity["wwn"] = logical_unit
+        elif current != logical_unit:
+            page_83["identity_conflict"] = True
+    else:
+        page_83["identity_conflict"] = False
+
+    unit_serial = page_80.get("unit_serial")
+    if isinstance(unit_serial, str):
+        current_serial = identity.get("serial")
+        if current_serial is None:
+            identity["serial"] = unit_serial
+        elif current_serial.strip().casefold() != unit_serial.strip().casefold():
+            page_80["identity_conflict"] = True
+    page_80.setdefault("identity_conflict", False)
+    page_83.setdefault("identity_conflict", False)
+    return {"scsi_vpd_page_83": page_83, "scsi_vpd_page_80": page_80}
 
 
 def _connection_description(connection: Mapping[str, str | None]) -> str:
@@ -1585,9 +1935,15 @@ def _discover_disks(
                 )
             ),
         }
+        identity_evidence = _discover_scsi_identity(block_path, identity)
         disk_id, stable_identity = _disk_id(identity, vendor, model, kernel_name)
         connection = _discover_connection(
             block_path, kernel_name, sysfs_root, properties, captured_at
+        )
+        vpd_page_83 = identity_evidence["scsi_vpd_page_83"]
+        connection["target_port_identifier"] = vpd_page_83.get("target_port_identifier")
+        connection["target_port_identifier_type"] = vpd_page_83.get(
+            "target_port_identifier_type"
         )
         signatures = _udev_signatures(properties)
         kernel_path = f"/dev/{kernel_name}"
@@ -1606,6 +1962,7 @@ def _discover_disks(
                 "health": _disk_health(captured_at, connection),
                 "id": disk_id,
                 "identity": identity,
+                "identity_evidence": identity_evidence,
                 "kernel_name": kernel_name,
                 "kernel_path": kernel_path,
                 "maintenance_capabilities": _maintenance_capabilities(

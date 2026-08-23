@@ -353,7 +353,9 @@ def _enclosure_health(sys_class_enclosure: Path) -> dict[str, Any]:
         if generic is None:
             errors.append({"provider": "sg_ses", "path": enclosure.name, "status": NOT_REPORTED})
             continue
-        output = _command("sg_ses", ["--json", f"/dev/{generic.name}"])
+        output = _command(
+            "sg_ses", ["--join", "--json", "--readonly", f"/dev/{generic.name}"]
+        )
         if output is None:
             errors.append({"provider": "sg_ses", "path": generic.name, "status": NOT_REPORTED})
             continue
