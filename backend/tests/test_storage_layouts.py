@@ -313,11 +313,31 @@ def test_secure_wipe_is_capability_gated_and_never_uses_shell() -> None:
         "sanitize",
         "/dev/disk/by-id/nvme-test",
         "--sanact=start-block-erase",
-        "--wait",
     )
-    assert commands[1].argv[:2] == ("nvme", "sanitize-log")
+    assert len(commands) == 1
     with pytest.raises(LayoutError):
         wipe_commands(plan, "/dev/nvme0n1")
+
+
+def test_scsi_sanitize_generation_uses_reported_action_and_waits_for_completion() -> None:
+    block = normalize_wipe(
+        {"method": "scsi_sanitize", "capability": True, "capability_source": "sg_opcodes"}
+    )
+    crypto = normalize_wipe(
+        {
+            "method": "scsi_crypto_erase",
+            "capability": True,
+            "capability_source": "sg_opcodes",
+        }
+    )
+    assert wipe_commands(block, "/dev/disk/by-id/scsi-test")[0].argv == (
+        "sg_sanitize",
+        "--block",
+        "--quick",
+        "--wait",
+        "/dev/disk/by-id/scsi-test",
+    )
+    assert wipe_commands(crypto, "/dev/disk/by-id/scsi-test")[0].argv[1] == "--crypto"
 
 
 def test_ata_secure_erase_sets_empty_ephemeral_password_then_verifies() -> None:

@@ -73,11 +73,26 @@ def build_plan(
     capabilities = _capabilities(disk)
     try:
         if action == "wipe":
+            method_name = str(method)
             capability = {
+                "hdd_overwrite": disk.get("rotational") is True,
                 "ata_secure_erase": capabilities.get("ata_secure_erase") is True,
                 "nvme_sanitize": capabilities.get("nvme_block_erase") is True,
-            }.get(str(method), True)
-            options = normalize_wipe({"method": method, "passes": passes, "capability": capability})
+                "nvme_crypto_erase": capabilities.get("nvme_crypto_erase") is True,
+                "scsi_sanitize": capabilities.get("scsi_block_erase") is True,
+                "scsi_crypto_erase": capabilities.get("scsi_crypto_erase") is True,
+            }.get(method_name, True)
+            capability_source = capabilities.get("source")
+            if method_name == "hdd_overwrite" and capability:
+                capability_source = "Linux rotational-drive classification"
+            options = normalize_wipe(
+                {
+                    "method": method,
+                    "passes": passes,
+                    "capability": capability,
+                    "capability_source": capability_source,
+                }
+            )
         elif action == "sector_conversion":
             supported = capabilities.get("supported_logical_sector_bytes")
             options = normalize_sector_conversion(

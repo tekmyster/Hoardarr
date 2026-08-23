@@ -121,6 +121,62 @@ describe("StoragePage", () => {
     expect(onResumeDraft).not.toHaveBeenCalled();
   });
 
+  it("offers only capability-verified sanitization methods", async () => {
+    const user = userEvent.setup();
+    const drive = {
+      id: "nguid:test-nvme",
+      path: "/dev/nvme1n1",
+      model: "Test NVMe",
+      vendor: "TEST",
+      serial: "NVME-TEST",
+      wwn: null,
+      capacityBytes: 1_000_000_000,
+      stableIdentity: true,
+      readOnly: false,
+      selectable: true,
+      selectionBlockers: [],
+      connection: { bus: "NVMe", transport: "pcie" },
+      sector: { logical: 512, physical: 4096 },
+      signatures: [],
+      partitions: [],
+      signatureScan: { status: "complete", reason: null, source: "blkid" },
+      location: "PCIe",
+      removable: false,
+      rotational: false,
+      healthStatus: "healthy",
+      metrics: [],
+      observations: [],
+      tests: [],
+      maintenanceCapabilities: {
+        source: "nvme id-ctrl",
+        ataSecureErase: false,
+        nvmeBlockErase: true,
+        nvmeCryptoErase: false,
+        scsiBlockErase: false,
+        scsiCryptoErase: false,
+      },
+    } as Drive;
+    const snapshot: HardwareSnapshot = {
+      id: "snapshot-1",
+      captured_at: "2026-08-20T19:14:52Z",
+      sha256: "abc",
+      hardware: {},
+    };
+    render(<StoragePage snapshot={snapshot} drives={[drive]} busy={false} status={null} error={null} onScan={vi.fn()} onAction={vi.fn()} onDriveAction={vi.fn()} />);
+
+    await user.click(screen.getByLabelText("Actions for /dev/nvme1n1"));
+    await user.click(screen.getByRole("menuitem", { name: /Erase or decommission/i }));
+    const method = screen.getByLabelText("Method") as HTMLSelectElement;
+    expect(method).toHaveValue("metadata_clear");
+    expect(screen.getByText("Metadata clear is not media sanitization")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /One-pass HDD overwrite/ })).toBeDisabled();
+    expect(screen.getByRole("option", { name: /^NVMe block erase$/ })).toBeEnabled();
+    expect(screen.getByRole("option", { name: /NVMe cryptographic erase/ })).toBeDisabled();
+
+    await user.selectOptions(method, "nvme_sanitize");
+    expect(screen.getByText(/Support was reported by nvme id-ctrl/)).toBeInTheDocument();
+  });
+
   it("shows request failures and only live discovered pools and shares", () => {
     const inventory: StorageInventory = {
       captured_from: "live_host",

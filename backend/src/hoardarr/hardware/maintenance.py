@@ -77,13 +77,18 @@ def detect_capability(disk: Mapping[str, Any], *, probe: Probe = bounded_probe) 
     result = deepcopy(current) if isinstance(current, Mapping) else {}
     result.update(
         {
-            "ata_secure_erase": result.get("ata_secure_erase") is True,
-            "nvme_block_erase": result.get("nvme_block_erase") is True,
+            # Never carry a destructive capability across scans. Each observation
+            # must prove support through the current complete device path.
+            "ata_secure_erase": False,
+            "nvme_block_erase": False,
+            "nvme_crypto_erase": False,
+            "scsi_block_erase": False,
+            "scsi_crypto_erase": False,
             "sector_format_passthrough": result.get("sector_format_passthrough") is True,
             "supported_logical_sector_bytes": list(
                 result.get("supported_logical_sector_bytes", [])
             ),
-            "source": str(result.get("source") or "Not reported"),
+            "source": "Not reported",
             "smart_self_test": _smart_self_test_capability(None),
         }
     )
@@ -110,6 +115,7 @@ def detect_capability(disk: Mapping[str, Any], *, probe: Probe = bounded_probe) 
             )
             return result
         result["nvme_block_erase"] = bool(sanicap & 0x2)
+        result["nvme_crypto_erase"] = bool(sanicap & 0x1)
         result["source"] = "nvme id-ctrl"
     elif protocol in {"ata", "sata"} and transport not in {"usb", "uas"}:
         output = probe(["hdparm", "-I", path])
@@ -119,10 +125,22 @@ def detect_capability(disk: Mapping[str, Any], *, probe: Probe = bounded_probe) 
             )
             return result
         security = output.casefold().partition("security:")[2][:2048]
-        result["ata_secure_erase"] = bool(
-            security and "supported" in security and "not\tsupported" not in security
+        result["ata_secure_erase"] = any(
+            line.strip() == "supported" for line in security.splitlines()
         )
         result["source"] = "hdparm -I"
+    elif protocol in {"scsi", "sas"} and transport not in {"usb", "uas"}:
+        block = probe(["sg_opcodes", "--opcode=0x48,0x2", "--no-inquiry", path])
+        crypto = probe(["sg_opcodes", "--opcode=0x48,0x3", "--no-inquiry", path])
+
+        def supported(output: str | None) -> bool:
+            value = output.casefold() if output is not None else ""
+            return bool(value and "supported" in value and "not supported" not in value)
+
+        result["scsi_block_erase"] = supported(block)
+        result["scsi_crypto_erase"] = supported(crypto)
+        if block is not None or crypto is not None:
+            result["source"] = "sg_opcodes REPORT SUPPORTED OPERATION CODES"
     result["smart_self_test"] = _smart_self_test_capability(
         probe(["smartctl", "-j", "-c", path])
     )

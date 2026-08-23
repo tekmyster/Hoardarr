@@ -85,6 +85,12 @@ async function storageWizardServer(page: Page): Promise<void> {
     signature_scan: { status: "complete", source: "wipefs", reason: null },
     discard: { granularity_bytes: 4096, max_bytes: 1_073_741_824 },
     maintenance_capabilities: {
+      source: "sg_opcodes REPORT SUPPORTED OPERATION CODES",
+      ata_secure_erase: false,
+      nvme_block_erase: false,
+      nvme_crypto_erase: false,
+      scsi_block_erase: index === 0,
+      scsi_crypto_erase: false,
       smart_self_test: {
         status: "available",
         short_minutes: 2,
@@ -153,6 +159,23 @@ async function storageWizardServer(page: Page): Promise<void> {
   await page.route("**/api/v1/operations/op-storage", (route) => route.fulfill({ json: { id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: { mountpoint: "/data" } } }));
   await page.route("**/api/v1/operations/op-storage/progress", (route) => route.fulfill({ json: { operation_id: "op-storage", state: "succeeded", phase: "Storage build completed", completed_steps: 6, total_steps: 6, percent: 100, completed_actions: ["format", "mount"], notices: [], current_action: null, estimate: null, updated_at: Date.now() / 1000 } }));
   await page.route("**/api/v1/operations/op-storage/events", (route) => route.fulfill({ json: { items: [{ sequence: 1, type: "operation.succeeded", message: "Storage build completed", data: {}, created_at: now }] } }));
+  await page.route("**/api/v1/storage/maintenance/preview", async (route) => {
+    const body = route.request().postDataJSON() as { device_id: string; method: string };
+    const plan = {
+      schema_version: 1,
+      action: "wipe",
+      options: { method: body.method, passes: 1, capability: true, capability_source: "sg_opcodes REPORT SUPPORTED OPERATION CODES", scope: "user_data_media" },
+      device: { id: body.device_id, stable_identity: true, vendor: "TEST", model: "SSD-1TB", serial: "SSD-1", wwn: drives[0].identity.wwn, eui64: null, nguid: null, capacity_bytes: drives[0].capacity_bytes, logical_sector_bytes: 512, physical_sector_bytes: 4096 },
+      device_binding_sha256: "e".repeat(64),
+      hardware_snapshot_sha256: snapshot.sha256,
+      destructive: true,
+      advanced_only: true,
+    };
+    return route.fulfill({ json: { plan, plan_sha256: "f".repeat(64) } });
+  });
+  await page.route("**/api/v1/storage/maintenance", (route) => route.fulfill({ status: 202, json: { operation: { id: "op-maintenance", kind: "storage.maintenance", status: "queued", resource: { type: "drive", id: drives[0].id } } } }));
+  await page.route("**/api/v1/operations/op-maintenance", (route) => route.fulfill({ json: { id: "op-maintenance", kind: "storage.maintenance", status: "succeeded", resource: { type: "drive", id: drives[0].id }, result: { sanitization_report: { method: "scsi_sanitize", scope: "user_data_media", capability_source: "sg_opcodes REPORT SUPPORTED OPERATION CODES", result: "succeeded", verification: { status: "command_completed", source: "Running SCSI block erase" } } } } }));
+  await page.route("**/api/v1/operations/op-maintenance/progress", (route) => route.fulfill({ json: { operation_id: "op-maintenance", state: "succeeded", phase: "Drive maintenance completed", completed_steps: 1, total_steps: 1, percent: 100, completed_actions: ["maintenance:1"], notices: [], current_action: null, estimate: null, updated_at: Date.now() / 1000 } }));
   await page.route("**/api/v1/accounts/media", (route) => route.fulfill({ status: 201, json: { account: { username: "media", created: true }, credential: { password: "one-time-storage-password" } } }));
 }
 
@@ -494,6 +517,28 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByText("Supported · drive-reported estimate 2 min")).toBeVisible();
     await expect(dialog.getByText("Supported · drive-reported estimate 381 min")).toBeVisible();
     await expect(dialog.getByText("smartctl -j -c")).toBeVisible();
+  });
+
+  test("reviews and applies only a hardware-reported SCSI sanitization method", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByLabel("Actions for /dev/sdb").click();
+    await page.getByRole("menuitem", { name: /Erase or decommission/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Erase or convert a drive" });
+    await expect(dialog.getByRole("option", { name: /NVMe block erase/ })).toHaveAttribute(
+      "disabled",
+      "",
+    );
+    await dialog.getByLabel("Method").selectOption("scsi_sanitize");
+    await expect(dialog.getByText(/Support was reported by sg_opcodes/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Review plan" }).click();
+    await expect(dialog.getByText("user_data_media")).toBeVisible();
+    await dialog.getByLabel('Type “I AGREE”').fill("I AGREE");
+    await dialog.getByRole("button", { name: "Apply" }).click();
+    await expect(dialog.getByText("Sanitization report")).toBeVisible();
+    await expect(dialog.getByText(/command_completed/)).toBeVisible();
   });
 
   test("reserves and releases an expansion disk through the real Storage UI", async ({ page }) => {

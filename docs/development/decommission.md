@@ -153,27 +153,39 @@ capability, encryption state, and device-reported sanitize support.
 - Export or deactivate the pool/array using its native safe procedure.
 - Preserve partition tables, filesystems, and data.
 
-### Quick reset
+### Metadata clear
 
-- Remove selected signatures or create a new empty filesystem.
-- Intended for reuse, not secure sanitization.
-- Clearly labelled **Quick format is not secure erasure**.
+- Remove filesystem and partition signatures with `wipefs` after immutable
+  review, exact `I AGREE` approval, active-use checks, and fresh stable-identity
+  validation.
+- Intended for reuse or reprovisioning, not media sanitization. Existing bytes
+  may remain recoverable.
+- The UI calls this **Clear filesystem/signature metadata only** and never
+  presents it as a secure erase.
 
-### Host overwrite
+### HDD overwrite
 
-- One-pass zero overwrite.
-- One-pass random overwrite.
-- Operator-selected multi-pattern overwrite where justified.
-- Full post-write verification or a documented verification sample.
+- A host overwrite is offered only when Linux reports rotational media.
+- Hoardarr currently uses an explicit zero-ending overwrite and does not claim
+  that legacy multi-pass patterns provide stronger modern sanitization.
+- SSDs and NVMe devices are not silently routed through host overwrite because
+  of wear and inaccessible/remapped flash regions.
 
 Hoardarr records the accessible range written and must not imply that hidden,
 remapped, overprovisioned, or controller-inaccessible areas were overwritten.
 
 ### Device-native sanitization
 
-- ATA security erase or sanitize when safely supported.
-- NVMe format, sanitize, or cryptographic erase when safely supported.
-- SCSI sanitize when safely supported.
+- ATA security erase only when direct ATA capability is reported; USB/UAS
+  bridges fail closed.
+- NVMe block or cryptographic sanitize only when the corresponding SANICAP bit
+  is reported. Hoardarr starts the operation and polls `nvme sanitize-log`
+  until the controller reports success or failure; command acceptance alone is
+  not completion.
+- SCSI block or cryptographic sanitize only when the exact SANITIZE service
+  action is reported through `sg_opcodes`; USB/UAS paths fail closed. Execution
+  uses `sg_sanitize --wait` so the durable operation remains active until the
+  command reports completion.
 - Cryptographic erase only when Hoardarr can establish the relevant encryption
   and key-destruction conditions.
 
@@ -207,6 +219,12 @@ Verification is method-specific and may include:
 
 An interrupted or ambiguous destructive operation finishes as
 `needs-attention`, never as passed or safely reusable.
+
+Every attempted wipe writes a durable sanitization report with the stable
+device identity, exact method and scope, capability source, start/end times,
+outcome, and method-specific verification evidence. A failed report remains
+available through Activity progress instead of being replaced with a generic
+success or discarded.
 
 ## Certificate of Data Burial
 
@@ -253,4 +271,3 @@ draft -> reviewed
 Approvals are invalidated by a changed device identity, source membership,
 destination, migration policy, verification policy, decommission method, or
 newer conflicting hardware snapshot.
-

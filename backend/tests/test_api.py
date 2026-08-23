@@ -803,9 +803,17 @@ def test_device_maintenance_preview_apply_and_worker_are_bound(api_runtime: Any)
     preview = client.post(
         "/api/v1/storage/maintenance/preview",
         headers=_state_headers(csrf),
-        json={"device_id": disk["id"], "action": "wipe", "method": "quick"},
+        json={"device_id": disk["id"], "action": "wipe", "method": "metadata_clear"},
     )
     assert preview.status_code == 200, preview.text
+    assert preview.json()["plan"]["options"]["scope"] == "metadata_only"
+    unsupported = client.post(
+        "/api/v1/storage/maintenance/preview",
+        headers=_state_headers(csrf),
+        json={"device_id": disk["id"], "action": "wipe", "method": "nvme_sanitize"},
+    )
+    assert unsupported.status_code == 422
+    assert unsupported.json()["code"] == "maintenance_capability_unavailable"
     body = {
         "plan": preview.json()["plan"],
         "plan_sha256": preview.json()["plan_sha256"],
@@ -1648,9 +1656,12 @@ def test_authenticated_hardware_worker_and_wizard_flow(
                 "partitions": [],
                 "signatures": [],
                 "maintenance_capabilities": {
-                    "ata_secure_erase": False,
-                    "nvme_block_erase": False,
-                    "sector_format_passthrough": False,
+                        "ata_secure_erase": False,
+                        "nvme_block_erase": False,
+                        "nvme_crypto_erase": False,
+                        "scsi_block_erase": False,
+                        "scsi_crypto_erase": False,
+                        "sector_format_passthrough": False,
                     "supported_logical_sector_bytes": [],
                     "source": "Not reported",
                     "smart_self_test": {

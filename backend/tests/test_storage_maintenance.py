@@ -25,11 +25,16 @@ def disk(*, logical: int = 512, system: bool = False) -> dict[str, object]:
         "model": "TEST",
         "identity": {"serial": "SERIAL", "wwn": "5000c500test", "eui64": None, "nguid": None},
         "capacity_bytes": 1_000_000_000,
+        "rotational": True,
         "sector_sizes": {"logical_bytes": logical, "physical_bytes": logical},
         "partitions": [],
         "maintenance_capabilities": {
             "ata_secure_erase": True,
             "nvme_block_erase": False,
+            "nvme_crypto_erase": False,
+            "scsi_block_erase": False,
+            "scsi_crypto_erase": False,
+            "source": "test capability fixture",
             "supported_logical_sector_bytes": [512, 520],
             "sector_format_passthrough": True,
         },
@@ -134,6 +139,98 @@ def test_executor_revalidates_before_each_ata_command_and_journals(
     )
     assert status["state"] == "succeeded"
     assert status["percent"] == 100
+    assert result["sanitization_report"]["result"] == "succeeded"
+    assert result["sanitization_report"]["capability_source"] == "test capability fixture"
+
+
+def test_nvme_sanitize_waits_for_controller_completion_without_cli_wait_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = disk()
+    target["maintenance_capabilities"]["nvme_block_erase"] = True
+    plan = build_plan(
+        disk=target,
+        hardware_snapshot_sha256="a" * 64,
+        action="wipe",
+        method="nvme_sanitize",
+    )
+    commands: list[list[str]] = []
+    statuses = iter(['{"sanitize_status": 2}', '{"sanitize_status": 1}'])
+    monkeypatch.setattr(executor, "_device_locks", lambda *_args: nullcontext())
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    monkeypatch.setattr(executor, "_ensure_not_active", lambda *_args: None)
+    monkeypatch.setattr(executor, "_stable_path", lambda *_args: Path("/dev/disk/by-id/nvme-test"))
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    result = apply_device_maintenance(
+        request(plan),
+        paths=Paths(
+            transaction_root=tmp_path / "transactions",
+            lock_root=tmp_path / "locks",
+            quarantine_marker=tmp_path / "missing-quarantine",
+        ),
+        inventory_provider=lambda: {"disks": [target]},
+        runner=lambda command, _timeout: commands.append(command),
+        status_probe=lambda command, _timeout: next(statuses),
+    )
+    assert commands == [
+        ["nvme", "sanitize", "/dev/disk/by-id/nvme-test", "--sanact=start-block-erase"]
+    ]
+    assert result["sanitization_report"]["verification"] == {
+        "status": "succeeded",
+        "observations": 2,
+        "source": "nvme sanitize-log",
+    }
+
+
+def test_nvme_sanitize_failure_is_durable_and_visible_in_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = disk()
+    target["maintenance_capabilities"]["nvme_block_erase"] = True
+    plan = build_plan(
+        disk=target,
+        hardware_snapshot_sha256="a" * 64,
+        action="wipe",
+        method="nvme_sanitize",
+    )
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        lock_root=tmp_path / "locks",
+        quarantine_marker=tmp_path / "missing-quarantine",
+    )
+    monkeypatch.setattr(executor, "_device_locks", lambda *_args: nullcontext())
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    monkeypatch.setattr(executor, "_ensure_not_active", lambda *_args: None)
+    monkeypatch.setattr(executor, "_stable_path", lambda *_args: Path("/dev/disk/by-id/nvme-test"))
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    with pytest.raises(ExecutorFailure) as failure:
+        apply_device_maintenance(
+            request(plan),
+            paths=paths,
+            inventory_provider=lambda: {"disks": [target]},
+            runner=lambda _command, _timeout: None,
+            status_probe=lambda _command, _timeout: '{"sanitize_status": 3}',
+        )
+    assert failure.value.code == "sanitize_failed"
+    plan_request_id = request(plan)["operation_id"]
+    status = executor.storage_operation_status(plan_request_id, paths=paths)
+    assert plan_request_id == "11111111-1111-4111-8111-111111111111"
+    assert status["state"] == "needs_attention"
+    assert status["sanitization_report"]["result"] == "needs_attention"
+
+
+def test_hdd_overwrite_rejects_non_rotational_media() -> None:
+    target = disk()
+    target["rotational"] = False
+    with pytest.raises(MaintenanceError) as failure:
+        build_plan(
+            disk=target,
+            hardware_snapshot_sha256="a" * 64,
+            action="wipe",
+            method="hdd_overwrite",
+        )
+    assert failure.value.code == "maintenance_capability_unavailable"
 
 
 def test_executor_fails_before_first_command_on_identity_drift(

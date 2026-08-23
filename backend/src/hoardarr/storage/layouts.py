@@ -660,23 +660,42 @@ def snapraid_expand_config(content: str, *, role: str, mountpoint: str) -> str:
 def normalize_wipe(value: Any) -> dict[str, Any]:
     item = _mapping(value, "wipe")
     method = item.get("method")
-    if method not in {"quick", "hdd_overwrite", "ata_secure_erase", "nvme_sanitize"}:
+    methods = {
+        "quick",
+        "metadata_clear",
+        "hdd_overwrite",
+        "ata_secure_erase",
+        "nvme_sanitize",
+        "nvme_crypto_erase",
+        "scsi_sanitize",
+        "scsi_crypto_erase",
+    }
+    if method not in methods:
         raise LayoutError(
-            "wipe.method", "must be quick, hdd_overwrite, ata_secure_erase, or nvme_sanitize"
+            "wipe.method", "is not a supported erase or sanitization method"
         )
     passes = item.get("passes", 1)
     if method == "hdd_overwrite" and (not isinstance(passes, int) or not 1 <= passes <= 7):
         raise LayoutError("wipe.passes", "must be from 1 through 7")
     capability = item.get("capability")
-    if method in {"ata_secure_erase", "nvme_sanitize"} and capability is not True:
+    if method not in {"quick", "metadata_clear"} and capability is not True:
         raise LayoutError(
             "wipe.capability",
             "the drive and complete controller path must explicitly report support",
+        )
+    source = item.get("capability_source")
+    if not isinstance(source, str) or not 1 <= len(source) <= 256:
+        source = (
+            "Always available for signature metadata only"
+            if method in {"quick", "metadata_clear"}
+            else "Not reported"
         )
     return {
         "method": method,
         "passes": passes if method == "hdd_overwrite" else 1,
         "capability": capability is True,
+        "capability_source": source,
+        "scope": "metadata_only" if method in {"quick", "metadata_clear"} else "user_data_media",
     }
 
 
@@ -684,7 +703,7 @@ def wipe_commands(plan: Mapping[str, Any], stable_path: str) -> list[CommandSpec
     if not _ABSOLUTE_DEVICE.fullmatch(stable_path):
         raise LayoutError("device", "secure wipe requires a stable by-id or mapper path")
     method = plan["method"]
-    if method == "quick":
+    if method in {"quick", "metadata_clear"}:
         return [
             CommandSpec(
                 ("wipefs", "--all", "--force", stable_path),
@@ -740,15 +759,34 @@ def wipe_commands(plan: Mapping[str, Any], stable_path: str) -> list[CommandSpec
                     "sanitize",
                     stable_path,
                     "--sanact=start-block-erase",
-                    "--wait",
                 ),
                 86400,
-                "Running NVMe block erase",
+                "Starting NVMe block erase",
                 False,
             ),
+        ]
+    if method == "nvme_crypto_erase":
+        return [
             CommandSpec(
-                ("nvme", "sanitize-log", stable_path), 300, "Verifying NVMe sanitize completion"
-            ),
+                ("nvme", "sanitize", stable_path, "--sanact=start-crypto-erase"),
+                86400,
+                "Starting NVMe cryptographic erase",
+                False,
+            )
+        ]
+    if method in {"scsi_sanitize", "scsi_crypto_erase"}:
+        action = "--block" if method == "scsi_sanitize" else "--crypto"
+        return [
+            CommandSpec(
+                ("sg_sanitize", action, "--quick", "--wait", stable_path),
+                604800,
+                (
+                    "Running SCSI block erase"
+                    if method == "scsi_sanitize"
+                    else "Running SCSI cryptographic erase"
+                ),
+                False,
+            )
         ]
     raise LayoutError("wipe.method", "is not executable")
 

@@ -452,6 +452,7 @@ export interface StorageOperationProgress {
   files?: { total: number; copied: number; verified: number };
   bytes?: { total: number; copied: number };
   report?: Record<string, unknown> | null;
+  sanitization_report?: Record<string, unknown> | null;
 }
 
 export interface NetworkInterface {
@@ -553,6 +554,14 @@ export interface Drive {
     shortMinutes: number | null;
     extendedMinutes: number | null;
     source: string;
+  };
+  maintenanceCapabilities?: {
+    source: string;
+    ataSecureErase: boolean;
+    nvmeBlockErase: boolean;
+    nvmeCryptoErase: boolean;
+    scsiBlockErase: boolean;
+    scsiCryptoErase: boolean;
   };
 }
 

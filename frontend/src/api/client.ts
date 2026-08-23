@@ -264,6 +264,14 @@ function normalizeDrive(raw: unknown, index: number): Drive {
       extendedMinutes: optionalPositiveNumber(smartSelfTest.extended_minutes ?? smartSelfTest.extendedMinutes),
       source: text(smartSelfTest.source, "Not reported"),
     },
+    maintenanceCapabilities: {
+      source: text(maintenance.source, "Not reported"),
+      ataSecureErase: maintenance.ata_secure_erase === true,
+      nvmeBlockErase: maintenance.nvme_block_erase === true,
+      nvmeCryptoErase: maintenance.nvme_crypto_erase === true,
+      scsiBlockErase: maintenance.scsi_block_erase === true,
+      scsiCryptoErase: maintenance.scsi_crypto_erase === true,
+    },
   };
 }
 
@@ -671,7 +679,7 @@ class HoardarrApi {
   async previewDeviceMaintenance(input: {
     device_id: string;
     action: "wipe" | "sector_conversion";
-    method?: "quick" | "hdd_overwrite" | "ata_secure_erase" | "nvme_sanitize";
+    method?: "quick" | "metadata_clear" | "hdd_overwrite" | "ata_secure_erase" | "nvme_sanitize" | "nvme_crypto_erase" | "scsi_sanitize" | "scsi_crypto_erase";
     passes?: number;
     target_logical_bytes?: 512 | 4096;
   }): Promise<{ plan: DeviceMaintenancePlan; plan_sha256: string }> {

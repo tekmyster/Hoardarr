@@ -193,6 +193,7 @@ class Paths:
 
 
 CommandRunner = Callable[[list[str], int], None]
+CommandProbe = Callable[[list[str], int], str]
 InventoryProvider = Callable[[], dict[str, Any]]
 ZfsStateProvider = Callable[[str], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
@@ -244,6 +245,98 @@ def _run(command: list[str], timeout_seconds: int) -> None:
             "A storage tool reported a failure. The operation stopped and requires inspection.",
             needs_attention=True,
         ) from exc
+
+
+def _capture(command: list[str], timeout_seconds: int) -> str:
+    if not command or any(not isinstance(part, str) or "\0" in part for part in command):
+        raise ExecutorFailure("executor_command_invalid", "A typed storage command was invalid.")
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        raise ExecutorFailure(
+            "sanitize_status_unavailable",
+            "The drive sanitize status could not be verified.",
+            needs_attention=True,
+        ) from exc
+    if len(result.stdout) > MAXIMUM_RESPONSE_BYTES:
+        raise ExecutorFailure(
+            "sanitize_status_invalid", "The drive returned an oversized sanitize status."
+        )
+    return result.stdout
+
+
+def _nvme_sanitize_status(output: str) -> str:
+    try:
+        document = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ExecutorFailure(
+            "sanitize_status_invalid", "The NVMe sanitize status was malformed."
+        ) from exc
+    if not isinstance(document, dict):
+        raise ExecutorFailure("sanitize_status_invalid", "The NVMe sanitize status was malformed.")
+    raw = document.get("sanitize_status", document.get("sstat"))
+    if isinstance(raw, str):
+        lowered = raw.casefold()
+        if "progress" in lowered:
+            return "in_progress"
+        if "success" in lowered or "complete" in lowered:
+            return "succeeded"
+        if "fail" in lowered:
+            return "failed"
+        try:
+            raw = int(raw, 0)
+        except ValueError as exc:
+            raise ExecutorFailure(
+                "sanitize_status_invalid", "The NVMe sanitize status was not recognized."
+            ) from exc
+    if not isinstance(raw, int):
+        raise ExecutorFailure(
+            "sanitize_status_invalid", "The NVMe sanitize status was not reported."
+        )
+    return {1: "succeeded", 2: "in_progress", 3: "failed", 4: "succeeded"}.get(
+        raw & 0x7, "unknown"
+    )
+
+
+def _wait_for_nvme_sanitize(
+    stable_path: str, *, probe: CommandProbe, timeout_seconds: int = 604800
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    observations = 0
+    while True:
+        output = probe(
+            [_tool("nvme"), "sanitize-log", stable_path, "--output-format=json"], 30
+        )
+        observations += 1
+        status = _nvme_sanitize_status(output)
+        if status == "succeeded":
+            return {"status": status, "observations": observations, "source": "nvme sanitize-log"}
+        if status == "failed":
+            raise ExecutorFailure(
+                "sanitize_failed",
+                "The NVMe controller reported that sanitization failed.",
+                needs_attention=True,
+            )
+        if status != "in_progress":
+            raise ExecutorFailure(
+                "sanitize_status_invalid", "The NVMe controller did not report a usable status."
+            )
+        if time.monotonic() >= deadline:
+            raise ExecutorFailure(
+                "sanitize_timeout",
+                "The NVMe sanitize operation did not complete within the bounded wait period.",
+                needs_attention=True,
+            )
+        time.sleep(5)
 
 
 def _live_zfs_pool_state(pool_name: str) -> dict[str, Any]:
@@ -1406,6 +1499,11 @@ def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -
         "result": dict(result)
         if journal.get("state") == "succeeded" and isinstance(result, dict)
         else None,
+        "sanitization_report": (
+            dict(journal["sanitization_report"])
+            if isinstance(journal.get("sanitization_report"), dict)
+            else None
+        ),
     }
 
 
@@ -2675,6 +2773,7 @@ def apply_device_maintenance(
     paths: Paths | None = None,
     inventory_provider: InventoryProvider | None = None,
     runner: CommandRunner = _run,
+    status_probe: CommandProbe = _capture,
 ) -> dict[str, Any]:
     if set(request) != {
         "operation",
@@ -2791,6 +2890,7 @@ def apply_device_maintenance(
             "current_action": None,
         }
         atomic_json(journal_path, journal)
+        sanitize_verification: dict[str, Any] | None = None
         try:
             for index, command in enumerate(commands):
                 # Identity, capacity, sector geometry, activation, and stable alias are checked
@@ -2814,6 +2914,16 @@ def apply_device_maintenance(
                 journal["updated_at"] = time.time()
                 atomic_json(journal_path, journal)
                 runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
+                if plan["action"] == "wipe" and plan["options"]["method"] in {
+                    "nvme_sanitize",
+                    "nvme_crypto_erase",
+                }:
+                    journal["phase"] = "Verifying NVMe sanitize completion"
+                    journal["updated_at"] = time.time()
+                    atomic_json(journal_path, journal)
+                    sanitize_verification = _wait_for_nvme_sanitize(
+                        stable_path.as_posix(), probe=status_probe
+                    )
                 journal["completed_steps"] = index + 1
                 journal["completed_actions"] = [
                     *journal["completed_actions"],
@@ -2838,8 +2948,36 @@ def apply_device_maintenance(
                 "completed_actions": list(journal["completed_actions"]),
                 "replayed": False,
             }
-        except Exception:
+            if plan["action"] == "wipe":
+                result["sanitization_report"] = {
+                    "device": device,
+                    "method": plan["options"]["method"],
+                    "scope": plan["options"]["scope"],
+                    "capability_source": plan["options"]["capability_source"],
+                    "started_at": journal["started_at"],
+                    "finished_at": time.time(),
+                    "result": "succeeded",
+                    "verification": sanitize_verification
+                    or {"status": "command_completed", "source": commands[-1].phase},
+                }
+        except Exception as exc:
             journal["state"] = "needs_attention"
+            if plan["action"] == "wipe":
+                safe_error = (
+                    str(exc)
+                    if isinstance(exc, ExecutorFailure)
+                    else "An internal execution failure interrupted sanitization."
+                )
+                journal["sanitization_report"] = {
+                    "device": device,
+                    "method": plan["options"]["method"],
+                    "scope": plan["options"]["scope"],
+                    "capability_source": plan["options"]["capability_source"],
+                    "started_at": journal["started_at"],
+                    "finished_at": time.time(),
+                    "result": "needs_attention",
+                    "error": safe_error[:512],
+                }
             journal["updated_at"] = time.time()
             atomic_json(journal_path, journal)
             raise
