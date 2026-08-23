@@ -251,6 +251,15 @@ class BuildPlanTests(unittest.TestCase):
         )
         self.assertIn('((uid > 0)) || die "existing hoardarr account must not use UID 0"', installer)
         self.assertIn('((gid > 0)) || die "existing hoardarr account must not use GID 0"', installer)
+        self.assertIn('--preserve-existing-login-account', installer)
+        self.assertIn(
+            '[[ "${PRESERVE_EXISTING_LOGIN_ACCOUNT}" == "true" ]]', installer
+        )
+        self.assertIn(
+            "Preserving existing hoardarr administrator login for this legacy development host.",
+            installer,
+        )
+        self.assertIn('usermod --lock --shell /usr/sbin/nologin hoardarr', installer)
 
     def test_plan_cli_does_not_create_output_directory(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -23,6 +23,7 @@ readonly INSTALL_LOCK_PATH="${RUNTIME_ROOT}/release.lock"
 
 ACTION="plan"
 CONFIRMED="false"
+PRESERVE_EXISTING_LOGIN_ACCOUNT="false"
 STAGE_DIR=""
 INSTALL_LOCK_FD=""
 
@@ -39,12 +40,13 @@ usage() {
     cat <<EOF
 Usage:
   ${PROGRAM_NAME} plan
-  sudo ${PROGRAM_NAME} apply --yes
+  sudo ${PROGRAM_NAME} apply --yes [--preserve-existing-login-account]
 
 The default and "plan" modes are read-only.  "apply" requires root and the
 explicit --yes confirmation. Apply installs the mandatory storage and connectivity
 host packages when they are missing. It does not issue an owner setup token or change
-the loopback-only default listener.
+the loopback-only default listener. The account-preservation option is intended only
+for legacy development hosts where "hoardarr" is already the administrator login.
 EOF
 }
 
@@ -68,11 +70,17 @@ parse_args() {
             (($# == 0)) || die "plan accepts no additional arguments"
             ;;
         apply)
-            if (($# == 1)) && [[ "$1" == "--yes" ]]; then
-                CONFIRMED="true"
-            else
-                die "apply requires exactly: apply --yes"
-            fi
+            while (($# > 0)); do
+                case "$1" in
+                    --yes) CONFIRMED="true" ;;
+                    --preserve-existing-login-account)
+                        PRESERVE_EXISTING_LOGIN_ACCOUNT="true"
+                        ;;
+                    *) die "unknown apply option: $1" ;;
+                esac
+                shift
+            done
+            [[ "${CONFIRMED}" == "true" ]] || die "apply requires --yes"
             ;;
         -h|--help)
             usage
@@ -473,7 +481,7 @@ ensure_connectivity_tools() {
 }
 
 ensure_service_account() {
-    local passwd_entry uid gid home shell login_uid_min group_gid groups
+    local passwd_entry uid gid home shell login_uid_min group_gid groups is_login_account
     local -a passwd_fields
     if passwd_entry="$(getent passwd hoardarr)"; then
         IFS=: read -r -a passwd_fields <<<"${passwd_entry}"
@@ -487,19 +495,26 @@ ensure_service_account() {
         [[ "${gid}" =~ ^[0-9]+$ ]] || die "existing hoardarr account has an invalid primary GID"
         ((uid > 0)) || die "existing hoardarr account must not use UID 0"
         ((gid > 0)) || die "existing hoardarr account must not use GID 0"
-        if [[ "${login_uid_min}" =~ ^[0-9]+$ ]] && ((uid >= login_uid_min)); then
-            die "existing hoardarr account is not a system account"
-        fi
-        [[ "${home}" == "${STATE_ROOT}" ]] || die "existing hoardarr account has unexpected home: ${home}"
-        case "${shell}" in
-            /usr/sbin/nologin|/sbin/nologin|/bin/false) ;;
-            *) die "existing hoardarr account has an interactive shell: ${shell}" ;;
-        esac
         getent group hoardarr >/dev/null || die "existing hoardarr group is missing"
         group_gid="$(getent group hoardarr | awk -F: '{ print $3 }')"
         [[ "${group_gid}" =~ ^[0-9]+$ ]] || die "existing hoardarr group has an invalid GID"
         ((group_gid > 0)) || die "existing hoardarr group must not use GID 0"
         [[ "${gid}" == "${group_gid}" ]] || die "hoardarr is not the account's primary group"
+        is_login_account="false"
+        if [[ "${login_uid_min}" =~ ^[0-9]+$ ]] && ((uid >= login_uid_min)); then
+            is_login_account="true"
+        fi
+        case "${shell}" in
+            /usr/sbin/nologin|/sbin/nologin|/bin/false) ;;
+            *) is_login_account="true" ;;
+        esac
+        [[ "${home}" == "${STATE_ROOT}" ]] || is_login_account="true"
+        if [[ "${is_login_account}" == "true" ]]; then
+            [[ "${PRESERVE_EXISTING_LOGIN_ACCOUNT}" == "true" ]] || \
+                die "existing hoardarr account is a login account; rerun only on a legacy development host with --preserve-existing-login-account"
+            log "Preserving existing hoardarr administrator login for this legacy development host."
+            return
+        fi
         groups="$(id -nG hoardarr)"
         [[ "${groups}" == "hoardarr" ]] || \
             die "hoardarr has unexpected supplementary groups: ${groups}"

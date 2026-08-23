@@ -111,6 +111,14 @@ over a `root:hoardarr` Unix socket; it cannot access storage devices or the
 network. Code and release assets are owned by root and are not writable by the
 runtime account. Hoardarr state remains in `/var/lib/hoardarr`.
 
+Legacy development benches that already use `hoardarr` as their interactive
+administrator login may apply a release with the explicit
+`--preserve-existing-login-account` option. The installer validates that the
+account is non-root and owns the matching primary group, leaves its login and
+supplementary groups unchanged, and emits a visible warning. Fresh appliances
+must not use this compatibility option; they retain the locked system-account
+default.
+
 On first install, `/etc/hoardarr/hoardarr.env` comes from the bundle and binds
 the API to `127.0.0.1`.  On every later install, an existing environment file is
 preserved byte-for-byte.  Review an existing file yourself if it was previously
