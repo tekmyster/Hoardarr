@@ -81,6 +81,8 @@ class PinnedServarrClient:
         api_key: str,
         verify_tls: bool,
         transport: httpx.BaseTransport | None = None,
+        api_key_header: str = "X-Api-Key",
+        product_label: str = "Servarr",
     ) -> None:
         self.settings = settings
         self.base_url = base_url
@@ -93,6 +95,10 @@ class PinnedServarrClient:
             allow_localhost=allow_localhost,
         )
         self.api_key = api_key
+        if api_key_header not in {"X-Api-Key", "X-Plex-Token", "X-Emby-Token"}:
+            raise ServarrError("invalid_request", "Unsupported integration credential header")
+        self.api_key_header = api_key_header
+        self.product_label = product_label
         self._client = httpx.Client(
             verify=verify_tls,
             timeout=httpx.Timeout(settings.integration_timeout_seconds),
@@ -141,7 +147,7 @@ class PinnedServarrClient:
             self._network_url(path),
             headers={
                 "Host": self._host_header(self.target),
-                "X-Api-Key": self.api_key,
+                self.api_key_header: self.api_key,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },
@@ -152,24 +158,31 @@ class PinnedServarrClient:
             response = self._client.send(request, stream=True)
             try:
                 if 300 <= response.status_code < 400:
-                    raise ServarrError("redirect_refused", "Servarr returned an untrusted redirect")
+                    raise ServarrError(
+                        "redirect_refused",
+                        f"{self.product_label} returned an untrusted redirect",
+                    )
                 if response.status_code in {401, 403}:
                     raise ServarrError(
-                        "authentication_failed", "Servarr rejected the API credential"
+                        "authentication_failed", f"{self.product_label} rejected the API credential"
                     )
                 if response.status_code == 404:
                     raise ServarrError(
-                        "capability_missing", "Servarr does not expose this API capability"
+                        "capability_missing",
+                        f"{self.product_label} does not expose this API capability",
                     )
                 if response.status_code >= 400:
                     raise ServarrError(
-                        "remote_error", f"Servarr returned HTTP {response.status_code}"
+                        "remote_error", f"{self.product_label} returned HTTP {response.status_code}"
                     )
                 if response.status_code == 204 or method == "DELETE":
                     return None
                 content_type = response.headers.get("content-type", "").lower()
                 if "json" not in content_type:
-                    raise ServarrError("invalid_response", "Servarr returned a non-JSON response")
+                    raise ServarrError(
+                        "invalid_response",
+                        f"{self.product_label} returned a non-JSON response",
+                    )
                 chunks: list[bytes] = []
                 size = 0
                 for chunk in response.iter_bytes():

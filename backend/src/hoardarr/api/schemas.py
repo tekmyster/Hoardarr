@@ -52,7 +52,10 @@ class IntegrationResolveRequest(StrictModel):
 
 class IntegrationCreateRequest(StrictModel):
     name: str = Field(min_length=1, max_length=128)
-    product: Literal["sonarr", "radarr", "lidarr", "readarr", "whisparr", "prowlarr"]
+    product: Literal[
+        "sonarr", "radarr", "lidarr", "readarr", "whisparr", "prowlarr",
+        "plex", "jellyfin", "emby",
+    ]
     base_url: str = Field(min_length=8, max_length=2048)
     api_key: SecretStr = Field(min_length=8, max_length=1024)
     verify_tls: bool = True

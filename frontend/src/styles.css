@@ -1006,3 +1006,23 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .overview-live-chart .chart-primary { stroke: #18b6a4; }
 .overview-live-chart .chart-secondary { stroke: #d59a19; }
 .storage-overview-chart { grid-column: 1 / -1; }
+.media-library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.media-library-grid article {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface-soft);
+  min-width: 0;
+}
+
+.media-library-grid code {
+  overflow-wrap: anywhere;
+}

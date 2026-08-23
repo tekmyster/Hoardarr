@@ -1332,7 +1332,7 @@ export interface AddonDocument {
   last_error: { code: string; message: string } | null;
 }
 
-export type IntegrationProduct = "sonarr" | "radarr" | "lidarr" | "readarr" | "whisparr" | "prowlarr";
+export type IntegrationProduct = "sonarr" | "radarr" | "lidarr" | "readarr" | "whisparr" | "prowlarr" | "plex" | "jellyfin" | "emby";
 
 export interface IntegrationDocument {
   id: string;

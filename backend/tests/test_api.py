@@ -1839,3 +1839,60 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
         assert stored is not None
         assert stored.mountpoint == "/media"
         assert stored.filesystem_uuid == "11111111-1111-4111-8111-111111111111"
+def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, app, setup_token, secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    credential = "plex-token-that-must-not-leak"
+    created = client.post(
+        "/api/v1/integrations",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "media-integration-0001"}),
+        json={
+            "name": "Plex",
+            "product": "plex",
+            "base_url": "http://127.0.0.1:32400",
+            "api_key": credential,
+            "verify_tls": True,
+            "allow_localhost": True,
+        },
+    )
+    assert created.status_code == 202, created.text
+    assert created.json()["operation"]["kind"] == "media.discover"
+    connection_id = created.json()["integration"]["id"]
+
+    def discoverer(**kwargs: object) -> dict[str, Any]:
+        assert kwargs["api_key"] == credential
+        return {
+            "product": "plex",
+            "version": "1.42.0",
+            "capabilities": ["media_libraries"],
+            "state": {
+                "status": {"app_name": "Plex", "version": "1.42.0"},
+                "libraries": [{
+                    "id": "movies",
+                    "name": "Movies",
+                    "media_type": "movie",
+                    "paths": ["/data/media/Movies"],
+                    "item_count": 4020,
+                    "capacity_bytes": None,
+                    "quality": "available",
+                    "untrusted_extra": credential,
+                }],
+            },
+        }
+
+    monkeypatch.setattr("hoardarr.operations.worker.discover_media_server", discoverer)
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        worker_id="media-api-worker",
+    )
+    connection = client.get(f"/api/v1/integrations/{connection_id}")
+    assert connection.status_code == 200
+    assert connection.json()["status"] == "connected"
+    assert connection.json()["capabilities"] == ["media_libraries"]
+    assert connection.json()["state"]["libraries"][0]["item_count"] == 4020
+    assert "untrusted_extra" not in connection.text
+    assert credential not in connection.text

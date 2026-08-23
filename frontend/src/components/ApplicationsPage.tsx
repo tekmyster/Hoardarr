@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { IntegrationDocument, IntegrationProduct } from "../types";
+import { humanCapacity } from "../policy";
 import { Card, Field, Notice, Spinner, StatusBadge } from "./ui";
 
 const PRODUCTS: Array<{ value: IntegrationProduct; label: string }> = [
@@ -10,6 +11,9 @@ const PRODUCTS: Array<{ value: IntegrationProduct; label: string }> = [
   { value: "readarr", label: "Readarr" },
   { value: "whisparr", label: "Whisparr" },
   { value: "prowlarr", label: "Prowlarr" },
+  { value: "plex", label: "Plex" },
+  { value: "jellyfin", label: "Jellyfin" },
+  { value: "emby", label: "Emby" },
 ];
 
 const DEFAULT_FOLDERS: Record<IntegrationProduct, string> = {
@@ -19,7 +23,23 @@ const DEFAULT_FOLDERS: Record<IntegrationProduct, string> = {
   readarr: "/data/media/Books",
   whisparr: "/data/media/Adult",
   prowlarr: "No media root required",
+  plex: "Read-only library visibility",
+  jellyfin: "Read-only library visibility",
+  emby: "Read-only library visibility",
 };
+
+const MEDIA_PRODUCTS = new Set<IntegrationProduct>(["plex", "jellyfin", "emby"]);
+
+type MediaLibrary = { id: string; name: string; media_type: string; paths: string[]; item_count: number | null; capacity_bytes: number | null; quality: string };
+
+function mediaLibraries(item: IntegrationDocument): MediaLibrary[] {
+  if (!MEDIA_PRODUCTS.has(item.expected_product) || !Array.isArray(item.state.libraries)) return [];
+  return item.state.libraries.filter((value): value is MediaLibrary => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    return typeof row.id === "string" && typeof row.name === "string" && Array.isArray(row.paths);
+  });
+}
 
 function activitySummary(item: IntegrationDocument): { status: string; detail: string } {
   const activity = item.state.activity;
@@ -98,7 +118,7 @@ export function ApplicationsPage({
       setAdding(false);
       setStatus("Application added. Discovery is running in Activity.");
       onChanged?.([...items, result.integration]);
-      onRecommendations?.({ product, media: useMediaRoot, torrents: useTorrentFolders, usenet: useUsenetFolders });
+      if (!MEDIA_PRODUCTS.has(product)) onRecommendations?.({ product, media: useMediaRoot, torrents: useTorrentFolders, usenet: useUsenetFolders });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Application could not be added.");
     } finally {
@@ -110,20 +130,21 @@ export function ApplicationsPage({
     {error && <Notice tone="danger" title="Application request failed">{error}</Notice>}
     {status && <Notice tone="info" title="Applications">{status}</Notice>}
     <Card title="ARR applications" description="Connected applications supply their media and download paths to storage setup." actions={<button type="button" className="icon-add-button" aria-label="Add application" onClick={() => setAdding(true)}>+</button>}>
-      {loading ? <Spinner label="Loading applications…" /> : items.length ? <div className="settings-list">{items.map((item) => { const activity = activitySummary(item); return <section key={item.id} className="settings-row"><div><strong>{item.name}</strong><small>{item.discovered_product ?? item.expected_product} {item.product_version ?? ""}</small><code>{item.base_url}</code><small><strong>{activity.status}</strong> · {activity.detail}</small>{typeof item.state.activity_observed_at === "string" && <small>Activity checked {new Date(item.state.activity_observed_at).toLocaleString()}</small>}</div><div><StatusBadge status={item.status} /><button type="button" className="button button-secondary" onClick={() => void api.refreshIntegration(item.id)} disabled={busy}>Refresh</button></div></section>; })}</div> : <div className="empty-state compact-empty"><h3>No applications connected</h3><p>Add an ARR application to discover its current folders.</p></div>}
+      {loading ? <Spinner label="Loading applications…" /> : items.length ? <div className="settings-list">{items.map((item) => { const activity = activitySummary(item); const libraries = mediaLibraries(item); const isMedia = MEDIA_PRODUCTS.has(item.expected_product); return <section key={item.id} className="settings-row"><div><strong>{item.name}</strong><small>{item.discovered_product ?? item.expected_product} {item.product_version ?? ""}</small><code>{item.base_url}</code>{isMedia ? <>{libraries.length ? <div className="media-library-grid">{libraries.map((library) => <article key={library.id}><strong>{library.name}</strong><small>{library.media_type}</small><span>{library.item_count === null ? "Item count not reported" : `${library.item_count.toLocaleString()} items`}</span><span>{library.capacity_bytes === null ? "Capacity not reported" : humanCapacity(library.capacity_bytes)}</span>{library.paths.map((path) => <code key={path}>{path}</code>)}</article>)}</div> : <small>{item.status === "connected" ? "No libraries were reported." : "Library discovery has not completed."}</small>}<small>Read-only observability · Hoardarr does not modify media libraries.</small></> : <><small><strong>{activity.status}</strong> · {activity.detail}</small>{typeof item.state.activity_observed_at === "string" && <small>Activity checked {new Date(item.state.activity_observed_at).toLocaleString()}</small>}</>}</div><div><StatusBadge status={item.status} /><button type="button" className="button button-secondary" onClick={() => void api.refreshIntegration(item.id)} disabled={busy}>Refresh</button></div></section>; })}</div> : <div className="empty-state compact-empty"><h3>No applications connected</h3><p>Add an ARR or media application to discover its current folders and libraries.</p></div>}
     </Card>
     {adding && <Card title="Add application" description="Enter the address and API key shown in the application’s General settings.">
       <div className="form-grid two-columns">
-        <Field label="Application"><select value={product} onChange={(event) => { const next = event.target.value as IntegrationProduct; setProduct(next); setName(PRODUCTS.find((item) => item.value === next)?.label ?? next); setUseMediaRoot(next !== "prowlarr"); }}>{PRODUCTS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+        <Field label="Application"><select value={product} onChange={(event) => { const next = event.target.value as IntegrationProduct; setProduct(next); setName(PRODUCTS.find((item) => item.value === next)?.label ?? next); setUseMediaRoot(next !== "prowlarr" && !MEDIA_PRODUCTS.has(next)); }}>{PRODUCTS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
         <Field label="Name"><input value={name} onChange={(event) => setName(event.target.value)} /></Field>
         <Field label="Address"><input type="url" placeholder="http://server:8989" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} /></Field>
         <Field label="API key"><input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></Field>
       </div>
-      <div className="check-stack">
+      {!MEDIA_PRODUCTS.has(product) && <div className="check-stack">
         <label><input type="checkbox" checked={useMediaRoot} disabled={product === "prowlarr"} onChange={(event) => setUseMediaRoot(event.target.checked)} /><span><strong>Use the recommended media folder</strong><small>{DEFAULT_FOLDERS[product]}</small></span></label>
         <label><input type="checkbox" checked={useTorrentFolders} onChange={(event) => setUseTorrentFolders(event.target.checked)} /><span><strong>Prepare torrent folders</strong><small>/data/downloads/torrents/incomplete and /data/downloads/torrents/complete</small></span></label>
         <label><input type="checkbox" checked={useUsenetFolders} onChange={(event) => setUseUsenetFolders(event.target.checked)} /><span><strong>Prepare Usenet folders</strong><small>/data/downloads/usenet/incomplete and /data/downloads/usenet/complete</small></span></label>
-      </div>
+      </div>}
+      {MEDIA_PRODUCTS.has(product) && <Notice tone="info" title="Read-only media visibility">Hoardarr will read library names, paths, and item counts when the server reports them. It will not change Plex, Jellyfin, or Emby libraries.</Notice>}
       <div className="page-actions"><button type="button" className="button button-secondary" onClick={() => setAdding(false)} disabled={busy}>Cancel</button><button type="button" className="button button-primary" onClick={() => void add()} disabled={busy}>{busy ? "Adding…" : "Add application"}</button></div>
     </Card>}
   </div>;

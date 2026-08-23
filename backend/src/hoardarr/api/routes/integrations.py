@@ -27,6 +27,7 @@ from hoardarr.integrations.url_policy import IntegrationTargetError, normalize_a
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
+MEDIA_PRODUCTS = frozenset({"plex", "jellyfin", "emby"})
 
 
 def _allow_risky_options(principal: Principal, *, allow_localhost: bool, verify_tls: bool) -> None:
@@ -92,13 +93,16 @@ def create_integration(
         "approved_ips": list(target.resolved_ips),
         "verify_tls": payload.verify_tls,
         "allow_localhost": payload.allow_localhost,
-        "credential_fingerprint": secret_box.fingerprint("servarr_api_key", api_key),
+        "credential_fingerprint": secret_box.fingerprint(
+            "media_api_key" if payload.product in MEDIA_PRODUCTS else "servarr_api_key",
+            api_key,
+        ),
     }
     connection_id = new_id()
     try:
         operation, created = create_operation(
             session,
-            kind="servarr.discover",
+            kind="media.discover" if payload.product in MEDIA_PRODUCTS else "servarr.discover",
             principal=principal,
             request=safe_request,
             idempotency_key=key,
@@ -110,7 +114,7 @@ def create_integration(
     if created:
         connection = IntegrationConnection(
             id=connection_id,
-            adapter="servarr",
+            adapter="media" if payload.product in MEDIA_PRODUCTS else "servarr",
             name=payload.name,
             expected_product=payload.product,
             base_url=target.base_url,
@@ -185,7 +189,7 @@ def refresh_integration(
     try:
         operation, created = create_operation(
             session,
-            kind="servarr.discover",
+            kind="media.discover" if connection.adapter == "media" else "servarr.discover",
             principal=principal,
             request={"connection_id": connection.id, "action": "refresh"},
             idempotency_key=key,

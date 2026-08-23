@@ -170,6 +170,21 @@ quality and activity counts, while Storage Group drain previews show separate
 blockers/warnings. Scheduled starts and bounded maintenance windows let users
 coordinate longer jobs without keeping the Web UI open.
 
+## Plex, Jellyfin, and Emby observability
+
+The Applications page also supports read-only Plex, Jellyfin, and Emby
+connections. These use the same DNS-pinned, redirect-refusing private-network
+transport boundary as ARR connections, but send the product-specific
+`X-Plex-Token` or `X-Emby-Token` header. Discovery is a durable operation and
+persists only bounded library IDs, names, media types, paths, and item counts.
+Provider strings are treated as untrusted input and API credentials are never
+included in stored state.
+
+Capacity remains **Not reported** until a library path can be correlated to a
+real Hoardarr Storage Group. A media-server path alone is not evidence of
+filesystem allocation, so Hoardarr does not manufacture a capacity value.
+These adapters never create, edit, scan, or delete media libraries.
+
 ## Completion criteria
 
 The final summary reports independently whether:

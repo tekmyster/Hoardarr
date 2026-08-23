@@ -653,6 +653,28 @@ test.describe("production sign-in shell", () => {
     await expect(page.getByText(/1 downloading · 1 importing · 3 pending/)).toBeVisible();
   });
 
+  test("shows read-only Plex library observability without inventing capacity", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    await page.route("**/api/v1/integrations", (route) => route.fulfill({ json: { items: [{
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Plex",
+      expected_product: "plex",
+      discovered_product: "plex",
+      product_version: "1.42.0",
+      base_url: "http://plex:32400",
+      status: "connected",
+      capabilities: ["media_libraries"],
+      state: { libraries: [{ id: "movies", name: "Movies", media_type: "movie", paths: ["/data/media/Movies"], item_count: 4020, capacity_bytes: null, quality: "available" }] },
+      last_checked_at: "2026-08-23T16:00:00Z",
+    }] } }));
+    await page.goto("/");
+    await page.getByRole("button", { name: "Applications" }).click();
+    await expect(page.getByText("4,020 items")).toBeVisible();
+    await expect(page.getByText("Capacity not reported")).toBeVisible();
+    await expect(page.getByText("/data/media/Movies")).toBeVisible();
+    await expect(page.getByText(/does not modify media libraries/)).toBeVisible();
+  });
+
   test("reviews a real download-tier plan and retains a torrent source for seeding", async ({ page }) => {
     await authenticatedEmptyServer(page);
     await page.route("**/api/v1/storage/groups", (route) => route.fulfill({ json: { items: [{

@@ -231,7 +231,7 @@ def mark_cancelled_resource(session: Session, operation: Operation) -> None:
             service.updated_at = utc_now()
         return
     if (
-        operation.kind != "servarr.discover"
+        operation.kind not in {"servarr.discover", "media.discover"}
         or operation.resource_type != "integration_connection"
         or operation.resource_id is None
     ):
@@ -255,7 +255,7 @@ def mark_failed_resource(session: Session, operation: Operation, code: str) -> N
             service.updated_at = utc_now()
         return
     if (
-        operation.kind != "servarr.discover"
+        operation.kind not in {"servarr.discover", "media.discover"}
         or operation.resource_type != "integration_connection"
         or operation.resource_id is None
     ):

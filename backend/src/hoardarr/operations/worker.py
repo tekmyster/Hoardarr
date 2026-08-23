@@ -38,6 +38,7 @@ from hoardarr.db.models import (
 )
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError, run_hardware_detector
+from hoardarr.integrations.media import MEDIA_PRODUCTS, discover_media_server
 from hoardarr.integrations.servarr import (
     PRODUCTS,
     ServarrError,
@@ -99,6 +100,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
     {
         "hardware.scan",
         "servarr.discover",
+        "media.discover",
         "servarr.apply",
         "storage.apply",
         "storage.transfer",
@@ -179,6 +181,7 @@ class HardwareExecution:
 @dataclass(frozen=True)
 class ServarrConnectionData:
     id: str
+    adapter: str
     expected_product: str
     base_url: str
     approved_ips: list[str]
@@ -331,17 +334,18 @@ def _load_connection(
     if item.resource_type not in {None, "integration_connection"} or not item.resource_id:
         raise WorkFailure(
             "invalid_operation_request",
-            "Servarr discovery requires an integration connection resource",
+            "Integration discovery requires an integration connection resource",
         )
     with session_factory() as session, session.begin():
         connection = session.get(IntegrationConnection, item.resource_id)
-        if connection is None or connection.adapter != "servarr":
+        if connection is None or connection.adapter not in {"servarr", "media"}:
             raise WorkFailure(
                 "integration_not_found",
-                "The Servarr integration connection no longer exists",
+                "The integration connection no longer exists",
             )
         return ServarrConnectionData(
             id=connection.id,
+            adapter=connection.adapter,
             expected_product=connection.expected_product,
             base_url=connection.base_url,
             approved_ips=list(connection.approved_ips_json),
@@ -561,6 +565,82 @@ def _sanitize_discovery(
     }
 
 
+def _sanitize_media_discovery(
+    discovery: dict[str, Any], *, expected_product: str
+) -> dict[str, Any]:
+    if (
+        expected_product not in MEDIA_PRODUCTS
+        or not isinstance(discovery, dict)
+        or discovery.get("product") != expected_product
+    ):
+        raise WorkFailure("invalid_discovery_result", "Media discovery returned invalid data")
+    state_value = discovery.get("state")
+    if not isinstance(state_value, dict):
+        raise WorkFailure("invalid_discovery_result", "Media discovery returned invalid data")
+    rows = state_value.get("libraries")
+    if not isinstance(rows, list) or len(rows) > 64:
+        raise WorkFailure("invalid_discovery_result", "Media discovery returned invalid libraries")
+    libraries: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise WorkFailure(
+                "invalid_discovery_result", "Media discovery returned invalid libraries"
+            )
+        library_id = _bounded_text(row.get("id"), maximum=128)
+        name = _bounded_text(row.get("name"), maximum=256)
+        if not library_id or not name:
+            raise WorkFailure(
+                "invalid_discovery_result", "Media discovery returned invalid libraries"
+            )
+        raw_paths = row.get("paths")
+        if not isinstance(raw_paths, list) or len(raw_paths) > 16:
+            raise WorkFailure(
+                "invalid_discovery_result", "Media discovery returned invalid libraries"
+            )
+        paths: list[str] = []
+        for path in raw_paths:
+            value = _bounded_text(path, maximum=4096)
+            if value and value not in paths:
+                paths.append(value)
+        item_count = row.get("item_count")
+        if item_count is not None and (
+            isinstance(item_count, bool)
+            or not isinstance(item_count, int)
+            or not 0 <= item_count <= 100_000_000
+        ):
+            raise WorkFailure("invalid_discovery_result", "Media discovery returned invalid counts")
+        capacity = row.get("capacity_bytes")
+        if capacity is not None and (
+            isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0
+        ):
+            raise WorkFailure(
+                "invalid_discovery_result", "Media discovery returned invalid capacity"
+            )
+        libraries.append(
+            {
+                "id": library_id,
+                "name": name,
+                "media_type": _bounded_text(row.get("media_type"), maximum=64)
+                or "Not reported",
+                "paths": paths,
+                "item_count": item_count,
+                "capacity_bytes": capacity,
+                "quality": "available",
+            }
+        )
+    status = state_value.get("status")
+    return {
+        "product": expected_product,
+        "version": _bounded_text(discovery.get("version"), maximum=64),
+        "support_level": "read_only",
+        "capabilities": ["media_libraries"],
+        "state": {
+            "status": _sanitize_status(status) if isinstance(status, dict) else {},
+            "libraries": libraries,
+        },
+    }
+
+
 def refresh_servarr_activity(
     session_factory: SessionFactory,
     settings: Settings,
@@ -690,6 +770,9 @@ def _execute_servarr(
     servarr_transport: httpx.BaseTransport | None,
 ) -> ServarrExecution:
     connection = _load_connection(session_factory, item)
+    product_label = (
+        "media server" if connection.adapter == "media" else "Servarr application"
+    )
     try:
         api_key = secret_box.decrypt(
             INTEGRATION_AAD_RECORD_TYPE,
@@ -699,12 +782,15 @@ def _execute_servarr(
     except SecretStoreError as exc:
         raise WorkFailure(
             "credential_unavailable",
-            "The Servarr API credential could not be loaded",
+            f"The {product_label} API credential could not be loaded",
             connection=connection,
         ) from exc
     try:
         try:
-            discovery = servarr_discoverer(
+            discoverer = (
+                discover_media_server if connection.adapter == "media" else servarr_discoverer
+            )
+            discovery = discoverer(
                 settings=settings,
                 expected_product=connection.expected_product,
                 base_url=connection.base_url,
@@ -717,25 +803,26 @@ def _execute_servarr(
         except ServarrError as exc:
             code = exc.code if exc.code in _SERVARR_FAILURE_MESSAGES else "servarr_discovery_failed"
             message = _SERVARR_FAILURE_MESSAGES.get(
-                code, "Servarr discovery could not be completed"
+                code, f"{product_label.title()} discovery could not be completed"
             )
             raise WorkFailure(code, message, connection=connection) from exc
         except IntegrationTargetError as exc:
             raise WorkFailure(
                 "target_rejected",
-                "The Servarr target no longer resolves to an approved address",
+                f"The {product_label} target no longer resolves to an approved address",
                 connection=connection,
             ) from exc
         except Exception as exc:
             raise WorkFailure(
                 "servarr_discovery_failed",
-                "Servarr discovery could not be completed",
+                f"{product_label.title()} discovery could not be completed",
                 connection=connection,
             ) from exc
         try:
-            safe_discovery = _sanitize_discovery(
-                discovery,
-                expected_product=connection.expected_product,
+            safe_discovery = (
+                _sanitize_media_discovery(discovery, expected_product=connection.expected_product)
+                if connection.adapter == "media"
+                else _sanitize_discovery(discovery, expected_product=connection.expected_product)
             )
         except WorkFailure as exc:
             raise WorkFailure(
@@ -746,7 +833,7 @@ def _execute_servarr(
         if _contains_plaintext(safe_discovery, api_key):
             raise WorkFailure(
                 "credential_reflected",
-                "Servarr reflected its API credential in discovery data",
+                f"The {product_label} reflected its API credential in discovery data",
                 connection=connection,
             )
     finally:
@@ -1110,7 +1197,7 @@ def _execute_work(
 ) -> ExecutionResult:
     if item.kind == "hardware.scan":
         return _execute_hardware(settings, detector_runner)
-    if item.kind == "servarr.discover":
+    if item.kind in {"servarr.discover", "media.discover"}:
         return _execute_servarr(
             session_factory,
             item,
