@@ -580,6 +580,21 @@ def test_existing_zfs_expansion_fails_before_commands_on_pool_drift(
     assert commands == []
 
 
+@pytest.mark.parametrize(
+    ("device", "partition"),
+    [
+        ("/dev/disk/by-id/wwn-test", "/dev/disk/by-id/wwn-test-part1"),
+        ("/tmp/by-id/wwn-test", "/tmp/by-id/wwn-test-part1"),
+        ("/dev/nvme0n1", "/dev/nvme0n1p1"),
+        ("/dev/sdz", "/dev/sdz1"),
+    ],
+)
+def test_partition_path_uses_linux_names_for_stable_device_aliases(
+    device: str, partition: str
+) -> None:
+    assert executor._partition_path(Path(device)) == Path(partition)
+
+
 DEVICE_ID = "serial:vendor:model:stable-serial"
 
 

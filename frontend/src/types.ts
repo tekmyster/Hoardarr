@@ -66,6 +66,14 @@ export interface StorageInventory {
       unsynced_items?: number | "Not reported";
       bad_blocks?: number | "Not reported";
       last_sync?: string;
+      configuration?: {
+        quality: "available" | "temporarily_unavailable";
+        data_disks: Array<{ name: string; path: string }>;
+        parity_disks: Array<{ level: number; path: string }>;
+        content_files: string[];
+        config_sha256: string | null;
+        errors: string[];
+      };
     }>;
   };
   shares: {
@@ -444,6 +452,39 @@ export interface DeviceMaintenancePlan {
   hardware_snapshot_sha256: string;
   destructive: true;
   advanced_only: boolean;
+}
+
+export interface SnapraidReplacementPlan {
+  schema_version: 1;
+  kind: "snapraid_replacement";
+  pool_name: string;
+  data_name: string;
+  old_path: string;
+  replacement_mount: string;
+  filesystem: "ext4" | "xfs" | "btrfs";
+  config_sha256: string;
+  device: {
+    id: string;
+    stable_identity: boolean;
+    vendor: string | null;
+    model: string | null;
+    serial: string | null;
+    wwn: string | null;
+    eui64: string | null;
+    nguid: string | null;
+    capacity_bytes: number;
+    logical_sector_bytes: number | null;
+    physical_sector_bytes: number | null;
+  };
+  device_binding_sha256: string;
+  hardware_snapshot_sha256: string;
+  existing_data: {
+    detected: boolean;
+    partition_count: number;
+    signature_types: string[];
+    scan_status: "complete" | "partial" | "unavailable";
+  };
+  destructive: true;
 }
 
 export interface StorageControllerPathDocument {

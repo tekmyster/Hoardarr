@@ -34,6 +34,7 @@ import type {
   PhysicalDiskDocument,
   ResourceUsageDocument,
   SetupStatus,
+  SnapraidReplacementPlan,
   StorageOperationProgress,
   StorageBackendActivationPlan,
   StorageInventory,
@@ -648,6 +649,33 @@ class HoardarrApi {
       headers: { "Idempotency-Key": createIdempotencyKey() },
       body: JSON.stringify({ plan, plan_sha256: planSha256, confirmation: "I AGREE" }),
     });
+    return result.operation;
+  }
+
+  async previewSnapraidReplacement(input: {
+    pool_name: string;
+    data_name: string;
+    replacement_device_id: string;
+    filesystem: "ext4" | "xfs" | "btrfs";
+  }): Promise<{ plan: SnapraidReplacementPlan; plan_sha256: string }> {
+    return this.request("/storage/snapraid/replacements/preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async applySnapraidReplacement(
+    plan: SnapraidReplacementPlan,
+    planSha256: string,
+  ): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      "/storage/snapraid/replacements",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({ plan, plan_sha256: planSha256, confirmation: "I AGREE" }),
+      },
+    );
     return result.operation;
   }
 

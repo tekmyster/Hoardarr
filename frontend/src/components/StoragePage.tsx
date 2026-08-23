@@ -9,6 +9,7 @@ import { StoragePerformance } from "./StoragePerformance";
 import { StorageRedundancyPanel } from "./StorageRedundancyPanel";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
 import { StorageExpansionPanel } from "./StorageExpansionPanel";
+import { SnapraidReplacementPanel } from "./SnapraidReplacementPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -208,6 +209,11 @@ export function StoragePage({
     <div id="storage-groups-panel"><StorageGroupsPanel /></div>
 
     <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />
+
+    <SnapraidReplacementPanel
+      inventory={storageInventory}
+      availableDrives={drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id))}
+    />
 
     <StorageTopologyPanels
       topology={storageInventory?.topology}

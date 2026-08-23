@@ -52,6 +52,8 @@ from hoardarr.storage.redundancy import (
 )
 from hoardarr.storage.snapraid import (
     SnapraidReplacementError,
+    existing_data_summary,
+    recovery_commands,
     replace_data_entry,
     validate_replacement_plan,
 )
@@ -1416,6 +1418,8 @@ def _assert_no_symlink_components(path: Path) -> None:
 
 
 def _partition_path(device: Path) -> Path:
+    if device.parent.name == "by-id":
+        return device.with_name(f"{device.name}-part1")
     return Path(f"{device}p1" if device.name.startswith("nvme") else f"{device}1")
 
 
@@ -2871,6 +2875,11 @@ def apply_snapraid_replacement(
     with _device_locks(paths, [str(device["id"])]):
         live = _selected_live_devices(identity_document, provider())
         _ensure_not_active(paths, live)
+        if existing_data_summary(live[str(device["id"])]) != plan["existing_data"]:
+            raise ExecutorFailure(
+                "replacement_contents_changed",
+                "The replacement drive contents changed after destructive review.",
+            )
         stable_path = _stable_path(paths, live[str(device["id"])])
         partition = _partition_path(stable_path)
         try:
@@ -2923,7 +2932,7 @@ def apply_snapraid_replacement(
             "updated_at": time.time(),
             "phase": "Revalidating replacement drive",
             "completed_steps": 0,
-            "total_steps": len(commands) + 4,
+            "total_steps": len(commands) + 5,
             "current_action": None,
             "completed_actions": [],
             "notices": [],
@@ -2949,8 +2958,31 @@ def apply_snapraid_replacement(
                 runner(command, timeout)
                 journal["completed_steps"] = index
                 journal["completed_actions"].append(f"replace:{index}")
+            def recovery_step(
+                *, step: int, action_id: str, phase: str, command: list[str], timeout: int
+            ) -> None:
+                journal.update(
+                    {
+                        "phase": phase,
+                        "current_action": {"id": action_id},
+                        "updated_at": time.time(),
+                    }
+                )
+                atomic_json(journal_path, journal)
+                runner(command, timeout)
+                journal["completed_steps"] = step
+                journal["completed_actions"].append(action_id)
+                journal["updated_at"] = time.time()
+                atomic_json(journal_path, journal)
+
             replacement_mount.mkdir(parents=True, exist_ok=False, mode=0o770)
-            runner([_tool("mount"), partition.as_posix(), str(replacement_mount)], 120)
+            recovery_step(
+                step=len(commands) + 1,
+                action_id="replace:mount",
+                phase="Mounting replacement drive",
+                command=[_tool("mount"), partition.as_posix(), str(replacement_mount)],
+                timeout=120,
+            )
             filesystem_uuid = _blkid_value(partition, "UUID")
             _append_fstab(
                 paths,
@@ -2958,13 +2990,20 @@ def apply_snapraid_replacement(
                 [f"UUID={filesystem_uuid} {replacement_mount} {plan['filesystem']} noatime 0 2"],
             )
             atomic_text(config_path, updated_config, mode=0o640)
-            runner([_tool("snapraid"), "-c", str(config_path), "status"], 300)
-            fix_started = True
-            runner(
-                [_tool("snapraid"), "-c", str(config_path), "-d", str(plan["data_name"]), "fix"],
-                86400,
-            )
-            runner([_tool("snapraid"), "-c", str(config_path), "sync"], 86400)
+            for recovery_index, command in enumerate(
+                recovery_commands(config_path=str(config_path), data_name=str(plan["data_name"])),
+                start=2,
+            ):
+                action_name = command.argv[-1]
+                if action_name == "fix":
+                    fix_started = True
+                recovery_step(
+                    step=len(commands) + recovery_index,
+                    action_id=f"replace:{action_name}",
+                    phase=command.phase,
+                    command=[_tool(command.argv[0]), *command.argv[1:]],
+                    timeout=command.timeout_seconds,
+                )
         except Exception:
             if not fix_started:
                 atomic_text(config_path, original_config, mode=0o640)

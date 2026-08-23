@@ -624,6 +624,8 @@ def test_snapraid_replacement_is_immutable_reserved_and_executed(api_runtime: An
         "capacity_bytes": 1_000_000_000,
         "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
         "partitions": [],
+        "signatures": [],
+        "signature_scan": {"status": "complete"},
     }
     hardware = {"schema_version": 1, "source": {"kind": "test"}, "disks": [disk]}
     app.state.settings.snapraid_config_root.mkdir()
@@ -662,6 +664,12 @@ def test_snapraid_replacement_is_immutable_reserved_and_executed(api_runtime: An
         },
     )
     assert preview.status_code == 200, preview.text
+    assert preview.json()["plan"]["existing_data"] == {
+        "detected": False,
+        "partition_count": 0,
+        "signature_types": [],
+        "scan_status": "complete",
+    }
     body = {
         "plan": preview.json()["plan"],
         "plan_sha256": preview.json()["plan_sha256"],

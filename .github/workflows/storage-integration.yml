@@ -102,11 +102,14 @@ jobs:
             dist/validation/snapraid-expansion.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .vdev_count_before == 1 and .vdev_count_after == 2 and .pool_guid_before == .pool_guid_after and .dry_run_executed and (.force_override_used | not)' \
             dist/validation/zfs-expansion.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .journal_state == "succeeded" and .parity_state == "current" and .recovered_sha256 == .expected_sha256 and .stable_alias_partition_used and .command_order == ["snapraid:status", "snapraid:fix", "snapraid:check", "snapraid:sync"]' \
+            dist/validation/snapraid-replacement.json
       - uses: actions/upload-artifact@v4
         with:
           name: storage-expansion-evidence
           path: |
             dist/validation/snapraid-expansion.json
+            dist/validation/snapraid-replacement.json
             dist/validation/zfs-expansion.json
   disposable-block-devices:
     if: github.event_name == 'workflow_dispatch' && inputs.run_extended_self_hosted

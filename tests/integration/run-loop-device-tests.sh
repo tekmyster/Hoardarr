@@ -132,16 +132,19 @@ mkdir -p "$managed/data-1" "$managed/parity-1"
 mount "$snap_data" "$managed/data-1"
 mount "$snap_parity" "$managed/parity-1"
 printf 'test payload\n' >"$managed/data-1/file.txt"
-cat >"$work/snapraid.conf" <<EOF
+snap_config_root="$work/snapraid"
+snap_config="$snap_config_root/media.conf"
+mkdir -p "$snap_config_root"
+cat >"$snap_config" <<EOF
 parity $managed/parity-1/snapraid.parity
 content $managed/data-1/snapraid.content
 content $managed/parity-1/snapraid.content
 data d1 $managed/data-1
 EOF
-snapraid -c "$work/snapraid.conf" sync
-snapraid -c "$work/snapraid.conf" status
-snapraid -c "$work/snapraid.conf" diff
-snapraid -c "$work/snapraid.conf" check
+snapraid -c "$snap_config" sync
+snapraid -c "$snap_config" status
+snapraid -c "$snap_config" diff
+snapraid -c "$snap_config" check
 
 make_loop snap-data-2 512M
 snap_data_2="$created_loop"
@@ -150,16 +153,16 @@ mkfs.ext4 -F -E nodiscard "$snap_data_2"
 mkdir "$managed/data-2"
 mount "$snap_data_2" "$managed/data-2"
 printf 'second data member\n' >"$managed/data-2/file.txt"
-config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
+config_sha="$(sha256sum "$snap_config" | awk '{print $1}')"
 "$python" "$repo/tests/integration/snapraid_expand_config.py" \
-  --config "$work/snapraid.conf" \
+  --config "$snap_config" \
   --role data \
   --mountpoint "$managed/data-2" \
   --expected-sha256 "$config_sha"
-snapraid -c "$work/snapraid.conf" status
-snapraid -c "$work/snapraid.conf" sync
-snapraid -c "$work/snapraid.conf" check
-grep -Eq "^data h[0-9a-f]{12} $managed/data-2$" "$work/snapraid.conf"
+snapraid -c "$snap_config" status
+snapraid -c "$snap_config" sync
+snapraid -c "$snap_config" check
+grep -Eq "^data h[0-9a-f]{12} $managed/data-2$" "$snap_config"
 
 make_loop snap-parity-2 512M
 snap_parity_2="$created_loop"
@@ -167,18 +170,18 @@ assert_test_loop "$snap_parity_2"
 mkfs.ext4 -F -E nodiscard "$snap_parity_2"
 mkdir "$managed/parity-2"
 mount "$snap_parity_2" "$managed/parity-2"
-config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
+config_sha="$(sha256sum "$snap_config" | awk '{print $1}')"
 "$python" "$repo/tests/integration/snapraid_expand_config.py" \
-  --config "$work/snapraid.conf" \
+  --config "$snap_config" \
   --role parity \
   --mountpoint "$managed/parity-2" \
   --expected-sha256 "$config_sha"
-snapraid -c "$work/snapraid.conf" status
-snapraid -c "$work/snapraid.conf" --force-full sync
-snapraid -c "$work/snapraid.conf" check
-grep -Fq "2-parity $managed/parity-2/snapraid.parity" "$work/snapraid.conf"
+snapraid -c "$snap_config" status
+snapraid -c "$snap_config" --force-full sync
+snapraid -c "$snap_config" check
+grep -Fq "2-parity $managed/parity-2/snapraid.parity" "$snap_config"
 mkdir -p "$repo/dist/validation"
-final_config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
+final_config_sha="$(sha256sum "$snap_config" | awk '{print $1}')"
 cat >"$repo/dist/validation/snapraid-expansion.json" <<EOF
 {
   "classification": "VERIFIED IN ISOLATION",
@@ -192,12 +195,30 @@ cat >"$repo/dist/validation/snapraid-expansion.json" <<EOF
   "parity_level_count": 2
 }
 EOF
+
+# Lose d1 after a synchronized snapshot, then exercise the production executor
+# against a newly created, blank replacement loop. The original member is never
+# reformatted and the reconstructed file is independently hashed before cleanup.
+snapraid_recovery_hash="$(sha256sum "$managed/data-1/file.txt" | awk '{print $1}')"
+umount "$managed/data-1"
+make_loop snap-replacement 512M
+snap_replacement="$created_loop"
+assert_test_loop "$snap_replacement"
+"$python" "$repo/tests/integration/snapraid_replace_data.py" \
+  --config "$snap_config" \
+  --pool media \
+  --data-name d1 \
+  --replacement-loop "$snap_replacement" \
+  --work-root "$work" \
+  --expected-file file.txt \
+  --expected-sha256 "$snapraid_recovery_hash" \
+  --evidence "$repo/dist/validation/snapraid-replacement.json"
+
 stat --format='%n size=%s blocks=%b' \
-  "$managed/data-1/snapraid.content" \
   "$managed/data-2/snapraid.content" \
   "$managed/parity-1/snapraid.parity" \
   "$managed/parity-2/snapraid.parity"
-umount "$managed/data-1"
+findmnt -rn -T "$managed/data-1" >/dev/null 2>&1 && umount "$managed/data-1" || true
 umount "$managed/data-2"
 umount "$managed/parity-1"
 umount "$managed/parity-2"
