@@ -70,6 +70,7 @@ def test_sas_shelf_topology_keeps_bays_speeds_and_drive_identity() -> None:
     ]
     drive = next(item for item in result["nodes"] if item["kind"] == "drive")
     assert drive["serial"] == "ZA123456"
+    assert drive["stable_identity"] == "wwn:5000c50012345678"
     assert drive["capable_speed_gbps"] == 12.0
     assert drive["negotiated_speed_gbps"] == 6.0
     assert drive["mapping_confidence"] == "high"

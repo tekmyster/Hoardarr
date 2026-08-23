@@ -446,6 +446,7 @@ def build_storage_topology(
         nodes[disk_id] = {
             "id": disk_id,
             "kind": "drive",
+            "stable_identity": stable_id,
             "label": " ".join(filter(None, (vendor, model))) or "Unidentified drive",
             "vendor": vendor,
             "model": model,

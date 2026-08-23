@@ -92,7 +92,9 @@ function LinkRail({ link }: { link: StorageTopologyLink }) {
   ><span>{link.protocol}</span><small>{speedLabel(link.negotiated_speed_gbps, link.capable_speed_gbps)}</small></div>;
 }
 
-function DriveNode({ node }: { node: StorageTopologyNode }) {
+type TopologyDriveAction = "configure" | "test" | "import";
+
+function DriveNode({ node, actionable, managed, onDriveAction, onManageLifecycle }: { node: StorageTopologyNode; actionable: boolean; managed: boolean; onDriveAction?: (action: TopologyDriveAction, driveId: string) => void; onManageLifecycle?: () => void }) {
   const driveHealth = health(node);
   const belowCapability = node.negotiated_speed_gbps != null && node.capable_speed_gbps != null && node.negotiated_speed_gbps < node.capable_speed_gbps;
   return <article className={`topology-drive health-${driveHealth}`}>
@@ -112,6 +114,15 @@ function DriveNode({ node }: { node: StorageTopologyNode }) {
       <div><dt>Use</dt><dd>{node.system_disk ? "System" : fillPercent(node) == null ? "Not reported" : `${fillPercent(node)}%`}</dd></div>
     </dl>
     {belowCapability && <p className="inline-notice warning">This link is operating at {node.negotiated_speed_gbps} Gb/s while the reported path capability is {node.capable_speed_gbps} Gb/s. A lower-rate drive or intermediate link can make this normal.</p>}
+    {node.system_disk !== true && <div className="button-row topology-drive-actions" aria-label={`Actions for ${node.label}`}>
+      {managed
+        ? <button type="button" className="button button-secondary" onClick={onManageLifecycle}>Manage lifecycle</button>
+        : actionable && node.stable_identity && <>
+          <button type="button" className="button button-secondary" onClick={() => onDriveAction?.("test", node.stable_identity!)}>Run health tests</button>
+          <button type="button" className="button button-secondary" onClick={() => onDriveAction?.("import", node.stable_identity!)}>Review existing data</button>
+          <button type="button" className="button button-primary" onClick={() => onDriveAction?.("configure", node.stable_identity!)}>Set up this drive</button>
+        </>}
+    </div>}
   </article>;
 }
 
@@ -134,23 +145,23 @@ function LogicalNode({ node }: { node: StorageTopologyNode }) {
   return <article className={`topology-logical-node topology-${node.kind}`}><header><div><span>{node.kind}</span><strong>{node.label}</strong>{node.path && <code>{node.path}</code>}</div><StatusBadge status={node.status ?? node.health_status ?? "configured"} /></header>{node.pool_type && <small>{node.pool_type}</small>}</article>;
 }
 
-function TopologyBranch({ link, target, linksBySource, nodes, visited = new Set<string>() }: { link: StorageTopologyLink; target: StorageTopologyNode; linksBySource: Map<string, StorageTopologyLink[]>; nodes: Map<string, StorageTopologyNode>; visited?: Set<string> }) {
+function TopologyBranch({ link, target, linksBySource, nodes, actionableDriveIds, managedDriveIds, onDriveAction, onManageLifecycle, visited = new Set<string>() }: { link: StorageTopologyLink; target: StorageTopologyNode; linksBySource: Map<string, StorageTopologyLink[]>; nodes: Map<string, StorageTopologyNode>; actionableDriveIds: ReadonlySet<string>; managedDriveIds: ReadonlySet<string>; onDriveAction?: (action: TopologyDriveAction, driveId: string) => void; onManageLifecycle?: () => void; visited?: Set<string> }) {
   if (visited.has(target.id)) return null;
   const nextVisited = new Set(visited).add(target.id);
   const childLinks = linksBySource.get(target.id) ?? [];
   return <div className="topology-branch">
     <LinkRail link={link} />
-    {target.kind === "drive" ? <><DriveNode node={target} />{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null; })}</> : target.kind !== "enclosure" ? <>{["port", "phy", "expander", "path"].includes(target.kind) ? <PhysicalNode node={target} /> : <LogicalNode node={target} />}{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null; })}</> : <article className="topology-enclosure-node">
+    {target.kind === "drive" ? <><DriveNode node={target} actionable={Boolean(target.stable_identity && actionableDriveIds.has(target.stable_identity))} managed={Boolean(target.stable_identity && managedDriveIds.has(target.stable_identity))} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} />{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null; })}</> : target.kind !== "enclosure" ? <>{["port", "phy", "expander", "path"].includes(target.kind) ? <PhysicalNode node={target} /> : <LogicalNode node={target} />}{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null; })}</> : <article className="topology-enclosure-node">
       <header><div><strong>{target.label}</strong><code>{target.address}</code></div><StatusBadge status={target.status ?? "detected"} /></header>
       <div className="topology-enclosure-drives">{childLinks.map((child) => {
         const childNode = nodes.get(child.target);
-        return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} visited={nextVisited} /> : null;
+        return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null;
       })}</div>
     </article>}
   </div>;
 }
 
-export function StorageTopologyPanels({ topology }: { topology: StorageTopology | null | undefined }) {
+export function StorageTopologyPanels({ topology, actionableDriveIds = new Set<string>(), managedDriveIds = new Set<string>(), onDriveAction, onManageLifecycle }: { topology: StorageTopology | null | undefined; actionableDriveIds?: ReadonlySet<string>; managedDriveIds?: ReadonlySet<string>; onDriveAction?: (action: TopologyDriveAction, driveId: string) => void; onManageLifecycle?: () => void }) {
   const nodes = new Map((topology?.nodes ?? []).map((node) => [node.id, node]));
   const links = topology?.links ?? [];
   const linksBySource = new Map<string, StorageTopologyLink[]>();
@@ -174,7 +185,7 @@ export function StorageTopologyPanels({ topology }: { topology: StorageTopology 
           <div className="controller-details"><span>{controller.driver ?? "Not reported"}</span><span>{speedLabel(controller.negotiated_speed_gbps, controller.capable_speed_gbps)}</span></div>
           <div className="topology-controller-branches">{controllerLinks.map((link) => {
             const target = nodes.get(link.target);
-            return target ? <TopologyBranch key={link.id} link={link} target={target} linksBySource={linksBySource} nodes={nodes} /> : null;
+            return target ? <TopologyBranch key={link.id} link={link} target={target} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} /> : null;
           })}</div>
         </article>;
       })}</div>}

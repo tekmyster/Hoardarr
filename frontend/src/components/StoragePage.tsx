@@ -205,11 +205,17 @@ export function StoragePage({
 
     <StoragePerformance />
 
-    <StorageGroupsPanel />
+    <div id="storage-groups-panel"><StorageGroupsPanel /></div>
 
     <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />
 
-    <StorageTopologyPanels topology={storageInventory?.topology} />
+    <StorageTopologyPanels
+      topology={storageInventory?.topology}
+      actionableDriveIds={new Set(drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id)).map((drive) => drive.id))}
+      managedDriveIds={assignedDriveIds}
+      onDriveAction={(action, driveId) => onDriveAction(action, driveId)}
+      onManageLifecycle={() => document.getElementById("storage-groups-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+    />
 
     <StorageRedundancyPanel initialManagedId={focusedStorageId} />
 

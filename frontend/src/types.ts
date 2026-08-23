@@ -100,6 +100,7 @@ export interface StorageTopologyNode {
   vendor?: string | null;
   model?: string | null;
   serial?: string;
+  stable_identity?: string;
   path?: string | null;
   slot?: string | null;
   mapping_source?: string | null;
