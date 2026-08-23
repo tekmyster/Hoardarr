@@ -21,6 +21,7 @@ from hoardarr.storage.executor import (
     apply_storage_plan,
     storage_operation_status,
 )
+from hoardarr.storage.layouts import CommandSpec
 
 
 @pytest.mark.parametrize(
@@ -94,6 +95,141 @@ def test_storage_timer_is_persistent_and_argv_is_fixed(
             runner=lambda *_args: None,
         )
     assert failure.value.code == "schedule_invalid"
+
+
+def test_mergerfs_fstab_update_is_atomic_and_replaces_the_existing_mount(
+    tmp_path: Path,
+) -> None:
+    paths = Paths(fstab=tmp_path / "fstab")
+    paths.fstab.write_text(
+        "/mnt/disk\\040one:/mnt/disk2 /data/media fuse.mergerfs "
+        "category.create=mfs,category.search=ff,nofail 0 0\n",
+        encoding="utf-8",
+    )
+    executor._append_fstab(
+        paths,
+        "11111111-1111-4111-8111-111111111111",
+        ["UUID=new-member /mnt/new-member ext4 defaults 0 2"],
+        mergerfs_update=(
+            "/data/media",
+            ["/mnt/disk one", "/mnt/disk2", "/mnt/new-member"],
+        ),
+    )
+    content = paths.fstab.read_text(encoding="utf-8")
+    assert content.count("fuse.mergerfs") == 1
+    assert "/mnt/disk\\040one:/mnt/disk2:/mnt/new-member /data/media" in content
+    assert "UUID=new-member /mnt/new-member ext4 defaults 0 2" in content
+
+
+def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    combined = tmp_path / "managed" / "data" / "media"
+    new_member = tmp_path / "mounts" / document_hash(DEVICE_ID)[:16]
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        fstab=tmp_path / "fstab",
+        mount_root=tmp_path / "mounts",
+    )
+    paths.fstab.write_text(
+        f"/mnt/member-a:/mnt/member-b {combined} fuse.mergerfs "
+        "category.create=mfs,category.search=ff,use_ino,nofail 0 0\n",
+        encoding="utf-8",
+    )
+    live = {
+        **_live_disk(),
+        "partitions": [
+            {
+                "kernel_path": "/dev/sdz1",
+                "filesystem": {"type": "ext4", "uuid": "member-uuid"},
+            }
+        ],
+    }
+    document = {
+        "presentation_root": "/data/media",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "mergerfs",
+            "selected_devices": [_selected_device()],
+            "actions": [
+                {
+                    "action_id": "storage-layout",
+                    "type": "storage.layout.ensure",
+                    "topology": "mergerfs",
+                    "device_ids": [DEVICE_ID],
+                    "purpose": "media",
+                    "destructive": False,
+                }
+            ],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "mergerfs": {
+                "mode": "existing",
+                "instance_id": "mergerfs:0123456789abcdef",
+                "name": "media",
+                "mountpoint": "/data/media",
+            },
+        },
+    }
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: live})
+    monkeypatch.setattr(
+        executor,
+        "_safe_mountpoint",
+        lambda value: tmp_path / "managed" / value.lstrip("/"),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_blkid_value",
+        lambda _partition, field: "ext4" if field == "TYPE" else "member-uuid",
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    monkeypatch.setattr(
+        executor,
+        "mergerfs_expand_commands",
+        lambda _mountpoint, _branches: [
+            CommandSpec(
+                ("setfattr", "-n", "user.mergerfs.branches", "runtime"),
+                120,
+                "expand",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        executor,
+        "discover_mergerfs",
+        lambda **_kwargs: {
+            "items": [
+                {
+                    "id": "mergerfs:0123456789abcdef",
+                    "mountpoint": str(combined),
+                    "branches": ["/mnt/member-a", "/mnt/member-b"],
+                    "options": ["category.create=mfs", "category.search=ff", "use_ino"],
+                    "active": True,
+                    "configured": True,
+                }
+            ]
+        },
+    )
+    result = executor._execute_actions(
+        operation_id=operation_id,
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": [live]},
+        runner=lambda command, _timeout: commands.append(command),
+        journal={"completed_steps": 0, "notices": []},
+    )
+
+    content = paths.fstab.read_text(encoding="utf-8")
+    assert content.count("fuse.mergerfs") == 1
+    assert (
+        f"/mnt/member-a:/mnt/member-b:{executor._fstab_encode(str(new_member))} {combined}"
+        in content
+    )
+    assert f"UUID=member-uuid {new_member} ext4 defaults 0 2" in content
+    assert not any(command[0].startswith("mkfs") for command in commands)
+    assert [command[0] for command in commands].count("setfattr") == 1
+    assert result["mountpoint"] == str(combined)
 
 
 DEVICE_ID = "serial:vendor:model:stable-serial"

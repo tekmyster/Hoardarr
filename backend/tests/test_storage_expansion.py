@@ -172,7 +172,15 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
             storage_inventory={
                 "pools": {
                     "items": [
-                        {"type": "mergerFS"},
+                        {
+                            "id": "mergerfs:0123456789abcdef",
+                            "type": "mergerFS",
+                            "mountpoint": "/srv/hoardarr/media",
+                            "branches": [
+                                "/srv/hoardarr/backends/current",
+                                "/srv/hoardarr/backends/member-two",
+                            ],
+                        },
                         {"type": "SnapRAID"},
                     ]
                 }
@@ -196,6 +204,11 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
             == 2_000_000_000
         )
         assert "resynchronized" in candidates["add_mergerfs_member"]["protection_impact"]
+        assert candidates["add_mergerfs_member"]["target"] == {
+            "provider": "mergerfs",
+            "instance_id": "mergerfs:0123456789abcdef",
+            "mountpoint": "/srv/hoardarr/media",
+        }
         assert candidates["add_download_tier"]["setup_mode"] == "cache"
         assert candidates["new_storage_group"]["recommended"] is False
         current_state = result["storage_groups"][0]

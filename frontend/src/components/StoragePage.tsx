@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { existingDataSummary, humanCapacity } from "../policy";
-import type { DeviceMaintenancePlan, Drive, HardwareSnapshot, OperationDocument, StorageInventory, StorageOperationProgress } from "../types";
+import type { DeviceMaintenancePlan, Drive, HardwareSnapshot, OperationDocument, StorageExpansionSelection, StorageInventory, StorageOperationProgress } from "../types";
 import { Card, Notice, StatusBadge } from "./ui";
 import { StorageProgressDetails } from "./StorageProgressDetails";
 import { StorageTopologyPanels } from "./StorageTopologyPanels";
@@ -86,7 +86,7 @@ export function StoragePage({
   error: string | null;
   onScan: () => void;
   onAction: (action: StorageAction) => void;
-  onDriveAction: (action: DriveAction, driveId: string | string[]) => void;
+  onDriveAction: (action: DriveAction, driveId: string | string[], selection?: StorageExpansionSelection) => void;
   savedDrafts?: SavedStorageDraft[];
   onResumeDraft?: (draftId: string) => void;
   onDiscardDraft?: (draftId: string) => void;

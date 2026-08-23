@@ -133,6 +133,7 @@ def _candidate(
     mode: str,
     restrictions: list[str] | None = None,
     methodology: str,
+    target: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     document: dict[str, Any] = {
         "kind": kind,
@@ -152,6 +153,7 @@ def _candidate(
         "future_expansion": expansion,
         "migration_work": migration,
         "restrictions": restrictions or [],
+        "target": target,
     }
     document["id"] = document_hash(document)[:24]
     return document
@@ -196,6 +198,31 @@ def build_expansion_assessment(
     has_mergerfs = any("mergerfs" in value for value in pool_types)
     has_snapraid = any("snapraid" in value for value in pool_types)
     has_zfs = any("zfs" in value for value in pool_types)
+    mergerfs_pools = [
+        item
+        for item in pool_items
+        if isinstance(item, dict) and str(item.get("type", "")).casefold() == "mergerfs"
+    ]
+    group_mergerfs_targets: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        backend_paths = {
+            item.namespace_path
+            for item in session.scalars(
+                select(StorageBackend).where(
+                    StorageBackend.storage_group_id == group.id,
+                    StorageBackend.lifecycle_state != "retired",
+                )
+            )
+            if item.namespace_path
+        }
+        matches = [
+            item
+            for item in mergerfs_pools
+            if item.get("mountpoint") == group.namespace_path
+            or bool(backend_paths.intersection(str(path) for path in item.get("branches", [])))
+        ]
+        if len(matches) == 1:
+            group_mergerfs_targets[group.id] = matches[0]
 
     candidates: list[dict[str, Any]] = []
     usable_blank = [
@@ -238,7 +265,8 @@ def build_expansion_assessment(
             continue
         media_groups = [group for group in groups if group.purpose == "media"]
         for group in media_groups:
-            if has_mergerfs:
+            mergerfs_target = group_mergerfs_targets.get(group.id)
+            if mergerfs_target is not None:
                 candidates.append(
                     _candidate(
                         kind="add_mergerfs_member",
@@ -272,6 +300,11 @@ def build_expansion_assessment(
                             "An independent mergerFS data member contributes its formatted "
                             "capacity; filesystem overhead is not subtracted here."
                         ),
+                        target={
+                            "provider": "mergerfs",
+                            "instance_id": str(mergerfs_target["id"]),
+                            "mountpoint": str(mergerfs_target["mountpoint"]),
+                        },
                     )
                 )
             if disk["media_type"] in {"ssd", "nvme"}:

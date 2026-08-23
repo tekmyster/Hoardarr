@@ -32,6 +32,7 @@ import type {
   PlanDocument,
   SetupStatus,
   StorageRole,
+  StorageExpansionSelection,
   StorageInventory,
   StorageOperationProgress,
   WizardDocument,
@@ -162,6 +163,7 @@ export default function App() {
   const [storageRole, setStorageRole] = useState<StorageRole>("individual");
   const [mergerFsInventory, setMergerFsInventory] = useState<MergerFsInventory | null>(null);
   const [storageInventory, setStorageInventory] = useState<StorageInventory | null>(null);
+  const [expansionSelection, setExpansionSelection] = useState<StorageExpansionSelection | null>(null);
   const [mergerFsTarget, setMergerFsTarget] = useState("");
   const [mergerFsName, setMergerFsName] = useState("combined-storage");
   const [mergerFsMountpoint, setMergerFsMountpoint] = useState("/mnt/combined-storage");
@@ -670,6 +672,7 @@ export default function App() {
         create_policy: mergerFsCreatePolicy,
         search_policy: mergerFsSearchPolicy,
       },
+      expansion_selection: expansionSelection,
       format: {
         filesystem: formatFilesystem,
         partition_table: formatPartitionTable,
@@ -1016,6 +1019,7 @@ export default function App() {
           },
           downloads: { torrents: torrentDownloads, usenet: usenetDownloads },
           ...(topology === "mergerfs" ? { mergerfs: mergerFsAnswer() } : {}),
+          ...(topology === "mergerfs" && expansionSelection ? { expansion: expansionSelection } : {}),
           ...(topology === "zfs" || topology === "raid" || topology === "snapraid" || topology === "mixed" ? { layout_options: layoutOptionsAnswer(topology) } : {}),
           ...(mode === "advanced" ? { format_options: {
             filesystem: selectedFilesystem,
@@ -1142,6 +1146,7 @@ export default function App() {
     setSnapshots(false);
     setEncryption("none");
     setStorageRole("individual");
+    setExpansionSelection(null);
     setMergerFsTarget(mergerFsInventory?.items.length ? "" : "create");
     setMergerFsName("combined-storage");
     setMergerFsMountpoint("/mnt/combined-storage");
@@ -1259,6 +1264,7 @@ export default function App() {
         const protocols = new Set(services.map((service) => stringValue(service.protocol, "")));
         const firstService = services[0] ?? {};
         const storedTopology = stringValue(storedStorage.topology, "individual");
+        setExpansionSelection(expansionSelectionValue(storedStorage.expansion));
         setSnapshot(refreshed.hardware_snapshot);
         setWizard(refreshed.wizard);
         setPlan(refreshed.plan);
@@ -1337,6 +1343,7 @@ export default function App() {
       setMixedComponentType(array.mixed_component_type === "raid" ? "raid" : "zfs");
       setMixedComponentWidth(numberValue(array.mixed_component_width, 4));
       const mergerfs = objectValue(draft.mergerfs);
+      setExpansionSelection(expansionSelectionValue(draft.expansion_selection));
       setMergerFsTarget(stringValue(mergerfs.target, mergerFsInventory?.items.length ? "" : "create"));
       setMergerFsName(stringValue(mergerfs.name, "combined-storage"));
       setMergerFsMountpoint(stringValue(mergerfs.mountpoint, "/mnt/combined-storage"));
@@ -1405,7 +1412,7 @@ export default function App() {
     setStorageAction(action);
   }
 
-  async function openDriveAction(action: DriveAction, driveId: string | string[]): Promise<void> {
+  async function openDriveAction(action: DriveAction, driveId: string | string[], expansion?: StorageExpansionSelection): Promise<void> {
     const driveIds = Array.isArray(driveId) ? driveId : [driveId];
     if (driveIds.some((id) => activeReservedDriveIds.has(id))) {
       setError("This drive is already reserved by a queued or running storage operation. Open Activity to review it.");
@@ -1422,6 +1429,7 @@ export default function App() {
       setConsentRecorded(false);
       setSelectedDriveIds(driveIds);
       setUsbOverrideAck("");
+      setExpansionSelection(expansion ?? null);
 
       if (action === "advanced") {
         setMode("advanced");
@@ -1438,7 +1446,13 @@ export default function App() {
           action === "cache" ? "download-cache" : action === "import" ? "import" : action === "expand" ? "mergerfs" : "individual",
         );
       }
-      if (action === "expand") setMergerFsTarget(mergerFsInventory?.items[0]?.id ?? "create");
+      if (action === "expand") {
+        const target = expansion?.target.instance_id;
+        if (expansion && !mergerFsInventory?.items.some((item) => item.id === target)) {
+          throw new Error("The recommended combined-storage target is no longer detected. Refresh expansion choices.");
+        }
+        setMergerFsTarget(target ?? mergerFsInventory?.items[0]?.id ?? "create");
+      }
       setStorageAction("add");
     } catch (caught) {
       setError(messageFromError(caught));
@@ -2156,7 +2170,7 @@ export default function App() {
         error={storageAction ? null : error}
         onScan={() => void refreshHardware()}
         onAction={openStorageAction}
-        onDriveAction={(action, driveId) => void openDriveAction(action, driveId)}
+        onDriveAction={(action, driveId, selection) => void openDriveAction(action, driveId, selection)}
         savedDrafts={savedStorageDrafts}
         onResumeDraft={(draftId) => void resumeStorageDraft(draftId)}
         onDiscardDraft={(draftId) => void discardSavedStorageDraft(draftId)}
@@ -2225,6 +2239,33 @@ function stringValue(value: unknown, fallback: string): string {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function expansionSelectionValue(value: unknown): StorageExpansionSelection | null {
+  const expansion = objectValue(value);
+  const target = objectValue(expansion.target);
+  const candidateId = stringValue(expansion.candidate_id, "");
+  const kind = stringValue(expansion.kind, "");
+  const snapshot = stringValue(expansion.hardware_snapshot_sha256, "");
+  const diskIds = stringArray(expansion.disk_ids);
+  const instanceId = stringValue(target.instance_id, "");
+  const mountpoint = stringValue(target.mountpoint, "");
+  if (
+    !/^[a-f0-9]{24}$/.test(candidateId)
+    || !kind
+    || !/^[a-f0-9]{64}$/.test(snapshot)
+    || !diskIds.length
+    || !/^mergerfs:[a-f0-9]{16}$/.test(instanceId)
+    || !mountpoint.startsWith("/")
+  ) return null;
+  return {
+    candidate_id: candidateId,
+    kind,
+    storage_group_id: typeof expansion.storage_group_id === "string" ? expansion.storage_group_id : null,
+    hardware_snapshot_sha256: snapshot,
+    disk_ids: diskIds,
+    target: { provider: "mergerfs", instance_id: instanceId, mountpoint },
+  };
 }
 
 function booleanValue(value: unknown, fallback: boolean): boolean {

@@ -57,6 +57,7 @@ const assessment: StorageExpansionAssessment = {
     future_expansion: "Different-size members can be added later.",
     migration_work: "Review, format, mount, and verify placement.",
     restrictions: ["Parity must be at least as large as the largest data disk."],
+    target: { provider: "mergerfs", instance_id: "mergerfs:0123456789abcdef", mountpoint: "/srv/hoardarr/media" },
   }],
   methodology: "Read-only analysis; no changes were made.",
 };
@@ -82,7 +83,14 @@ describe("StorageExpansionPanel", () => {
     await user.click(screen.getByText("Restrictions and calculation details"));
     expect(screen.getByText(/Parity must be at least as large/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Customize this plan" }));
-    expect(onPlan).toHaveBeenCalledWith("expand", assessment.candidates[0].disk_ids);
+    expect(onPlan).toHaveBeenCalledWith("expand", assessment.candidates[0].disk_ids, {
+      candidate_id: assessment.candidates[0].id,
+      kind: assessment.candidates[0].kind,
+      storage_group_id: assessment.candidates[0].storage_group_id,
+      hardware_snapshot_sha256: assessment.hardware_snapshot_sha256,
+      disk_ids: assessment.candidates[0].disk_ids,
+      target: assessment.candidates[0].target,
+    });
   });
 
   it("renders an honest no-disk state", async () => {

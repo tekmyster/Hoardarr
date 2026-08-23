@@ -341,6 +341,11 @@ test.describe("production sign-in shell", () => {
 
   test("opens a snapshot-bound expansion recommendation in the real storage wizard", async ({ page }) => {
     await storageWizardServer(page);
+    await page.route("**/api/v1/storage/mergerfs", (route) => route.fulfill({ json: {
+      available: true,
+      status: "configured",
+      items: [{ id: "mergerfs:0123456789abcdef", name: "media", mountpoint: "/data/media", source: "/mnt/disk1:/mnt/disk2", branches: ["/mnt/disk1", "/mnt/disk2"], options: ["category.create=mfs", "category.search=ff"], active: true, configured: true }],
+    } }));
     await page.route("**/api/v1/storage/expansion", (route) => route.fulfill({ json: {
       schema_version: 1,
       hardware_snapshot_id: "snap-storage",
@@ -371,7 +376,7 @@ test.describe("production sign-in shell", () => {
       reserved_disks: [],
       detected_capabilities: { mergerfs: true, snapraid: false, zfs: false },
       candidates: [{
-        id: "expand-media",
+        id: "0123456789abcdef01234567",
         kind: "mergerfs_add_member",
         disk_ids: ["serial:test:ssd-1", "serial:test:ssd-2"],
         storage_group_id: "media",
@@ -385,6 +390,7 @@ test.describe("production sign-in shell", () => {
         future_expansion: "Additional members can be added later.",
         migration_work: "No existing media files need to move.",
         restrictions: ["Review SnapRAID parity capacity separately."],
+        target: { provider: "mergerfs", instance_id: "mergerfs:0123456789abcdef", mountpoint: "/data/media" },
       }],
       methodology: "Read-only assessment bound to the latest hardware snapshot.",
     } }));
@@ -444,6 +450,7 @@ test.describe("production sign-in shell", () => {
         future_expansion: "It can become a combined member later.",
         migration_work: "No disk changes occur until approval.",
         restrictions: [],
+        target: null,
       }],
       methodology: "Read-only assessment; no changes were made.",
     });

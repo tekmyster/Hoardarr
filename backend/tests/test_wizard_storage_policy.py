@@ -368,6 +368,69 @@ def test_mergerfs_new_target_is_bound_into_the_storage_plan(session: Session) ->
     assert layout_action["requires_live_instance_revalidation"] is False
 
 
+def test_existing_mergerfs_expansion_target_and_snapshot_are_bound_into_plan(
+    session: Session,
+) -> None:
+    snapshot_sha256 = document_hash(_usb_payload())
+    expansion = {
+        "candidate_id": "a" * 24,
+        "kind": "add_mergerfs_member",
+        "storage_group_id": "11111111-1111-4111-8111-111111111111",
+        "hardware_snapshot_sha256": snapshot_sha256,
+        "disk_ids": ["serial:cisco:ssd-240g:stp26501raw"],
+        "target": {
+            "provider": "mergerfs",
+            "instance_id": "mergerfs:0123456789abcdef",
+            "mountpoint": "/mnt/combined-storage",
+        },
+    }
+    _wizard, plan, _snapshot_record = _storage_plan(
+        session,
+        storage_answers=_storage_answers(
+            topology="mergerfs",
+            mergerfs={
+                "mode": "existing",
+                "instance_id": "mergerfs:0123456789abcdef",
+                "name": "combined-storage",
+                "mountpoint": "/mnt/combined-storage",
+            },
+            expansion=expansion,
+        ),
+    )
+    storage = plan.document_json["storage"]
+    assert storage["expansion"] == expansion
+    assert storage["snapshot_binding"]["snapshot_sha256"] == snapshot_sha256
+    assert storage["mergerfs"]["instance_id"] == expansion["target"]["instance_id"]
+
+
+def test_existing_mergerfs_expansion_rejects_stale_assessment(session: Session) -> None:
+    with pytest.raises(WizardValidationError, match="assessment is stale"):
+        _storage_plan(
+            session,
+            storage_answers=_storage_answers(
+                topology="mergerfs",
+                mergerfs={
+                    "mode": "existing",
+                    "instance_id": "mergerfs:0123456789abcdef",
+                    "name": "combined-storage",
+                    "mountpoint": "/mnt/combined-storage",
+                },
+                expansion={
+                    "candidate_id": "b" * 24,
+                    "kind": "add_mergerfs_member",
+                    "storage_group_id": None,
+                    "hardware_snapshot_sha256": "b" * 64,
+                    "disk_ids": ["serial:cisco:ssd-240g:stp26501raw"],
+                    "target": {
+                        "provider": "mergerfs",
+                        "instance_id": "mergerfs:0123456789abcdef",
+                        "mountpoint": "/mnt/combined-storage",
+                    },
+                },
+            ),
+        )
+
+
 def test_mergerfs_mountpoint_rejects_fstab_control_characters(session: Session) -> None:
     snapshot = _snapshot(session, _usb_payload())
     wizard = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)

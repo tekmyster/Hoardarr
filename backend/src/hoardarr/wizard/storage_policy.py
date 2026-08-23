@@ -29,6 +29,8 @@ INTAKE_TESTS = (
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _MERGERFS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MERGERFS_INSTANCE_RE = re.compile(r"^mergerfs:[a-f0-9]{16}$")
+_EXPANSION_CANDIDATE_RE = re.compile(r"^[a-f0-9]{24}$")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _CUSTOM_APPS = frozenset({"radarr", "sonarr", "lidarr", "readarr", "immich", "none"})
 _CONTENT_TYPES = frozenset({"movies", "series", "music", "photos", "books", "audiobooks", "both"})
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -121,6 +123,55 @@ def _normalize_mergerfs(value: Any) -> dict[str, Any]:
         "mountpoint": mountpoint,
         "create_policy": create_policy,
         "search_policy": search_policy,
+    }
+
+
+def _normalize_expansion(value: Any) -> dict[str, Any]:
+    expansion = _as_mapping(value, field="storage.expansion")
+    allowed = {
+        "candidate_id",
+        "kind",
+        "storage_group_id",
+        "hardware_snapshot_sha256",
+        "disk_ids",
+        "target",
+    }
+    unknown = sorted(set(expansion) - allowed)
+    if unknown:
+        _error("storage.expansion", f"unknown fields: {', '.join(unknown)}")
+    candidate_id = expansion.get("candidate_id")
+    if not isinstance(candidate_id, str) or not _EXPANSION_CANDIDATE_RE.fullmatch(candidate_id):
+        _error("storage.expansion.candidate_id", "must identify the reviewed expansion choice")
+    kind = expansion.get("kind")
+    if not isinstance(kind, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,63}", kind):
+        _error("storage.expansion.kind", "is invalid")
+    snapshot_sha256 = expansion.get("hardware_snapshot_sha256")
+    if not isinstance(snapshot_sha256, str) or not _SHA256_RE.fullmatch(snapshot_sha256):
+        _error("storage.expansion.hardware_snapshot_sha256", "must be a SHA-256 digest")
+    disk_ids = _normalize_selected_ids(expansion.get("disk_ids"))
+    group_id = expansion.get("storage_group_id")
+    if group_id is not None and (not isinstance(group_id, str) or len(group_id) > 36):
+        _error("storage.expansion.storage_group_id", "is invalid")
+    target = _as_mapping(expansion.get("target"), field="storage.expansion.target")
+    if set(target) != {"provider", "instance_id", "mountpoint"}:
+        _error("storage.expansion.target", "must contain provider, instance_id, and mountpoint")
+    if target.get("provider") != "mergerfs":
+        _error("storage.expansion.target.provider", "must be mergerfs")
+    instance_id = target.get("instance_id")
+    if not isinstance(instance_id, str) or not _MERGERFS_INSTANCE_RE.fullmatch(instance_id):
+        _error("storage.expansion.target.instance_id", "must identify a mergerFS instance")
+    mountpoint = _mergerfs_mountpoint(target.get("mountpoint"))
+    return {
+        "candidate_id": candidate_id,
+        "kind": kind,
+        "storage_group_id": group_id,
+        "hardware_snapshot_sha256": snapshot_sha256,
+        "disk_ids": disk_ids,
+        "target": {
+            "provider": "mergerfs",
+            "instance_id": instance_id,
+            "mountpoint": mountpoint,
+        },
     }
 
 
@@ -653,6 +704,7 @@ def normalize_storage_answers(
         "mergerfs",
         "advanced_usb_acknowledgement",
         "layout_options",
+        "expansion",
     }
     unknown = sorted(set(storage) - allowed)
     if unknown:
@@ -814,6 +866,14 @@ def normalize_storage_answers(
         "format_decision": format_decision,
         "warnings": warnings,
     }
+    if storage.get("expansion") is not None:
+        expansion = _normalize_expansion(storage["expansion"])
+        if expansion["disk_ids"] != selected_ids:
+            _error(
+                "storage.expansion.disk_ids",
+                "must exactly match the selected expansion disks in the reviewed order",
+            )
+        normalized["expansion"] = expansion
     if topology == "mergerfs":
         if storage.get("mergerfs") is None:
             _error(
@@ -821,6 +881,17 @@ def normalize_storage_answers(
                 "choose an existing combined storage instance or create a new one",
             )
         normalized["mergerfs"] = _normalize_mergerfs(storage["mergerfs"])
+        if "expansion" in normalized:
+            target = normalized["expansion"]["target"]
+            if (
+                normalized["mergerfs"]["mode"] != "existing"
+                or normalized["mergerfs"]["instance_id"] != target["instance_id"]
+                or normalized["mergerfs"]["mountpoint"] != target["mountpoint"]
+            ):
+                _error(
+                    "storage.expansion.target",
+                    "does not match the selected existing mergerFS instance",
+                )
     elif storage.get("mergerfs") is not None:
         _error("storage.mergerfs", "is only valid for combined storage")
     if topology in ARRAY_TOPOLOGIES:
@@ -879,6 +950,15 @@ def build_storage_plan(
     snapshot_sha256: str,
     snapshot_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
+    expansion = storage.get("expansion")
+    if (
+        isinstance(expansion, Mapping)
+        and expansion.get("hardware_snapshot_sha256") != snapshot_sha256
+    ):
+        _error(
+            "storage.expansion.hardware_snapshot_sha256",
+            "the expansion assessment is stale; refresh expansion choices",
+        )
     selected = select_devices(snapshot_payload, storage["selected_device_ids"])
     device_binding_hash = document_hash(selected)
     intake_tests = dict(storage["intake_tests"])
@@ -1002,6 +1082,7 @@ def build_storage_plan(
         },
         "selected_devices": selected,
         "topology": storage["topology"],
+        **({"expansion": dict(storage["expansion"])} if "expansion" in storage else {}),
         **({"mergerfs": dict(storage["mergerfs"])} if storage["topology"] == "mergerfs" else {}),
         **(
             {"layout_options": dict(storage["layout_options"])}

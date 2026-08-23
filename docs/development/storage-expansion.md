@@ -37,10 +37,24 @@ For a completely scanned blank disk, the planner can currently describe:
 - an SSD/NVMe download tier for an existing media Storage Group; and
 - a matched two-disk ZFS mirror/new mirror vdev candidate with smallest-member capacity math.
 
+An existing mergerFS candidate is emitted only when exactly one discovered instance can be tied to
+the Storage Group by its namespace mount or an active backend branch. Merely detecting mergerFS
+somewhere on the host is not sufficient. The candidate carries that instance ID and mountpoint into
+the wizard; the normalized storage answer binds the candidate ID, selected disk identities, target,
+and assessment snapshot digest into the immutable plan. A changed snapshot or changed target is
+rejected instead of silently choosing the first pool.
+
 The UI's action opens the existing Guided or Advanced storage wizard with the candidate disks
 selected. The wizard remains the canonical persistent plan, identity revalidation, explicit
 approval, durable operation, and execution boundary. The assessment itself is deliberately not a
 second apply mechanism.
+
+During existing mergerFS execution, the worker re-discovers the active instance and rejects branch
+or identity drift before changing runtime membership. Its existing `/etc/fstab` entry is replaced in
+the same atomic write that persists the new member filesystem entry, avoiding duplicate mergerFS
+mount definitions. The runtime command has a rollback path if branch activation or verification
+fails. This software path is covered with deterministic executor tests; disposable Linux execution
+remains tracked separately from the implementation claim.
 
 An operator may explicitly choose **Reserve for later** on a single candidate. That authenticated,
 CSRF-protected API action changes only the durable physical-disk lifecycle state; it never opens the
@@ -49,5 +63,5 @@ candidates until **Release disk** is used. The transition is idempotent, audited
 rejects protected system storage.
 
 Current limitations are recorded in the unified roadmap: richer current-state capacity/forecast
-analysis, additional ZFS vdev geometries, explicit SnapRAID parity expansion selection, and
-end-to-end immutable apply evidence remain in the EXPAND dependency family.
+analysis, additional ZFS vdev geometries, explicit SnapRAID parity expansion selection, and the
+disposable-Linux expansion fault matrix remain in the EXPAND dependency family.

@@ -581,6 +581,21 @@ export interface StorageExpansionDisk {
   warnings: string[];
 }
 
+export interface StorageExpansionTarget {
+  provider: "mergerfs";
+  instance_id: string;
+  mountpoint: string;
+}
+
+export interface StorageExpansionSelection {
+  candidate_id: string;
+  kind: string;
+  storage_group_id: string | null;
+  hardware_snapshot_sha256: string;
+  disk_ids: string[];
+  target: StorageExpansionTarget;
+}
+
 export interface StorageExpansionAssessment {
   schema_version: 1;
   hardware_snapshot_id: string;
@@ -632,6 +647,7 @@ export interface StorageExpansionAssessment {
     future_expansion: string;
     migration_work: string;
     restrictions: string[];
+    target: StorageExpansionTarget | null;
   }>;
   methodology: string;
 }

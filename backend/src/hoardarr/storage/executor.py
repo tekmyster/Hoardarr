@@ -35,7 +35,7 @@ from hoardarr.storage.maintenance import (
 from hoardarr.storage.maintenance import (
     validate_plan as validate_maintenance_plan,
 )
-from hoardarr.storage.mergerfs import discover_mergerfs
+from hoardarr.storage.mergerfs import MERGERFS_TYPES, discover_mergerfs
 from hoardarr.storage.quarantine import (
     QuarantineError,
     atomic_json,
@@ -1290,11 +1290,61 @@ def _revalidate(
     return devices
 
 
-def _append_fstab(paths: Paths, operation_id: str, lines: list[str]) -> None:
+_FSTAB_OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def _fstab_decode(value: str) -> str:
+    return _FSTAB_OCTAL_ESCAPE.sub(lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _fstab_encode(value: str) -> str:
+    return (
+        value.replace("\\", "\\134")
+        .replace(" ", "\\040")
+        .replace("\t", "\\011")
+        .replace("\n", "\\012")
+    )
+
+
+def _replace_mergerfs_source(content: str, mountpoint: str, branches: list[str]) -> str:
+    matches: list[int] = []
+    rows = content.splitlines()
+    for index, row in enumerate(rows):
+        stripped = row.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if (
+            len(fields) >= 4
+            and fields[2] in MERGERFS_TYPES
+            and _fstab_decode(fields[1]) == mountpoint
+        ):
+            matches.append(index)
+    if len(matches) != 1:
+        raise ExecutorFailure(
+            "mergerfs_fstab_drift",
+            "The persistent mergerFS mount entry changed; runtime expansion was not persisted.",
+            needs_attention=True,
+        )
+    fields = rows[matches[0]].strip().split()
+    fields[0] = _fstab_encode(":".join(branches))
+    rows[matches[0]] = " ".join(fields)
+    return "\n".join(rows) + ("\n" if content.endswith("\n") else "")
+
+
+def _append_fstab(
+    paths: Paths,
+    operation_id: str,
+    lines: list[str],
+    *,
+    mergerfs_update: tuple[str, list[str]] | None = None,
+) -> None:
     current = paths.fstab.read_text(encoding="utf-8") if paths.fstab.exists() else ""
     marker = f"# BEGIN HOARDARR {operation_id}"
     if marker in current:
         return
+    if mergerfs_update is not None:
+        current = _replace_mergerfs_source(current, *mergerfs_update)
     content = (
         current.rstrip("\n")
         + "\n"
@@ -1623,6 +1673,7 @@ def _execute_actions(
     disk_mounts_by_id: dict[str, Path] = {}
     filesystem_uuids: dict[str, str] = {}
     fstab_lines: list[str] = []
+    mergerfs_fstab_update: tuple[str, list[str]] | None = None
     mount_members = topology not in {"zfs", "raid", "mixed"}
     for mount_index, (identifier, disk) in enumerate(devices.items() if mount_members else ()):
         journal["phase"] = "Mounting prepared drives"
@@ -1790,7 +1841,10 @@ def _execute_actions(
                 raise
         else:
             runner([_tool("mergerfs"), "-o", options, branches, os.fspath(combined)], 120)
-        fstab_lines.append(f"{branches} {combined} fuse.mergerfs {options},nofail 0 0")
+        if mergerfs.get("mode") == "existing" and matches[0].get("configured") is True:
+            mergerfs_fstab_update = (str(combined), [*prior_branches, *new_branches])
+        else:
+            fstab_lines.append(f"{branches} {combined} fuse.mergerfs {options},nofail 0 0")
         if combined != presentation_root:
             runner(
                 [_tool("mount"), "--bind", os.fspath(combined), os.fspath(presentation_root)], 120
@@ -1981,7 +2035,12 @@ def _execute_actions(
     journal["current_action"] = {"id": "fstab", "type": "mount.configuration.save"}
     journal["updated_at"] = time.time()
     atomic_json(_journal_path(paths, operation_id), journal)
-    _append_fstab(paths, operation_id, fstab_lines)
+    _append_fstab(
+        paths,
+        operation_id,
+        fstab_lines,
+        mergerfs_update=mergerfs_fstab_update,
+    )
     journal["completed_steps"] = int(journal["completed_steps"]) + 1
     journal["current_action"] = None
     journal["updated_at"] = time.time()
