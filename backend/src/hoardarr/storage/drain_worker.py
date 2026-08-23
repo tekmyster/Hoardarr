@@ -347,7 +347,14 @@ def _preflight_and_exclude(
 
 
 def _walk_source(root: Path) -> Iterator[tuple[str, os.stat_result]]:
-    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+    def walk_error(exc: OSError) -> None:
+        raise DrainExecutionError(
+            "source_inventory_failed", "The drain source disappeared during inventory."
+        ) from exc
+
+    for directory, directory_names, file_names in os.walk(
+        root, followlinks=False, onerror=walk_error
+    ):
         directory_names.sort()
         file_names.sort()
         directory_path = Path(directory)
@@ -499,6 +506,21 @@ def _open_directory(root_fd: int, parts: tuple[str, ...], *, create: bool) -> in
     except Exception:
         os.close(current)
         raise
+
+
+def _open_root_directory(path: str | Path, *, source: bool) -> int:
+    try:
+        return os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise DrainExecutionError(
+            "source_unavailable" if source else "destination_unavailable",
+            "The drain source is unavailable."
+            if source
+            else "A drain destination is unavailable.",
+        ) from exc
 
 
 def _new_digest(algorithm: str) -> Any:
@@ -713,13 +735,12 @@ def _copy(
     source_root = Path(plan["source"]["path"])
     destinations = _plan_destinations(plan)
     digest_algorithm = str(plan.get("verification", {}).get("algorithm", "sha256"))
-    source_fd = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    source_fd = _open_root_directory(source_root, source=True)
     destination_fds: dict[str, int] = {}
     try:
         for backend_id, item in destinations.items():
-            destination_fds[backend_id] = os.open(
-                item["path"],
-                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            destination_fds[backend_id] = _open_root_directory(
+                item["path"], source=False
             )
         while entry := _next_entry(session_factory, operation_id, "pending"):
             _job_control(session_factory, operation_id, deadline)
@@ -828,12 +849,16 @@ def _verify(
             details={"files_copied": job.files_copied},
         )
     destinations = _plan_destinations(plan)
-    destination_fds = {
-        backend_id: os.open(
-            item["path"], os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-        )
-        for backend_id, item in destinations.items()
-    }
+    destination_fds: dict[str, int] = {}
+    try:
+        for backend_id, item in destinations.items():
+            destination_fds[backend_id] = _open_root_directory(
+                item["path"], source=False
+            )
+    except Exception:
+        for descriptor in destination_fds.values():
+            os.close(descriptor)
+        raise
     try:
         while entry := _next_entry(session_factory, operation_id, "copied"):
             _job_control(session_factory, operation_id, deadline)
@@ -917,10 +942,7 @@ def _finalize(
         _set_source_mount_read_only(plan["source"]["path"], False)
     source_fd = -1
     try:
-        source_fd = os.open(
-            plan["source"]["path"],
-            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-        )
+        source_fd = _open_root_directory(plan["source"]["path"], source=True)
         while entry := _next_entry(session_factory, operation_id, "verified"):
             _job_control(session_factory, operation_id, deadline)
             _remove_source(source_fd, entry)

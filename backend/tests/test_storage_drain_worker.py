@@ -22,11 +22,15 @@ from hoardarr.db.models import (
 from hoardarr.operations.service import document_hash, recover_stale_operations
 from hoardarr.storage.drain_worker import (
     BandwidthLimiter,
+    DrainExecutionError,
     DrainPaused,
     _execution_deadline,
     _finalize,
     _job_control,
+    _open_root_directory,
     _set_source_mount_read_only,
+    _verify_entry,
+    _walk_source,
     _worker_io_priority,
     execute_drain,
     mark_drain_paused,
@@ -393,7 +397,7 @@ def test_finalization_restores_read_only_mount_when_source_open_fails(
         "hoardarr.storage.drain_worker.os.open",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected open failure")),
     )
-    with pytest.raises(OSError, match="injected open failure"):
+    with pytest.raises(DrainExecutionError) as raised:
         _finalize(
             lambda: None,  # type: ignore[arg-type]
             "operation-id",
@@ -403,4 +407,44 @@ def test_finalization_restores_read_only_mount_when_source_open_fails(
             },
             deadline=None,
         )
+    assert raised.value.code == "source_unavailable"
     assert access == [False, True]
+
+
+def test_source_disappearance_during_inventory_fails_closed(tmp_path: Path) -> None:
+    missing = tmp_path / "source-was-removed"
+    with pytest.raises(DrainExecutionError) as raised:
+        list(_walk_source(missing))
+    assert raised.value.code == "source_inventory_failed"
+
+
+def test_destination_disappearance_is_reported_without_exposing_os_error(tmp_path: Path) -> None:
+    with pytest.raises(DrainExecutionError) as raised:
+        _open_root_directory(tmp_path / "missing-destination", source=False)
+    assert raised.value.code == "destination_unavailable"
+    assert str(raised.value) == "A drain destination is unavailable."
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative verification requires Linux")
+def test_checksum_mismatch_stops_before_source_retirement(tmp_path: Path) -> None:
+    copied = tmp_path / "movie.mkv"
+    copied.write_bytes(b"copied data")
+    facts = copied.stat()
+    entry = StorageDrainEntry(
+        job_id="11111111-1111-4111-8111-111111111111",
+        relative_path="movie.mkv",
+        destination_backend_id="22222222-2222-4222-8222-222222222222",
+        source_size=facts.st_size,
+        source_mtime_ns=facts.st_mtime_ns,
+        status="copied",
+        digest_algorithm="blake3",
+        digest_hex="0" * 64,
+    )
+    root_fd = _open_root_directory(tmp_path, source=False)
+    try:
+        with pytest.raises(DrainExecutionError) as raised:
+            _verify_entry(root_fd, entry, "accurate", control=lambda: None)
+    finally:
+        os.close(root_fd)
+    assert raised.value.code == "drain_verification_failed"
+    assert copied.exists()
