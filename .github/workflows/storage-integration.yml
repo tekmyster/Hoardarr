@@ -3,6 +3,18 @@ on:
   push:
     branches:
       - rc/0.3.11-validation
+    paths:
+      - .github/workflows/storage-integration.yml
+      - backend/pyproject.toml
+      - backend/uv.lock
+      - backend/src/hoardarr/operations/**
+      - backend/src/hoardarr/storage/**
+      - backend/src/hoardarr/api/routes/storage.py
+      - backend/src/hoardarr/api/routes/storage_groups.py
+      - backend/src/hoardarr/worker.py
+      - backend/src/hoardarr/models.py
+      - backend/alembic/**
+      - tests/integration/**
   workflow_dispatch:
     inputs:
       run_extended_self_hosted:

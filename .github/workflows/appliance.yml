@@ -3,6 +3,17 @@ on:
   push:
     branches:
       - rc/0.3.11-validation
+    paths:
+      - .github/workflows/appliance.yml
+      - frontend/package.json
+      - frontend/package-lock.json
+      - backend/pyproject.toml
+      - backend/uv.lock
+      - packaging/**
+      - scripts/build-appliance.sh
+      - scripts/build-release-bundle.py
+      - tests/appliance/**
+      - tests/release/**
   workflow_dispatch:
     inputs:
       base_iso_url:
