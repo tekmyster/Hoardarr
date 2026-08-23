@@ -9,10 +9,10 @@ The persistent lifecycle is:
 `discovered → assigned → active → preferred_write → draining → verifying → read_only → retired`
 
 The first production slices implement registration, assignment, activation, single preferred-write
-placement, and immutable drain preflight. Moving a preference atomically demotes the previous
-preferred backend. Drain execution, verification, retirement, reuse, and wipe states cannot be
-entered through the direct transition API: a durable operation must own them so copy or
-verification safety cannot be skipped.
+placement, immutable drain preflight, and the mover's atomic new-write exclusion boundary. Moving a
+preference atomically demotes the previous preferred backend. Drain execution, verification,
+retirement, reuse, and wipe states cannot be entered through the direct transition API: a durable
+operation must own them so copy or verification safety cannot be skipped.
 
 ## Drain preflight
 
@@ -34,6 +34,13 @@ writes, unhealthy destinations, or insufficient capacity make the plan `ready: f
 Verification modes are explicit: `fast` retains size/mtime methodology, `accurate` requires full
 file hashes, and `paranoid` adds another full read pass. The checkpointed mover will implement these
 methods under `DRAIN-04`, `DRAIN-07`, and `DRAIN-09`.
+
+Before that mover copies its first byte, `begin_drain_placement` atomically changes the source to
+`draining`, records the owning operation and immutable plan digest, mirrors the state to a physical
+disk when present, and guarantees another backend is preferred for new files. Replaying the same
+operation is idempotent; a different operation cannot adopt an in-progress source. This transaction
+boundary is deliberately not exposed as a standalone UI action: starting it without the
+checkpointed mover would leave an operator with placement changed but no evacuation work running.
 
 ## Identity and namespace safety
 
@@ -60,4 +67,4 @@ checks. Unsafe lifecycle skips return Problem Details with `durable_operation_re
 
 The UI exposes **Preview drain** only when another active data/archive backend and a source mount
 path exist. It labels the result as preflight-only. Apply remains unavailable until the durable,
-checkpointed mover tracked by `DRAIN-02` through `DRAIN-12` is complete.
+checkpointed mover tracked by `DRAIN-04` through `DRAIN-12` is complete.

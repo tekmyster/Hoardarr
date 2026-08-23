@@ -3,7 +3,8 @@
 ## Scope
 
 This batch expanded the existing 120-row roadmap without renumbering it and implemented the first
-safe Storage Group lifecycle slice. It did not implement or claim the drain engine.
+safe Storage Group lifecycle slices. Drain planning and new-write exclusion are implemented; the
+checkpointed copy/verify/finalize engine remains dependency-ordered work.
 
 ## Roadmap
 
@@ -22,7 +23,10 @@ group.
 
 Implemented UI behavior includes loading/error/empty states, group creation, stable namespace,
 registered-disk assignment, activation, preferred-write selection, backend state, and recent
-lifecycle events. Drain/retire remains unavailable until its durable operation exists.
+lifecycle events. Immutable drain preflight is visible without implying movement. The internal
+new-write exclusion boundary atomically marks a source `draining`, binds it to one operation and
+plan digest, and selects a replacement preferred writer before copying. Drain apply/retire remains
+unavailable until the checkpointed mover exists.
 
 ## GitHub Actions notification incident
 

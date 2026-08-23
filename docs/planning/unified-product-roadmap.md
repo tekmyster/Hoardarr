@@ -213,8 +213,8 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| DRAIN-01 | P1 | Drain plan and preflight | Build immutable source/destination plans with identity, namespace, capacity, health, open-use, and ARR checks. | IN PROGRESS — planner/API/UI and deterministic preflight tests pass; Linux `/proc` probe CI pending |
-| DRAIN-02 | P1 | Remove source from new-write placement | Change placement before copying so new files do not race evacuation. | QUEUED |
+| DRAIN-01 | P1 | Drain plan and preflight | Build immutable source/destination plans with identity, namespace, capacity, health, open-use, and ARR checks. | SOFTWARE VERIFIED — planner/API/UI, adversarial tests, and Linux CI pass |
+| DRAIN-02 | P1 | Remove source from new-write placement | Change placement before copying so new files do not race evacuation. | SOFTWARE VERIFIED — atomic idempotent placement exclusion with operation/plan ownership |
 | DRAIN-03 | P1 | Optional source read-only enforcement | Apply and verify read-only behavior only where the selected workflow supports it safely. | QUEUED |
 | DRAIN-04 | P1 | Checkpointed mover | Copy through durable checkpoints and temporary destinations without deleting the verified source. | QUEUED |
 | DRAIN-05 | P1 | Capacity and destination-health gates | Fail before and during movement when reserve, health, or destination identity becomes unsafe. | QUEUED |

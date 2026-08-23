@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -372,6 +372,153 @@ def transition_backend(
             "Another request selected a preferred-write backend first. Refresh and try again.",
         ) from exc
     return backend
+
+
+def begin_drain_placement(
+    session: Session,
+    *,
+    group_id: str,
+    source_backend_id: str,
+    destination_backend_ids: list[str],
+    operation_id: str,
+    plan_sha256: str,
+    principal: Principal,
+) -> StorageBackend:
+    """Atomically remove a drain source from all new-write placement.
+
+    The mover calls this transaction boundary before it copies the first byte.
+    Replaying the same operation is safe; another operation cannot adopt an
+    already-draining backend.
+    """
+
+    group = session.get(StorageGroup, group_id)
+    source = session.get(StorageBackend, source_backend_id)
+    if group is None or source is None or source.storage_group_id != group.id:
+        raise StorageGroupError("backend_not_found", "The drain source does not exist.")
+    if not operation_id or len(operation_id) > 128:
+        raise StorageGroupError("operation_id_invalid", "The drain operation ID is invalid.")
+    if len(plan_sha256) != 64 or any(char not in "0123456789abcdef" for char in plan_sha256):
+        raise StorageGroupError("drain_plan_invalid", "The immutable drain plan digest is invalid.")
+
+    existing_drain = source.config_json.get("drain")
+    if source.lifecycle_state == "draining":
+        if isinstance(existing_drain, dict) and (
+            existing_drain.get("operation_id") == operation_id
+            and existing_drain.get("plan_sha256") == plan_sha256
+        ):
+            return source
+        raise StorageGroupError(
+            "drain_in_progress", "Another durable operation already owns this drain source."
+        )
+    if source.lifecycle_state not in {"active", "preferred_write"}:
+        raise StorageGroupError(
+            "source_state_invalid", "Only an active backend can begin draining."
+        )
+    if not destination_backend_ids or len(destination_backend_ids) > 64:
+        raise StorageGroupError(
+            "destination_required", "Select at least one bounded drain destination."
+        )
+    if len(set(destination_backend_ids)) != len(destination_backend_ids):
+        raise StorageGroupError("destination_duplicate", "A drain destination was selected twice.")
+    if source.id in destination_backend_ids:
+        raise StorageGroupError(
+            "source_destination_same", "The drain source cannot receive itself."
+        )
+
+    destinations: list[StorageBackend] = []
+    for destination_id in destination_backend_ids:
+        destination = session.get(StorageBackend, destination_id)
+        if destination is None or destination.storage_group_id != group.id:
+            raise StorageGroupError(
+                "destination_backend_not_found", "A drain destination does not exist."
+            )
+        if destination.lifecycle_state not in {"active", "preferred_write"}:
+            raise StorageGroupError(
+                "destination_state_invalid", "Drain destinations must remain write-active."
+            )
+        if destination.role not in {"data", "archive"}:
+            raise StorageGroupError(
+                "destination_role_invalid",
+                "Parity, cache, and landing backends cannot receive a drain.",
+            )
+        destinations.append(destination)
+
+    previous_state = source.lifecycle_state
+    drain_config = {
+        **source.config_json,
+        "drain": {
+            "operation_id": operation_id,
+            "plan_sha256": plan_sha256,
+            "previous_state": previous_state,
+            "destination_backend_ids": destination_backend_ids,
+            "new_write_placement_removed": True,
+        },
+    }
+    claimed = session.execute(
+        update(StorageBackend)
+        .where(
+            StorageBackend.id == source.id,
+            StorageBackend.lifecycle_state == previous_state,
+        )
+        .values(lifecycle_state="draining", config_json=drain_config)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        session.expire(source)
+        raise StorageGroupError(
+            "drain_in_progress", "Another durable operation changed this drain source first."
+        )
+    source.lifecycle_state = "draining"
+    source.config_json = drain_config
+    if source.physical_disk_id:
+        source_disk = session.get(PhysicalDisk, source.physical_disk_id)
+        if source_disk is not None:
+            source_disk.lifecycle_state = "draining"
+
+    # Demote the source before selecting its replacement so the partial unique
+    # index can never observe two preferred writers, even within this transaction.
+    session.flush()
+    current_preferred = session.scalar(
+        select(StorageBackend).where(
+            StorageBackend.storage_group_id == group.id,
+            StorageBackend.lifecycle_state == "preferred_write",
+        )
+    )
+    replacement = current_preferred or destinations[0]
+    if replacement.lifecycle_state != "preferred_write":
+        replacement.lifecycle_state = "preferred_write"
+        if replacement.physical_disk_id:
+            replacement_disk = session.get(PhysicalDisk, replacement.physical_disk_id)
+            if replacement_disk is not None:
+                replacement_disk.lifecycle_state = "preferred_write"
+        _event(
+            session,
+            group=group,
+            backend=replacement,
+            principal=principal,
+            event_type="drain_destination_preferred",
+            previous_state="active",
+            resulting_state="preferred_write",
+            details={"operation_id": operation_id, "source_backend_id": source.id},
+        )
+
+    _event(
+        session,
+        group=group,
+        backend=source,
+        principal=principal,
+        event_type="backend_drain_started",
+        previous_state=previous_state,
+        resulting_state="draining",
+        details={
+            "operation_id": operation_id,
+            "plan_sha256": plan_sha256,
+            "destination_backend_ids": destination_backend_ids,
+            "new_write_placement_removed": True,
+        },
+    )
+    session.flush()
+    return source
 
 
 def group_documents(session: Session) -> list[dict[str, Any]]:
