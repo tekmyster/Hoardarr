@@ -520,6 +520,27 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .topology-locate-control { display: grid; gap: 6px; margin-top: 8px; }
 .topology-locate-control .button { justify-self: start; }
 .topology-locate-control small { color: var(--muted); }
+.topology-plan-empty, .topology-plan-workspace { display: grid; gap: 14px; }
+.topology-plan-create, .topology-plan-editor { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: end; }
+.topology-plan-create p { grid-column: 1 / -1; margin: 0; color: var(--muted); }
+.topology-plan-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.topology-plan-toolbar label { min-width: min(100%, 280px); }
+.topology-plan-map { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-soft); }
+.topology-plan-chassis, .topology-plan-controllers article, .topology-plan-enclosures > article { padding: 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+.topology-plan-chassis, .topology-plan-controllers article { display: grid; gap: 3px; }
+.topology-plan-controllers { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.topology-plan-enclosures { display: grid; gap: 10px; }
+.topology-plan-enclosures > article > header { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.topology-plan-enclosures > article > header div { display: grid; gap: 3px; }
+.topology-plan-bays { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-top: 10px; }
+.topology-plan-bays > div { min-height: 64px; display: grid; align-content: start; gap: 2px; padding: 7px; border-radius: 3px; border: 1px dashed var(--border); }
+.topology-plan-bays .planned-filled { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
+.topology-plan-bays span, .topology-plan-bays small, .topology-plan-map span, .topology-plan-map small { color: var(--muted); }
+.topology-plan-changes { display: grid; gap: 8px; }
+.topology-plan-changes h3, .topology-plan-changes p { margin: 0; }
+.topology-plan-changes article { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 4px; }
+.topology-plan-changes article > div { display: grid; grid-template-columns: auto 1fr; gap: 3px 7px; align-items: center; }
+.topology-plan-changes article small { grid-column: 2; color: var(--muted); overflow-wrap: anywhere; }
 .redundancy-storage-list { display: grid; gap: 8px; }
 .redundancy-storage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-soft); }
 .redundancy-storage-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
@@ -808,6 +829,10 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
   .storage-summary-grid { grid-template-columns: repeat(2, minmax(170px, 1fr)); }
   .storage-wizard-dialog-header { align-items: flex-start; }
   .storage-wizard-dialog-actions { flex-wrap: wrap; }
+}
+
+@media (max-width: 700px) {
+  .topology-plan-changes article, .topology-plan-enclosures > article > header { align-items: stretch; flex-direction: column; }
 }
 
 @media (max-width: 780px) {

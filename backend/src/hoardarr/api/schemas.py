@@ -107,6 +107,117 @@ class HardwareLocateRequest(StrictModel):
     duration_seconds: int = Field(default=300, ge=10, le=300)
 
 
+class TopologyPlanCreateRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=128)
+    template_id: Literal[
+        "generic-8-bay",
+        "generic-12-bay",
+        "generic-24-bay-shelf",
+        "generic-dual-path-shelf",
+    ]
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name cannot be blank")
+        return cleaned
+
+
+class TopologyPlanController(StrictModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    label: str = Field(min_length=1, max_length=128)
+    state: Literal["existing", "planned"]
+
+
+class TopologyPlanEnclosure(StrictModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    label: str = Field(min_length=1, max_length=128)
+    bay_count: int = Field(ge=1, le=1024)
+    controller_ids: list[str] = Field(min_length=1, max_length=16)
+
+
+class TopologyPlanChassis(StrictModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    label: str = Field(min_length=1, max_length=128)
+
+
+class TopologyPlanChange(StrictModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    kind: Literal["disk_addition", "disk_retirement"]
+    label: str = Field(min_length=1, max_length=128)
+    enclosure_id: str | None = Field(default=None, max_length=64)
+    slot: int | None = Field(default=None, ge=1, le=1024)
+    capacity_bytes: int | None = Field(default=None, ge=1, le=8 * 1024**5)
+    stable_device_id: str | None = Field(default=None, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> TopologyPlanChange:
+        if self.kind == "disk_addition" and (self.enclosure_id is None or self.slot is None):
+            raise ValueError("a planned disk addition requires an enclosure and bay")
+        if self.kind == "disk_retirement" and not self.stable_device_id:
+            raise ValueError("a planned retirement requires the existing stable drive identity")
+        return self
+
+
+class TopologyPlanDocumentRequest(StrictModel):
+    schema_version: Literal[1]
+    chassis: TopologyPlanChassis
+    controllers: list[TopologyPlanController] = Field(min_length=1, max_length=16)
+    enclosures: list[TopologyPlanEnclosure] = Field(min_length=1, max_length=64)
+    changes: list[TopologyPlanChange] = Field(default_factory=list, max_length=4096)
+    notes: str = Field(default="", max_length=4096)
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> TopologyPlanDocumentRequest:
+        controller_ids = [item.id for item in self.controllers]
+        enclosure_ids = [item.id for item in self.enclosures]
+        change_ids = [item.id for item in self.changes]
+        if len(set(controller_ids)) != len(controller_ids):
+            raise ValueError("controller IDs must be unique")
+        if len(set(enclosure_ids)) != len(enclosure_ids):
+            raise ValueError("enclosure IDs must be unique")
+        if len(set(change_ids)) != len(change_ids):
+            raise ValueError("change IDs must be unique")
+        controller_set = set(controller_ids)
+        enclosure_set = set(enclosure_ids)
+        for enclosure in self.enclosures:
+            if not set(enclosure.controller_ids) <= controller_set:
+                raise ValueError("every enclosure controller must exist in this plan")
+        planned_slots: set[tuple[str, int]] = set()
+        for change in self.changes:
+            if change.enclosure_id is not None and change.enclosure_id not in enclosure_set:
+                raise ValueError("every planned bay must belong to an enclosure in this plan")
+            if change.kind == "disk_addition":
+                enclosure = next(item for item in self.enclosures if item.id == change.enclosure_id)
+                if change.slot is None or change.slot > enclosure.bay_count:
+                    raise ValueError("planned disk bay exceeds the enclosure bay count")
+                key = (enclosure.id, change.slot)
+                if key in planned_slots:
+                    raise ValueError("only one planned disk may occupy an enclosure bay")
+                planned_slots.add(key)
+        return self
+
+
+class TopologyPlanUpdateRequest(StrictModel):
+    revision: int = Field(ge=0)
+    name: str = Field(min_length=1, max_length=128)
+    plan: TopologyPlanDocumentRequest
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name cannot be blank")
+        return cleaned
+
+
+class TopologyPlanRemoveRequest(StrictModel):
+    confirmation: Literal["REMOVE"]
+
+
 class WizardStepRequest(StrictModel):
     revision: int = Field(ge=0)
     answers: dict[str, Any]

@@ -13,6 +13,7 @@ import { SnapraidReplacementPanel } from "./SnapraidReplacementPanel";
 import { ArrayReplacementPanel } from "./ArrayReplacementPanel";
 import { DownloadTierPanel } from "./DownloadTierPanel";
 import { TopologyExpectationPanel } from "./TopologyExpectationPanel";
+import { TopologyPlanningPanel } from "./TopologyPlanningPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -233,6 +234,11 @@ export function StoragePage({
     />
 
     <TopologyExpectationPanel snapshotId={snapshot?.id ?? null} />
+
+    <details className="advanced-panel topology-planning-disclosure">
+      <summary>Plan future chassis and drive changes</summary>
+      <TopologyPlanningPanel drives={drives} />
+    </details>
 
     <StorageRedundancyPanel initialManagedId={focusedStorageId} />
 

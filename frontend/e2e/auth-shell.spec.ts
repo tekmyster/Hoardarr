@@ -30,6 +30,9 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/onboarding/network/interfaces")) return json({ items: [] });
     if (pathname.endsWith("/networking")) return json({ configuration: null, pending_confirmation: false, capabilities: { available: true, tools: {} }, interfaces: [], current: { hostname: "hoardarr", timezone: "UTC", addresses: {}, default_interface: null, default_gateway: null } });
     if (pathname.endsWith("/hardware/snapshots/latest")) return route.fulfill({ status: 404, json: { title: "Not found" } });
+    if (pathname.endsWith("/hardware/topology/expectation")) return json({ expectation: null, active_drifts: [], recent_events: [] });
+    if (pathname.endsWith("/hardware/topology/plan-templates")) return json({ items: [] });
+    if (pathname.endsWith("/hardware/topology/plans")) return json({ items: [] });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
     if (pathname.endsWith("/storage/groups") || pathname.endsWith("/storage/disks")) return json({ items: [] });
     if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "none", hardware_snapshot_sha256: "0".repeat(64), captured_at: new Date().toISOString(), storage_groups: [], available_disks: [], reserved_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
@@ -46,6 +49,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     });
     if (pathname.endsWith("/system/resources")) return json({ captured_at: new Date().toISOString(), processor: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, volumes: [], network: { interfaces: [] }, storage: { performance: null } });
     if (pathname.endsWith("/storage/telemetry")) return json({ captured_at: new Date().toISOString(), summary: { sample_seconds: null, writes_today_bytes: 0 }, drives: [], pools: [] });
+    if (pathname.endsWith("/storage/transfers/summary")) return json({ operations: [], tiers: [], summary: { queued_bytes: 0, running_bytes: 0, retained_for_seeding_bytes: 0, failed_operations: 0, observed_bytes_per_second: null, rate_sample_count: 0, estimated_queued_seconds: null, estimate_quality: "not_reported", estimate_methodology: "No measured transfer history is available." } });
     if (pathname.endsWith("/telemetry/catalog")) return json({
       items: [{ id: "io.read.bytes_per_second", name: "Read throughput", entity_types: ["drive"], unit: "bytes_per_second", kind: "raw", source: "Linux block counters", minimum_interval_seconds: 5, capability: null, retention_class: "recent", aggregation: "mean", availability: "When Linux reports block counters", formula: null, test_evidence: "backend test", entitled: true }],
       quality_states: ["available", "not_reported", "unsupported", "temporarily_unavailable", "stale", "estimated", "derived"],
@@ -551,6 +555,65 @@ test.describe("production sign-in shell", () => {
     await expect(page.getByRole("heading", { name: "Reserved for later" })).toBeVisible();
     await page.getByRole("button", { name: "Release disk" }).click();
     await expect(page.getByRole("button", { name: "Reserve for later" })).toBeVisible();
+  });
+
+  test("creates and edits a future topology through the real Storage UI", async ({ page }, testInfo) => {
+    await storageWizardServer(page);
+    const template = {
+      id: "generic-dual-path-shelf",
+      name: "Dual-path 24-bay shelf",
+      description: "Two planned controller paths to one generic twenty-four-bay disk shelf.",
+      controller_count: 2,
+      enclosures: [{ id: "shelf-1", label: "Disk shelf 1", bay_count: 24 }],
+    };
+    let plan: Record<string, any> | null = null;
+    await page.route("**/api/v1/hardware/topology/plan-templates", (route) => route.fulfill({ json: { items: [template] } }));
+    await page.route("**/api/v1/hardware/topology/plans", async (route) => {
+      if (route.request().method() === "GET") return route.fulfill({ json: { items: plan ? [plan] : [] } });
+      plan = {
+        id: "plan-browser",
+        name: "Future media shelf",
+        template_id: template.id,
+        revision: 0,
+        plan: {
+          schema_version: 1,
+          chassis: { id: "host", label: "Hoardarr host" },
+          controllers: [
+            { id: "controller-1", label: "Controller A", state: "planned" },
+            { id: "controller-2", label: "Controller B", state: "planned" },
+          ],
+          enclosures: [{ ...template.enclosures[0], controller_ids: ["controller-1", "controller-2"] }],
+          changes: [],
+          notes: "",
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      return route.fulfill({ status: 201, json: { plan } });
+    });
+    await page.route("**/api/v1/hardware/topology/plans/plan-browser", async (route) => {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as { revision: number; name: string; plan: Record<string, unknown> };
+        plan = { ...plan!, name: body.name, revision: body.revision + 1, plan: body.plan, updated_at: new Date().toISOString() };
+        return route.fulfill({ json: { plan } });
+      }
+      return route.fulfill({ json: { removed: true } });
+    });
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByText("Plan future chassis and drive changes", { exact: true }).click();
+    await expect(page.getByText("No future layout has been planned")).toBeVisible();
+    await page.getByLabel("Plan name").fill("Future media shelf");
+    await page.getByRole("button", { name: "Create planning layout" }).click();
+    await expect(page.getByLabel("Future media shelf planned topology")).toBeVisible();
+    await expect(page.getByText("Controller A")).toBeVisible();
+    await expect(page.getByText("Controller B")).toBeVisible();
+    await page.getByLabel("Bay").fill("4");
+    await page.getByLabel("Capacity (TB, optional)").fill("20");
+    await page.getByRole("button", { name: "Add to plan" }).click();
+    await expect(page.getByText("20 TB planned", { exact: true })).toBeVisible();
+    await testInfo.attach("planned-topology", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
   });
 
   test("guides a Plex user from four drives to protected media and download folders", async ({ page }) => {

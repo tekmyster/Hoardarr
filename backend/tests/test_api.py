@@ -302,6 +302,92 @@ def test_locate_api_queues_real_activity_and_bounded_automatic_clear(api_runtime
     assert len(calls) == 1
 
 
+def test_topology_planning_api_keeps_declared_plans_separate_from_live_hardware(
+    api_runtime: Any,
+) -> None:
+    client, _app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+
+    templates = client.get("/api/v1/hardware/topology/plan-templates")
+    assert templates.status_code == 200
+    assert {item["id"] for item in templates.json()["items"]} >= {
+        "generic-8-bay",
+        "generic-dual-path-shelf",
+    }
+    missing_csrf = client.post(
+        "/api/v1/hardware/topology/plans",
+        json={"name": "Future media shelf", "template_id": "generic-dual-path-shelf"},
+    )
+    assert missing_csrf.status_code == 403
+    created = client.post(
+        "/api/v1/hardware/topology/plans",
+        headers=_state_headers(csrf),
+        json={"name": "Future media shelf", "template_id": "generic-dual-path-shelf"},
+    )
+    assert created.status_code == 201, created.text
+    plan = created.json()["plan"]
+    assert plan["revision"] == 0
+    assert len(plan["plan"]["controllers"]) == 2
+    assert plan["plan"]["enclosures"][0]["bay_count"] == 24
+
+    document = plan["plan"]
+    document["changes"] = [
+        {
+            "id": "add-bay-3",
+            "kind": "disk_addition",
+            "label": "Add 18 TB media disk",
+            "enclosure_id": "shelf-1",
+            "slot": 3,
+            "capacity_bytes": 18_000_000_000_000,
+            "stable_device_id": None,
+        },
+        {
+            "id": "retire-old-disk",
+            "kind": "disk_retirement",
+            "label": "Retire old media disk",
+            "enclosure_id": None,
+            "slot": None,
+            "capacity_bytes": None,
+            "stable_device_id": "wwn:5000c500old",
+        },
+    ]
+    updated = client.put(
+        f"/api/v1/hardware/topology/plans/{plan['id']}",
+        headers=_state_headers(csrf),
+        json={"revision": 0, "name": plan["name"], "plan": document},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["plan"]["revision"] == 1
+    assert len(updated.json()["plan"]["plan"]["changes"]) == 2
+
+    stale = client.put(
+        f"/api/v1/hardware/topology/plans/{plan['id']}",
+        headers=_state_headers(csrf),
+        json={"revision": 0, "name": plan["name"], "plan": document},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "topology_plan_revision_conflict"
+    invalid = {**document, "changes": [{**document["changes"][0], "slot": 25}]}
+    invalid_update = client.put(
+        f"/api/v1/hardware/topology/plans/{plan['id']}",
+        headers=_state_headers(csrf),
+        json={"revision": 1, "name": plan["name"], "plan": invalid},
+    )
+    assert invalid_update.status_code == 422
+
+    listed = client.get("/api/v1/hardware/topology/plans")
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [plan["id"]]
+    removed = client.request(
+        "DELETE",
+        f"/api/v1/hardware/topology/plans/{plan['id']}",
+        headers=_state_headers(csrf),
+        json={"confirmation": "REMOVE"},
+    )
+    assert removed.status_code == 200
+    assert client.get("/api/v1/hardware/topology/plans").json()["items"] == []
+
+
 def test_disk_reservation_api_is_guarded_persistent_and_idempotent(api_runtime: Any) -> None:
     client, app, setup_token, _secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

@@ -260,6 +260,41 @@ export interface TopologyExpectationStatus {
   recent_events: TopologyDriftEventDocument[];
 }
 
+export interface TopologyPlanTemplate {
+  id: "generic-8-bay" | "generic-12-bay" | "generic-24-bay-shelf" | "generic-dual-path-shelf";
+  name: string;
+  description: string;
+  controller_count: number;
+  enclosures: Array<{ id: string; label: string; bay_count: number }>;
+}
+
+export interface TopologyPlanChange {
+  id: string;
+  kind: "disk_addition" | "disk_retirement";
+  label: string;
+  enclosure_id: string | null;
+  slot: number | null;
+  capacity_bytes: number | null;
+  stable_device_id: string | null;
+}
+
+export interface TopologyPlanDocument {
+  id: string;
+  name: string;
+  template_id: TopologyPlanTemplate["id"];
+  revision: number;
+  plan: {
+    schema_version: 1;
+    chassis: { id: string; label: string };
+    controllers: Array<{ id: string; label: string; state: "existing" | "planned" }>;
+    enclosures: Array<{ id: string; label: string; bay_count: number; controller_ids: string[] }>;
+    changes: TopologyPlanChange[];
+    notes: string;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ApiKeyDocument {
   id: string;
   name: string;

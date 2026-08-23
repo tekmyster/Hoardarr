@@ -87,6 +87,29 @@ the baseline. Unknown bays and unreported link rates do not become fabricated
 differences. The baseline can be replaced or monitoring can be stopped from the
 Storage page; neither action changes any hardware.
 
+### Live topology versus planning topology
+
+Hoardarr keeps live discovery, an expected operational baseline, and future
+planning as three different records:
+
+- **Live topology** contains only the latest provider evidence from the host.
+- **Expected topology** is an operator-approved copy of a real scan used for
+  drift detection.
+- **Planning topology** is an operator-declared future design. It never creates
+  hardware, contributes telemetry, satisfies a health check, or appears as a
+  currently installed controller, shelf, bay, or disk.
+
+Planning documents are revisioned and stored independently of hardware
+snapshots. The Advanced Storage UI can start from bounded generic 8-bay,
+12-bay, 24-bay, or dual-path 24-bay layouts, render the declared controller and
+enclosure relationships, and record exact future disk additions or retirement
+of a currently discovered stable drive. Server-side validation rejects unknown
+controllers/enclosures, duplicate planned bay occupancy, out-of-range bays,
+retirement without a stable drive identity, oversized documents, and stale
+browser revisions. These documents are planning evidence only; executing an
+expansion or retirement still requires the separate immutable lifecycle or
+expansion workflow.
+
 ## SAS PHY evidence and slow links
 
 For the exact SAS PHY present in a disk's Linux transport path, Hoardarr reads

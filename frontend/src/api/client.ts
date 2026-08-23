@@ -52,6 +52,8 @@ import type {
   TierTransferSummary,
   TopologyExpectationDocument,
   TopologyExpectationStatus,
+  TopologyPlanDocument,
+  TopologyPlanTemplate,
   UpdateCheckDocument,
   UpdateStatusDocument,
   WizardDocument,
@@ -964,6 +966,39 @@ class HoardarrApi {
 
   async removeTopologyExpectation(expectationId: string): Promise<void> {
     await this.request(`/hardware/topology/expectations/${encodeURIComponent(expectationId)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation: "REMOVE" }),
+    });
+  }
+
+  async topologyPlanTemplates(): Promise<TopologyPlanTemplate[]> {
+    const result = await this.request<{ items: TopologyPlanTemplate[] }>("/hardware/topology/plan-templates");
+    return result.items;
+  }
+
+  async topologyPlans(): Promise<TopologyPlanDocument[]> {
+    const result = await this.request<{ items: TopologyPlanDocument[] }>("/hardware/topology/plans");
+    return result.items;
+  }
+
+  async createTopologyPlan(name: string, templateId: TopologyPlanTemplate["id"]): Promise<TopologyPlanDocument> {
+    const result = await this.request<{ plan: TopologyPlanDocument }>("/hardware/topology/plans", {
+      method: "POST",
+      body: JSON.stringify({ name, template_id: templateId }),
+    });
+    return result.plan;
+  }
+
+  async updateTopologyPlan(plan: TopologyPlanDocument): Promise<TopologyPlanDocument> {
+    const result = await this.request<{ plan: TopologyPlanDocument }>(`/hardware/topology/plans/${encodeURIComponent(plan.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ revision: plan.revision, name: plan.name, plan: plan.plan }),
+    });
+    return result.plan;
+  }
+
+  async removeTopologyPlan(planId: string): Promise<void> {
+    await this.request(`/hardware/topology/plans/${encodeURIComponent(planId)}`, {
       method: "DELETE",
       body: JSON.stringify({ confirmation: "REMOVE" }),
     });

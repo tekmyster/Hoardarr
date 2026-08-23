@@ -17,17 +17,33 @@ from hoardarr.api.schemas import (
     HardwareLocateRequest,
     TopologyExpectationCreateRequest,
     TopologyExpectationRemoveRequest,
+    TopologyPlanCreateRequest,
+    TopologyPlanRemoveRequest,
+    TopologyPlanUpdateRequest,
 )
 from hoardarr.api.serializers import operation_document, snapshot_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
-from hoardarr.db.models import HardwareSnapshot, TopologyDriftEvent, TopologyExpectation, utc_now
+from hoardarr.db.models import (
+    HardwareSnapshot,
+    TopologyDriftEvent,
+    TopologyExpectation,
+    TopologyPlan,
+    utc_now,
+)
 from hoardarr.hardware.locate import LocateError, build_locate_plan
 from hoardarr.hardware.topology_expectations import (
     create_topology_expectation,
     drift_document,
     expectation_document,
     reconcile_topology_snapshot,
+)
+from hoardarr.hardware.topology_plans import (
+    TopologyPlanError,
+    create_topology_plan,
+    topology_plan_document,
+    topology_plan_templates,
+    update_topology_plan,
 )
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 
@@ -274,4 +290,110 @@ def remove_topology_expectation(
         target_type="topology_expectation",
         target_id=expectation.id,
     )
+    return {"removed": True}
+
+
+@router.get("/topology/plan-templates")
+def list_topology_plan_templates(
+    _principal: Principal = Depends(authenticated_principal),
+) -> dict[str, object]:
+    return {"items": topology_plan_templates()}
+
+
+@router.get("/topology/plans")
+def list_topology_plans(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    plans = session.scalars(
+        select(TopologyPlan).order_by(TopologyPlan.updated_at.desc()).limit(100)
+    )
+    return {"items": [topology_plan_document(plan) for plan in plans]}
+
+
+@router.post("/topology/plans", status_code=201)
+def save_topology_plan(
+    payload: TopologyPlanCreateRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        plan = create_topology_plan(
+            session,
+            name=payload.name,
+            template_id=payload.template_id,
+            created_by=principal.user_id,
+        )
+    except TopologyPlanError as exc:
+        raise Problem(422, "topology_plan_invalid", "Invalid topology plan", str(exc)) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="hardware.topology.plan.create",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="topology_plan",
+        target_id=plan.id,
+        details={"template_id": plan.template_id},
+    )
+    return {"plan": topology_plan_document(plan)}
+
+
+@router.put("/topology/plans/{plan_id}")
+def replace_topology_plan(
+    plan_id: str,
+    payload: TopologyPlanUpdateRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    plan = session.get(TopologyPlan, plan_id)
+    if plan is None:
+        raise Problem(404, "topology_plan_not_found", "Not found", "Topology plan was not found.")
+    try:
+        update_topology_plan(
+            plan,
+            revision=payload.revision,
+            name=payload.name,
+            document=payload.plan.model_dump(mode="json"),
+        )
+    except TopologyPlanError as exc:
+        raise Problem(409, "topology_plan_revision_conflict", "Plan changed", str(exc)) from exc
+    session.flush()
+    record_audit(
+        session,
+        principal=principal,
+        action="hardware.topology.plan.update",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="topology_plan",
+        target_id=plan.id,
+        details={"revision": plan.revision, "change_count": len(plan.plan_json["changes"])},
+    )
+    return {"plan": topology_plan_document(plan)}
+
+
+@router.delete("/topology/plans/{plan_id}")
+def delete_topology_plan(
+    plan_id: str,
+    payload: TopologyPlanRemoveRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    plan = session.get(TopologyPlan, plan_id)
+    if plan is None:
+        raise Problem(404, "topology_plan_not_found", "Not found", "Topology plan was not found.")
+    record_audit(
+        session,
+        principal=principal,
+        action="hardware.topology.plan.remove",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="topology_plan",
+        target_id=plan.id,
+        details={"revision": plan.revision},
+    )
+    session.delete(plan)
     return {"removed": True}
