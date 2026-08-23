@@ -65,6 +65,10 @@ def _existing_data(observation: dict[str, Any] | None) -> dict[str, Any]:
 def _disk_document(disk: PhysicalDisk, observation: dict[str, Any] | None) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
+    if observation is None:
+        blockers.append("The disk is absent from the latest hardware snapshot.")
+    elif observation.get("system_disk") is True or observation.get("system_device") is True:
+        blockers.append("Protected system storage cannot be used for expansion or import.")
     if disk.capacity_bytes is None or disk.capacity_bytes <= 0:
         blockers.append("Capacity is not reported.")
     if not disk.kernel_path:
@@ -178,6 +182,8 @@ def build_expansion_assessment(
         if item["eligible"] and item["existing_data"]["state"] == "none_detected"
     ]
     for disk in available:
+        if not disk["eligible"]:
+            continue
         capacity = int(disk["capacity_bytes"] or 0)
         existing = disk["existing_data"]["state"]
         if existing != "none_detected":

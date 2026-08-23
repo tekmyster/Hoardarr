@@ -15,8 +15,10 @@ function capacity(value: number | null): string {
 
 export function StorageExpansionPanel({
   onPlan,
+  snapshotId,
 }: {
   onPlan: (action: DriveAction, diskIds: string[]) => void;
+  snapshotId: string | null;
 }) {
   const [assessment, setAssessment] = useState<StorageExpansionAssessment | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,7 +41,7 @@ export function StorageExpansionPanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [snapshotId]);
 
   const diskNames = useMemo(() => new Map(
     assessment?.available_disks.map((disk) => [disk.id, `${disk.vendor ?? ""} ${disk.model ?? "Disk"}`.trim()]) ?? [],

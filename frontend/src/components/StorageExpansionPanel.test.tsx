@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
@@ -67,7 +67,7 @@ describe("StorageExpansionPanel", () => {
     vi.spyOn(api, "storageExpansion").mockResolvedValue(assessment);
     const onPlan = vi.fn();
     const user = userEvent.setup();
-    render(<StorageExpansionPanel onPlan={onPlan} />);
+    render(<StorageExpansionPanel onPlan={onPlan} snapshotId="snapshot-one" />);
 
     const candidate = await screen.findByLabelText("Add capacity to Media");
     expect(within(candidate).getAllByText("8 TB", { exact: true })).toHaveLength(2);
@@ -84,7 +84,18 @@ describe("StorageExpansionPanel", () => {
       available_disks: [],
       candidates: [],
     });
-    render(<StorageExpansionPanel onPlan={vi.fn()} />);
+    render(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-one" />);
     expect(await screen.findByText("No unassigned disks detected")).toBeInTheDocument();
+  });
+
+  it("reconciles choices automatically after a new hardware snapshot", async () => {
+    const load = vi.spyOn(api, "storageExpansion")
+      .mockResolvedValueOnce({ ...assessment, available_disks: [], candidates: [] })
+      .mockResolvedValueOnce(assessment);
+    const view = render(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-one" />);
+    expect(await screen.findByText("No unassigned disks detected")).toBeInTheDocument();
+    view.rerender(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-two" />);
+    expect(await screen.findByLabelText("Add capacity to Media")).toBeInTheDocument();
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
   });
 });

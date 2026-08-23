@@ -230,7 +230,7 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| EXPAND-01 | P1 | Expansion discovery trigger | Recognize newly available eligible disks without treating them as assigned storage. | SOFTWARE VERIFIED — snapshot-bound read-only assessment excludes assigned/retired/unavailable disks |
+| EXPAND-01 | P1 | Expansion discovery trigger | Recognize newly available eligible disks without treating them as assigned storage. | SOFTWARE VERIFIED — snapshot-bound read-only assessment excludes assigned/retired/stale/system disks and refreshes automatically after discovery |
 | EXPAND-02 | P1 | Current-state analysis | Analyze groups, backends, health, capacity, mergerFS balance, parity, ZFS geometry, forecasts, and tiers. | IN PROGRESS — groups/backends/health/current pool capabilities implemented; balance and forecast correlation pending |
 | EXPAND-03 | P1 | mergerFS and SnapRAID candidates | Generate add-member, data-disk, and parity-expansion candidates with restrictions. | IN PROGRESS — detected mergerFS member and SnapRAID resync/parity-size consequences implemented; explicit parity-role selection pending |
 | EXPAND-04 | P1 | ZFS, new-pool, cache, and reserve candidates | Generate supported vdev/pool/tier/reserve choices without inventing executable capability. | IN PROGRESS — matched mirror/new pool and download-tier candidates implemented; wider vdev geometry and reserve persistence pending |

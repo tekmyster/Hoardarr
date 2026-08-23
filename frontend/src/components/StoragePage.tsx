@@ -207,7 +207,7 @@ export function StoragePage({
 
     <StorageGroupsPanel />
 
-    <StorageExpansionPanel onPlan={onDriveAction} />
+    <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />
 
     <StorageTopologyPanels topology={storageInventory?.topology} />
 

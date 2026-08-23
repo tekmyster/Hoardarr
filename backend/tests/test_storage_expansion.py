@@ -184,3 +184,34 @@ def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:
         assert mirror["capacity"]["estimated_usable_delta_bytes"] == 9_900_000_000
         assert mirror["recommended"] is False
         assert len(mirror["disk_ids"]) == 2
+
+
+def test_system_disk_is_visible_as_protected_but_never_becomes_a_candidate() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        disk, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:system",
+                "kernel_path": "/dev/sda",
+                "capacity_bytes": 100_000_000_000,
+                "media_type": "ssd",
+                "health_state": "healthy",
+            },
+        )
+        observation = _observation(
+            "wwn:system", signatures=[{"type": "ext4", "usage": "filesystem"}]
+        )
+        observation["system_disk"] = True
+        result = build_expansion_assessment(
+            session,
+            snapshot=_snapshot(session, [observation]),
+        )
+        protected = result["available_disks"][0]
+        assert protected["id"] == disk.id
+        assert protected["eligible"] is False
+        assert protected["blockers"] == [
+            "Protected system storage cannot be used for expansion or import."
+        ]
+        assert result["candidates"] == []

@@ -17,6 +17,13 @@ Existing partitions, filesystem signatures, or incomplete signature scans cause 
 recommendation. Hoardarr does not produce a formatting recommendation by pretending an uncertain
 disk is blank. Capacity is `Not calculated` when the source filesystem has not been inspected.
 
+`system_disk` and `system_device` discovery evidence are absolute exclusions. Protected storage can
+remain visible with its blocker so the operator understands why it is unavailable, but it never
+produces an import, new-pool, tier, or expansion candidate. A registry entry absent from the latest
+snapshot is likewise blocked rather than planned from a stale kernel path. The panel reloads its
+assessment automatically after a successful hardware scan; manual refresh remains available for a
+retry.
+
 For a completely scanned blank disk, the planner can currently describe:
 
 - an independent Storage Group;
