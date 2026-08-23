@@ -98,16 +98,22 @@ def inspect_open_use(
             descriptors = (process / "fd").iterdir()
         except OSError:
             continue
-        for descriptor in islice(descriptors, max(fd_limit - inspected, 0)):
-            inspected += 1
-            try:
-                target = os.readlink(descriptor)
-            except OSError:
-                continue
-            normalized = target.removesuffix(" (deleted)")
-            if normalized == value or normalized.startswith(source):
-                handles += 1
-                matched += 1
+        try:
+            for descriptor in islice(descriptors, max(fd_limit - inspected, 0)):
+                inspected += 1
+                try:
+                    target = os.readlink(descriptor)
+                except OSError:
+                    continue
+                normalized = target.removesuffix(" (deleted)")
+                if normalized == value or normalized.startswith(source):
+                    handles += 1
+                    matched += 1
+        except OSError:
+            # A process can disappear or deny /proc access after its directory
+            # was listed. This is ordinary partial visibility, not a planner
+            # failure; continue with the remaining bounded process set.
+            continue
         if matched and len(processes) < 16:
             try:
                 name = (process / "comm").read_text(encoding="utf-8", errors="replace").strip()
