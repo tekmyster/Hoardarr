@@ -171,6 +171,15 @@ enclosures. Their dual IOM paths are management endpoints for one logical
 shelf. A tested profile supplies the documented bay layout and model-specific
 quirks; the core association still comes from SES/AES, SMP, and disk identity.
 
+The normalized topology keeps the PCI HBA and Linux SAS host as distinct
+objects: PCI BDF → SAS host → port → PHY → expander → enclosure → bay → disk.
+This prevents a `hostN` renumber from replacing the stable controller identity.
+The sanitized mixed-HBA regression fixture contains SAS2308 and SAS3008
+controllers, DS424IOM6 and DS224IOM6 shelves, SAS and SATA devices, 3/6/12 Gb/s
+observations, PHY error counters, confirmed mappings, and an explicitly unknown
+bay. It contains no real host name or complete physical serial number and is
+software evidence only, not certification of those models.
+
 The two-digit physical shelf ID is secondary because it is configurable and
 can conflict. The SES logical ID or shelf UID is canonical. IOM A and IOM B are
 kept as independent paths so a partial cabling, IOM, or expander failure remains

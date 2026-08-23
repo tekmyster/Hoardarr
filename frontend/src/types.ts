@@ -98,7 +98,7 @@ export type StorageTopologyProtocol = "SAS" | "SATA" | "FC" | "FCoE" | "NVMe" | 
 
 export interface StorageTopologyNode {
   id: string;
-  kind: "controller" | "port" | "phy" | "expander" | "path" | "enclosure" | "drive" | "pool" | "filesystem" | "share";
+  kind: "controller" | "sas_host" | "port" | "phy" | "expander" | "path" | "enclosure" | "drive" | "pool" | "filesystem" | "share";
   label: string;
   address?: string | null;
   bus?: string | null;

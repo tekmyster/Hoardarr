@@ -366,11 +366,40 @@ def build_storage_topology(
         connection = _mapping(disk.get("connection"))
         transport_host = _text(connection.get("transport_host"))
         controller_address = _text(connection.get("controller_address"))
-        chosen_address = transport_host or controller_address or "unreported"
+        # A SCSI host is a child transport object of a PCI HBA when both are
+        # reported; it must not replace the controller's stable PCI identity.
+        # FC/FCoE hosts without a reported PCI ancestor remain valid top-level
+        # controllers so their transport state is still visible.
+        chosen_address = controller_address or transport_host or "unreported"
         driver = _text(_mapping(controllers_by_address.get(chosen_address)).get("kernel_driver"))
         protocol = _protocol(connection, driver)
         controller_id = controller_node(chosen_address, protocol)
         physical_parent_id = controller_id
+        if controller_address and transport_host:
+            host_id = f"sas_host:{controller_address}:{transport_host}"
+            nodes.setdefault(
+                host_id,
+                {
+                    "id": host_id,
+                    "kind": "sas_host",
+                    "label": transport_host,
+                    "address": transport_host,
+                    "protocol": protocol,
+                    "status": "detected",
+                },
+            )
+            links.setdefault(
+                f"{controller_id}->{host_id}",
+                {
+                    "id": f"{controller_id}->{host_id}",
+                    "source": controller_id,
+                    "target": host_id,
+                    "protocol": protocol,
+                    "capable_speed_gbps": None,
+                    "negotiated_speed_gbps": None,
+                },
+            )
+            physical_parent_id = host_id
         for kind, value in (
             ("port", _text(connection.get("hba_port"))),
             ("phy", _text(connection.get("phy_id"))),

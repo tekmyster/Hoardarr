@@ -14,6 +14,7 @@ describe("StorageTopologyPanels", () => {
       status: "available",
       nodes: [
         { id: "controller:1", kind: "controller", label: "Broadcom SAS HBA", address: "0000:01:00.0", driver: "mpt3sas", protocol: "SAS", status: "detected" },
+        { id: "sas_host:1", kind: "sas_host", label: "host6", address: "host6", protocol: "SAS", status: "detected" },
         { id: "phy:1", kind: "phy", label: "phy-6:2", address: "phy-6:2", protocol: "SAS", status: "detected", sas_address: "0x5000c500abcd", phy_identifier: "2", minimum_speed_gbps: 1.5, capable_speed_gbps: 12, negotiated_speed_gbps: 6, invalid_dwords: 11, disparity_errors: 7, loss_of_sync: 3, reset_problems: 1 },
         { id: "enclosure:1", kind: "enclosure", label: "NETAPP DS4246", address: "6:0:0:0", protocol: "SAS", status: "OK" },
         { id: "drive:1", kind: "drive", stable_identity: "wwn:5000c50012345678", label: "SEAGATE ST8000NM", serial: "ZA123456", path: "/dev/sdb", slot: "12", mapping_source: "sysfs enclosure_device", mapping_confidence: "high", mapping_last_confirmed_at: "2026-08-23T12:00:00Z", controller_id: "controller:1", enclosure_id: "enclosure:1", capacity_bytes: 8_000_000_000_000, used_bytes: 4_000_000_000_000, usable_bytes: 8_000_000_000_000, health_status: "healthy", smart_available: true, temperature_c: 39, protocol: "SAS", capable_speed_gbps: 12, negotiated_speed_gbps: 6 },
@@ -22,7 +23,8 @@ describe("StorageTopologyPanels", () => {
         { id: "share:smb:media", kind: "share", label: "Media", path: "/mnt/hoardarr/tank/Media", status: "configured" },
       ],
       links: [
-        { id: "controller:1->phy:1", source: "controller:1", target: "phy:1", protocol: "SAS", capable_speed_gbps: 12, negotiated_speed_gbps: 6 },
+        { id: "controller:1->sas_host:1", source: "controller:1", target: "sas_host:1", protocol: "SAS", capable_speed_gbps: null, negotiated_speed_gbps: null },
+        { id: "sas_host:1->phy:1", source: "sas_host:1", target: "phy:1", protocol: "SAS", capable_speed_gbps: 12, negotiated_speed_gbps: 6 },
         { id: "phy:1->enclosure:1", source: "phy:1", target: "enclosure:1", protocol: "SAS", capable_speed_gbps: 12, negotiated_speed_gbps: 12 },
         { id: "enclosure:1->drive:1", source: "enclosure:1", target: "drive:1", protocol: "SAS", capable_speed_gbps: 12, negotiated_speed_gbps: 6 },
         { id: "drive:1->pool:zfs:tank", source: "drive:1", target: "pool:zfs:tank", protocol: "Logical", capable_speed_gbps: null, negotiated_speed_gbps: null },
@@ -45,6 +47,8 @@ describe("StorageTopologyPanels", () => {
     expect(screen.getByText("Locate On")).toBeInTheDocument();
     expect(screen.getByText("Fault Off")).toBeInTheDocument();
     expect(screen.getByText("SAS PHY")).toBeInTheDocument();
+    expect(screen.getByText("SAS host")).toBeInTheDocument();
+    expect(screen.getAllByText("host6")).toHaveLength(2);
     expect(screen.getByText("0x5000c500abcd")).toBeInTheDocument();
     expect(screen.getByText("Invalid DWORDs").nextElementSibling).toHaveTextContent("11");
     expect(screen.getByText("Bay 12 · Confirmed")).toBeInTheDocument();
@@ -57,7 +61,7 @@ describe("StorageTopologyPanels", () => {
     await user.click(screen.getByRole("button", { name: "Review existing data" }));
     expect(onDriveAction).toHaveBeenCalledWith("import", "wwn:5000c50012345678");
     const sasRails = [...document.querySelectorAll<HTMLElement>(".topology-link.protocol-sas")];
-    expect(sasRails.map((item) => item.style.getPropertyValue("--link-width"))).toEqual(["4px", "6px", "4px"]);
+    expect(sasRails.map((item) => item.style.getPropertyValue("--link-width"))).toEqual(["2px", "4px", "6px", "4px"]);
   });
 
   it("renders untrusted hardware metadata as text", () => {

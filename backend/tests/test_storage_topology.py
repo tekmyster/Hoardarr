@@ -240,6 +240,7 @@ def test_sanitized_mixed_hba_shelf_topology_preserves_realistic_evidence() -> No
     assert phys["0x500605b000000003"]["reset_problems"] == 1.0
     assert {item["kind"] for item in result["nodes"]} >= {
         "controller",
+        "sas_host",
         "port",
         "phy",
         "expander",
@@ -247,3 +248,10 @@ def test_sanitized_mixed_hba_shelf_topology_preserves_realistic_evidence() -> No
         "enclosure",
         "drive",
     }
+    host_nodes = {item["address"] for item in result["nodes"] if item["kind"] == "sas_host"}
+    assert host_nodes == {"host6", "host12"}
+    assert any(
+        item["source"] == "controller:0000:81:00.0"
+        and item["target"] == "sas_host:0000:81:00.0:host12"
+        for item in result["links"]
+    )

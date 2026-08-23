@@ -32,6 +32,7 @@
       "identity": { "serial": "SAN-SATA-0001", "wwn": "5000c50000000001" },
       "connection": {
         "controller_address": "0000:03:00.0",
+        "transport_host": "host6",
         "transport": "sata",
         "protocol": "ata",
         "hba_port": "port-6:0",
@@ -67,6 +68,7 @@
       "identity": { "serial": "SAN-SAS-0002", "wwn": "5000c50000000002" },
       "connection": {
         "controller_address": "0000:03:00.0",
+        "transport_host": "host6",
         "transport": "sas",
         "protocol": "sas",
         "hba_port": "port-6:1",
@@ -102,6 +104,7 @@
       "identity": { "serial": "SAN-SAS-0003", "wwn": "5000c50000000003" },
       "connection": {
         "controller_address": "0000:81:00.0",
+        "transport_host": "host12",
         "transport": "sas",
         "protocol": "sas",
         "hba_port": "port-12:0",
@@ -137,6 +140,7 @@
       "identity": { "serial": "SAN-SAS-0004", "wwn": "5000c50000000004" },
       "connection": {
         "controller_address": "0000:81:00.0",
+        "transport_host": "host12",
         "transport": "sas",
         "protocol": "sas",
         "hba_port": "port-12:1",
