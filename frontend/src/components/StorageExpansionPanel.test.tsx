@@ -48,6 +48,7 @@ const assessment: StorageExpansionAssessment = {
   }],
   reserved_disks: [],
   detected_capabilities: { mergerfs: true, snapraid: true, zfs: false },
+  tool_availability: { mergerfs: true, snapraid: true, zfs: false },
   candidates: [{
     id: "candidate-one",
     kind: "add_mergerfs_member",
@@ -119,6 +120,19 @@ describe("StorageExpansionPanel", () => {
     });
     render(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-one" />);
     expect(await screen.findByText("No unassigned disks detected")).toBeInTheDocument();
+  });
+
+  it("distinguishes configured storage from unavailable host software", async () => {
+    vi.spyOn(api, "storageExpansion").mockResolvedValue({
+      ...assessment,
+      detected_capabilities: { mergerfs: true, snapraid: false, zfs: true },
+      tool_availability: { mergerfs: true, snapraid: false, zfs: false },
+      candidates: [],
+    });
+    render(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-one" />);
+    expect(await screen.findByText("Configured and ready")).toBeInTheDocument();
+    expect(screen.getAllByText("Configured · required software unavailable")).toHaveLength(1);
+    expect(screen.getByText("Not available")).toBeInTheDocument();
   });
 
   it("keeps a reviewed SnapRAID parity disk out of usable-capacity claims", async () => {

@@ -246,17 +246,50 @@ def _candidate(
     return document
 
 
+def _best_matched_disks(
+    items: list[dict[str, Any]], *, minimum: int, maximum: int | None = None
+) -> list[dict[str, Any]] | None:
+    """Choose a close-capacity set without letting one outlier suppress a valid plan."""
+
+    ordered = sorted(items, key=lambda item: int(item["capacity_bytes"] or 0), reverse=True)
+    best: list[dict[str, Any]] | None = None
+    best_score: tuple[int, int, int] | None = None
+    for start in range(len(ordered)):
+        upper = len(ordered) if maximum is None else min(len(ordered), start + maximum)
+        for end in range(start + minimum, upper + 1):
+            possible = ordered[start:end]
+            capacities = [int(item["capacity_bytes"] or 0) for item in possible]
+            smallest = min(capacities)
+            largest = max(capacities)
+            if smallest <= 0 or largest / smallest > 1.05:
+                continue
+            score = (len(possible), smallest, sum(capacities))
+            if best_score is None or score > best_score:
+                best = possible
+                best_score = score
+    return best
+
+
 def build_expansion_assessment(
     session: Session,
     *,
     snapshot: HardwareSnapshot,
     storage_inventory: dict[str, Any] | None = None,
     filesystem_probe: Callable[[str], FilesystemUsage] | None = None,
+    tool_probe: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Describe safe expansion choices without claiming that an unapproved change occurred."""
 
     observations = _snapshot_disks(snapshot)
     filesystem_probe = filesystem_probe or inspect_filesystem_usage
+    tool_probe = tool_probe or (
+        lambda name: shutil.which(name, path="/usr/sbin:/usr/bin:/sbin:/bin") is not None
+    )
+    tool_availability = {
+        "mergerfs": tool_probe("mergerfs"),
+        "snapraid": tool_probe("snapraid"),
+        "zfs": tool_probe("zpool") and tool_probe("zfs"),
+    }
     assigned_ids = {
         value
         for value in session.scalars(
@@ -289,17 +322,17 @@ def build_expansion_assessment(
         item
         for item in pool_items
         if isinstance(item, dict) and str(item.get("type", "")).casefold() == "mergerfs"
-    ]
+    ] if tool_availability["mergerfs"] else []
     snapraid_pools = [
         item
         for item in pool_items
         if isinstance(item, dict) and str(item.get("type", "")).casefold() == "snapraid"
-    ]
+    ] if tool_availability["snapraid"] else []
     zfs_pools = [
         item
         for item in pool_items
         if isinstance(item, dict) and str(item.get("type", "")).casefold() == "zfs"
-    ]
+    ] if tool_availability["zfs"] else []
     group_mergerfs_targets: dict[str, dict[str, Any]] = {}
     group_snapraid_targets: dict[str, dict[str, Any]] = {}
     group_zfs_targets: dict[str, dict[str, Any]] = {}
@@ -686,58 +719,58 @@ def build_expansion_assessment(
             )
         )
 
-    matched = sorted(usable_blank, key=lambda item: int(item["capacity_bytes"] or 0), reverse=True)
-    if len(matched) >= 2:
-        first, second = matched[:2]
+    matched = (
+        sorted(usable_blank, key=lambda item: int(item["capacity_bytes"] or 0), reverse=True)
+        if tool_availability["zfs"]
+        else []
+    )
+    mirror_members = _best_matched_disks(matched, minimum=2, maximum=2)
+    if mirror_members is not None:
+        first, second = mirror_members
         first_capacity = int(first["capacity_bytes"] or 0)
         second_capacity = int(second["capacity_bytes"] or 0)
-        if second_capacity and first_capacity / second_capacity <= 1.05:
-            candidates.append(
-                _candidate(
-                    kind="new_zfs_mirror",
-                    disk_ids=[first["id"], second["id"]],
-                    title="Create a protected two-drive pool",
-                    summary=(
-                        "Store one copy on each selected disk so one drive can fail without losing "
-                        "the pool."
-                    ),
-                    group=None,
-                    raw_delta=first_capacity + second_capacity,
-                    usable_delta=min(first_capacity, second_capacity),
-                    protection="Can tolerate one drive failure in this mirror.",
-                    expansion="Capacity grows by adding another matched mirror pair.",
-                    migration=(
-                        "Create a new ZFS mirror vdev after identity revalidation and exact "
-                        "approval."
-                    ),
-                    recommended=False,
-                    mode="advanced",
-                    restrictions=["Both disks must remain dedicated to the ZFS vdev."],
-                    methodology=(
-                        "Mirror usable capacity equals the smallest member capacity before pool "
-                        "overhead."
-                    ),
-                    configuration={"topology": "zfs", "vdev_type": "mirror", "vdev_width": 2},
-                )
+        candidates.append(
+            _candidate(
+                kind="new_zfs_mirror",
+                disk_ids=[first["id"], second["id"]],
+                title="Create a protected two-drive pool",
+                summary=(
+                    "Store one copy on each selected disk so one drive can fail without losing "
+                    "the pool."
+                ),
+                group=None,
+                raw_delta=first_capacity + second_capacity,
+                usable_delta=min(first_capacity, second_capacity),
+                protection="Can tolerate one drive failure in this mirror.",
+                expansion="Capacity grows by adding another matched mirror pair.",
+                migration=(
+                    "Create a new ZFS mirror vdev after identity revalidation and exact approval."
+                ),
+                recommended=False,
+                mode="advanced",
+                restrictions=["Both disks must remain dedicated to the ZFS vdev."],
+                methodology=(
+                    "Mirror usable capacity equals the smallest member capacity before pool "
+                    "overhead."
+                ),
+                configuration={"topology": "zfs", "vdev_type": "mirror", "vdev_width": 2},
             )
+        )
 
-    # Offer complete, executable single-vdev RAIDZ geometries only when all
-    # selected blank disks are closely matched.  Mixed-size sets remain visible
-    # as individual/mergerFS choices instead of hiding stranded ZFS capacity.
+    # Offer complete, executable single-vdev RAIDZ geometries from the best
+    # close-capacity subset. Outliers remain available for other plans instead
+    # of suppressing a valid matched group or being silently stranded in it.
     if len(matched) >= 3:
-        capacities = [int(item["capacity_bytes"] or 0) for item in matched]
-        smallest = min(capacities)
-        largest = max(capacities)
-        if smallest > 0 and largest / smallest <= 1.05:
-            geometry = (
-                ("raidz1", 1, 3),
-                ("raidz2", 2, 4),
-                ("raidz3", 3, 5),
-            )
-            for vdev_type, parity_count, minimum in geometry:
-                if len(matched) < minimum:
-                    continue
-                selected = matched
+        geometry = (
+            ("raidz1", 1, 3),
+            ("raidz2", 2, 4),
+            ("raidz3", 3, 5),
+        )
+        for vdev_type, parity_count, minimum in geometry:
+            selected = _best_matched_disks(matched, minimum=minimum)
+            if selected is not None:
+                capacities = [int(item["capacity_bytes"] or 0) for item in selected]
+                smallest = min(capacities)
                 width = len(selected)
                 raw = sum(int(item["capacity_bytes"] or 0) for item in selected)
                 usable = smallest * (width - parity_count)
@@ -887,6 +920,7 @@ def build_expansion_assessment(
             "snapraid": has_snapraid,
             "zfs": has_zfs,
         },
+        "tool_availability": tool_availability,
         "candidates": sorted(
             candidates,
             key=lambda item: (not bool(item["recommended"]), str(item["title"]), str(item["id"])),

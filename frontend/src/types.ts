@@ -946,6 +946,7 @@ export interface StorageExpansionAssessment {
   available_disks: StorageExpansionDisk[];
   reserved_disks: StorageExpansionDisk[];
   detected_capabilities: { mergerfs: boolean; snapraid: boolean; zfs: boolean };
+  tool_availability?: { mergerfs: boolean; snapraid: boolean; zfs: boolean };
   candidates: Array<{
     id: string;
     kind: string;

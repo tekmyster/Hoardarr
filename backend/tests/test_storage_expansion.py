@@ -29,6 +29,10 @@ def _principal() -> Principal:
     )
 
 
+def _all_tools(_name: str) -> bool:
+    return True
+
+
 def _snapshot(session: Session, disks: list[dict[str, object]]) -> HardwareSnapshot:
     payload = {"schema_version": 1, "source": {"kind": "fixture"}, "disks": disks}
     operation = Operation(
@@ -226,6 +230,7 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
                     902, 4_000, 1_000, 3_000
                 ),
             }[path],
+            tool_probe=_all_tools,
         )
         available = result["available_disks"]
         assert [item["id"] for item in available] == [fresh.id]
@@ -367,7 +372,9 @@ def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:
             )
             observations.append(_observation(f"wwn:{suffix}"))
         snapshot = _snapshot(session, observations)
-        result = build_expansion_assessment(session, snapshot=snapshot)
+        result = build_expansion_assessment(
+            session, snapshot=snapshot, tool_probe=_all_tools
+        )
         mirror = next(item for item in result["candidates"] if item["kind"] == "new_zfs_mirror")
         assert mirror["capacity"]["raw_delta_bytes"] == 19_900_000_000
         assert mirror["capacity"]["estimated_usable_delta_bytes"] == 9_900_000_000
@@ -378,6 +385,117 @@ def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:
             "vdev_type": "mirror",
             "vdev_width": 2,
         }
+
+
+def test_unmatched_larger_disk_does_not_hide_valid_mirror_or_raidz_set() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        observations = []
+        registered: dict[str, str] = {}
+        for suffix, capacity in (
+            ("outlier", 12_000_000_000),
+            ("matched-a", 10_000_000_000),
+            ("matched-b", 10_000_000_000),
+            ("matched-c", 9_900_000_000),
+            ("matched-d", 9_900_000_000),
+        ):
+            disk, _ = register_disk(
+                session,
+                {
+                    "stable_identity": f"wwn:{suffix}",
+                    "kernel_path": f"/dev/{suffix}",
+                    "capacity_bytes": capacity,
+                    "media_type": "hdd",
+                    "health_state": "healthy",
+                },
+            )
+            registered[suffix] = disk.id
+            observations.append(_observation(f"wwn:{suffix}"))
+        result = build_expansion_assessment(
+            session, snapshot=_snapshot(session, observations), tool_probe=_all_tools
+        )
+        candidates = {item["kind"]: item for item in result["candidates"]}
+        matched_ids = {registered[f"matched-{suffix}"] for suffix in "abcd"}
+        assert set(candidates["new_zfs_mirror"]["disk_ids"]).issubset(matched_ids)
+        assert set(candidates["new_zfs_raidz2"]["disk_ids"]) == matched_ids
+        assert registered["outlier"] not in candidates["new_zfs_raidz2"]["disk_ids"]
+        assert candidates["new_zfs_raidz2"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 19_800_000_000
+
+
+def test_unavailable_zfs_tools_suppress_non_executable_candidates() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        observations = []
+        for suffix in ("one", "two"):
+            register_disk(
+                session,
+                {
+                    "stable_identity": f"wwn:{suffix}",
+                    "kernel_path": f"/dev/{suffix}",
+                    "capacity_bytes": 10_000_000_000,
+                    "media_type": "hdd",
+                    "health_state": "healthy",
+                },
+            )
+            observations.append(_observation(f"wwn:{suffix}"))
+        result = build_expansion_assessment(
+            session,
+            snapshot=_snapshot(session, observations),
+            tool_probe=lambda _name: False,
+        )
+        assert result["tool_availability"] == {
+            "mergerfs": False,
+            "snapraid": False,
+            "zfs": False,
+        }
+        assert not any(
+            str(item["kind"]).startswith("new_zfs_") for item in result["candidates"]
+        )
+        assert {item["kind"] for item in result["candidates"]} == {
+            "new_storage_group"
+        }
+
+
+def test_critical_health_blocks_expansion_but_unknown_health_remains_explicit() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        observations = []
+        ids = {}
+        for suffix, health in (("critical", "critical"), ("unknown", "not_reported")):
+            disk, _ = register_disk(
+                session,
+                {
+                    "stable_identity": f"wwn:{suffix}",
+                    "kernel_path": f"/dev/{suffix}",
+                    "capacity_bytes": 1_000_000_000,
+                    "media_type": "hdd",
+                    "health_state": health,
+                },
+            )
+            ids[suffix] = disk.id
+            observations.append(_observation(f"wwn:{suffix}"))
+        result = build_expansion_assessment(
+            session, snapshot=_snapshot(session, observations)
+        )
+        by_id = {item["id"]: item for item in result["available_disks"]}
+        assert by_id[ids["critical"]]["eligible"] is False
+        assert by_id[ids["critical"]]["blockers"] == [
+            "The disk reports a critical health state."
+        ]
+        assert by_id[ids["unknown"]]["eligible"] is True
+        assert by_id[ids["unknown"]]["warnings"] == [
+            "Drive health is not reported."
+        ]
+        candidate_disk_ids = {
+            disk_id for item in result["candidates"] for disk_id in item["disk_ids"]
+        }
+        assert ids["critical"] not in candidate_disk_ids
+        assert ids["unknown"] in candidate_disk_ids
 
 
 def test_existing_zfs_pool_gets_exact_matching_vdev_candidate() -> None:
@@ -469,6 +587,7 @@ def test_existing_zfs_pool_gets_exact_matching_vdev_candidate() -> None:
                 }
             },
             filesystem_probe=lambda _path: FilesystemUsage(900, 10_000, 2_000, 8_000),
+            tool_probe=_all_tools,
         )
         candidate = next(item for item in result["candidates"] if item["kind"] == "add_zfs_vdev")
 
@@ -509,7 +628,7 @@ def test_five_matched_blank_disks_offer_source_backed_raidz_geometry_math() -> N
             )
             observations.append(_observation(identity))
         result = build_expansion_assessment(
-            session, snapshot=_snapshot(session, observations)
+            session, snapshot=_snapshot(session, observations), tool_probe=_all_tools
         )
         candidates = {item["kind"]: item for item in result["candidates"]}
         assert candidates["new_zfs_raidz1"]["capacity"][
