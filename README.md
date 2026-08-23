@@ -172,6 +172,7 @@ the release documentation for the complete trust and installation boundary.
 - [Hardware, controller, and enclosure support](docs/development/hardware-support.md)
 - [Non-destructive controller and path redundancy](docs/development/storage-redundancy.md)
 - [Storage Groups and disk lifecycle](docs/development/storage-groups.md)
+- [Storage expansion planning](docs/development/storage-expansion.md)
 - [Product and architecture reconciliation](docs/development/architecture-reconciliation.md)
 - [Tiered storage and download workloads](docs/development/tiered-storage.md)
 - [ARR folder and API integration](docs/development/arr-integration.md)

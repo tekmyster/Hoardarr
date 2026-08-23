@@ -85,6 +85,7 @@ async function storageLifecycleServer(page: Page) {
       return json({ items: [value] });
     }
     if (pathname.endsWith("/storage/disks")) return json({ items: [] });
+    if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "lifecycle-snapshot", hardware_snapshot_sha256: "f".repeat(64), captured_at: now, storage_groups: [], available_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
     if (pathname.endsWith(`/storage/groups/${groupId}/drain/preview`)) return json({ plan });
     if (pathname.endsWith(`/storage/groups/${groupId}/drain`)) {
       const body = request.postDataJSON() as { confirmation: string };

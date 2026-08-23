@@ -1052,6 +1052,13 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     assert latest_snapshot.json()["id"] == snapshot_id
     assert latest_snapshot.json()["hardware"] == payload
 
+    expansion = client.get("/api/v1/storage/expansion")
+    assert expansion.status_code == 200, expansion.text
+    assert expansion.json()["hardware_snapshot_id"] == snapshot_id
+    assert expansion.json()["methodology"].startswith("Plans use the latest persisted hardware")
+    assert expansion.json()["available_disks"][0]["existing_data"]["state"] == "unknown"
+    assert expansion.json()["candidates"][0]["kind"] == "import_existing"
+
     wizard = client.post(
         "/api/v1/wizards",
         headers=_state_headers(csrf),

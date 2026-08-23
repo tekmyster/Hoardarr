@@ -32,6 +32,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/hardware/snapshots/latest")) return route.fulfill({ status: 404, json: { title: "Not found" } });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
     if (pathname.endsWith("/storage/groups") || pathname.endsWith("/storage/disks")) return json({ items: [] });
+    if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "none", hardware_snapshot_sha256: "0".repeat(64), captured_at: new Date().toISOString(), storage_groups: [], available_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
     if (pathname.endsWith("/storage/logical")) return json({ items: [] });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations")) return json({ items: [] });
@@ -336,6 +337,62 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByLabel("Filesystem", { exact: true })).toBeVisible();
     await expect(dialog.getByLabel("Partition table")).toBeVisible();
     await expect(dialog.getByLabel("TRIM or discard")).toBeVisible();
+  });
+
+  test("opens a snapshot-bound expansion recommendation in the real storage wizard", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.route("**/api/v1/storage/expansion", (route) => route.fulfill({ json: {
+      schema_version: 1,
+      hardware_snapshot_id: "snap-storage",
+      hardware_snapshot_sha256: "c".repeat(64),
+      captured_at: new Date().toISOString(),
+      storage_groups: [{ id: "media", name: "Media", namespace_path: "/data/media", purpose: "media", backend_count: 1, raw_capacity_bytes: 4_000_000_000_000, preferred_backend_id: "backend-1" }],
+      available_disks: [1, 2].map((number) => ({
+        id: `serial:test:ssd-${number}`,
+        stable_identity: `serial:SSD-${number}`,
+        kernel_path: `/dev/sd${number === 1 ? "b" : "c"}`,
+        vendor: "TEST",
+        model: "SSD-1TB",
+        capacity_bytes: 1_000_000_000_000,
+        media_type: "ssd",
+        health: "available",
+        existing_data: { state: "none_detected", detail: "No partition or filesystem signatures were reported by the complete scan." },
+        eligible: true,
+        blockers: [],
+        warnings: [],
+      })),
+      detected_capabilities: { mergerfs: true, snapraid: false, zfs: false },
+      candidates: [{
+        id: "expand-media",
+        kind: "mergerfs_add_member",
+        disk_ids: ["serial:test:ssd-1", "serial:test:ssd-2"],
+        storage_group_id: "media",
+        storage_group_name: "Media",
+        title: "Add capacity to Media",
+        summary: "Add two independently readable members without changing the media namespace.",
+        recommended: true,
+        setup_mode: "expand",
+        capacity: { raw_delta_bytes: 2_000_000_000_000, estimated_usable_delta_bytes: 2_000_000_000_000, methodology: "Sum of the two blank member capacities." },
+        protection_impact: "No additional parity is created by this step.",
+        future_expansion: "Additional members can be added later.",
+        migration_work: "No existing media files need to move.",
+        restrictions: ["Review SnapRAID parity capacity separately."],
+      }],
+      methodology: "Read-only assessment bound to the latest hardware snapshot.",
+    } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    const recommendation = page.getByRole("article", { name: "Add capacity to Media" });
+    await expect(recommendation.getByText("Recommended")).toBeVisible();
+    await recommendation.getByRole("button", { name: "Customize this plan" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.getByRole("heading", { name: "Choose a storage layout" })).toBeVisible();
+    await expect(dialog.getByText("2 selected drives")).toBeVisible();
+    await expect(dialog.locator(".selected-drives article")).toHaveCount(2);
+    await expect(dialog.getByText("/dev/sdb", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("/dev/sdc", { exact: true })).toBeVisible();
   });
 
   test("guides a Plex user from four drives to protected media and download folders", async ({ page }) => {

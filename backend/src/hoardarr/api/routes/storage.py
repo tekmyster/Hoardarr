@@ -36,6 +36,7 @@ from hoardarr.auth.service import Principal
 from hoardarr.db.models import HardwareSnapshot, Operation, StorageDrainJob
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
+from hoardarr.storage.expansion import build_expansion_assessment
 from hoardarr.storage.groups import (
     StorageGroupError,
     assign_backend,
@@ -127,6 +128,18 @@ def storage_groups(
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
     return {"items": group_documents(session)}
+
+
+@router.get("/expansion")
+def storage_expansion_assessment(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Return current, read-only expansion choices bound to the latest hardware snapshot."""
+
+    snapshot = _latest_hardware(session)
+    inventory = discover_storage_inventory(hardware_snapshot=snapshot.payload_json)
+    return build_expansion_assessment(session, snapshot=snapshot, storage_inventory=inventory)
 
 
 @router.post("/groups", status_code=201)

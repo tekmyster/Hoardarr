@@ -316,6 +316,16 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .event-list { margin: 10px 0 0; padding-left: 20px; }
 .event-list time { color: var(--muted); font-variant-numeric: tabular-nums; }
 @media (max-width: 720px) { .storage-group > header, .storage-group-assign { align-items: stretch; flex-direction: column; } }
+.expansion-capabilities { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.expansion-capabilities span { border: 1px solid var(--border); border-radius: 999px; padding: 5px 9px; }
+.expansion-disk-list, .expansion-candidate-list { display: grid; gap: 12px; margin: 16px 0; }
+.expansion-disk-list article { align-items: center; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 4px; display: grid; gap: 11px; grid-template-columns: minmax(12rem, 2fr) repeat(3, minmax(8rem, 1fr)); padding: 12px; }
+.expansion-disk-list article div { display: grid; gap: 3px; }
+.expansion-candidate-list article { border: 1px solid var(--border); border-radius: 4px; padding: 16px; }
+.expansion-candidate-list article.recommended { border-color: var(--accent); box-shadow: inset 4px 0 var(--accent); }
+.expansion-candidate-list header { align-items: flex-start; display: flex; justify-content: space-between; }
+.expansion-candidate-list h4 { margin: 6px 0; }
+@media (max-width: 900px) { .expansion-disk-list article { grid-template-columns: 1fr; } }
 .button-primary { color: #fff; background: var(--accent-dark); border-color: #1565c0; }
 .button-primary:hover:not(:disabled) { background: #1565c0; }
 .button-secondary { color: #34464f; background: #fff; border-color: #bcc7cc; }

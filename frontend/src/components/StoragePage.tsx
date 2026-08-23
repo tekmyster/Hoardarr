@@ -8,6 +8,7 @@ import { StorageTopologyPanels } from "./StorageTopologyPanels";
 import { StoragePerformance } from "./StoragePerformance";
 import { StorageRedundancyPanel } from "./StorageRedundancyPanel";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
+import { StorageExpansionPanel } from "./StorageExpansionPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -85,7 +86,7 @@ export function StoragePage({
   error: string | null;
   onScan: () => void;
   onAction: (action: StorageAction) => void;
-  onDriveAction: (action: DriveAction, driveId: string) => void;
+  onDriveAction: (action: DriveAction, driveId: string | string[]) => void;
   savedDrafts?: SavedStorageDraft[];
   onResumeDraft?: (draftId: string) => void;
   onDiscardDraft?: (draftId: string) => void;
@@ -205,6 +206,8 @@ export function StoragePage({
     <StoragePerformance />
 
     <StorageGroupsPanel />
+
+    <StorageExpansionPanel onPlan={onDriveAction} />
 
     <StorageTopologyPanels topology={storageInventory?.topology} />
 

@@ -1405,8 +1405,9 @@ export default function App() {
     setStorageAction(action);
   }
 
-  async function openDriveAction(action: DriveAction, driveId: string): Promise<void> {
-    if (activeReservedDriveIds.has(driveId)) {
+  async function openDriveAction(action: DriveAction, driveId: string | string[]): Promise<void> {
+    const driveIds = Array.isArray(driveId) ? driveId : [driveId];
+    if (driveIds.some((id) => activeReservedDriveIds.has(id))) {
       setError("This drive is already reserved by a queued or running storage operation. Open Activity to review it.");
       return;
     }
@@ -1419,7 +1420,7 @@ export default function App() {
       setPlan(null);
       setConsentPhrase("");
       setConsentRecorded(false);
-      setSelectedDriveIds([driveId]);
+      setSelectedDriveIds(driveIds);
       setUsbOverrideAck("");
 
       if (action === "advanced") {

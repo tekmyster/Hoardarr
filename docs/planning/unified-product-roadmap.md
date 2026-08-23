@@ -230,14 +230,14 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| EXPAND-01 | P1 | Expansion discovery trigger | Recognize newly available eligible disks without treating them as assigned storage. | QUEUED |
-| EXPAND-02 | P1 | Current-state analysis | Analyze groups, backends, health, capacity, mergerFS balance, parity, ZFS geometry, forecasts, and tiers. | QUEUED |
-| EXPAND-03 | P1 | mergerFS and SnapRAID candidates | Generate add-member, data-disk, and parity-expansion candidates with restrictions. | QUEUED |
-| EXPAND-04 | P1 | ZFS, new-pool, cache, and reserve candidates | Generate supported vdev/pool/tier/reserve choices without inventing executable capability. | QUEUED |
-| EXPAND-05 | P1 | Capacity and protection calculations | Show raw/usable change, protection impact, growth effect, and migration work with formulas. | QUEUED |
-| EXPAND-06 | P1 | Guided and Advanced expansion wizard | Recommend in plain language while exposing exact geometry and policies on demand. | QUEUED |
+| EXPAND-01 | P1 | Expansion discovery trigger | Recognize newly available eligible disks without treating them as assigned storage. | SOFTWARE VERIFIED — snapshot-bound read-only assessment excludes assigned/retired/unavailable disks |
+| EXPAND-02 | P1 | Current-state analysis | Analyze groups, backends, health, capacity, mergerFS balance, parity, ZFS geometry, forecasts, and tiers. | IN PROGRESS — groups/backends/health/current pool capabilities implemented; balance and forecast correlation pending |
+| EXPAND-03 | P1 | mergerFS and SnapRAID candidates | Generate add-member, data-disk, and parity-expansion candidates with restrictions. | IN PROGRESS — detected mergerFS member and SnapRAID resync/parity-size consequences implemented; explicit parity-role selection pending |
+| EXPAND-04 | P1 | ZFS, new-pool, cache, and reserve candidates | Generate supported vdev/pool/tier/reserve choices without inventing executable capability. | IN PROGRESS — matched mirror/new pool and download-tier candidates implemented; wider vdev geometry and reserve persistence pending |
+| EXPAND-05 | P1 | Capacity and protection calculations | Show raw/usable change, protection impact, growth effect, and migration work with formulas. | SOFTWARE VERIFIED — candidate-specific raw/usable methodology, protection, restrictions, and migration work rendered in UI |
+| EXPAND-06 | P1 | Guided and Advanced expansion wizard | Recommend in plain language while exposing exact geometry and policies on demand. | SOFTWARE VERIFIED — browser E2E proves a snapshot-bound recommendation opens the real wizard with the complete candidate disk set; remaining geometries track under EXPAND-04 |
 | EXPAND-07 | P1 | Immutable expansion apply | Bind approval to hardware and plan, revalidate identity, and execute through durable operations. | QUEUED |
-| EXPAND-08 | P1 | Expansion tests | Cover mixed sizes, health blockers, parity needs, ZFS restrictions, stale discovery, and unsupported tools. | QUEUED |
+| EXPAND-08 | P1 | Expansion tests | Cover mixed sizes, health blockers, parity needs, ZFS restrictions, stale discovery, and unsupported tools. | IN PROGRESS — existing-data, mergerFS/SnapRAID, download-tier, matched-mirror, API, component, and real-browser handoff tests added; fault matrix pending |
 
 ### IMPORT — Foreign storage, Unraid, and archive intake
 

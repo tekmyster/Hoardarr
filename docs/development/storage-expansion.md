@@ -1,0 +1,35 @@
+# Storage expansion planning
+
+The Storage page includes a read-only expansion assessment bound to the latest persisted hardware
+snapshot and current Storage Groups. It does not assign, reserve, format, mount, or otherwise change
+a disk.
+
+`GET /api/v1/storage/expansion` returns:
+
+- currently unassigned registered disks and their stable identities;
+- health and presence blockers;
+- existing-data state from partition, signature, and signature-scan evidence;
+- detected mergerFS, SnapRAID, and ZFS capabilities;
+- candidate plans with raw capacity, estimated usable capacity, calculation methodology,
+  protection impact, future expansion implications, restrictions, and migration work.
+
+Existing partitions, filesystem signatures, or incomplete signature scans cause an import-first
+recommendation. Hoardarr does not produce a formatting recommendation by pretending an uncertain
+disk is blank. Capacity is `Not calculated` when the source filesystem has not been inspected.
+
+For a completely scanned blank disk, the planner can currently describe:
+
+- an independent Storage Group;
+- an additional mergerFS member when a mergerFS pool is actually detected;
+- the SnapRAID resynchronization/parity-size consequence when SnapRAID is actually detected;
+- an SSD/NVMe download tier for an existing media Storage Group; and
+- a matched two-disk ZFS mirror/new mirror vdev candidate with smallest-member capacity math.
+
+The UI's action opens the existing Guided or Advanced storage wizard with the candidate disks
+selected. The wizard remains the canonical persistent plan, identity revalidation, explicit
+approval, durable operation, and execution boundary. The assessment itself is deliberately not a
+second apply mechanism.
+
+Current limitations are recorded in the unified roadmap: richer current-state capacity/forecast
+analysis, additional ZFS vdev geometries, explicit SnapRAID parity expansion selection, reserve-disk
+persistence, and end-to-end immutable apply evidence remain in the EXPAND dependency family.

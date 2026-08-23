@@ -557,6 +557,58 @@ export interface StorageDrainPlan {
   plan_sha256: string;
 }
 
+export interface StorageExpansionAssessment {
+  schema_version: 1;
+  hardware_snapshot_id: string;
+  hardware_snapshot_sha256: string;
+  captured_at: string;
+  storage_groups: Array<{
+    id: string;
+    name: string;
+    namespace_path: string;
+    purpose: string;
+    backend_count: number;
+    raw_capacity_bytes: number | null;
+    preferred_backend_id: string | null;
+  }>;
+  available_disks: Array<{
+    id: string;
+    stable_identity: string;
+    kernel_path: string | null;
+    vendor: string | null;
+    model: string | null;
+    capacity_bytes: number | null;
+    media_type: string;
+    health: string;
+    existing_data: { state: "detected" | "none_detected" | "unknown"; detail: string };
+    eligible: boolean;
+    blockers: string[];
+    warnings: string[];
+  }>;
+  detected_capabilities: { mergerfs: boolean; snapraid: boolean; zfs: boolean };
+  candidates: Array<{
+    id: string;
+    kind: string;
+    disk_ids: string[];
+    storage_group_id: string | null;
+    storage_group_name: string | null;
+    title: string;
+    summary: string;
+    recommended: boolean;
+    setup_mode: "configure" | "import" | "expand" | "cache" | "advanced";
+    capacity: {
+      raw_delta_bytes: number;
+      estimated_usable_delta_bytes: number | null;
+      methodology: string;
+    };
+    protection_impact: string;
+    future_expansion: string;
+    migration_work: string;
+    restrictions: string[];
+  }>;
+  methodology: string;
+}
+
 export interface StorageRedundancyPlan {
   schema_version: 1;
   operation: "redundancy.add" | "redundancy.remove" | "redundancy.replace" | "redundancy.configure";

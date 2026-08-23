@@ -37,6 +37,7 @@ import type {
   StorageOperationProgress,
   StorageInventory,
   StorageDrainPlan,
+  StorageExpansionAssessment,
   StorageGroupDocument,
   StorageRedundancyPlan,
   StorageRedundancyEventDocument,
@@ -368,6 +369,10 @@ class HoardarrApi {
     if (demoMode) return [];
     const result = await this.request<{ items: PhysicalDiskDocument[] }>("/storage/disks", { signal });
     return result.items;
+  }
+
+  async storageExpansion(signal?: AbortSignal): Promise<StorageExpansionAssessment> {
+    return this.request<StorageExpansionAssessment>("/storage/expansion", { signal });
   }
 
   async createStorageGroup(input: {
