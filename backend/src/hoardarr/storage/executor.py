@@ -2046,8 +2046,15 @@ def _execute_actions(
                 atomic_json(_journal_path(paths, operation_id), journal)
                 _revalidate(document, inventory_provider, paths)
                 snapraid_sync_started = True
+                sync_arguments = [
+                    _tool("snapraid"),
+                    "-c",
+                    os.fspath(snapraid_config_path),
+                    *(["--force-full"] if snapraid_role == "parity" else []),
+                    "sync",
+                ]
                 runner(
-                    [_tool("snapraid"), "-c", os.fspath(snapraid_config_path), "sync"],
+                    sync_arguments,
                     86_400,
                 )
         except LayoutError as exc:

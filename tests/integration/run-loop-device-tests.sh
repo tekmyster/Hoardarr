@@ -150,7 +150,7 @@ config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
   --mountpoint "$managed/parity-2" \
   --expected-sha256 "$config_sha"
 snapraid -c "$work/snapraid.conf" status
-snapraid -c "$work/snapraid.conf" sync
+snapraid -c "$work/snapraid.conf" --force-full sync
 snapraid -c "$work/snapraid.conf" check
 grep -Fq "2-parity $managed/parity-2/snapraid.parity" "$work/snapraid.conf"
 mkdir -p "$repo/dist/validation"

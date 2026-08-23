@@ -403,6 +403,12 @@ def test_existing_mergerfs_snapraid_expansion_applies_explicit_role(
         assert str(new_member) in paths.fstab.read_text(encoding="utf-8")
     else:
         assert "2-parity /mnt/hoardarr/new-member/snapraid.parity" in updated
+        parity_sync = next(
+            command
+            for command in commands
+            if command[0] == "snapraid" and command[-1] == "sync"
+        )
+        assert "--force-full" in parity_sync
         assert not any(command[0] == "setfattr" for command in commands)
         mergerfs_line = next(
             line

@@ -63,7 +63,9 @@ returned through the inventory API. An expansion plan binds the exact `snapraid:
 configuration SHA-256, and the selected `data` or `parity` role. The worker refuses a changed
 configuration. A data member is added to both mergerFS and SnapRAID; a parity member is mounted and
 added only to SnapRAID, so it is never counted as usable media capacity. The updated configuration
-is validated and synchronized with structured `snapraid -c ... status/sync` arguments. Validation,
+is validated and synchronized with structured `snapraid -c ... status/sync` arguments; adding a
+new parity level uses SnapRAID's required `--force-full sync` rather than treating an empty parity
+file as an ordinary incremental sync. Validation,
 runtime activation, or persistent-mount failures before synchronization restore the prior
 configuration and runtime membership. Once synchronization starts, the expanded configuration and
 mount are deliberately retained on failure so files written to a newly active data member cannot

@@ -49,7 +49,7 @@ class ApplianceAssetsTests(unittest.TestCase):
         )
         self.assertIn("/.hoardarr-disposable-runner", loop_test)
         self.assertIn('image="$work/$name.img"', loop_test)
-        self.assertIn("snap-parity/snapraid.content", loop_test)
+        self.assertIn("parity-1/snapraid.content", loop_test)
         self.assertIn("run-mergerfs-telemetry-workload.sh", storage)
         workload = (ROOT / "tests/integration/run-mergerfs-telemetry-workload.sh").read_text(
             encoding="utf-8"
