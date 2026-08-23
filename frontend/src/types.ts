@@ -650,6 +650,21 @@ export interface StorageBackendActivationPlan {
   plan_sha256: string;
 }
 
+export interface TierTransferPlan {
+  workload: "torrent" | "usenet";
+  source: string;
+  destination: string;
+  source_identity: string;
+  destination_identity: string;
+  same_filesystem: boolean;
+  method: "copy" | "move" | "hardlink";
+  retain_until: "seeding_complete" | "manual" | "never" | "import_complete";
+  cleanup: boolean;
+  required_bytes: number;
+  completed_steps: string[];
+  sha256: string;
+}
+
 export interface StorageDrainPlan {
   schema_version: 1;
   kind: "storage.drain";

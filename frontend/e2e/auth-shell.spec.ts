@@ -653,6 +653,51 @@ test.describe("production sign-in shell", () => {
     await expect(page.getByText(/1 downloading · 1 importing · 3 pending/)).toBeVisible();
   });
 
+  test("reviews a real download-tier plan and retains a torrent source for seeding", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    await page.route("**/api/v1/storage/groups", (route) => route.fulfill({ json: { items: [{
+      id: "group-media",
+      name: "Media",
+      namespace_path: "/data/media",
+      purpose: "media",
+      state: "active",
+      policy: {},
+      backends: [
+        { id: "landing", stable_identity: "wwn:fast", physical_disk_id: "disk-fast", storage_entity_id: null, namespace_path: "/data/downloads", role: "landing", lifecycle_state: "preferred_write" },
+        { id: "media", stable_identity: "wwn:media", physical_disk_id: "disk-media", storage_entity_id: null, namespace_path: "/data/media", role: "data", lifecycle_state: "active" },
+      ],
+      events: [],
+    }] } }));
+    const plan = {
+      workload: "torrent",
+      source: "/data/downloads/completed/example.mkv",
+      destination: "/data/media/Movies/example.mkv",
+      source_identity: "dev:11",
+      destination_identity: "dev:22",
+      same_filesystem: false,
+      method: "copy",
+      retain_until: "seeding_complete",
+      cleanup: true,
+      required_bytes: 1_073_741_824,
+      completed_steps: ["download_complete"],
+      sha256: "a".repeat(64),
+    };
+    await page.route("**/api/v1/storage/transfers/preview", (route) => route.fulfill({ json: { plan, plan_sha256: "b".repeat(64) } }));
+    await page.route("**/api/v1/storage/transfers", (route) => route.fulfill({ json: { operation: { id: "transfer-1", kind: "storage.transfer", status: "succeeded", result: { state: "retained" } } } }));
+    await page.route("**/api/v1/storage/transfers/transfer-1/cleanup", (route) => route.fulfill({ json: { operation: { id: "cleanup-1", kind: "storage.transfer.cleanup", status: "queued" } } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await expect(page.getByRole("heading", { name: "Download & landing tier" })).toBeVisible();
+    await page.getByRole("button", { name: "Review transfer" }).click();
+    await expect(page.getByText(/different filesystems; a hardlink is not possible/)).toBeVisible();
+    await expect(page.getByText("1.07 GB")).toBeVisible();
+    await page.getByRole("button", { name: "Start durable transfer" }).click();
+    await expect(page.getByText("Imported and retained for seeding")).toBeVisible();
+    await page.getByRole("button", { name: "Seeding complete — clean up source" }).click();
+    await expect(page.getByText("Post-seeding cleanup")).toBeVisible();
+  });
+
   test("productizes controller redundancy from single path through failover and recovery", async ({ page }, testInfo) => {
     test.setTimeout(90_000);
     const controls = await controllerRedundancyServer(page);

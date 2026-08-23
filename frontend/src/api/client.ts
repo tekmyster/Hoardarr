@@ -47,6 +47,7 @@ import type {
   StorageTelemetryDocument,
   TelemetryForecastDocument,
   TelemetrySettingsDocument,
+  TierTransferPlan,
   UpdateCheckDocument,
   UpdateStatusDocument,
   WizardDocument,
@@ -369,6 +370,36 @@ class HoardarrApi {
     if (demoMode) return [];
     const result = await this.request<{ items: LogicalStorageDocument[] }>("/storage/logical");
     return result.items;
+  }
+
+  async previewTierTransfer(input: {
+    workload: "torrent" | "usenet";
+    source: string;
+    destination: string;
+    method: "auto" | "copy" | "move" | "hardlink";
+    retain_until?: "seeding_complete" | "manual" | "never" | "import_complete";
+    cleanup: boolean;
+    completed_steps: string[];
+  }): Promise<{ plan: TierTransferPlan; plan_sha256: string }> {
+    return this.request("/storage/transfers/preview", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async applyTierTransfer(plan: TierTransferPlan, planSha256: string): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>("/storage/transfers", {
+      method: "POST",
+      headers: { "Idempotency-Key": createIdempotencyKey() },
+      body: JSON.stringify({ plan, plan_sha256: planSha256, confirmation: "APPLY" }),
+    });
+    return result.operation;
+  }
+
+  async cleanupTierTransfer(operationId: string): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(`/storage/transfers/${encodeURIComponent(operationId)}/cleanup`, {
+      method: "POST",
+      headers: { "Idempotency-Key": createIdempotencyKey() },
+      body: JSON.stringify({ confirmation: "APPLY" }),
+    });
+    return result.operation;
   }
 
   async storageGroups(signal?: AbortSignal): Promise<StorageGroupDocument[]> {

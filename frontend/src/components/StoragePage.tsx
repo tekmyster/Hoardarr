@@ -10,6 +10,7 @@ import { StorageRedundancyPanel } from "./StorageRedundancyPanel";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
 import { StorageExpansionPanel } from "./StorageExpansionPanel";
 import { SnapraidReplacementPanel } from "./SnapraidReplacementPanel";
+import { DownloadTierPanel } from "./DownloadTierPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -207,6 +208,7 @@ export function StoragePage({
     <StoragePerformance />
 
     <div id="storage-groups-panel"><StorageGroupsPanel /></div>
+    <DownloadTierPanel />
 
     <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />
 

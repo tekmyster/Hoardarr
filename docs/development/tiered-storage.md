@@ -67,6 +67,21 @@ hardlink is impossible.
 - **Manual placement** exposes tier selection and lifecycle rules without
   automatic movement.
 
+The Storage page now exposes the implemented file-aware mover as **Download &
+landing tier**. It only becomes actionable when a real Storage Group contains
+a `cache` or `landing` backend and a real `data` backend. The panel does not
+infer tier membership from SSD/HDD media type. It asks for the completed file
+and library destination, shows the backend's immutable transfer decision, and
+then starts a durable Activity operation. Torrent imports retain their verified
+source until seeding is reported complete or the operator explicitly cleans it
+up. Usenet imports require download, repair, unpack, and verification stages
+before the mover will accept them.
+
+The review states whether the paths share a filesystem and whether the actual
+method is a hardlink, copy, or move. A cross-filesystem transfer is never called
+a hardlink. Progress shown by this surface is the durable operation state; it
+does not synthesize a percentage when the worker has not reported one.
+
 ZFS L2ARC is a read cache, a SLOG is a synchronous intent-log device, and a ZFS
 special vdev stores selected allocation classes. None of them should be
 presented as a general SSD download write cache. A special vdev is pool-critical
