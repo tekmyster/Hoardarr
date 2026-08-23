@@ -92,6 +92,37 @@ describe("StorageGroupsPanel", () => {
     ));
   });
 
+  it("releases only a verified retired assignment after explicit confirmation", async () => {
+    const retiredGroup: StorageGroupDocument = {
+      ...group,
+      backends: [{ ...group.backends[0], lifecycle_state: "retired" }],
+    };
+    vi.spyOn(api, "storageGroups")
+      .mockResolvedValueOnce([retiredGroup])
+      .mockResolvedValueOnce([{ ...retiredGroup, backends: [] }]);
+    vi.spyOn(api, "registeredDisks")
+      .mockResolvedValueOnce([{ ...disk, lifecycle_state: "retired" }])
+      .mockResolvedValueOnce([{ ...disk, lifecycle_state: "reuse_ready" }]);
+    const release = vi.spyOn(api, "releaseRetiredStorageBackend").mockResolvedValue({
+      item: { ...retiredGroup, backends: [] },
+      disk: { ...disk, lifecycle_state: "reuse_ready" },
+    });
+    const user = userEvent.setup();
+    render(<StorageGroupsPanel />);
+
+    await user.click(await screen.findByRole("button", { name: "Release retired disk" }));
+    expect(screen.getByText(/does not erase, format, mount, or wipe/)).toBeInTheDocument();
+    const confirm = screen.getByLabelText("Release retired disk confirmation");
+    expect(screen.getByRole("button", { name: "Release for reuse" })).toBeDisabled();
+    await user.type(confirm, "RELEASE");
+    await user.click(screen.getByRole("button", { name: "Release for reuse" }));
+    await waitFor(() => expect(release).toHaveBeenCalledWith(
+      retiredGroup.id,
+      retiredGroup.backends[0].id,
+      "Verified drain complete; operator released the retired disk for reuse.",
+    ));
+  });
+
   it("shows a real immutable drain preflight without implying that files moved", async () => {
     const drainGroup: StorageGroupDocument = {
       ...group,

@@ -43,6 +43,8 @@ export function StorageGroupsPanel() {
   const [drainConfirmation, setDrainConfirmation] = useState("");
   const [drainOperation, setDrainOperation] = useState<OperationDocument | null>(null);
   const [drainProgress, setDrainProgress] = useState<StorageOperationProgress | null>(null);
+  const [releaseBackendId, setReleaseBackendId] = useState<string | null>(null);
+  const [releaseConfirmation, setReleaseConfirmation] = useState("");
 
   const load = async (signal?: AbortSignal) => {
     const [nextGroups, nextDisks] = await Promise.all([
@@ -220,6 +222,26 @@ export function StorageGroupsPanel() {
     }
   };
 
+  const releaseForReuse = async (groupId: string, backendId: string) => {
+    if (releaseConfirmation !== "RELEASE") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.releaseRetiredStorageBackend(
+        groupId,
+        backendId,
+        "Verified drain complete; operator released the retired disk for reuse.",
+      );
+      setReleaseBackendId(null);
+      setReleaseConfirmation("");
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The retired disk could not be released.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return <Card
     title="Storage Groups"
     description="Keep one stable media path while disks are added, preferred for new files, drained, or retired."
@@ -249,7 +271,7 @@ export function StorageGroupsPanel() {
         <p>{group.purpose === "media" ? "Media libraries" : group.purpose} · New-write placement follows the preferred healthy backend.</p>
         {group.backends.length === 0 ? <p className="muted">No backends assigned.</p> : <div className="table-scroll"><table className="data-table"><thead><tr><th>Backend identity</th><th>Role</th><th>Lifecycle</th><th>Placement and lifecycle</th></tr></thead><tbody>{group.backends.map((backend) => {
           const drainDestinations = group.backends.filter((item) => item.id !== backend.id && ["active", "preferred_write"].includes(item.lifecycle_state) && ["data", "archive"].includes(item.role));
-          return <tr key={backend.id}><td><code>{backend.stable_identity}</code><small>{backend.namespace_path || "Mount path not configured"}</small></td><td>{backend.role}</td><td><StatusBadge status={backend.lifecycle_state.replace("_", " ")} /></td><td>{backend.lifecycle_state === "assigned" ? <button className="button button-secondary" type="button" disabled={busy} onClick={() => void transition(group.id, backend.id, "active")}>Activate</button> : backend.lifecycle_state === "active" ? <div className="button-row"><button className="button button-secondary" type="button" disabled={busy} onClick={() => void transition(group.id, backend.id, "preferred_write")}>Prefer new files here</button><button className="button button-secondary" type="button" disabled={busy || drainDestinations.length === 0 || !backend.namespace_path} onClick={() => void previewDrain(group, backend.id)}>Preview drain</button></div> : backend.lifecycle_state === "preferred_write" ? <div><span>Preferred for new files</span><button className="button button-secondary" type="button" disabled={busy || drainDestinations.length === 0 || !backend.namespace_path} onClick={() => void previewDrain(group, backend.id)}>Preview drain</button></div> : "Managed by lifecycle operation"}</td></tr>;
+          return <tr key={backend.id}><td><code>{backend.stable_identity}</code><small>{backend.namespace_path || "Mount path not configured"}</small></td><td>{backend.role}</td><td><StatusBadge status={backend.lifecycle_state.replace("_", " ")} /></td><td>{backend.lifecycle_state === "assigned" ? <button className="button button-secondary" type="button" disabled={busy} onClick={() => void transition(group.id, backend.id, "active")}>Activate</button> : backend.lifecycle_state === "active" ? <div className="button-row"><button className="button button-secondary" type="button" disabled={busy} onClick={() => void transition(group.id, backend.id, "preferred_write")}>Prefer new files here</button><button className="button button-secondary" type="button" disabled={busy || drainDestinations.length === 0 || !backend.namespace_path} onClick={() => void previewDrain(group, backend.id)}>Preview drain</button></div> : backend.lifecycle_state === "preferred_write" ? <div><span>Preferred for new files</span><button className="button button-secondary" type="button" disabled={busy || drainDestinations.length === 0 || !backend.namespace_path} onClick={() => void previewDrain(group, backend.id)}>Preview drain</button></div> : backend.lifecycle_state === "retired" ? <div>{releaseBackendId === backend.id ? <div className="form-grid compact-form"><p>The verified source is retired. Releasing removes only its Hoardarr assignment; it does not erase, format, mount, or wipe the disk.</p><label>Type RELEASE to make this disk available<input aria-label="Release retired disk confirmation" value={releaseConfirmation} onChange={(event) => setReleaseConfirmation(event.target.value)} autoComplete="off" /></label><div className="button-row"><button className="button button-primary" type="button" disabled={busy || releaseConfirmation !== "RELEASE"} onClick={() => void releaseForReuse(group.id, backend.id)}>Release for reuse</button><button className="button button-secondary" type="button" disabled={busy} onClick={() => { setReleaseBackendId(null); setReleaseConfirmation(""); }}>Cancel</button></div></div> : <button className="button button-secondary" type="button" disabled={busy} onClick={() => { setReleaseBackendId(backend.id); setReleaseConfirmation(""); }}>Release retired disk</button>}</div> : "Managed by lifecycle operation"}</td></tr>;
         })}</tbody></table></div>}
         <div className="storage-group-assign"><label>Add a registered disk<select aria-label={`Disk to add to ${group.name}`} value={selectedDisks[group.id] ?? ""} onChange={(event) => {
           const diskId = event.target.value;

@@ -12,6 +12,7 @@ async function storageLifecycleServer(page: Page) {
   let submittedConfirmation: string | null = null;
   let groupReads = 0;
   let lastGroupLifecycle = "preferred_write";
+  let released = false;
   const group = () => ({
     id: groupId,
     name: "Media",
@@ -38,8 +39,10 @@ async function storageLifecycleServer(page: Page) {
         role: "data",
         lifecycle_state: "preferred_write",
       },
-    ],
-    events: operationStatus === "succeeded"
+    ].filter((backend) => !(released && backend.id === sourceId)),
+    events: released
+      ? [{ id: "event-released", event_type: "backend_released_for_reuse", backend_id: sourceId, previous_state: "retired", resulting_state: "reuse_ready", reason: "operator release", occurred_at: now }]
+      : operationStatus === "succeeded"
       ? [{ id: "event-retired", event_type: "backend_retired", backend_id: sourceId, previous_state: "read_only", resulting_state: "retired", reason: "verified drain completed", occurred_at: now }]
       : [],
   });
@@ -89,10 +92,10 @@ async function storageLifecycleServer(page: Page) {
     if (pathname.endsWith("/storage/groups") && request.method() === "GET") {
       const value = group();
       groupReads += 1;
-      lastGroupLifecycle = value.backends[0].lifecycle_state;
+      lastGroupLifecycle = value.backends.find((backend) => backend.id === sourceId)?.lifecycle_state ?? "released";
       return json({ items: [value] });
     }
-    if (pathname.endsWith("/storage/disks")) return json({ items: [] });
+    if (pathname.endsWith("/storage/disks")) return json({ items: released ? [{ id: "66666666-6666-4666-8666-666666666666", stable_identity: "wwn:source", kernel_path: "/dev/loop0", serial: "DISPOSABLE-SOURCE", wwn: "source", vendor: "Test", model: "Virtual disk", capacity_bytes: 1_000_000_000, media_type: "ssd", health_state: "healthy", lifecycle_state: "reuse_ready", last_seen_at: now }] : [] });
     if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "lifecycle-snapshot", hardware_snapshot_sha256: "f".repeat(64), captured_at: now, storage_groups: [], available_disks: [], reserved_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
     if (pathname.endsWith(`/storage/groups/${groupId}/drain/preview`)) return json({ plan });
     if (pathname.endsWith(`/storage/groups/${groupId}/drain`)) {
@@ -100,6 +103,12 @@ async function storageLifecycleServer(page: Page) {
       submittedConfirmation = body.confirmation;
       operationStatus = "queued";
       return json({ operation: operation(), replayed: false }, 202);
+    }
+    if (pathname.endsWith(`/storage/groups/${groupId}/backends/${sourceId}/retirement`)) {
+      const body = request.postDataJSON() as { confirmation: string };
+      expect(body.confirmation).toBe("RELEASE");
+      released = true;
+      return json({ item: group(), disk: { id: "66666666-6666-4666-8666-666666666666", lifecycle_state: "reuse_ready" } });
     }
     if (pathname.endsWith(`/operations/${operationId}/pause`)) {
       operationStatus = "paused";
@@ -149,6 +158,7 @@ async function storageLifecycleServer(page: Page) {
     confirmation: () => submittedConfirmation,
     groupReads: () => groupReads,
     lastGroupLifecycle: () => lastGroupLifecycle,
+    released: () => released,
   };
 }
 
@@ -176,5 +186,12 @@ test("drains and retires a Storage Group source through the real browser workflo
   await expect.poll(observed.lastGroupLifecycle).toBe("retired");
   await expect(page.getByTitle("Technical state: retired")).toBeVisible();
   await expect(page.getByLabel("Media", { exact: true }).getByText("/srv/hoardarr/media")).toBeVisible();
+  await page.getByRole("button", { name: "Release retired disk" }).click();
+  await expect(page.getByText(/does not erase, format, mount, or wipe/)).toBeVisible();
+  await page.getByLabel("Release retired disk confirmation").fill("RELEASE");
+  await page.getByRole("button", { name: "Release for reuse" }).click();
+  await expect.poll(observed.released).toBe(true);
+  await page.getByText("Recent lifecycle activity").click();
+  await expect(page.getByText("backend released for reuse")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("storage-lifecycle-completed.png"), fullPage: true });
 });

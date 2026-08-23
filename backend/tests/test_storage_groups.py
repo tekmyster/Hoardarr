@@ -7,6 +7,7 @@ from hoardarr.auth.service import Principal
 from hoardarr.db.models import Base, PhysicalDisk, StorageBackend, StorageLifecycleEvent
 from hoardarr.storage.groups import (
     StorageGroupError,
+    advance_drain_lifecycle,
     assign_backend,
     begin_drain_placement,
     create_group,
@@ -14,6 +15,7 @@ from hoardarr.storage.groups import (
     group_documents,
     normalize_namespace,
     register_disk,
+    release_retired_backend,
     set_disk_reservation,
     transition_backend,
 )
@@ -373,3 +375,137 @@ def test_drain_keeps_an_existing_destination_preferred() -> None:
         )
         assert backends[0].lifecycle_state == "draining"
         assert backends[1].lifecycle_state == "preferred_write"
+
+
+def test_verified_retirement_can_be_released_and_reassigned_without_touching_disk() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    with Session(engine) as session:
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        disk, _ = register_disk(session, {"stable_identity": "wwn:retired-source"})
+        destination_disk, _ = register_disk(
+            session, {"stable_identity": "wwn:drain-destination"}
+        )
+        source = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=disk.id,
+            storage_entity_id=None,
+            namespace_path="/srv/hoardarr/backends/source",
+            role="data",
+            principal=actor,
+        )
+        destination = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=destination_disk.id,
+            storage_entity_id=None,
+            namespace_path="/srv/hoardarr/backends/destination",
+            role="data",
+            principal=actor,
+        )
+        for backend in (source, destination):
+            transition_backend(
+                session,
+                group_id=group.id,
+                backend_id=backend.id,
+                target_state="active",
+                principal=actor,
+                reason="mounted",
+            )
+        begin_drain_placement(
+            session,
+            group_id=group.id,
+            source_backend_id=source.id,
+            destination_backend_ids=[destination.id],
+            operation_id="verified-release-operation",
+            plan_sha256="d" * 64,
+            principal=actor,
+        )
+        for state in ("verifying", "read_only", "retired"):
+            advance_drain_lifecycle(
+                session,
+                group_id=group.id,
+                source_backend_id=source.id,
+                operation_id="verified-release-operation",
+                target_state=state,
+                principal=actor,
+                details={"files_verified": 2} if state == "verifying" else None,
+            )
+
+        historical, reusable = release_retired_backend(
+            session,
+            group_id=group.id,
+            backend_id=source.id,
+            principal=actor,
+            reason="operator chose reuse",
+        )
+        assert historical.lifecycle_state == "reuse_ready"
+        assert historical.physical_disk_id is None
+        assert historical.config_json["release"]["device_contents_changed"] is False
+        assert reusable.id == disk.id
+        assert reusable.lifecycle_state == "reuse_ready"
+        assert all(item["id"] != source.id for item in group_documents(session)[0]["backends"])
+
+        reassigned = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=disk.id,
+            storage_entity_id=None,
+            namespace_path="/srv/hoardarr/backends/reused",
+            role="data",
+            principal=actor,
+        )
+        assert reassigned.physical_disk_id == disk.id
+        assert reassigned.stable_identity == "disk:wwn:retired-source"
+        released_event = session.scalar(
+            select(StorageLifecycleEvent).where(
+                StorageLifecycleEvent.event_type == "backend_released_for_reuse"
+            )
+        )
+        assert released_event is not None
+        assert released_event.physical_disk_id == disk.id
+        assert released_event.details_json["device_contents_changed"] is False
+
+
+def test_unverified_or_active_backend_cannot_be_released_for_reuse() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    with Session(engine) as session:
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        disk, _ = register_disk(session, {"stable_identity": "wwn:still-active"})
+        backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=disk.id,
+            storage_entity_id=None,
+            namespace_path="/srv/hoardarr/backends/active",
+            role="data",
+            principal=actor,
+        )
+        try:
+            release_retired_backend(
+                session,
+                group_id=group.id,
+                backend_id=backend.id,
+                principal=actor,
+                reason=None,
+            )
+        except StorageGroupError as exc:
+            assert exc.code == "backend_not_retired"
+        else:
+            raise AssertionError("an active backend was released")

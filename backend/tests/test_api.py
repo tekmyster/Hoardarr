@@ -28,6 +28,8 @@ from hoardarr.db.models import (
     HardwareSnapshot,
     IntegrationConnection,
     Operation,
+    PhysicalDisk,
+    StorageBackend,
     StorageEntity,
     User,
 )
@@ -352,6 +354,75 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(
     source_document = next(item for item in document["backends"] if item["id"] == backend_id)
     assert source_document["stable_identity"] == "disk:wwn:5000c500feed0001"
     assert source_document["lifecycle_state"] == "preferred_write"
+
+
+def test_retired_backend_release_api_requires_scope_csrf_and_exact_confirmation(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    headers = _state_headers(csrf)
+    reconciled = client.post(
+        "/api/v1/storage/disks/reconcile",
+        headers=headers,
+        json={"items": [{"stable_identity": "wwn:api-retired", "kernel_path": "/dev/sdz"}]},
+    )
+    disk_id = reconciled.json()["items"][0]["id"]
+    created = client.post(
+        "/api/v1/storage/groups",
+        headers=headers,
+        json={"name": "Reusable", "namespace_path": "/srv/hoardarr/reusable"},
+    )
+    group_id = created.json()["item"]["id"]
+    assigned = client.post(
+        f"/api/v1/storage/groups/{group_id}/backends",
+        headers=headers,
+        json={
+            "physical_disk_id": disk_id,
+            "namespace_path": "/srv/hoardarr/backends/retired",
+            "role": "data",
+        },
+    )
+    backend_id = assigned.json()["item"]["backends"][0]["id"]
+    with app.state.session_factory() as session, session.begin():
+        backend = session.get(StorageBackend, backend_id)
+        disk = session.get(PhysicalDisk, disk_id)
+        assert backend is not None and disk is not None
+        backend.lifecycle_state = "retired"
+        backend.config_json = {
+            "drain": {"operation_id": "completed-drain", "phase": "retired"}
+        }
+        disk.lifecycle_state = "retired"
+
+    endpoint = f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/retirement"
+    missing_csrf = client.post(
+        endpoint, json={"action": "release_for_reuse", "confirmation": "RELEASE"}
+    )
+    assert missing_csrf.status_code == 403
+    invalid = client.post(
+        endpoint,
+        headers=headers,
+        json={"action": "release_for_reuse", "confirmation": "release"},
+    )
+    assert invalid.status_code == 422
+    released = client.post(
+        endpoint,
+        headers=headers,
+        json={
+            "action": "release_for_reuse",
+            "confirmation": "RELEASE",
+            "reason": "verified lifecycle test",
+        },
+    )
+    assert released.status_code == 200, released.text
+    assert released.json()["item"]["backends"] == []
+    assert released.json()["disk"]["lifecycle_state"] == "reuse_ready"
+    replay = client.post(
+        endpoint,
+        headers=headers,
+        json={"action": "release_for_reuse", "confirmation": "RELEASE"},
+    )
+    assert replay.status_code == 422
 
 
 def test_device_maintenance_preview_apply_and_worker_are_bound(api_runtime: Any) -> None:

@@ -288,6 +288,12 @@ class StorageBackendTransitionRequest(StrictModel):
     reason: str | None = Field(default=None, max_length=512)
 
 
+class StorageBackendRetirementRequest(StrictModel):
+    action: Literal["release_for_reuse"]
+    confirmation: Literal["RELEASE"]
+    reason: str | None = Field(default=None, max_length=512)
+
+
 class StorageDrainPreviewRequest(StrictModel):
     source_backend_id: str = Field(min_length=36, max_length=36)
     destination_backend_ids: list[str] = Field(min_length=1, max_length=64)

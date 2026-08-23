@@ -623,6 +623,82 @@ def advance_drain_lifecycle(
     return source
 
 
+def release_retired_backend(
+    session: Session,
+    *,
+    group_id: str,
+    backend_id: str,
+    principal: Principal,
+    reason: str | None,
+) -> tuple[StorageBackend, PhysicalDisk]:
+    """Release a verified retired disk from a group without touching its contents.
+
+    The historical backend row and lifecycle events remain durable.  Its unique
+    hardware association is detached so the physical disk can be assigned again;
+    no mount, partition, filesystem, or wipe operation occurs here.
+    """
+
+    group = session.get(StorageGroup, group_id)
+    backend = session.get(StorageBackend, backend_id)
+    if group is None or backend is None or backend.storage_group_id != group.id:
+        raise StorageGroupError("backend_not_found", "The retired backend does not exist.")
+    if backend.lifecycle_state != "retired":
+        raise StorageGroupError(
+            "backend_not_retired",
+            "Only a backend retired by a completed verified drain can be released for reuse.",
+        )
+    drain = backend.config_json.get("drain")
+    if not isinstance(drain, dict) or drain.get("phase") != "retired":
+        raise StorageGroupError(
+            "retirement_not_verified",
+            "The backend does not contain completed drain verification evidence.",
+        )
+    if backend.physical_disk_id is None:
+        raise StorageGroupError(
+            "physical_disk_not_found", "The retired backend is not attached to a physical disk."
+        )
+    disk = session.get(PhysicalDisk, backend.physical_disk_id)
+    if disk is None:
+        raise StorageGroupError(
+            "physical_disk_not_found", "The retired physical disk is no longer registered."
+        )
+
+    previous_identity = backend.stable_identity
+    released_at = datetime.now(UTC).isoformat()
+    _event(
+        session,
+        group=group,
+        backend=backend,
+        principal=principal,
+        event_type="backend_released_for_reuse",
+        previous_state="retired",
+        resulting_state="reuse_ready",
+        reason=reason,
+        details={
+            "stable_identity": previous_identity,
+            "released_at": released_at,
+            "device_contents_changed": False,
+        },
+    )
+    backend.config_json = {
+        **backend.config_json,
+        "release": {
+            "stable_identity": previous_identity,
+            "physical_disk_id": disk.id,
+            "released_at": released_at,
+            "device_contents_changed": False,
+        },
+    }
+    # Keep the historical row without retaining either uniqueness claim.  The
+    # physical registry remains the source of truth for the reusable identity.
+    backend.stable_identity = f"released:{backend.id}"
+    backend.physical_disk_id = None
+    backend.lifecycle_state = "reuse_ready"
+    disk.lifecycle_state = "reuse_ready"
+    session.flush()
+    return backend, disk
+
+
 def group_documents(session: Session) -> list[dict[str, Any]]:
     groups = list(session.scalars(select(StorageGroup).order_by(StorageGroup.name)))
     documents: list[dict[str, Any]] = []
@@ -661,6 +737,11 @@ def group_documents(session: Session) -> list[dict[str, Any]]:
                         "lifecycle_state": item.lifecycle_state,
                     }
                     for item in backends
+                    if not (
+                        item.lifecycle_state == "reuse_ready"
+                        and item.physical_disk_id is None
+                        and item.storage_entity_id is None
+                    )
                 ],
                 "events": [
                     {

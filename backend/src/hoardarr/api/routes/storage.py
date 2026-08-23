@@ -22,6 +22,7 @@ from hoardarr.api.schemas import (
     SnapraidReplacementApplyRequest,
     SnapraidReplacementPreviewRequest,
     StorageBackendAssignRequest,
+    StorageBackendRetirementRequest,
     StorageBackendTransitionRequest,
     StorageDrainApplyRequest,
     StorageDrainPreviewRequest,
@@ -46,6 +47,7 @@ from hoardarr.storage.groups import (
     disk_documents,
     group_documents,
     register_disk,
+    release_retired_backend,
     set_disk_reservation,
     transition_backend,
 )
@@ -239,6 +241,48 @@ def change_storage_backend_state(
         details={"group_id": group_id, "target_state": payload.target_state},
     )
     return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
+
+
+@router.post("/groups/{group_id}/backends/{backend_id}/retirement")
+def release_storage_backend_for_reuse(
+    group_id: str,
+    backend_id: str,
+    payload: StorageBackendRetirementRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Release only Hoardarr's retired assignment; never mutate device contents."""
+
+    try:
+        backend, disk = release_retired_backend(
+            session,
+            group_id=group_id,
+            backend_id=backend_id,
+            principal=principal,
+            reason=payload.reason,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.backend.release_for_reuse",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="storage_backend",
+        target_id=backend.id,
+        details={
+            "group_id": group_id,
+            "physical_disk_id": disk.id,
+            "stable_identity": disk.stable_identity,
+            "device_contents_changed": False,
+        },
+    )
+    return {
+        "item": next(item for item in group_documents(session) if item["id"] == group_id),
+        "disk": next(item for item in disk_documents(session) if item["id"] == disk.id),
+    }
 
 
 @router.post("/groups/{group_id}/drain/preview")

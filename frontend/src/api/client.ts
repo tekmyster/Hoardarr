@@ -465,6 +465,24 @@ class HoardarrApi {
     return result.item;
   }
 
+  async releaseRetiredStorageBackend(
+    groupId: string,
+    backendId: string,
+    reason?: string,
+  ): Promise<{ item: StorageGroupDocument; disk: PhysicalDiskDocument }> {
+    return this.request(
+      `/storage/groups/${encodeURIComponent(groupId)}/backends/${encodeURIComponent(backendId)}/retirement`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "release_for_reuse",
+          confirmation: "RELEASE",
+          reason: reason || undefined,
+        }),
+      },
+    );
+  }
+
   async previewStorageRedundancy(input: {
     storage_entity_id: string;
     action: "add" | "remove" | "replace" | "configure";
