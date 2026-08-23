@@ -40,6 +40,20 @@ class FilesystemFacts:
 FilesystemProbe = Callable[[str], FilesystemFacts]
 OpenUseProbe = Callable[[str], dict[str, Any]]
 ReadOnlyCapabilityProbe = Callable[[str], dict[str, Any]]
+IoPriorityCapabilityProbe = Callable[[], dict[str, Any]]
+
+
+def inspect_io_priority_capability() -> dict[str, Any]:
+    executable = shutil.which("ionice")
+    return {
+        "supported": executable is not None,
+        "provider": "util-linux ionice" if executable is not None else None,
+        "reason": (
+            "Linux I/O priority is available."
+            if executable is not None
+            else "The util-linux ionice command is not installed."
+        ),
+    }
 
 
 def _path_without_symlinks(value: str) -> Path:
@@ -250,15 +264,20 @@ def build_drain_plan(
     reserve_bytes: int,
     enforce_source_read_only: bool = False,
     bandwidth_limit_mib_per_second: int | None = None,
+    io_priority: str = "normal",
     start_at: datetime | None = None,
     maintenance_window_minutes: int | None = None,
     filesystem_probe: FilesystemProbe | None = None,
     open_use_probe: OpenUseProbe | None = None,
     read_only_capability_probe: ReadOnlyCapabilityProbe | None = None,
+    io_priority_capability_probe: IoPriorityCapabilityProbe | None = None,
 ) -> dict[str, Any]:
     filesystem_probe = filesystem_probe or inspect_filesystem
     open_use_probe = open_use_probe or inspect_open_use
     read_only_capability_probe = read_only_capability_probe or inspect_read_only_capability
+    io_priority_capability_probe = (
+        io_priority_capability_probe or inspect_io_priority_capability
+    )
     if verification_mode not in {"fast", "accurate", "paranoid"}:
         raise DrainPlanError("verification_mode_invalid", "Unknown drain verification mode.")
     if reserve_bytes < 0 or reserve_bytes > 10**15:
@@ -269,6 +288,8 @@ def build_drain_plan(
         raise DrainPlanError(
             "bandwidth_limit_invalid", "The bandwidth limit is outside safe bounds."
         )
+    if io_priority not in {"normal", "background", "idle"}:
+        raise DrainPlanError("io_priority_invalid", "The I/O priority is invalid.")
     if maintenance_window_minutes is not None and start_at is None:
         raise DrainPlanError(
             "maintenance_window_invalid", "A maintenance window requires a scheduled start time."
@@ -438,6 +459,17 @@ def build_drain_plan(
                 ),
             }
         )
+    io_priority_capability = io_priority_capability_probe()
+    if io_priority != "normal" and io_priority_capability.get("supported") is not True:
+        blockers.append(
+            {
+                "code": "io_priority_unsupported",
+                "message": str(
+                    io_priority_capability.get("reason")
+                    or "Linux I/O priority is unavailable."
+                ),
+            }
+        )
 
     document: dict[str, Any] = {
         "schema_version": 1,
@@ -458,6 +490,7 @@ def build_drain_plan(
             "mode": verification_mode,
             "full_hashes": verification_mode in {"accurate", "paranoid"},
             "additional_read_pass": verification_mode == "paranoid",
+            "algorithm": "blake3",
         },
         "capacity": {
             "required_bytes": required_bytes,
@@ -470,6 +503,8 @@ def build_drain_plan(
             "enforce_source_read_only": enforce_source_read_only,
             "source_read_only_capability": read_only,
             "bandwidth_limit_mib_per_second": bandwidth_limit_mib_per_second,
+            "io_priority": io_priority,
+            "io_priority_capability": io_priority_capability,
             "start_at": start_at.isoformat() if start_at else None,
             "maintenance_window_minutes": maintenance_window_minutes,
             "maintenance_window_end": (
@@ -590,6 +625,7 @@ def validate_drain_plan(document: dict[str, Any]) -> None:
     enforce_read_only = controls.get("enforce_source_read_only")
     read_only_capability = controls.get("source_read_only_capability")
     bandwidth = controls.get("bandwidth_limit_mib_per_second")
+    io_priority = controls.get("io_priority", "normal")
     start_value = controls.get("start_at")
     window = controls.get("maintenance_window_minutes")
     end_value = controls.get("maintenance_window_end")
@@ -605,6 +641,13 @@ def validate_drain_plan(document: dict[str, Any]) -> None:
         or not 1 <= bandwidth <= 10_240
     ):
         raise DrainPlanError("bandwidth_limit_invalid", "The bandwidth limit is invalid.")
+    if io_priority not in {"normal", "background", "idle"}:
+        raise DrainPlanError("io_priority_invalid", "The I/O priority is invalid.")
+    algorithm = verification.get("algorithm", "sha256")
+    if algorithm not in {"sha256", "blake3"}:
+        raise DrainPlanError(
+            "verification_algorithm_invalid", "The verification algorithm is invalid."
+        )
     if start_value is None:
         if window is not None or end_value is not None:
             raise DrainPlanError("maintenance_window_invalid", "The maintenance window is invalid.")

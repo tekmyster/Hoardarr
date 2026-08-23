@@ -588,12 +588,13 @@ export interface StorageDrainPlan {
     total_bytes: number;
     health: string;
   }>;
-  verification: { mode: "fast" | "accurate" | "paranoid"; full_hashes: boolean; additional_read_pass: boolean };
+  verification: { mode: "fast" | "accurate" | "paranoid"; full_hashes: boolean; additional_read_pass: boolean; algorithm?: "sha256" | "blake3" };
   capacity: { required_bytes: number; destination_free_bytes: number; reserve_bytes: number };
   controls: {
     enforce_source_read_only: boolean;
     source_read_only_capability: { supported: boolean; currently_read_only: boolean | null; reason: string };
     bandwidth_limit_mib_per_second: number | null;
+    io_priority?: "normal" | "background" | "idle";
     start_at: string | null;
     maintenance_window_minutes: number | null;
     maintenance_window_end: string | null;

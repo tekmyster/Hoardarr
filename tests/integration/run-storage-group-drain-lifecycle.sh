@@ -42,3 +42,5 @@ jq -e '.classification == "VERIFIED IN ISOLATION"' "$repo/dist/validation/storag
 jq -e '.restart_recovered == true and .source_lifecycle == "retired"' "$repo/dist/validation/storage-group-drain-lifecycle.json"
 jq -e '.hashes_before == .hashes_after' "$repo/dist/validation/storage-group-drain-lifecycle.json"
 jq -e '.source_mount_read_only == true and .bandwidth_limit_mib_per_second == 16' "$repo/dist/validation/storage-group-drain-lifecycle.json"
+jq -e '.io_priority == "background" and .verification_algorithm == "blake3"' "$repo/dist/validation/storage-group-drain-lifecycle.json"
+jq -e '.elapsed_seconds >= 0 and .average_mib_per_second >= 0' "$repo/dist/validation/storage-group-drain-lifecycle.json"

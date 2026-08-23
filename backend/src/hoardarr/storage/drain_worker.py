@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from blake3 import blake3
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -72,6 +75,52 @@ class DrainExecutionError(RuntimeError):
 
 class DrainPaused(RuntimeError):
     pass
+
+
+@contextmanager
+def _worker_io_priority(policy: str) -> Iterator[None]:
+    """Temporarily lower only the durable worker's Linux I/O scheduling priority."""
+
+    if policy == "normal":
+        yield
+        return
+    executable = shutil.which("ionice")
+    if executable is None:
+        raise DrainExecutionError(
+            "io_priority_unsupported",
+            "The selected Linux I/O priority is not available on this host.",
+        )
+    pid = str(os.getpid())
+    requested = (
+        [executable, "-c", "2", "-n", "7", "-p", pid]
+        if policy == "background"
+        else [executable, "-c", "3", "-p", pid]
+    )
+
+    def apply(arguments: list[str]) -> None:
+        try:
+            completed = subprocess.run(
+                arguments,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise DrainExecutionError(
+                "io_priority_failed", "Hoardarr could not apply the requested I/O priority."
+            ) from exc
+        if completed.returncode != 0:
+            raise DrainExecutionError(
+                "io_priority_failed", "Hoardarr could not apply the requested I/O priority."
+            )
+
+    apply(requested)
+    try:
+        yield
+    finally:
+        apply([executable, "-c", "2", "-n", "4", "-p", pid])
 
 
 def _execution_deadline(controls: dict[str, Any]) -> datetime | None:
@@ -228,6 +277,7 @@ def _preflight_and_exclude(
                     bandwidth_limit_mib_per_second=plan.get("controls", {}).get(
                         "bandwidth_limit_mib_per_second"
                     ),
+                    io_priority=str(plan.get("controls", {}).get("io_priority", "normal")),
                     start_at=(
                         datetime.fromisoformat(plan["controls"]["start_at"])
                         if plan.get("controls", {}).get("start_at")
@@ -451,8 +501,20 @@ def _open_directory(root_fd: int, parts: tuple[str, ...], *, create: bool) -> in
         raise
 
 
-def _hash_fd(fd: int, control: Callable[[], None] | None = None) -> str:
-    digest = hashlib.sha256()
+def _new_digest(algorithm: str) -> Any:
+    if algorithm == "blake3":
+        return blake3()
+    if algorithm == "sha256":
+        return hashlib.sha256()
+    raise DrainExecutionError(
+        "verification_algorithm_invalid", "The verification algorithm is unsupported."
+    )
+
+
+def _hash_fd(
+    fd: int, control: Callable[[], None] | None = None, *, algorithm: str = "sha256"
+) -> str:
+    digest = _new_digest(algorithm)
     os.lseek(fd, 0, os.SEEK_SET)
     chunks = 0
     while chunk := os.read(fd, COPY_CHUNK_BYTES):
@@ -478,6 +540,7 @@ def _copy_entry(
     entry: StorageDrainEntry,
     *,
     control: Callable[[], None],
+    digest_algorithm: str,
     limiter: BandwidthLimiter | None = None,
 ) -> str:
     relative = _relative_path(entry.relative_path)
@@ -511,10 +574,10 @@ def _copy_entry(
         if existing_fd >= 0:
             try:
                 existing = os.fstat(existing_fd)
-                source_digest = _hash_fd(source_fd, control)
+                source_digest = _hash_fd(source_fd, control, algorithm=digest_algorithm)
                 if (
                     existing.st_size != before.st_size
-                    or _hash_fd(existing_fd, control) != source_digest
+                    or _hash_fd(existing_fd, control, algorithm=digest_algorithm) != source_digest
                 ):
                     raise DrainExecutionError(
                         "destination_collision",
@@ -539,7 +602,7 @@ def _copy_entry(
             stat.S_IMODE(before.st_mode),
             dir_fd=destination_parent,
         )
-        digest = hashlib.sha256()
+        digest = _new_digest(digest_algorithm)
         chunks = 0
         while chunk := os.read(source_fd, COPY_CHUNK_BYTES):
             digest.update(chunk)
@@ -615,7 +678,11 @@ def _next_entry(
 
 
 def _checkpoint_copy(
-    session_factory: SessionFactory, operation_id: str, entry_id: int, digest: str
+    session_factory: SessionFactory,
+    operation_id: str,
+    entry_id: int,
+    digest: str,
+    digest_algorithm: str,
 ) -> None:
     with session_factory() as session, session.begin():
         entry = session.get(StorageDrainEntry, entry_id)
@@ -625,7 +692,7 @@ def _checkpoint_copy(
             raise DrainExecutionError("drain_job_changed", "The drain checkpoint changed.")
         if entry.status == "pending":
             entry.status = "copied"
-            entry.digest_algorithm = "sha256"
+            entry.digest_algorithm = digest_algorithm
             entry.digest_hex = digest
             entry.copied_at = utc_now()
             job.files_copied += 1
@@ -645,6 +712,7 @@ def _copy(
 ) -> None:
     source_root = Path(plan["source"]["path"])
     destinations = _plan_destinations(plan)
+    digest_algorithm = str(plan.get("verification", {}).get("algorithm", "sha256"))
     source_fd = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     destination_fds: dict[str, int] = {}
     try:
@@ -663,9 +731,12 @@ def _copy(
                 destination_fds[entry.destination_backend_id],
                 entry,
                 control=lambda: _job_control(session_factory, operation_id, deadline),
+                digest_algorithm=digest_algorithm,
                 limiter=limiter,
             )
-            _checkpoint_copy(session_factory, operation_id, entry.id, digest)
+            _checkpoint_copy(
+                session_factory, operation_id, entry.id, digest, digest_algorithm
+            )
     finally:
         os.close(source_fd)
         for descriptor in destination_fds.values():
@@ -694,11 +765,16 @@ def _verify_entry(
             raise DrainExecutionError(
                 "drain_verification_failed", "A copied file did not preserve size and time."
             )
-        if mode in {"accurate", "paranoid"} and _hash_fd(descriptor, control) != entry.digest_hex:
+        digest_algorithm = entry.digest_algorithm or "sha256"
+        if mode in {"accurate", "paranoid"} and _hash_fd(
+            descriptor, control, algorithm=digest_algorithm
+        ) != entry.digest_hex:
             raise DrainExecutionError(
                 "drain_verification_failed", "A copied file failed checksum verification."
             )
-        if mode == "paranoid" and _hash_fd(descriptor, control) != entry.digest_hex:
+        if mode == "paranoid" and _hash_fd(
+            descriptor, control, algorithm=digest_algorithm
+        ) != entry.digest_hex:
             raise DrainExecutionError(
                 "drain_verification_failed", "A copied file failed its second read pass."
             )
@@ -796,7 +872,9 @@ def _remove_source(source_root_fd: int, entry: StorageDrainEntry) -> None:
             dir_fd=parent,
         )
         try:
-            if entry.digest_hex and _hash_fd(descriptor) != entry.digest_hex:
+            if entry.digest_hex and _hash_fd(
+                descriptor, algorithm=entry.digest_algorithm or "sha256"
+            ) != entry.digest_hex:
                 raise DrainExecutionError(
                     "source_changed", "A verified source file changed before retirement."
                 )
@@ -889,12 +967,34 @@ def _finalize(
             principal=actor,
             details={"namespace_path": plan["storage_group_namespace"]},
         )
+        completed_at = utc_now()
+        started_at = job.started_at
+        elapsed_seconds: float | None = None
+        if started_at is not None:
+            if started_at.tzinfo is None and completed_at.tzinfo is not None:
+                completed_at = completed_at.replace(tzinfo=None)
+            elapsed_seconds = max((completed_at - started_at).total_seconds(), 0.0)
+        average_mib_per_second = (
+            round(job.bytes_total / elapsed_seconds / (1024 * 1024), 2)
+            if elapsed_seconds is not None and elapsed_seconds > 0
+            else None
+        )
         report = {
             "storage_group_id": job.storage_group_id,
             "source_backend_id": job.source_backend_id,
             "files_moved": job.files_total,
             "bytes_moved": job.bytes_total,
             "verification_mode": job.verification_mode,
+            "verification_algorithm": plan.get("verification", {}).get(
+                "algorithm", "sha256"
+            ),
+            "verification_read_passes": (
+                2
+                if job.verification_mode == "paranoid"
+                else 1
+                if job.verification_mode == "accurate"
+                else 0
+            ),
             "source_state": "retired",
             "namespace_path": plan["storage_group_namespace"],
             "namespace_preserved": True,
@@ -903,13 +1003,16 @@ def _finalize(
             "bandwidth_limit_mib_per_second": plan.get("controls", {}).get(
                 "bandwidth_limit_mib_per_second"
             ),
+            "io_priority": plan.get("controls", {}).get("io_priority", "normal"),
             "scheduled_start": plan.get("controls", {}).get("start_at"),
+            "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
+            "average_mib_per_second": average_mib_per_second,
         }
         job.status = "succeeded"
         job.phase = "completed"
         job.current_relative_path = None
         job.report_json = report
-        job.completed_at = utc_now()
+        job.completed_at = completed_at
         job.updated_at = utc_now()
         append_event(session, operation, "drain_completed", "Storage drain completed", report)
         return report
@@ -936,30 +1039,33 @@ def execute_drain(
         if isinstance(bandwidth, int) and bandwidth > 0
         else None
     )
-    _job_control(session_factory, operation_id, deadline)
-    _preflight_and_exclude(session_factory, operation_id, plan)
-    if controls.get("enforce_source_read_only"):
-        _set_source_mount_read_only(plan["source"]["path"], True)
-    with session_factory() as session:
-        job = session.get(StorageDrainJob, operation_id)
-        if job is None:
-            raise DrainExecutionError("drain_job_missing", "The durable drain job is unavailable.")
-        phase = job.phase
-    if phase_hook:
-        phase_hook(phase)
-    if phase in {"preflight", "inventory"}:
-        _inventory(session_factory, operation_id, plan, deadline=deadline)
-        phase = "copying"
-    if phase_hook:
-        phase_hook(phase)
-    if phase == "copying":
-        _copy(session_factory, operation_id, plan, deadline=deadline, limiter=limiter)
-        phase = "verifying"
-    if phase_hook:
-        phase_hook(phase)
-    if phase == "verifying":
-        _verify(session_factory, operation_id, plan, deadline=deadline)
-        phase = "finalizing"
+    with _worker_io_priority(str(controls.get("io_priority", "normal"))):
+        _job_control(session_factory, operation_id, deadline)
+        _preflight_and_exclude(session_factory, operation_id, plan)
+        if controls.get("enforce_source_read_only"):
+            _set_source_mount_read_only(plan["source"]["path"], True)
+        with session_factory() as session:
+            job = session.get(StorageDrainJob, operation_id)
+            if job is None:
+                raise DrainExecutionError(
+                    "drain_job_missing", "The durable drain job is unavailable."
+                )
+            phase = job.phase
+        if phase_hook:
+            phase_hook(phase)
+        if phase in {"preflight", "inventory"}:
+            _inventory(session_factory, operation_id, plan, deadline=deadline)
+            phase = "copying"
+        if phase_hook:
+            phase_hook(phase)
+        if phase == "copying":
+            _copy(session_factory, operation_id, plan, deadline=deadline, limiter=limiter)
+            phase = "verifying"
+        if phase_hook:
+            phase_hook(phase)
+        if phase == "verifying":
+            _verify(session_factory, operation_id, plan, deadline=deadline)
+            phase = "finalizing"
     if phase_hook:
         phase_hook(phase)
     if phase == "finalizing":

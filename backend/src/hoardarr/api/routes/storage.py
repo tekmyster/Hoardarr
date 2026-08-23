@@ -304,6 +304,7 @@ def preview_storage_group_drain(
             reserve_bytes=payload.reserve_bytes,
             enforce_source_read_only=payload.enforce_source_read_only,
             bandwidth_limit_mib_per_second=payload.bandwidth_limit_mib_per_second,
+            io_priority=payload.io_priority,
             start_at=payload.start_at,
             maintenance_window_minutes=payload.maintenance_window_minutes,
         )

@@ -27,6 +27,7 @@ from hoardarr.storage.drain_worker import (
     _finalize,
     _job_control,
     _set_source_mount_read_only,
+    _worker_io_priority,
     execute_drain,
     mark_drain_paused,
     resume_drain,
@@ -141,6 +142,7 @@ def _seed_job(session_factory, tmp_path: Path) -> tuple[str, dict[str, object], 
                 "mode": "accurate",
                 "full_hashes": True,
                 "additional_read_pass": False,
+                "algorithm": "blake3",
             },
             "capacity": {
                 "required_bytes": total_bytes,
@@ -157,6 +159,12 @@ def _seed_job(session_factory, tmp_path: Path) -> tuple[str, dict[str, object], 
                     "reason": "Not requested in this fixture.",
                 },
                 "bandwidth_limit_mib_per_second": None,
+                "io_priority": "normal",
+                "io_priority_capability": {
+                    "supported": False,
+                    "provider": None,
+                    "reason": "Not requested in this fixture.",
+                },
                 "start_at": None,
                 "maintenance_window_minutes": None,
                 "maintenance_window_end": None,
@@ -260,6 +268,7 @@ def test_drain_moves_verifies_retires_and_preserves_namespace(
         assert job is not None and job.status == "succeeded"
         assert source_backend is not None and source_backend.lifecycle_state == "retired"
         assert entries and {entry.status for entry in entries} == {"removed"}
+        assert {entry.digest_algorithm for entry in entries} == {"blake3"}
 
 
 def test_interrupted_drain_is_requeued_from_durable_checkpoint(tmp_path: Path) -> None:
@@ -300,6 +309,25 @@ def test_bandwidth_limiter_uses_a_bounded_sleep_budget() -> None:
     limiter.consume(500)
     assert sleeps[:2] == [0.5, 0.5]
     assert all(0 < value <= 1.0 for value in sleeps)
+
+
+def test_worker_io_priority_uses_structured_linux_arguments_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr("hoardarr.storage.drain_worker.os.getpid", lambda: 4242)
+    monkeypatch.setattr(
+        "hoardarr.storage.drain_worker.shutil.which", lambda _name: "/usr/bin/ionice"
+    )
+
+    def run(arguments: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(arguments)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hoardarr.storage.drain_worker.subprocess.run", run)
+    with _worker_io_priority("idle"):
+        assert calls == [["/usr/bin/ionice", "-c", "3", "-p", "4242"]]
+    assert calls[-1] == ["/usr/bin/ionice", "-c", "2", "-n", "4", "-p", "4242"]
 
 
 def test_maintenance_window_expiry_persists_a_safe_pause(tmp_path: Path) -> None:

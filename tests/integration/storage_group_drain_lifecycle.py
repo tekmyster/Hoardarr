@@ -143,6 +143,7 @@ def main() -> int:
             reserve_bytes=8 * 1024 * 1024,
             enforce_source_read_only=True,
             bandwidth_limit_mib_per_second=16,
+            io_priority="background",
             start_at=datetime.now(UTC) - timedelta(minutes=1),
             maintenance_window_minutes=60,
         )
@@ -284,6 +285,10 @@ def main() -> int:
             "source_lifecycle": source_backend.lifecycle_state,
             "source_mount_read_only": bool(os.statvfs(source).f_flag & os.ST_RDONLY),
             "bandwidth_limit_mib_per_second": job.report_json.get("bandwidth_limit_mib_per_second"),
+            "io_priority": job.report_json.get("io_priority"),
+            "verification_algorithm": job.report_json.get("verification_algorithm"),
+            "elapsed_seconds": job.report_json.get("elapsed_seconds"),
+            "average_mib_per_second": job.report_json.get("average_mib_per_second"),
             "entry_states": sorted({entry.status for entry in entries}),
             "operation_events": [event.event_type for event in events],
             "report": job.report_json,

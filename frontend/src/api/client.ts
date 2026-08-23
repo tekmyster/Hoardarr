@@ -436,6 +436,7 @@ class HoardarrApi {
       reserve_bytes: number;
       enforce_source_read_only: boolean;
       bandwidth_limit_mib_per_second: number | null;
+      io_priority?: "normal" | "background" | "idle";
       start_at: string | null;
       maintenance_window_minutes: number | null;
     },

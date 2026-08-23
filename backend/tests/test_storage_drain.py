@@ -114,7 +114,9 @@ def test_drain_preflight_is_immutable_and_exposes_methodology() -> None:
             "mode": "paranoid",
             "full_hashes": True,
             "additional_read_pass": True,
+            "algorithm": "blake3",
         }
+        assert plan["controls"]["io_priority"] == "normal"
         assert plan["source"]["stable_identity"] == "disk:wwn:source"
         validate_drain_plan(plan)
         plan["capacity"]["required_bytes"] = 7_999
@@ -124,6 +126,35 @@ def test_drain_preflight_is_immutable_and_exposes_methodology() -> None:
             assert exc.code == "drain_plan_changed"
         else:
             raise AssertionError("a modified drain plan passed integrity validation")
+
+
+def test_drain_preflight_fails_closed_when_requested_io_priority_is_unavailable() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        group_id, source_id, destination_id = _group_with_backends(session)
+        plan = build_drain_plan(
+            session,
+            group_id=group_id,
+            source_backend_id=source_id,
+            destination_backend_ids=[destination_id],
+            verification_mode="accurate",
+            reserve_bytes=0,
+            io_priority="background",
+            filesystem_probe=_facts,
+            open_use_probe=lambda _path: {
+                "quality": "available",
+                "open_handles": 0,
+                "processes": [],
+            },
+            io_priority_capability_probe=lambda: {
+                "supported": False,
+                "provider": None,
+                "reason": "ionice is unavailable in this fixture.",
+            },
+        )
+        assert plan["ready"] is False
+        assert {item["code"] for item in plan["blockers"]} == {"io_priority_unsupported"}
 
 
 def test_drain_preflight_blocks_capacity_open_files_health_and_arr_activity() -> None:
