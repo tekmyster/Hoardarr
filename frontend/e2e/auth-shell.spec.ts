@@ -670,7 +670,7 @@ test.describe("production sign-in shell", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Applications" }).click();
     await expect(page.getByText("4,020 items")).toBeVisible();
-    await expect(page.getByText("Capacity not reported")).toBeVisible();
+    await expect(page.getByText(/Storage Group not reported/)).toBeVisible();
     await expect(page.getByText("/data/media/Movies")).toBeVisible();
     await expect(page.getByText(/does not modify media libraries/)).toBeVisible();
   });

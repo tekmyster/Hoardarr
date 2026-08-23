@@ -208,7 +208,7 @@ test("drains and retires a Storage Group source through the real browser workflo
   await page.getByRole("button", { name: "Review activation" }).first().click();
   await page.getByRole("button", { name: "Activate verified storage" }).click();
   await page.getByRole("button", { name: "Prefer new files here" }).first().click();
-  await expect(page.getByText("Preferred for new files")).toBeVisible();
+  await expect(page.getByText("Preferred for new files", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Preview drain" }).first().click();
   await expect(page.getByText("Drain preflight")).toBeVisible();
   await expect(page.getByText(/Source files are removed only after/)).toBeVisible();

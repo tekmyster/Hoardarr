@@ -181,9 +181,18 @@ Provider strings are treated as untrusted input and API credentials are never
 included in stored state.
 
 Capacity remains **Not reported** until a library path can be correlated to a
-real Hoardarr Storage Group. A media-server path alone is not evidence of
-filesystem allocation, so Hoardarr does not manufacture a capacity value.
-These adapters never create, edit, scan, or delete media libraries.
+real Hoardarr Storage Group. A high-confidence mapping requires the reported
+path and Storage Group namespace to resolve locally, the library to be inside
+that namespace, and both to report the same filesystem device identity. Remote
+or container-only paths remain Not reported; Hoardarr does not manufacture a
+mapping from similar strings.
+
+The durable worker refreshes connected media servers independently of API and
+browser clients. It records bounded `media.library.items`, mapped Storage Group
+capacity, and mapped free-space samples in the persistent telemetry store. The
+normal Analytics history/rollup/retention limits apply, so item-count and
+storage growth can be graphed without browser-owned history. These adapters
+never create, edit, scan, or delete media libraries.
 
 ## Completion criteria
 

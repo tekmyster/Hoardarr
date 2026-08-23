@@ -28,14 +28,17 @@ from hoardarr.db.models import (
     ConnectivityService,
     HardwareSnapshot,
     IntegrationConnection,
+    MetricEntity,
+    MetricSample,
     Operation,
     PhysicalDisk,
     StorageBackend,
     StorageEntity,
+    StorageGroup,
     User,
 )
 from hoardarr.operations.service import document_hash
-from hoardarr.operations.worker import run_once
+from hoardarr.operations.worker import refresh_media_libraries, run_once
 from hoardarr.storage.groups import register_disk
 from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.storage.tiering import plan_transfer
@@ -1840,7 +1843,7 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
         assert stored.mountpoint == "/media"
         assert stored.filesystem_uuid == "11111111-1111-4111-8111-111111111111"
 def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
-    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     client, app, setup_token, secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)
@@ -1861,6 +1864,10 @@ def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
     assert created.json()["operation"]["kind"] == "media.discover"
     connection_id = created.json()["integration"]["id"]
 
+    namespace = tmp_path / "media"
+    movies = namespace / "Movies"
+    movies.mkdir(parents=True)
+
     def discoverer(**kwargs: object) -> dict[str, Any]:
         assert kwargs["api_key"] == credential
         return {
@@ -1873,7 +1880,7 @@ def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
                     "id": "movies",
                     "name": "Movies",
                     "media_type": "movie",
-                    "paths": ["/data/media/Movies"],
+                    "paths": [str(movies)],
                     "item_count": 4020,
                     "capacity_bytes": None,
                     "quality": "available",
@@ -1894,5 +1901,52 @@ def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
     assert connection.json()["status"] == "connected"
     assert connection.json()["capabilities"] == ["media_libraries"]
     assert connection.json()["state"]["libraries"][0]["item_count"] == 4020
+    assert (
+        connection.json()["state"]["libraries"][0]["storage_mapping"]["quality"]
+        == "not_reported"
+    )
     assert "untrusted_extra" not in connection.text
     assert credential not in connection.text
+
+    with app.state.session_factory() as session, session.begin():
+        session.add(
+            StorageGroup(
+                name="Media",
+                namespace_path=str(namespace),
+                purpose="media",
+                state="active",
+            )
+        )
+
+    def refreshed_discovery(**kwargs: object) -> dict[str, Any]:
+        result = discoverer(**kwargs)
+        result["state"]["libraries"][0]["item_count"] = 4021
+        return result
+
+    assert refresh_media_libraries(
+        app.state.session_factory,
+        app.state.settings,
+        secret_box,
+        discoverer=refreshed_discovery,
+    ) == 1
+    refreshed = client.get(f"/api/v1/integrations/{connection_id}")
+    mapping = refreshed.json()["state"]["libraries"][0]["storage_mapping"]
+    assert mapping["confidence"] == "high"
+    assert mapping["storage_group_name"] == "Media"
+    assert mapping["storage_capacity_bytes"] > 0
+    with app.state.session_factory() as session:
+        entity = session.scalar(
+            select(MetricEntity).where(MetricEntity.stable_id == f"media:{connection_id}:movies")
+        )
+        assert entity is not None
+        samples = list(
+            session.scalars(
+                select(MetricSample)
+                .where(MetricSample.entity_id == entity.id)
+                .order_by(MetricSample.observed_at)
+            )
+        )
+        values = {sample.metric_id: sample.value for sample in samples}
+        assert values["media.library.items"] == 4021
+        assert values["media.library.storage.capacity"] > 0
+        assert values["media.library.storage.free"] > 0

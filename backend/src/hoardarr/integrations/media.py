@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -12,6 +14,91 @@ from hoardarr.integrations.servarr import PinnedServarrClient, ServarrError
 MEDIA_PRODUCTS = frozenset({"plex", "jellyfin", "emby"})
 MAX_LIBRARIES = 64
 MAX_LIBRARY_PATHS = 16
+
+
+def correlate_library_storage(
+    libraries: list[dict[str, Any]],
+    storage_groups: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Attach only locally provable Storage Group mappings.
+
+    Media servers commonly report container- or remote-host paths. String
+    similarity is not sufficient evidence that such a path belongs to local
+    storage, so a mapping is high-confidence only when both paths resolve on
+    this host, the library is inside the group namespace, and both have the
+    same filesystem device identity.
+    """
+
+    groups: list[tuple[dict[str, str], Path, int]] = []
+    for group in storage_groups[:256]:
+        group_id = group.get("id")
+        group_name = group.get("name")
+        namespace = group.get("namespace_path")
+        if (
+            not isinstance(group_id, str)
+            or not isinstance(group_name, str)
+            or not isinstance(namespace, str)
+            or not Path(namespace).is_absolute()
+        ):
+            continue
+        try:
+            resolved = Path(namespace).resolve(strict=True)
+            groups.append((group, resolved, resolved.stat().st_dev))
+        except OSError:
+            continue
+    result: list[dict[str, Any]] = []
+    for library in libraries[:MAX_LIBRARIES]:
+        matches: dict[str, tuple[dict[str, str], Path]] = {}
+        raw_paths = library.get("paths")
+        if not isinstance(raw_paths, list):
+            raw_paths = []
+        for raw_path in raw_paths[:MAX_LIBRARY_PATHS]:
+            if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+                continue
+            try:
+                candidate = Path(raw_path).resolve(strict=True)
+                candidate_device = candidate.stat().st_dev
+            except OSError:
+                continue
+            for group, namespace, namespace_device in groups:
+                if candidate_device != namespace_device:
+                    continue
+                if candidate != namespace and namespace not in candidate.parents:
+                    continue
+                matches[group["id"]] = (group, namespace)
+        mapping: dict[str, Any] = {
+            "quality": "not_reported",
+            "confidence": "unknown",
+            "source": "local_path_not_proven",
+            "storage_group_id": None,
+            "storage_group_name": None,
+            "storage_group_namespace": None,
+            "storage_capacity_bytes": None,
+            "storage_free_bytes": None,
+        }
+        if len(matches) == 1:
+            group, namespace = next(iter(matches.values()))
+            try:
+                usage = shutil.disk_usage(namespace)
+                capacity = usage.total
+                free = usage.free
+            except OSError:
+                capacity = None
+                free = None
+            mapping = {
+                "quality": "available",
+                "confidence": "high",
+                "source": "local_path_device_and_namespace",
+                "storage_group_id": group["id"],
+                "storage_group_name": group["name"],
+                "storage_group_namespace": group["namespace_path"],
+                "storage_capacity_bytes": capacity,
+                "storage_free_bytes": free,
+            }
+        elif len(matches) > 1:
+            mapping["source"] = "ambiguous_local_paths"
+        result.append({**library, "storage_mapping": mapping})
+    return result
 
 
 def _text(value: object, *, maximum: int = 512) -> str | None:

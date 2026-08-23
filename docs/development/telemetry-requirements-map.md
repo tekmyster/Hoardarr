@@ -35,8 +35,8 @@ The implementation will preserve the existing live documents for compatibility w
 
 The production implementation now resides in `hoardarr.telemetry` with schema
 revisions `0005_enterprise_telemetry`, `0006_metric_alert_rules`, and
-`0007_telemetry_rollup_details`. The generated 95-row catalog is
-`docs/telemetry/metric-catalog.json`. All 95 definitions have production
+`0007_telemetry_rollup_details`. The generated 98-row catalog is
+`docs/telemetry/metric-catalog.json`. All 98 definitions have production
 collector or derivation paths and explicit implementation/physical-validation
 status. Collection, persistence, rendering, entitlements, forecasts, anomalies,
 alerts, reporting/export, query budgeting, bounded live history, progressive

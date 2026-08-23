@@ -92,14 +92,20 @@ describe("ApplicationsPage", () => {
       base_url: "http://plex:32400",
       status: "connected",
       capabilities: ["media_libraries"],
-      state: { libraries: [{ id: "movies", name: "Movies", media_type: "movie", paths: ["/data/media/Movies"], item_count: 4020, capacity_bytes: null, quality: "available" }] },
+      state: { libraries: [
+        { id: "movies", name: "Movies", media_type: "movie", paths: ["/data/media/Movies"], item_count: 4020, capacity_bytes: null, quality: "available" },
+        { id: "tv", name: "TV", media_type: "show", paths: ["/storage/media/TV"], item_count: 1200, capacity_bytes: null, quality: "available", storage_mapping: { quality: "available", confidence: "high", source: "local_path_device_and_namespace", storage_group_name: "Media", storage_group_namespace: "/storage/media", storage_capacity_bytes: 4_000_000_000_000, storage_free_bytes: 1_000_000_000_000 } },
+      ] },
       last_checked_at: "2026-08-23T16:00:00Z",
     }]);
 
     render(<ApplicationsPage />);
 
     expect(await screen.findByText("4,020 items")).toBeInTheDocument();
-    expect(screen.getByText("Capacity not reported")).toBeInTheDocument();
+    expect(screen.getByText(/Storage Group not reported/)).toBeInTheDocument();
+    expect(screen.getByText("Storage Group: Media")).toBeInTheDocument();
+    expect(screen.getByText(/4 TB storage capacity/)).toBeInTheDocument();
+    expect(screen.getByText(/Confirmed from the local namespace/)).toBeInTheDocument();
     expect(screen.getByText("/data/media/Movies")).toBeInTheDocument();
     expect(screen.getByText(/Read-only observability/)).toBeInTheDocument();
   });

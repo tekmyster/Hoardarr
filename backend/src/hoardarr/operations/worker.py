@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from threading import Event
 from typing import Any, Protocol
@@ -32,13 +33,18 @@ from hoardarr.db.models import (
     Plan,
     PlanApproval,
     StorageDrainJob,
+    StorageGroup,
     UpdateState,
     WizardSession,
     utc_now,
 )
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError, run_hardware_detector
-from hoardarr.integrations.media import MEDIA_PRODUCTS, discover_media_server
+from hoardarr.integrations.media import (
+    MEDIA_PRODUCTS,
+    correlate_library_storage,
+    discover_media_server,
+)
 from hoardarr.integrations.servarr import (
     PRODUCTS,
     ServarrError,
@@ -84,7 +90,9 @@ from hoardarr.storage.tiering import (
     execute_transfer,
     plan_transfer,
 )
+from hoardarr.telemetry.samples import EntityReading, MetricReading
 from hoardarr.telemetry.service import TelemetryService, collect_for_worker
+from hoardarr.telemetry.store import ingest as ingest_metrics
 from hoardarr.updates.service import (
     UpdateError,
     UpdatePaths,
@@ -725,6 +733,195 @@ def refresh_servarr_activity(
     return refreshed
 
 
+def _correlate_media_state(session: Session, state: dict[str, Any]) -> dict[str, Any]:
+    groups = [
+        {"id": group.id, "name": group.name, "namespace_path": group.namespace_path}
+        for group in session.scalars(select(StorageGroup).order_by(StorageGroup.id).limit(256))
+    ]
+    result = deepcopy(state)
+    libraries = result.get("libraries")
+    if isinstance(libraries, list):
+        result["libraries"] = correlate_library_storage(libraries, groups)
+    return result
+
+
+def _media_metric_readings(
+    connection: IntegrationConnection,
+    *,
+    observed_at: datetime,
+    interval_seconds: int,
+) -> list[MetricReading]:
+    state = connection.state_json if isinstance(connection.state_json, dict) else {}
+    rows = state.get("libraries")
+    if not isinstance(rows, list):
+        return []
+    readings: list[MetricReading] = []
+    for row in rows[:64]:
+        if not isinstance(row, dict):
+            continue
+        library_id = row.get("id")
+        name = row.get("name")
+        if not isinstance(library_id, str) or not isinstance(name, str):
+            continue
+        mapping = row.get("storage_mapping")
+        if not isinstance(mapping, dict):
+            mapping = {}
+        group_id = mapping.get("storage_group_id")
+        topology = {"integration_id": connection.id}
+        if isinstance(group_id, str):
+            topology["storage_group_id"] = group_id
+        entity = EntityReading(
+            entity_type="application",
+            stable_id=f"media:{connection.id}:{library_id}"[:512],
+            display_name=f"{connection.name} / {name}"[:256],
+            labels={
+                "integration_id": connection.id,
+                "product": connection.expected_product,
+                "library_id": library_id[:128],
+            },
+            topology=topology,
+        )
+        values = (
+            ("media.library.items", row.get("item_count"), "media_server_api"),
+            (
+                "media.library.storage.capacity",
+                mapping.get("storage_capacity_bytes"),
+                "storage_group_statvfs",
+            ),
+            (
+                "media.library.storage.free",
+                mapping.get("storage_free_bytes"),
+                "storage_group_statvfs",
+            ),
+        )
+        for metric_id, value, source in values:
+            available = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            readings.append(
+                MetricReading(
+                    entity=entity,
+                    metric_id=metric_id,
+                    observed_at=observed_at,
+                    value=value if available else None,
+                    quality="available" if available else "not_reported",
+                    source=source,
+                    collection_interval_seconds=interval_seconds,
+                )
+            )
+    return readings
+
+
+def refresh_media_libraries(
+    session_factory: SessionFactory,
+    settings: Settings,
+    secret_box: SecretBox,
+    *,
+    discoverer: ServarrDiscoverer = discover_media_server,
+    transport: httpx.BaseTransport | None = None,
+) -> int:
+    """Refresh and persist media history independently of API/browser clients."""
+
+    with session_factory() as session:
+        connection_ids = list(
+            session.scalars(
+                select(IntegrationConnection.id)
+                .where(
+                    IntegrationConnection.adapter == "media",
+                    IntegrationConnection.status == "connected",
+                )
+                .order_by(IntegrationConnection.id)
+                .limit(64)
+            )
+        )
+    refreshed = 0
+    interval = max(1, min(86400, int(settings.integration_activity_interval_seconds)))
+    for connection_id in connection_ids:
+        connection: ServarrConnectionData | None = None
+        fingerprint: str | None = None
+        try:
+            connection = _load_connection(
+                session_factory,
+                WorkItem(
+                    operation_id="media-refresh",
+                    kind="media.discover",
+                    resource_type="integration_connection",
+                    resource_id=connection_id,
+                    request={},
+                ),
+            )
+            fingerprint = connection.fingerprint
+            api_key = secret_box.decrypt(
+                INTEGRATION_AAD_RECORD_TYPE,
+                connection.id,
+                connection.api_key_ciphertext,
+            )
+            remote = discoverer(
+                settings=settings,
+                expected_product=connection.expected_product,
+                base_url=connection.base_url,
+                approved_ips=connection.approved_ips,
+                allow_localhost=connection.allow_localhost,
+                api_key=api_key,
+                verify_tls=connection.verify_tls,
+                transport=transport,
+            )
+            safe = _sanitize_media_discovery(remote, expected_product=connection.expected_product)
+        except (SecretStoreError, ServarrError, IntegrationTargetError, WorkFailure) as exc:
+            LOGGER.warning(
+                "Media library refresh unavailable for %s (%s)",
+                connection_id,
+                type(exc).__name__,
+            )
+            with session_factory() as session, session.begin():
+                record = session.get(IntegrationConnection, connection_id)
+                if (
+                    record is not None
+                    and record.adapter == "media"
+                    and (fingerprint is None or _connection_fingerprint(record) == fingerprint)
+                ):
+                    state = (
+                        deepcopy(record.state_json)
+                        if isinstance(record.state_json, dict)
+                        else {}
+                    )
+                    state["library_refresh_quality"] = "temporarily_unavailable"
+                    state["library_refresh_observed_at"] = utc_now().isoformat()
+                    record.state_json = state
+            continue
+        except Exception as exc:
+            # One malformed/unexpected provider failure must not stop other media refreshes.
+            LOGGER.warning(
+                "Media library refresh failed safely for %s (%s)",
+                connection_id,
+                type(exc).__name__,
+            )
+            continue
+        observed_at = utc_now()
+        with session_factory() as session, session.begin():
+            record = session.get(IntegrationConnection, connection_id)
+            if record is None or record.adapter != "media":
+                continue
+            if fingerprint is not None and _connection_fingerprint(record) != fingerprint:
+                continue
+            state = _correlate_media_state(session, safe["state"])
+            state["library_refresh_quality"] = "available"
+            state["library_refresh_observed_at"] = observed_at.isoformat()
+            record.state_json = state
+            record.product_version = safe["version"]
+            record.last_checked_at = observed_at
+            record.updated_at = observed_at
+            session.flush()
+            ingest_metrics(
+                session,
+                _media_metric_readings(
+                    record,
+                    observed_at=observed_at,
+                    interval_seconds=interval,
+                ),
+            )
+            refreshed += 1
+    return refreshed
+
+
 def _contains_plaintext(value: object, plaintext: str) -> bool:
     if not plaintext:
         return False
@@ -770,9 +967,7 @@ def _execute_servarr(
     servarr_transport: httpx.BaseTransport | None,
 ) -> ServarrExecution:
     connection = _load_connection(session_factory, item)
-    product_label = (
-        "media server" if connection.adapter == "media" else "Servarr application"
-    )
+    product_label = "media server" if connection.adapter == "media" else "Servarr"
     try:
         api_key = secret_box.decrypt(
             INTEGRATION_AAD_RECORD_TYPE,
@@ -833,7 +1028,7 @@ def _execute_servarr(
         if _contains_plaintext(safe_discovery, api_key):
             raise WorkFailure(
                 "credential_reflected",
-                f"The {product_label} reflected its API credential in discovery data",
+                f"{product_label.title()} reflected its API credential in discovery data",
                 connection=connection,
             )
     finally:
@@ -1551,11 +1746,25 @@ def _finalize_success(
         connection.product_version = discovery["version"]
         connection.capabilities_json = discovery["capabilities"]
         state = deepcopy(discovery["state"])
+        if connection.adapter == "media":
+            state = _correlate_media_state(session, state)
+            state["library_refresh_quality"] = "available"
+            state["library_refresh_observed_at"] = utc_now().isoformat()
         if "activity" in state:
             state["activity_observed_at"] = utc_now().isoformat()
         connection.state_json = state
         connection.last_checked_at = utc_now()
         connection.updated_at = utc_now()
+        if connection.adapter == "media":
+            session.flush()
+            ingest_metrics(
+                session,
+                _media_metric_readings(
+                    connection,
+                    observed_at=connection.last_checked_at,
+                    interval_seconds=60,
+                ),
+            )
         complete_operation(
             session,
             operation,
@@ -1903,6 +2112,7 @@ def run_forever(
     detector_runner: DetectorRunner = run_hardware_detector,
     servarr_discoverer: ServarrDiscoverer = discover_servarr,
     servarr_activity_discoverer: ServarrActivityDiscoverer = discover_servarr_activity,
+    media_discoverer: ServarrDiscoverer = discover_media_server,
     servarr_transport: httpx.BaseTransport | None = None,
 ) -> None:
     """Recover abandoned leases periodically, then process work until stopped."""
@@ -1914,6 +2124,7 @@ def run_forever(
         recovery_interval = 30.0
         next_recovery = time.monotonic() + recovery_interval
         next_servarr_activity = time.monotonic()
+        next_media_refresh = time.monotonic()
         while stop_event is None or not stop_event.is_set():
             try:
                 collect_for_worker(session_factory, settings, telemetry_service)
@@ -1933,6 +2144,21 @@ def run_forever(
                     # Application monitoring cannot stop durable storage work.
                     LOGGER.warning("Servarr activity refresh failed (%s)", type(exc).__name__)
                 next_servarr_activity = (
+                    time.monotonic() + settings.integration_activity_interval_seconds
+                )
+            if time.monotonic() >= next_media_refresh:
+                try:
+                    refresh_media_libraries(
+                        session_factory,
+                        settings,
+                        secret_box,
+                        discoverer=media_discoverer,
+                        transport=servarr_transport,
+                    )
+                except Exception as exc:
+                    # Media history is monitoring and cannot stop durable storage work.
+                    LOGGER.warning("Media library refresh failed (%s)", type(exc).__name__)
+                next_media_refresh = (
                     time.monotonic() + settings.integration_activity_interval_seconds
                 )
             if time.monotonic() >= next_recovery:

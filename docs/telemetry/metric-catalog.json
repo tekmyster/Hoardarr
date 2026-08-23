@@ -1914,6 +1914,63 @@
       "unit": "ratio"
     },
     {
+      "aggregation": "last",
+      "availability": "When the named local source/provider reports the value",
+      "capability": null,
+      "entity_types": [
+        "application"
+      ],
+      "formula": null,
+      "id": "media.library.items",
+      "implementation_status": "PRODUCTION IMPLEMENTED + SOFTWARE VERIFIED",
+      "kind": "raw",
+      "minimum_interval_seconds": 60,
+      "name": "Media library items",
+      "physical_validation": "not_required",
+      "retention_class": "recent",
+      "source": "Plex/Jellyfin/Emby read-only API",
+      "test_evidence": "backend/tests/test_media_integrations.py",
+      "unit": "count"
+    },
+    {
+      "aggregation": "last",
+      "availability": "When the named local source/provider reports the value",
+      "capability": null,
+      "entity_types": [
+        "application"
+      ],
+      "formula": null,
+      "id": "media.library.storage.capacity",
+      "implementation_status": "PRODUCTION IMPLEMENTED + SOFTWARE VERIFIED",
+      "kind": "raw",
+      "minimum_interval_seconds": 60,
+      "name": "Mapped storage capacity",
+      "physical_validation": "not_required",
+      "retention_class": "recent",
+      "source": "locally proven Storage Group statvfs",
+      "test_evidence": "backend/tests/test_media_integrations.py",
+      "unit": "bytes"
+    },
+    {
+      "aggregation": "last",
+      "availability": "When the named local source/provider reports the value",
+      "capability": null,
+      "entity_types": [
+        "application"
+      ],
+      "formula": null,
+      "id": "media.library.storage.free",
+      "implementation_status": "PRODUCTION IMPLEMENTED + SOFTWARE VERIFIED",
+      "kind": "raw",
+      "minimum_interval_seconds": 60,
+      "name": "Mapped storage free",
+      "physical_validation": "not_required",
+      "retention_class": "recent",
+      "source": "locally proven Storage Group statvfs",
+      "test_evidence": "backend/tests/test_media_integrations.py",
+      "unit": "bytes"
+    },
+    {
       "aggregation": "mean",
       "availability": "When the named local source/provider reports the value",
       "capability": "metrics.analytics.performance",

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from hoardarr.core.config import Settings
-from hoardarr.integrations.media import discover_media_server
+from hoardarr.integrations.media import correlate_library_storage, discover_media_server
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -132,3 +132,41 @@ def test_malformed_media_provider_output_fails_closed(
                 )
             ),
         )
+
+
+def test_library_storage_mapping_requires_local_namespace_and_device_proof(
+    tmp_path: Path,
+) -> None:
+    namespace = tmp_path / "media"
+    movies = namespace / "Movies"
+    movies.mkdir(parents=True)
+    libraries = [{"id": "1", "name": "Movies", "paths": [str(movies)]}]
+    groups = [{"id": "group-1", "name": "Media", "namespace_path": str(namespace)}]
+
+    mapped = correlate_library_storage(libraries, groups)[0]["storage_mapping"]
+
+    assert mapped["quality"] == "available"
+    assert mapped["confidence"] == "high"
+    assert mapped["storage_group_id"] == "group-1"
+    assert mapped["storage_capacity_bytes"] > 0
+    assert mapped["storage_free_bytes"] > 0
+
+
+def test_remote_or_unreachable_library_path_remains_not_reported(tmp_path: Path) -> None:
+    namespace = tmp_path / "media"
+    namespace.mkdir()
+    libraries = [{"id": "1", "name": "Movies", "paths": ["/container/media/Movies"]}]
+    groups = [{"id": "group-1", "name": "Media", "namespace_path": str(namespace)}]
+
+    mapped = correlate_library_storage(libraries, groups)[0]["storage_mapping"]
+
+    assert mapped == {
+        "quality": "not_reported",
+        "confidence": "unknown",
+        "source": "local_path_not_proven",
+        "storage_group_id": None,
+        "storage_group_name": None,
+        "storage_group_namespace": None,
+        "storage_capacity_bytes": None,
+        "storage_free_bytes": None,
+    }
