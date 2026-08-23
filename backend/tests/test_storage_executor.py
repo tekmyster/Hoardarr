@@ -418,6 +418,168 @@ def test_existing_mergerfs_snapraid_expansion_applies_explicit_role(
         assert str(new_member) not in mergerfs_line
 
 
+def test_existing_zfs_expansion_adds_vdev_without_recreating_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = "22222222-2222-4222-8222-222222222222"
+    device_ids = ["wwn:zfs-new-a", "wwn:zfs-new-b"]
+    live_devices = {
+        identity: {
+            **_live_disk(),
+            "id": identity,
+            "stable_identity": identity,
+            "kernel_path": f"/dev/sd{suffix}",
+        }
+        for identity, suffix in zip(device_ids, ("y", "z"), strict=True)
+    }
+    expected_digest = "a" * 64
+    base_state = {
+        "pool_guid": "1234567890123456789",
+        "config_sha256": expected_digest,
+        "vdev_type": "mirror",
+        "vdev_width": 2,
+        "vdev_count": 1,
+    }
+    states = [base_state, base_state, {**base_state, "config_sha256": "b" * 64, "vdev_count": 2}]
+    document = {
+        "presentation_root": "/data",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "zfs",
+            "selected_devices": [
+                {**_selected_device(), "id": identity, "stable_identity": identity}
+                for identity in device_ids
+            ],
+            "actions": [
+                {
+                    "action_id": "storage-layout",
+                    "type": "storage.layout.ensure",
+                    "topology": "zfs",
+                    "device_ids": device_ids,
+                    "purpose": "media",
+                    "destructive": True,
+                }
+            ],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "layout_options": {
+                "name": "media",
+                "mountpoint": "/data",
+                "vdevs": [{"type": "mirror", "device_ids": device_ids}],
+                "ashift": 12,
+                "recordsize": "1M",
+                "compression": "lz4",
+                "scrub_schedule": "monthly",
+                "snapshots": {"enabled": False, "retention": 0},
+            },
+            "expansion": {
+                "kind": "add_zfs_vdev",
+                "target": {
+                    "provider": "zfs",
+                    "instance_id": "zfs:media",
+                    "mountpoint": "/data",
+                },
+                "configuration": {
+                    "topology": "zfs",
+                    "vdev_type": "mirror",
+                    "vdev_width": 2,
+                    "zfs_pool_guid": "1234567890123456789",
+                    "zfs_config_sha256": expected_digest,
+                    "zfs_vdev_count": 1,
+                },
+            },
+        },
+    }
+    commands: list[list[str]] = []
+    paths = Paths(transaction_root=tmp_path / "transactions", fstab=tmp_path / "fstab")
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: live_devices)
+    monkeypatch.setattr(executor, "_safe_mountpoint", lambda _value: tmp_path / "managed")
+    monkeypatch.setattr(
+        executor,
+        "_stable_path",
+        lambda _paths, disk: PurePosixPath(
+            f"/dev/disk/by-id/scsi-{disk['id'].rsplit('-', 1)[-1]}"
+        ),
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+
+    result = executor._execute_actions(
+        operation_id=operation_id,
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": list(live_devices.values())},
+        runner=lambda command, _timeout: commands.append(command),
+        journal={"completed_steps": 0, "notices": []},
+        zfs_state_provider=lambda _pool: states.pop(0),
+    )
+
+    zpool_commands = [command for command in commands if command[0] == "zpool"]
+    assert zpool_commands[0][:4] == ["zpool", "add", "-n", "media"]
+    assert zpool_commands[1][:3] == ["zpool", "add", "media"]
+    assert "-f" not in zpool_commands[1]
+    assert all(command[1] != "create" for command in zpool_commands)
+    assert result["mountpoint"] == str(tmp_path / "managed")
+    assert states == []
+
+
+def test_existing_zfs_expansion_fails_before_commands_on_pool_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device_ids = ["wwn:zfs-new-a", "wwn:zfs-new-b"]
+    live = {identity: {**_live_disk(), "id": identity} for identity in device_ids}
+    document = {
+        "presentation_root": "/data",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "zfs",
+            "selected_devices": [],
+            "actions": [],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "layout_options": {
+                "name": "media",
+                "mountpoint": "/data",
+                "vdevs": [{"type": "mirror", "device_ids": device_ids}],
+            },
+            "expansion": {
+                "kind": "add_zfs_vdev",
+                "target": {"provider": "zfs", "instance_id": "zfs:media", "mountpoint": "/data"},
+                "configuration": {
+                    "vdev_type": "mirror",
+                    "vdev_width": 2,
+                    "zfs_pool_guid": "1234567890123456789",
+                    "zfs_config_sha256": "a" * 64,
+                    "zfs_vdev_count": 1,
+                },
+            },
+        },
+    }
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: live)
+    monkeypatch.setattr(executor, "_safe_mountpoint", lambda _value: tmp_path / "managed")
+    monkeypatch.setattr(
+        executor, "_stable_path", lambda *_args: PurePosixPath("/dev/disk/by-id/scsi-x")
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+
+    with pytest.raises(executor.ExecutorFailure, match="changed after review") as failure:
+        executor._execute_actions(
+            operation_id="33333333-3333-4333-8333-333333333333",
+            document=document,
+            paths=Paths(transaction_root=tmp_path / "transactions"),
+            inventory_provider=lambda: {"disks": list(live.values())},
+            runner=lambda command, _timeout: commands.append(command),
+            journal={"completed_steps": 0, "notices": []},
+            zfs_state_provider=lambda _pool: {
+                "pool_guid": "9999999999999999999",
+                "config_sha256": "a" * 64,
+                "vdev_type": "mirror",
+                "vdev_width": 2,
+                "vdev_count": 1,
+            },
+        )
+    assert failure.value.code == "zfs_pool_changed"
+    assert commands == []
+
+
 DEVICE_ID = "serial:vendor:model:stable-serial"
 
 

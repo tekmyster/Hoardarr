@@ -36,7 +36,9 @@ For a completely scanned blank disk, the planner can currently describe:
 - an explicit SnapRAID data-member role when the exact configuration is evidence-matched to the
   mergerFS branches, plus a separate parity-member choice when the disk is large enough;
 - an SSD/NVMe download tier for an existing media Storage Group; and
-- a matched two-disk ZFS mirror/new mirror vdev candidate with smallest-member capacity math.
+- a new matched ZFS mirror, RAIDZ1, RAIDZ2, or RAIDZ3 candidate; and
+- for an exactly correlated existing ZFS pool, one additional complete top-level vdev whose
+  redundancy type and width match every currently observed data vdev.
 
 An existing mergerFS candidate is emitted only when exactly one discovered instance can be tied to
 the Storage Group by its namespace mount or an active backend branch. Merely detecting mergerFS
@@ -73,12 +75,24 @@ be hidden by an unsafe rollback. The operation enters needs-attention state and 
 is stale until a later sync succeeds; parity is never described as current merely because the disk
 was added.
 
+Existing ZFS expansion is intentionally Advanced. Inventory reads `zpool status -P` and the pool
+GUID, excludes log/cache/spare/special/dedup classes from the data geometry, and offers a candidate
+only when all top-level data vdevs have one supported, uniform mirror or RAIDZ1/2/3 type and width.
+The immutable choice binds the pool name, mountpoint, GUID, canonical topology digest, existing
+vdev count, new member identities, and exact geometry. The executor revalidates the disks and pool
+again immediately before mutation, runs `zpool add -n`, and then runs the same add without `-f`.
+It never recreates the pool, datasets, or mount. Final verification requires the same pool GUID,
+the same vdev type and width, exactly one additional vdev, and a changed configuration digest.
+Failure after the add may have begun enters needs-attention state rather than pretending the
+one-way topology change rolled back. Existing blocks are not described as rebalanced: ZFS begins
+placing new writes across the expanded set of top-level vdevs.
+
 An operator may explicitly choose **Reserve for later** on a single candidate. That authenticated,
 CSRF-protected API action changes only the durable physical-disk lifecycle state; it never opens the
 device or writes storage metadata. Reserved disks are excluded from wizard assignment and expansion
 candidates until **Release disk** is used. The transition is idempotent, audited, and independently
 rejects protected system storage.
 
-Current limitations are recorded in the unified roadmap: additional ZFS multi-vdev expansion
-recommendations and the disposable-Linux expansion fault matrix remain in the EXPAND dependency
-family.
+Current limitations are recorded in the unified roadmap. Mixed-geometry/striped pools, dRAID,
+top-level vdev removal, and auxiliary-vdev mutation are not guessed into this workflow. The
+disposable-Linux expansion and fault evidence remains tracked in the EXPAND dependency family.

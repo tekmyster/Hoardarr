@@ -55,6 +55,11 @@ from hoardarr.storage.snapraid import (
     replace_data_entry,
     validate_replacement_plan,
 )
+from hoardarr.storage.zfs import (
+    parse_zpool_data_topology,
+    valid_pool_guid,
+    zfs_add_vdev_commands,
+)
 
 try:  # pragma: no cover - Windows exists only for repository tests.
     import fcntl
@@ -182,6 +187,7 @@ class Paths:
 
 CommandRunner = Callable[[list[str], int], None]
 InventoryProvider = Callable[[], dict[str, Any]]
+ZfsStateProvider = Callable[[str], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
 
 
@@ -231,6 +237,47 @@ def _run(command: list[str], timeout_seconds: int) -> None:
             "A storage tool reported a failure. The operation stopped and requires inspection.",
             needs_attention=True,
         ) from exc
+
+
+def _live_zfs_pool_state(pool_name: str) -> dict[str, Any]:
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,254}", pool_name) is None:
+        raise ExecutorFailure("zfs_pool_identity_invalid", "The reviewed ZFS pool name is invalid.")
+
+    def capture(arguments: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                [_tool("zpool"), *arguments],
+                check=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={
+                    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                },
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExecutorFailure(
+                "zfs_pool_identity_unavailable",
+                "The existing ZFS pool identity and topology could not be read safely.",
+            ) from exc
+        if len(result.stdout) > 1024 * 1024:
+            raise ExecutorFailure(
+                "zfs_pool_identity_unavailable", "The ZFS pool status output is unexpectedly large."
+            )
+        return result.stdout
+
+    guid = capture(["get", "-Hp", "-o", "value", "guid", pool_name]).strip()
+    topology = parse_zpool_data_topology(capture(["status", "-P", pool_name]), pool_name)
+    if not valid_pool_guid(guid) or topology.quality != "available":
+        raise ExecutorFailure(
+            "zfs_pool_identity_unavailable",
+            "The existing ZFS pool did not report a safe, uniform data-vdev identity.",
+        )
+    return {"pool_guid": guid, **topology.document()}
 
 
 def _smartctl(command: list[str], *, allow_unsupported_log: bool = False) -> str:
@@ -368,10 +415,14 @@ def _run_smart_test(
                 else expected_seconds
             )
         else:
-            percent = min(
-                99.0,
-                elapsed * 100 / expected_seconds,
-            ) if expected_seconds else 0.0
+            percent = (
+                min(
+                    99.0,
+                    elapsed * 100 / expected_seconds,
+                )
+                if expected_seconds
+                else 0.0
+            )
             remaining_seconds = (
                 max(expected_seconds - elapsed, 0) if expected_seconds is not None else None
             )
@@ -1651,6 +1702,7 @@ def _execute_actions(
     inventory_provider: InventoryProvider,
     runner: CommandRunner,
     journal: dict[str, Any],
+    zfs_state_provider: ZfsStateProvider = _live_zfs_pool_state,
 ) -> dict[str, Any]:
     storage = document["storage"]
     topology = storage["topology"]
@@ -2122,38 +2174,141 @@ def _execute_actions(
         stable_paths = {
             identifier: os.fspath(_stable_path(paths, disk)) for identifier, disk in devices.items()
         }
-        try:
-            commands = layout_commands(topology, options, stable_paths)
-        except LayoutError as exc:
-            raise ExecutorFailure("layout_options_invalid", str(exc)) from exc
-        for command in commands:
-            devices = _revalidate(document, inventory_provider, paths)
-            runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
-        if topology == "zfs":
-            _install_storage_timer(
-                paths,
-                unit_name=f"hoardarr-zfs-scrub-{options['name']}",
-                description=f"Scrub ZFS pool {options['name']}",
-                command=[_tool("zpool"), "scrub", str(options["name"])],
-                schedule=str(options["scrub_schedule"]),
-                runner=runner,
+        expansion = storage.get("expansion")
+        expansion_kind = expansion.get("kind") if isinstance(expansion, Mapping) else None
+        if topology == "zfs" and expansion_kind == "add_zfs_vdev":
+            target = expansion.get("target")
+            configuration = expansion.get("configuration")
+            if not isinstance(target, Mapping) or not isinstance(configuration, Mapping):
+                raise ExecutorFailure(
+                    "zfs_expansion_invalid", "The reviewed ZFS expansion binding is incomplete."
+                )
+            instance_id = target.get("instance_id")
+            pool_name = (
+                str(instance_id).removeprefix("zfs:")
+                if isinstance(instance_id, str) and instance_id.startswith("zfs:")
+                else ""
             )
-            snapshots = options.get("snapshots", {})
-            if snapshots.get("enabled") and int(snapshots.get("retention", 0)) > 0:
+            expected_guid = configuration.get("zfs_pool_guid")
+            expected_digest = configuration.get("zfs_config_sha256")
+            expected_type = configuration.get("vdev_type")
+            expected_width = configuration.get("vdev_width")
+            expected_count = configuration.get("zfs_vdev_count")
+            if (
+                target.get("provider") != "zfs"
+                or options.get("name") != pool_name
+                or options.get("mountpoint") != target.get("mountpoint")
+                or not valid_pool_guid(expected_guid)
+                or not isinstance(expected_digest, str)
+                or SHA256_RE.fullmatch(expected_digest) is None
+                or expected_type not in {"mirror", "raidz1", "raidz2", "raidz3"}
+                or not isinstance(expected_width, int)
+                or not isinstance(expected_count, int)
+            ):
+                raise ExecutorFailure(
+                    "zfs_expansion_invalid", "The reviewed ZFS pool or geometry binding is invalid."
+                )
+
+            def reviewed_state() -> dict[str, Any]:
+                state = zfs_state_provider(pool_name)
+                if (
+                    state.get("pool_guid") != expected_guid
+                    or state.get("config_sha256") != expected_digest
+                    or state.get("vdev_type") != expected_type
+                    or state.get("vdev_width") != expected_width
+                    or state.get("vdev_count") != expected_count
+                ):
+                    raise ExecutorFailure(
+                        "zfs_pool_changed",
+                        "The existing ZFS pool identity or data-vdev topology changed "
+                        "after review.",
+                    )
+                return state
+
+            reviewed_state()
+            try:
+                commands = zfs_add_vdev_commands(
+                    pool_name=pool_name,
+                    vdev_type=str(expected_type),
+                    device_ids=list(devices),
+                    device_paths=stable_paths,
+                )
+            except LayoutError as exc:
+                raise ExecutorFailure("zfs_expansion_invalid", str(exc)) from exc
+            mutation_started = False
+            try:
+                for command_index, command in enumerate(commands):
+                    journal["phase"] = command.phase
+                    journal["current_action"] = {
+                        "id": f"zfs-expand:{command_index + 1}",
+                        "type": "zfs.vdev.add",
+                        "pool": pool_name,
+                    }
+                    journal["updated_at"] = time.time()
+                    atomic_json(_journal_path(paths, operation_id), journal)
+                    _revalidate(document, inventory_provider, paths)
+                    if command_index == 1:
+                        reviewed_state()
+                        mutation_started = True
+                    runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
+                post_state = zfs_state_provider(pool_name)
+                if (
+                    post_state.get("pool_guid") != expected_guid
+                    or post_state.get("vdev_type") != expected_type
+                    or post_state.get("vdev_width") != expected_width
+                    or post_state.get("vdev_count") != expected_count + 1
+                    or post_state.get("config_sha256") == expected_digest
+                ):
+                    raise ExecutorFailure(
+                        "zfs_expansion_verification_failed",
+                        "ZFS did not report the expected additional matching data vdev.",
+                        needs_attention=True,
+                    )
+            except ExecutorFailure as exc:
+                if mutation_started and not exc.needs_attention:
+                    raise ExecutorFailure(
+                        "zfs_expansion_needs_attention",
+                        "The ZFS add operation started, but final verification did not complete. "
+                        "The existing pool was not recreated; inspect zpool status before "
+                        "retrying.",
+                        needs_attention=True,
+                    ) from exc
+                raise
+            journal["current_action"] = None
+        else:
+            try:
+                commands = layout_commands(topology, options, stable_paths)
+            except LayoutError as exc:
+                raise ExecutorFailure("layout_options_invalid", str(exc)) from exc
+            for command in commands:
+                devices = _revalidate(document, inventory_provider, paths)
+                runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
+        if topology == "zfs":
+            if expansion_kind != "add_zfs_vdev":
                 _install_storage_timer(
                     paths,
-                    unit_name=f"hoardarr-zfs-snapshot-{options['name']}",
-                    description=f"Snapshot ZFS pool {options['name']}",
-                    command=[
-                        _tool("hoardarr-zfs-snapshot"),
-                        "--pool",
-                        str(options["name"]),
-                        "--retention",
-                        str(snapshots["retention"]),
-                    ],
-                    schedule="daily",
+                    unit_name=f"hoardarr-zfs-scrub-{options['name']}",
+                    description=f"Scrub ZFS pool {options['name']}",
+                    command=[_tool("zpool"), "scrub", str(options["name"])],
+                    schedule=str(options["scrub_schedule"]),
                     runner=runner,
                 )
+                snapshots = options.get("snapshots", {})
+                if snapshots.get("enabled") and int(snapshots.get("retention", 0)) > 0:
+                    _install_storage_timer(
+                        paths,
+                        unit_name=f"hoardarr-zfs-snapshot-{options['name']}",
+                        description=f"Snapshot ZFS pool {options['name']}",
+                        command=[
+                            _tool("hoardarr-zfs-snapshot"),
+                            "--pool",
+                            str(options["name"]),
+                            "--retention",
+                            str(snapshots["retention"]),
+                        ],
+                        schedule="daily",
+                        runner=runner,
+                    )
         elif topology == "raid":
             md_path = Path(f"/dev/md/{options['name']}")
             filesystem_uuid = _blkid_value(md_path, "UUID")
@@ -2344,6 +2499,7 @@ def apply_storage_plan(
     paths: Paths | None = None,
     inventory_provider: InventoryProvider | None = None,
     runner: CommandRunner = _run,
+    zfs_state_provider: ZfsStateProvider = _live_zfs_pool_state,
 ) -> dict[str, Any]:
     paths = paths or Paths()
     operation_id, plan_sha, document, _approval = _validate_plan(request)
@@ -2433,6 +2589,7 @@ def apply_storage_plan(
                 inventory_provider=provider,
                 runner=runner,
                 journal=journal,
+                zfs_state_provider=zfs_state_provider,
             )
         except Exception:
             journal["state"] = "needs_attention"
@@ -2985,10 +3142,10 @@ def apply_storage_redundancy(
             else "Verifying shares"
             if command_name == "systemctl" and len(command) > 1 and command[1] == "start"
             else {
-            "multipath": "Preparing redundant storage access",
-            "multipathd": "Updating controller paths",
-            "umount": "Switching the storage access layer",
-            "mount": "Restoring the existing storage mount",
+                "multipath": "Preparing redundant storage access",
+                "multipathd": "Updating controller paths",
+                "umount": "Switching the storage access layer",
+                "mount": "Restoring the existing storage mount",
             }.get(command_name, "Updating controller redundancy")
         )
         journal["current_action"] = {

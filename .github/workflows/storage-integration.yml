@@ -90,7 +90,7 @@ jobs:
       - run: uv sync --project backend --locked --all-groups
       - name: Install disposable filesystem and storage-stack tools
         run: sudo apt-get update && sudo apt-get install -y acl e2fsprogs jq mdadm snapraid xfsprogs zfsutils-linux
-      - name: Validate ext4 ACLs, MD RAID6, ZFS RAIDZ2, and expanded SnapRAID on test-created loops
+      - name: Validate ACLs, MD RAID6, existing-ZFS expansion, and SnapRAID on test-created loops
         run: |
           sudo touch /.hoardarr-disposable-runner
           sudo modprobe loop
@@ -100,10 +100,14 @@ jobs:
             tests/integration/run-loop-device-tests.sh
           jq -e '.classification == "VERIFIED IN ISOLATION" and .data_member_added and .second_parity_added' \
             dist/validation/snapraid-expansion.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .vdev_count_before == 1 and .vdev_count_after == 2 and .pool_guid_before == .pool_guid_after and .dry_run_executed and (.force_override_used | not)' \
+            dist/validation/zfs-expansion.json
       - uses: actions/upload-artifact@v4
         with:
-          name: snapraid-expansion-evidence
-          path: dist/validation/snapraid-expansion.json
+          name: storage-expansion-evidence
+          path: |
+            dist/validation/snapraid-expansion.json
+            dist/validation/zfs-expansion.json
   disposable-block-devices:
     if: github.event_name == 'workflow_dispatch' && inputs.run_extended_self_hosted
     runs-on: [self-hosted, linux, hoardarr-storage-test]

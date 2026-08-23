@@ -646,7 +646,7 @@ export interface StorageExpansionDisk {
 }
 
 export interface StorageExpansionTarget {
-  provider: "mergerfs";
+  provider: "mergerfs" | "zfs";
   instance_id: string;
   mountpoint: string;
 }
@@ -665,6 +665,9 @@ export interface StorageExpansionSelection {
     snapraid_role?: "data" | "parity";
     snapraid_instance_id?: string;
     snapraid_config_sha256?: string;
+    zfs_pool_guid?: string;
+    zfs_config_sha256?: string;
+    zfs_vdev_count?: number;
   };
 }
 

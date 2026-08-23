@@ -558,13 +558,17 @@ export default function App() {
       for (let index = 0; index < selectedDriveIds.length; index += zfsVdevWidth) {
         vdevs.push({ type: zfsVdevType, device_ids: selectedDriveIds.slice(index, index + zfsVdevWidth) });
       }
+      const existingZfsMountpoint = expansionSelection?.kind === "add_zfs_vdev"
+        && expansionSelection.target?.provider === "zfs"
+        ? expansionSelection.target.mountpoint
+        : "/data";
       return {
         name: arrayName,
         vdevs,
         ashift: zfsAshift,
         recordsize: zfsRecordsize,
         compression: zfsCompression,
-        mountpoint: "/data",
+        mountpoint: existingZfsMountpoint,
         scrub_schedule: "monthly",
         snapshots: { enabled: snapshots, retention: snapshots ? 12 : 0 },
       };
@@ -1029,7 +1033,7 @@ export default function App() {
           },
           downloads: { torrents: torrentDownloads, usenet: usenetDownloads },
           ...(topology === "mergerfs" ? { mergerfs: mergerFsAnswer() } : {}),
-          ...(topology === "mergerfs" && expansionSelection ? { expansion: expansionSelection } : {}),
+          ...(expansionSelection ? { expansion: expansionSelection } : {}),
           ...(topology === "zfs" || topology === "raid" || topology === "snapraid" || topology === "mixed" ? { layout_options: layoutOptionsAnswer(topology) } : {}),
           ...(mode === "advanced" ? { format_options: {
             filesystem: selectedFilesystem,
@@ -1041,10 +1045,14 @@ export default function App() {
           } } : {}),
           ...(usbOverrideAck ? { advanced_usb_acknowledgement: usbOverrideAck } : {}),
         });
+        const storageRoot = expansionSelection?.kind === "add_zfs_vdev"
+          && expansionSelection.target?.provider === "zfs"
+          ? expansionSelection.target.mountpoint
+          : "/data";
         const layoutUpdated = await api.saveWizardStep(storageUpdated, "layout", {
-          work_path: "/data/work",
-          downloads_path: "/data/downloads",
-          media_path: "/data/media",
+          work_path: `${storageRoot}/work`,
+          downloads_path: `${storageRoot}/downloads`,
+          media_path: `${storageRoot}/media`,
         });
         const applicationsUpdated = await api.saveWizardStep(
           layoutUpdated,
@@ -1451,6 +1459,9 @@ export default function App() {
             setZfsVdevType(type);
           }
           setZfsVdevWidth(expansion.configuration.vdev_width ?? driveIds.length);
+          if (expansion.target?.provider === "zfs") {
+            setArrayName(expansion.target.instance_id.replace(/^zfs:/, ""));
+          }
         }
       } else {
         setMode("guided");
@@ -2279,18 +2290,27 @@ function expansionSelectionValue(value: unknown): StorageExpansionSelection | nu
     || !/^[a-f0-9]{64}$/.test(snapshot)
     || !diskIds.length
   ) return null;
-  const hasTarget = /^mergerfs:[a-f0-9]{16}$/.test(instanceId) && mountpoint.startsWith("/");
+  const provider = target.provider === "mergerfs" || target.provider === "zfs" ? target.provider : null;
+  const hasTarget = provider !== null
+    && (provider === "mergerfs" ? /^mergerfs:[a-f0-9]{16}$/.test(instanceId) : /^zfs:[A-Za-z][A-Za-z0-9_.:-]{0,254}$/.test(instanceId))
+    && mountpoint.startsWith("/");
   return {
     candidate_id: candidateId,
     kind,
     storage_group_id: typeof expansion.storage_group_id === "string" ? expansion.storage_group_id : null,
     hardware_snapshot_sha256: snapshot,
     disk_ids: diskIds,
-    target: hasTarget ? { provider: "mergerfs", instance_id: instanceId, mountpoint } : null,
+    target: hasTarget && provider ? { provider, instance_id: instanceId, mountpoint } : null,
     configuration: {
       ...(typeof configuration.topology === "string" ? { topology: configuration.topology } : {}),
       ...(typeof configuration.vdev_type === "string" ? { vdev_type: configuration.vdev_type } : {}),
       ...(typeof configuration.vdev_width === "number" ? { vdev_width: configuration.vdev_width } : {}),
+      ...(typeof configuration.snapraid_role === "string" && (configuration.snapraid_role === "data" || configuration.snapraid_role === "parity") ? { snapraid_role: configuration.snapraid_role } : {}),
+      ...(typeof configuration.snapraid_instance_id === "string" ? { snapraid_instance_id: configuration.snapraid_instance_id } : {}),
+      ...(typeof configuration.snapraid_config_sha256 === "string" ? { snapraid_config_sha256: configuration.snapraid_config_sha256 } : {}),
+      ...(typeof configuration.zfs_pool_guid === "string" ? { zfs_pool_guid: configuration.zfs_pool_guid } : {}),
+      ...(typeof configuration.zfs_config_sha256 === "string" ? { zfs_config_sha256: configuration.zfs_config_sha256 } : {}),
+      ...(typeof configuration.zfs_vdev_count === "number" ? { zfs_vdev_count: configuration.zfs_vdev_count } : {}),
     },
   };
 }

@@ -154,6 +154,50 @@ describe("StorageExpansionPanel", () => {
     expect(onPlan.mock.calls[0][2].configuration.snapraid_role).toBe("parity");
   });
 
+  it("passes the immutable existing ZFS pool binding into Advanced setup", async () => {
+    const secondDisk = {
+      ...assessment.available_disks[0],
+      id: "55555555-5555-4555-8555-555555555555",
+      stable_identity: "wwn:new-drive-two",
+      kernel_path: "/dev/sdy",
+    };
+    const zfsCandidate = {
+      ...assessment.candidates[0],
+      id: "candidate-zfs",
+      kind: "add_zfs_vdev",
+      title: "Add another protected vdev to Media",
+      summary: "Add one complete MIRROR group without recreating the existing pool.",
+      setup_mode: "advanced" as const,
+      disk_ids: [assessment.available_disks[0].id, secondDisk.id],
+      target: { provider: "zfs" as const, instance_id: "zfs:media", mountpoint: "/srv/hoardarr/media" },
+      configuration: {
+        topology: "zfs",
+        vdev_type: "mirror",
+        vdev_width: 2,
+        zfs_pool_guid: "1234567890123456789",
+        zfs_config_sha256: "c".repeat(64),
+        zfs_vdev_count: 1,
+      },
+    };
+    vi.spyOn(api, "storageExpansion").mockResolvedValue({
+      ...assessment,
+      available_disks: [...assessment.available_disks, secondDisk],
+      detected_capabilities: { ...assessment.detected_capabilities, zfs: true },
+      candidates: [zfsCandidate],
+    });
+    const onPlan = vi.fn();
+    const user = userEvent.setup();
+    render(<StorageExpansionPanel onPlan={onPlan} snapshotId="snapshot-one" />);
+
+    const card = await screen.findByLabelText("Add another protected vdev to Media");
+    await user.click(within(card).getByRole("button", { name: "Customize this plan" }));
+    expect(onPlan).toHaveBeenCalledWith("advanced", zfsCandidate.disk_ids, expect.objectContaining({
+      kind: "add_zfs_vdev",
+      target: zfsCandidate.target,
+      configuration: zfsCandidate.configuration,
+    }));
+  });
+
   it("reconciles choices automatically after a new hardware snapshot", async () => {
     const load = vi.spyOn(api, "storageExpansion")
       .mockResolvedValueOnce({ ...assessment, available_disks: [], candidates: [] })

@@ -573,6 +573,80 @@ def test_zfs_expansion_candidate_rejects_changed_geometry(session: Session) -> N
         )
 
 
+def test_existing_zfs_vdev_expansion_binds_pool_identity_and_preserves_mount(
+    session: Session,
+) -> None:
+    payload = _direct_payload(drive_count=2)
+    snapshot = _snapshot(session, payload)
+    disk_ids = [str(item["id"]) for item in payload["disks"]]  # type: ignore[index]
+    expansion = {
+        "candidate_id": "f" * 24,
+        "kind": "add_zfs_vdev",
+        "storage_group_id": "11111111-1111-4111-8111-111111111111",
+        "hardware_snapshot_sha256": snapshot.sha256,
+        "disk_ids": disk_ids,
+        "target": {
+            "provider": "zfs",
+            "instance_id": "zfs:media",
+            "mountpoint": "/data",
+        },
+        "configuration": {
+            "topology": "zfs",
+            "vdev_type": "mirror",
+            "vdev_width": 2,
+            "zfs_pool_guid": "1234567890123456789",
+            "zfs_config_sha256": "e" * 64,
+            "zfs_vdev_count": 1,
+        },
+    }
+    answers = _storage_answers(
+            selected_device_ids=disk_ids,
+            topology="zfs",
+            portable_systems=["linux"],
+            expansion=expansion,
+            layout_options={
+                "name": "media",
+                "vdevs": [{"type": "mirror", "device_ids": disk_ids}],
+                "ashift": 12,
+                "recordsize": "1M",
+                "compression": "lz4",
+                "mountpoint": "/data",
+                "scrub_schedule": "monthly",
+                "snapshots": {"enabled": False, "retention": 0},
+            },
+    )
+    wizard = create_wizard(session, mode="advanced", hardware_snapshot_id=snapshot.id)
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=0,
+        step="storage",
+        answers=answers,
+    )
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=wizard.revision,
+        step="layout",
+        answers=DEFAULT_LAYOUT,
+    )
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=wizard.revision,
+        step="applications",
+        answers={},
+    )
+    plan = create_plan(session, wizard_id=wizard.id, expected_revision=wizard.revision)
+
+    storage = plan.document_json["storage"]
+    assert storage["expansion"] == expansion
+    assert storage["layout_options"]["name"] == "media"
+    assert storage["layout_options"]["mountpoint"] == "/data"
+    assert "will be added permanently" in storage["risk"]["message"]
+    assert "repartitioned" not in storage["risk"]["message"]
+
+
 def test_mergerfs_mountpoint_rejects_fstab_control_characters(session: Session) -> None:
     snapshot = _snapshot(session, _usb_payload())
     wizard = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)

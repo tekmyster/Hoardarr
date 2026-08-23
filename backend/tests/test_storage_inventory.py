@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hoardarr.storage import inventory
+from hoardarr.storage.zfs import parse_zpool_data_topology
 
 
 def test_live_inventory_reports_md_arrays_and_managed_shares(tmp_path: Path, monkeypatch) -> None:
@@ -92,3 +93,42 @@ def test_snapraid_inventory_fails_closed_on_malformed_or_oversized_config(
     oversized = inventory._snapraid_configuration(config)
     assert oversized["quality"] == "temporarily_unavailable"
     assert oversized["config_sha256"] is None
+
+
+def test_zfs_inventory_exposes_guid_and_uniform_data_vdev_binding(monkeypatch) -> None:
+    status = """
+  pool: media
+ state: ONLINE
+  scan: none requested
+config:
+
+        NAME                                      STATE     READ WRITE CKSUM
+        media                                     ONLINE       0     0     0
+          mirror-0                                ONLINE       0     0     0
+            /dev/disk/by-id/scsi-a                ONLINE       0     0     0
+            /dev/disk/by-id/scsi-b                ONLINE       0     0     0
+
+errors: No known data errors
+"""
+    topology = parse_zpool_data_topology(status, "media")
+
+    def command(name: str, arguments: list[str]) -> str | None:
+        if name == "zpool" and arguments[:2] == ["list", "-Hp"]:
+            return "media\t20000000000\t1000000000\t19000000000\tONLINE\n"
+        if name == "zpool" and arguments[:2] == ["status", "-P"]:
+            return status
+        if name == "zpool" and arguments[:2] == ["get", "-Hp"]:
+            return "1234567890123456789\n"
+        if name == "zfs":
+            return "media\t/srv/hoardarr/media\n"
+        return None
+
+    monkeypatch.setattr(inventory, "_command", command)
+    item = inventory._zfs_pools()[0]
+
+    assert item["pool_guid"] == "1234567890123456789"
+    assert item["configuration"] == topology.document()
+    assert item["configuration"]["vdev_type"] == "mirror"
+    assert item["configuration"]["vdev_width"] == 2
+    assert item["configuration"]["vdev_count"] == 1
+    assert item["mountpoint"] == "/srv/hoardarr/media"

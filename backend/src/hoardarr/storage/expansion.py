@@ -102,9 +102,7 @@ def _group_capacity_forecast(
         .limit(365)
     ).all()
     points = [
-        (timestamp, float(value))
-        for timestamp, value in [*rolled, *raw]
-        if value is not None
+        (timestamp, float(value)) for timestamp, value in [*rolled, *raw] if value is not None
     ]
     forecast = capacity_forecast(points, total_bytes=total_bytes).document()
     return {
@@ -297,8 +295,14 @@ def build_expansion_assessment(
         for item in pool_items
         if isinstance(item, dict) and str(item.get("type", "")).casefold() == "snapraid"
     ]
+    zfs_pools = [
+        item
+        for item in pool_items
+        if isinstance(item, dict) and str(item.get("type", "")).casefold() == "zfs"
+    ]
     group_mergerfs_targets: dict[str, dict[str, Any]] = {}
     group_snapraid_targets: dict[str, dict[str, Any]] = {}
+    group_zfs_targets: dict[str, dict[str, Any]] = {}
     for group in groups:
         backend_paths = {
             item.namespace_path
@@ -338,6 +342,14 @@ def build_expansion_assessment(
                     snapraid_matches.append(snapraid_pool)
             if len(snapraid_matches) == 1:
                 group_snapraid_targets[group.id] = snapraid_matches[0]
+        zfs_matches = [
+            item
+            for item in zfs_pools
+            if item.get("mountpoint") == group.namespace_path
+            or item.get("mountpoint") in backend_paths
+        ]
+        if len(zfs_matches) == 1:
+            group_zfs_targets[group.id] = zfs_matches[0]
 
     candidates: list[dict[str, Any]] = []
     usable_blank = [
@@ -573,6 +585,107 @@ def build_expansion_assessment(
             )
         )
 
+    # Existing ZFS pools expand by appending another complete top-level vdev
+    # with the exact, already-observed redundancy geometry. Never suggest a
+    # force override or a lone disk merely because it has similar capacity.
+    for group in groups:
+        zfs_target = group_zfs_targets.get(group.id)
+        if zfs_target is None:
+            continue
+        zfs_configuration = zfs_target.get("configuration")
+        if not isinstance(zfs_configuration, dict):
+            continue
+        vdev_type = zfs_configuration.get("vdev_type")
+        vdev_width = zfs_configuration.get("vdev_width")
+        config_sha256 = zfs_configuration.get("config_sha256")
+        pool_guid = zfs_target.get("pool_guid")
+        if (
+            zfs_configuration.get("quality") != "available"
+            or vdev_type not in {"mirror", "raidz1", "raidz2", "raidz3"}
+            or not isinstance(vdev_width, int)
+            or not 2 <= vdev_width <= 64
+            or not isinstance(config_sha256, str)
+            or len(config_sha256) != 64
+            or not isinstance(pool_guid, str)
+            or not pool_guid.isdigit()
+        ):
+            continue
+        capacity_ordered = sorted(
+            usable_blank,
+            key=lambda item: int(item["capacity_bytes"] or 0),
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] | None = None
+        for offset in range(0, len(capacity_ordered) - vdev_width + 1):
+            possible = capacity_ordered[offset : offset + vdev_width]
+            possible_capacities = [int(item["capacity_bytes"] or 0) for item in possible]
+            smallest_possible = min(possible_capacities)
+            largest_possible = max(possible_capacities)
+            if smallest_possible > 0 and largest_possible / smallest_possible <= 1.05:
+                selected = possible
+                break
+        if selected is None:
+            continue
+        capacities = [int(item["capacity_bytes"] or 0) for item in selected]
+        smallest = min(capacities)
+        parity_columns = {"mirror": vdev_width - 1, "raidz1": 1, "raidz2": 2, "raidz3": 3}[
+            str(vdev_type)
+        ]
+        pool_name = str(zfs_target.get("name") or "")
+        candidates.append(
+            _candidate(
+                kind="add_zfs_vdev",
+                disk_ids=[item["id"] for item in selected],
+                title=f"Add another protected vdev to {group.name}",
+                summary=(
+                    f"Add one complete {str(vdev_type).upper()} group to the existing ZFS pool "
+                    "without recreating its datasets or mount path."
+                ),
+                group=group,
+                raw_delta=sum(capacities),
+                usable_delta=smallest * (vdev_width - parity_columns),
+                protection=(
+                    f"Matches the existing {str(vdev_type).upper()} data-vdev geometry. "
+                    "Protection remains defined independently within each top-level vdev."
+                ),
+                expansion=(
+                    "Future growth requires another complete matching vdev. Existing data is not "
+                    "automatically rebalanced onto the new vdev."
+                ),
+                migration=(
+                    "Validate the pool GUID and exact data-vdev configuration, run ZFS's no-change "
+                    "dry run, then add the reviewed vdev without formatting or recreating the pool."
+                ),
+                recommended=False,
+                mode="advanced",
+                restrictions=[
+                    "Adding a top-level vdev changes the pool permanently and requires exact "
+                    "destructive approval.",
+                    "Hoardarr will not use zpool -f to override a geometry or device-safety "
+                    "warning.",
+                    "ZFS directs new writes to the added vdev; it does not rebalance existing "
+                    "blocks.",
+                ],
+                methodology=(
+                    "Estimated usable capacity is the smallest new member multiplied by the data "
+                    "columns in the reviewed matching vdev, before ZFS overhead."
+                ),
+                target={
+                    "provider": "zfs",
+                    "instance_id": f"zfs:{pool_name}",
+                    "mountpoint": str(zfs_target.get("mountpoint") or group.namespace_path),
+                },
+                configuration={
+                    "topology": "zfs",
+                    "vdev_type": vdev_type,
+                    "vdev_width": vdev_width,
+                    "zfs_pool_guid": pool_guid,
+                    "zfs_config_sha256": config_sha256,
+                    "zfs_vdev_count": int(zfs_configuration.get("vdev_count") or 0),
+                },
+            )
+        )
+
     matched = sorted(usable_blank, key=lambda item: int(item["capacity_bytes"] or 0), reverse=True)
     if len(matched) >= 2:
         first, second = matched[:2]
@@ -706,9 +819,7 @@ def build_expansion_assessment(
         ]
         spread = max(utilizations) - min(utilizations) if len(utilizations) >= 2 else None
         parity = [
-            item
-            for item in backends
-            if item.role == "parity" and item.lifecycle_state != "retired"
+            item for item in backends if item.role == "parity" and item.lifecycle_state != "retired"
         ]
         data = [
             item

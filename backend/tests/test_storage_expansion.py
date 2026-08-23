@@ -380,6 +380,116 @@ def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:
         }
 
 
+def test_existing_zfs_pool_gets_exact_matching_vdev_candidate() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        actor = _principal()
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        current = StorageEntity(
+            name="media",
+            stable_identity="zpool-guid:1234567890123456789",
+            storage_kind="zfs",
+            filesystem_uuid=None,
+            mountpoint=group.namespace_path,
+            presentation_device="media",
+            capacity_bytes=10_000_000_000,
+            logical_sector_bytes=512,
+            physical_sector_bytes=4096,
+            topology_state="single_path",
+            provider="zfs",
+        )
+        session.add(current)
+        session.flush()
+        backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=None,
+            storage_entity_id=current.id,
+            namespace_path=group.namespace_path,
+            role="data",
+            principal=actor,
+        )
+        transition_backend(
+            session,
+            group_id=group.id,
+            backend_id=backend.id,
+            target_state="active",
+            principal=actor,
+            reason="fixture",
+        )
+        observations = []
+        new_ids = []
+        # The largest disk does not match either smaller member. The planner must
+        # find the valid matched window instead of considering only the N largest.
+        for suffix, capacity in (
+            ("new-too-large", 12_000_000_000),
+            ("new-a", 10_000_000_000),
+            ("new-b", 9_900_000_000),
+        ):
+            disk, _ = register_disk(
+                session,
+                {
+                    "stable_identity": f"wwn:{suffix}",
+                    "kernel_path": f"/dev/{suffix}",
+                    "capacity_bytes": capacity,
+                    "media_type": "hdd",
+                    "health_state": "healthy",
+                },
+            )
+            new_ids.append(disk.id)
+            observations.append(_observation(f"wwn:{suffix}"))
+        result = build_expansion_assessment(
+            session,
+            snapshot=_snapshot(session, observations),
+            storage_inventory={
+                "pools": {
+                    "items": [
+                        {
+                            "id": "zfs:media",
+                            "name": "media",
+                            "type": "ZFS",
+                            "mountpoint": group.namespace_path,
+                            "pool_guid": "1234567890123456789",
+                            "configuration": {
+                                "quality": "available",
+                                "vdev_type": "mirror",
+                                "vdev_width": 2,
+                                "vdev_count": 1,
+                                "config_sha256": "b" * 64,
+                            },
+                        }
+                    ]
+                }
+            },
+            filesystem_probe=lambda _path: FilesystemUsage(900, 10_000, 2_000, 8_000),
+        )
+        candidate = next(item for item in result["candidates"] if item["kind"] == "add_zfs_vdev")
+
+        assert candidate["disk_ids"] == new_ids[1:]
+        assert candidate["target"] == {
+            "provider": "zfs",
+            "instance_id": "zfs:media",
+            "mountpoint": group.namespace_path,
+        }
+        assert candidate["capacity"]["estimated_usable_delta_bytes"] == 9_900_000_000
+        assert candidate["configuration"] == {
+            "topology": "zfs",
+            "vdev_type": "mirror",
+            "vdev_width": 2,
+            "zfs_pool_guid": "1234567890123456789",
+            "zfs_config_sha256": "b" * 64,
+            "zfs_vdev_count": 1,
+        }
+        assert "zpool -f" in " ".join(candidate["restrictions"])
+
+
 def test_five_matched_blank_disks_offer_source_backed_raidz_geometry_math() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

@@ -90,12 +90,36 @@ for number in 1 2 3 4; do
   zfs_members+=("$member")
 done
 zpool_name="hoardarr_ci_$$"
-zpool create -f -o ashift=12 -O mountpoint=none -O compression=lz4 "$zpool_name" raidz2 "${zfs_members[@]}"
+zpool create -f -o ashift=12 -O mountpoint=none -O compression=lz4 "$zpool_name" mirror "${zfs_members[@]:0:2}"
 zfs create -o mountpoint="$work/zfs" -o recordsize=1M "$zpool_name/media"
-touch "$work/zfs/zfs-verified"
+printf 'zfs expansion data integrity\n' >"$work/zfs/zfs-verified"
+zfs_hash_before="$(sha256sum "$work/zfs/zfs-verified" | awk '{print $1}')"
+zfs_guid_before="$(zpool get -Hp -o value guid "$zpool_name")"
+zfs_mount_before="$(zfs get -Hp -o value mountpoint "$zpool_name/media")"
 zfs snapshot "$zpool_name/media@initial"
 zpool scrub "$zpool_name"
 zpool status "$zpool_name" | grep -q 'state: ONLINE'
+"$python" - "$zpool_name" >"$work/zfs-before.json" <<'PY'
+import json
+import sys
+from hoardarr.storage.executor import _live_zfs_pool_state
+
+print(json.dumps(_live_zfs_pool_state(sys.argv[1]), sort_keys=True))
+PY
+zfs_config_before="$(jq -r .config_sha256 "$work/zfs-before.json")"
+zfs_vdev_count_before="$(jq -r .vdev_count "$work/zfs-before.json")"
+"$python" "$repo/tests/integration/zfs_expand_vdev.py" \
+  --pool "$zpool_name" \
+  --vdev-type mirror \
+  --expected-guid "$zfs_guid_before" \
+  --expected-config-sha256 "$zfs_config_before" \
+  --expected-vdev-count "$zfs_vdev_count_before" \
+  --evidence "$repo/dist/validation/zfs-expansion.json" \
+  "${zfs_members[@]:2:2}"
+[[ "$(zfs get -Hp -o value mountpoint "$zpool_name/media")" == "$zfs_mount_before" ]]
+[[ "$(zpool get -Hp -o value guid "$zpool_name")" == "$zfs_guid_before" ]]
+[[ "$(sha256sum "$work/zfs/zfs-verified" | awk '{print $1}')" == "$zfs_hash_before" ]]
+[[ "$(zpool status -P "$zpool_name" | grep -Ec 'mirror-[0-9]+')" -eq 2 ]]
 zpool destroy -f "$zpool_name"
 zpool_name=""
 

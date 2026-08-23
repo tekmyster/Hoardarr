@@ -29,6 +29,7 @@ INTAKE_TESTS = (
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _MERGERFS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MERGERFS_INSTANCE_RE = re.compile(r"^mergerfs:[a-f0-9]{16}$")
+_ZFS_INSTANCE_RE = re.compile(r"^zfs:([A-Za-z][A-Za-z0-9_.:-]{0,127})$")
 _EXPANSION_CANDIDATE_RE = re.compile(r"^[a-f0-9]{24}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _CUSTOM_APPS = frozenset({"radarr", "sonarr", "lidarr", "readarr", "immich", "none"})
@@ -80,7 +81,7 @@ def _mergerfs_mountpoint(value: Any) -> str:
     if ".." in path.parts or path == PurePosixPath("/"):
         _error("storage.mergerfs.mountpoint", "cannot be the root directory or contain ..")
     allowed_roots = (PurePosixPath("/mnt"), PurePosixPath("/srv"), PurePosixPath("/data"))
-    if not any(root in path.parents for root in allowed_roots):
+    if not any(path == root or root in path.parents for root in allowed_roots):
         _error("storage.mergerfs.mountpoint", "must be beneath /mnt, /srv, or /data")
     return str(path)
 
@@ -148,6 +149,7 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "import_existing",
         "add_mergerfs_member",
         "add_snapraid_parity",
+        "add_zfs_vdev",
         "add_download_tier",
         "new_storage_group",
         "new_zfs_mirror",
@@ -170,20 +172,34 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         raw_target = _as_mapping(target_value, field="storage.expansion.target")
         if set(raw_target) != {"provider", "instance_id", "mountpoint"}:
             _error("storage.expansion.target", "must contain provider, instance_id, and mountpoint")
-        if raw_target.get("provider") != "mergerfs":
-            _error("storage.expansion.target.provider", "must be mergerfs")
+        provider = raw_target.get("provider")
         instance_id = raw_target.get("instance_id")
-        if not isinstance(instance_id, str) or not _MERGERFS_INSTANCE_RE.fullmatch(instance_id):
-            _error("storage.expansion.target.instance_id", "must identify a mergerFS instance")
+        if provider == "mergerfs":
+            if not isinstance(instance_id, str) or not _MERGERFS_INSTANCE_RE.fullmatch(instance_id):
+                _error("storage.expansion.target.instance_id", "must identify a mergerFS instance")
+        elif provider == "zfs":
+            if not isinstance(instance_id, str) or not _ZFS_INSTANCE_RE.fullmatch(instance_id):
+                _error("storage.expansion.target.instance_id", "must identify a ZFS pool")
+        else:
+            _error("storage.expansion.target.provider", "must be mergerfs or zfs")
         target = {
-            "provider": "mergerfs",
+            "provider": provider,
             "instance_id": instance_id,
             "mountpoint": _mergerfs_mountpoint(raw_target.get("mountpoint")),
         }
-    if kind in {"add_mergerfs_member", "add_snapraid_parity"} and target is None:
-        _error("storage.expansion.target", "is required for an existing mergerFS expansion")
-    if kind not in {"add_mergerfs_member", "add_snapraid_parity"} and target is not None:
-        _error("storage.expansion.target", "is only valid for an existing mergerFS expansion")
+    target_kinds = {"add_mergerfs_member", "add_snapraid_parity", "add_zfs_vdev"}
+    if kind in target_kinds and target is None:
+        _error("storage.expansion.target", "is required for an existing-storage expansion")
+    if kind not in target_kinds and target is not None:
+        _error("storage.expansion.target", "is only valid for an existing-storage expansion")
+    if (
+        kind in {"add_mergerfs_member", "add_snapraid_parity"}
+        and target is not None
+        and target["provider"] != "mergerfs"
+    ):
+        _error("storage.expansion.target.provider", "must be mergerfs for this expansion")
+    if kind == "add_zfs_vdev" and target is not None and target["provider"] != "zfs":
+        _error("storage.expansion.target.provider", "must be zfs for this expansion")
     configuration = _as_mapping(
         expansion.get("configuration", {}), field="storage.expansion.configuration"
     )
@@ -194,12 +210,16 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "snapraid_role",
         "snapraid_instance_id",
         "snapraid_config_sha256",
+        "zfs_pool_guid",
+        "zfs_config_sha256",
+        "zfs_vdev_count",
     }:
         _error("storage.expansion.configuration", "contains unsupported fields")
     expected_configuration: dict[str, Any] = {
         "import_existing": {"topology": "import"},
         "add_mergerfs_member": {"topology": "mergerfs"},
         "add_snapraid_parity": {"topology": "mergerfs", "snapraid_role": "parity"},
+        "add_zfs_vdev": {"topology": "zfs"},
         "add_download_tier": {"topology": "download-cache"},
         "new_storage_group": {"topology": "individual"},
         "new_zfs_mirror": {"topology": "zfs", "vdev_type": "mirror", "vdev_width": 2},
@@ -239,13 +259,31 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
             )
     elif kind == "add_snapraid_parity":
         _error("storage.expansion.configuration.snapraid_role", "is required")
-    if str(kind).startswith("new_zfs_"):
+    if str(kind).startswith("new_zfs_") or kind == "add_zfs_vdev":
         width = configuration.get("vdev_width")
         minimum = {"mirror": 2, "raidz1": 3, "raidz2": 4, "raidz3": 5}[
             str(configuration.get("vdev_type"))
         ]
         if not isinstance(width, int) or not minimum <= width <= 64:
             _error("storage.expansion.configuration.vdev_width", "is invalid")
+    if kind == "add_zfs_vdev":
+        pool_guid = configuration.get("zfs_pool_guid")
+        config_digest = configuration.get("zfs_config_sha256")
+        vdev_count = configuration.get("zfs_vdev_count")
+        if not isinstance(pool_guid, str) or not pool_guid.isdigit() or len(pool_guid) > 20:
+            _error(
+                "storage.expansion.configuration.zfs_pool_guid", "must bind the reviewed pool GUID"
+            )
+        if not isinstance(config_digest, str) or not _SHA256_RE.fullmatch(config_digest):
+            _error(
+                "storage.expansion.configuration.zfs_config_sha256",
+                "must bind the reviewed pool topology",
+            )
+        if not isinstance(vdev_count, int) or not 1 <= vdev_count <= 1024:
+            _error(
+                "storage.expansion.configuration.zfs_vdev_count",
+                "must bind the reviewed vdev count",
+            )
     return {
         "candidate_id": candidate_id,
         "kind": kind,
@@ -969,8 +1007,7 @@ def normalize_storage_answers(
                 target is None
                 or normalized["expansion"]["kind"]
                 not in {"add_mergerfs_member", "add_snapraid_parity"}
-                or
-                normalized["mergerfs"]["mode"] != "existing"
+                or normalized["mergerfs"]["mode"] != "existing"
                 or normalized["mergerfs"]["instance_id"] != target["instance_id"]
                 or normalized["mergerfs"]["mountpoint"] != target["mountpoint"]
             ):
@@ -1011,6 +1048,18 @@ def normalize_storage_answers(
                     "storage.expansion.configuration",
                     "the ZFS geometry no longer matches the reviewed expansion choice",
                 )
+            if normalized["expansion"]["kind"] == "add_zfs_vdev":
+                target = normalized["expansion"]["target"]
+                pool_name = target["instance_id"].removeprefix("zfs:")
+                if (
+                    normalized.get("layout_options", {}).get("name") != pool_name
+                    or normalized.get("layout_options", {}).get("mountpoint")
+                    != target["mountpoint"]
+                ):
+                    _error(
+                        "storage.layout_options",
+                        "must preserve the reviewed existing ZFS pool name and mountpoint",
+                    )
     if storage.get("format_options") is not None:
         normalized["format_options"] = {
             "filesystem": format_decision["filesystem"],
@@ -1167,7 +1216,7 @@ def build_storage_plan(
         )
     destructive = any(action["destructive"] for action in actions)
     risk_messages: list[str] = []
-    if not storage["preserve_data"]:
+    if not storage["preserve_data"] and format_members:
         risk_messages.append(
             "The listed drives will be repartitioned and formatted. Existing data will be lost."
         )
@@ -1175,7 +1224,12 @@ def build_storage_plan(
         risk_messages.append(
             "The destructive write/read test will overwrite data on the listed drives."
         )
-    if layout_is_destructive:
+    if isinstance(expansion, Mapping) and expansion.get("kind") == "add_zfs_vdev":
+        risk_messages.append(
+            "The listed blank drives will be added permanently as a new top-level ZFS vdev. "
+            "The existing pool, datasets, data, and mountpoint will not be recreated."
+        )
+    elif layout_is_destructive:
         risk_messages.append(
             f"Creating the {storage['topology']} layout can overwrite storage metadata or data "
             "on the listed drives."

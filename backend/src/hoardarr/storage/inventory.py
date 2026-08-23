@@ -21,6 +21,7 @@ from hoardarr.hardware.providers import (
 )
 from hoardarr.storage.mergerfs import discover_mergerfs
 from hoardarr.storage.topology import add_logical_topology, build_storage_topology
+from hoardarr.storage.zfs import parse_zpool_data_topology, valid_pool_guid
 
 _SNAPRAID_PARITY_RE = re.compile(r"^(?:(\d+)-)?parity$")
 
@@ -135,11 +136,12 @@ def _zfs_pools() -> list[dict[str, Any]]:
             continue
         name, size, allocated, free, health = fields
         status_output = _command("zpool", ["status", "-P", name]) or ""
-        device_names = []
-        for status_line in status_output.splitlines():
-            candidate = status_line.strip().split(maxsplit=1)[0] if status_line.strip() else ""
-            if candidate.startswith("/dev/"):
-                device_names.append(Path(candidate).name)
+        topology = parse_zpool_data_topology(status_output, name)
+        guid_output = _command("zpool", ["get", "-Hp", "-o", "value", "guid", name])
+        pool_guid = guid_output.strip() if guid_output else None
+        if not valid_pool_guid(pool_guid):
+            pool_guid = None
+        device_names = [Path(candidate).name for candidate in topology.member_paths]
         try:
             provider = parse_zpool_status(status_output) if status_output else None
             items.append(
@@ -154,6 +156,8 @@ def _zfs_pools() -> list[dict[str, Any]]:
                     "members": None,
                     "mountpoint": mountpoints.get(name),
                     "device_names": sorted(set(device_names)),
+                    "pool_guid": pool_guid,
+                    "configuration": topology.document(),
                     "degraded": provider["degraded"] if provider else health.casefold() != "online",
                     "maintenance": provider["scan"] if provider else NOT_REPORTED,
                     "progress_percent": provider["scan_percent"] if provider else NOT_REPORTED,
