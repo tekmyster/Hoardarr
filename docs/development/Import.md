@@ -8,6 +8,28 @@ devices, groups related members, explains its conclusions, and presents an
 immutable import plan. It does not automatically assemble, replay, repair,
 upgrade, or mount an unknown storage system.
 
+## Current implementation boundary
+
+`GET /api/v1/storage/foreign` performs the first non-mutating assessment from
+the latest persisted hardware snapshot. It recognizes reported ext4, XFS,
+Btrfs, NTFS, exFAT, Linux MD member, LVM physical-volume, and ZFS member
+signatures. Matching MD/LVM/ZFS member UUIDs are grouped for review, but no
+array, volume group, pool, or filesystem is activated. The assessment is bound
+to the snapshot ID and digest and records `mutation_performed: false`.
+
+Cached udev evidence is explicitly partial. It can identify a likely signature
+but cannot prove that no other on-media signature exists. System storage,
+mounted sources, unstable identities, already-managed devices, missing provider
+tools, and stack-member uncertainty block automatic inspection. Filesystem and
+volume metadata alone never assigns an Unraid, Synology, QNAP, or other product
+origin; the UI shows **Not reported** until a reviewed adapter has stronger
+evidence.
+
+The current Storage-page panel is an assessment surface. Its inspection control
+remains disabled until the next implementation stage supplies the immutable,
+provider-specific no-recovery mount plan and executor. A disabled control is not
+evidence that read-only mounting or copy intake has been implemented.
+
 ## Principles
 
 - Discover first; do not mount merely to determine what a device contains.
@@ -168,4 +190,3 @@ adapter/version, commands or library operations, mount namespace, mount options,
 before/after block-device state, bytes read, migration manifest, verification
 result, and all operator decisions. Sensitive keys and unrelated file contents
 are excluded.
-

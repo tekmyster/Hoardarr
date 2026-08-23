@@ -397,6 +397,14 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .choice-card input { margin: 3px 0 0; accent-color: var(--accent-dark); }
 .choice-copy { display: grid; align-content: start; gap: 4px; }.choice-copy strong { color: #31444c; }.choice-copy > span { color: var(--muted); font-size: 13px; line-height: 1.4; }.choice-copy .choice-warning { color: var(--warning); font-weight: 600; margin-top: 3px; }
 .advanced-panel { margin-top: 17px; border: 1px solid #b5c5cd; background: #f2f6f8; padding: 15px; border-radius: 3px; display: grid; gap: 12px; }.advanced-panel h3 { margin: 0; font-size: 14px; }.advanced-hint { color: var(--muted); font-size: 13px; }
+.foreign-storage-panel > summary { cursor: pointer; font-weight: 700; }
+.foreign-candidate-list { display: grid; gap: 14px; margin-top: 14px; }
+.foreign-candidate { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 4px; display: grid; gap: 12px; padding: 14px; }
+.foreign-candidate > header, .foreign-candidate > footer, .panel-actions { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.foreign-candidate > header div { display: grid; gap: 3px; }
+.foreign-candidate > header span, .foreign-candidate > footer, .panel-actions small { color: var(--muted); font-size: 12px; }
+.foreign-candidate .settings-list small { color: var(--muted); display: block; margin-top: 3px; }
+@media (max-width: 720px) { .foreign-candidate > header, .foreign-candidate > footer, .panel-actions { align-items: stretch; flex-direction: column; } }
 
 .interface-list { display: grid; gap: 7px; }
 .interface-row { display: grid; grid-template-columns: 22px minmax(220px, 1fr) auto; gap: 10px; align-items: center; border: 1px solid #ccd5d9; padding: 10px 12px; border-radius: 3px; }

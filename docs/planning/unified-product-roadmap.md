@@ -245,9 +245,9 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| IMPORT-01 | P2 | Foreign signature detection | Detect ext4, XFS, Btrfs, NTFS, exFAT, MD, LVM, ZFS, and recognizable NAS layouts. | QUEUED |
-| IMPORT-02 | P2 | Read-only foreign safety and confidence | Default foreign media to non-destructive read-only inspection with evidence-based type/origin confidence. | QUEUED |
-| IMPORT-03 | P2 | MD/LVM/ZFS foreign assembly preview | Identify members and mountability without activating or importing automatically. | QUEUED |
+| IMPORT-01 | P2 | Foreign signature detection | Detect ext4, XFS, Btrfs, NTFS, exFAT, MD, LVM, ZFS, and recognizable NAS layouts. | IN PROGRESS — the authenticated assessment recognizes persisted ext4/XFS/Btrfs/NTFS/exFAT and MD/LVM/ZFS member signatures and groups stable member UUIDs; reviewed NAS-origin adapters remain pending and weak filesystem heuristics intentionally report origin as Not reported |
+| IMPORT-02 | P2 | Read-only foreign safety and confidence | Default foreign media to non-destructive read-only inspection with evidence-based type/origin confidence. | IN PROGRESS — snapshot-bound API/UI assessment performs no mount, assembly, or mutation; partial versus complete signature evidence, system/mounted/managed/unstable blockers and Not reported origin are explicit; immutable provider-specific read-only execution remains pending and its UI control is disabled |
+| IMPORT-03 | P2 | MD/LVM/ZFS foreign assembly preview | Identify members and mountability without activating or importing automatically. | IN PROGRESS — matching reported member UUIDs are grouped and required local provider tools are detected without activation; member completeness/health and provider-specific no-activation command previews remain pending |
 | IMPORT-04 | P2 | Unraid disk and parity classification | Recognize independent data disks and distinguish identified, suspected, and unknown parity. | QUEUED |
 | IMPORT-05 | P2 | Unraid read-only inventory | Preview filesystems, members, files, capacity, health, and warnings before selection. | QUEUED |
 | IMPORT-06 | P2 | Unraid migration engine | Preserve relative paths, resolve collisions explicitly, verify copies, and never claim unproven parity reuse. | QUEUED |

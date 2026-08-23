@@ -884,6 +884,53 @@ export interface StorageExpansionTarget {
   mountpoint: string;
 }
 
+export interface ForeignStorageAssessment {
+  snapshot: { id: string; captured_at: string; sha256: string };
+  policy: {
+    default_access: "read_only";
+    automatic_mount: false;
+    automatic_assembly: false;
+    mutation_performed: false;
+  };
+  candidates: Array<{
+    id: string;
+    profile: "standalone_filesystem" | "linux_md" | "lvm" | "zfs";
+    profile_name: string;
+    origin: { name: string; confidence: "unknown" | "low" | "medium" | "high"; reason: string };
+    confidence: "unknown" | "low" | "medium" | "high";
+    state: "degraded-review" | "blocked";
+    members: Array<{
+      device_id: string;
+      kernel_path: string | null;
+      model: string;
+      capacity_bytes: number | null;
+      stable_identity: boolean;
+      system_device: boolean;
+      read_only: boolean;
+      removable: boolean;
+      mounted: boolean;
+      mountpoints: string[];
+      signature_scan: { status: string | null; source: string | null; reason: string | null };
+      confidence: "unknown" | "low" | "medium" | "high";
+      signatures: Array<{
+        type: string;
+        usage: string | null;
+        uuid: string | null;
+        label: string | null;
+        source: string;
+      }>;
+    }>;
+    filesystems: string[];
+    signature_types: string[];
+    capacity_bytes: number | null;
+    warnings: string[];
+    blockers: string[];
+    modes: Array<{ id: string; available: boolean; reason: string }>;
+    mutation_performed: false;
+  }>;
+  unrecognized_device_count: number;
+}
+
 export interface StorageExpansionSelection {
   candidate_id: string;
   kind: string;

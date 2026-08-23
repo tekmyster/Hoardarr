@@ -14,6 +14,7 @@ import { ArrayReplacementPanel } from "./ArrayReplacementPanel";
 import { DownloadTierPanel } from "./DownloadTierPanel";
 import { TopologyExpectationPanel } from "./TopologyExpectationPanel";
 import { TopologyPlanningPanel } from "./TopologyPlanningPanel";
+import { ForeignStoragePanel } from "./ForeignStoragePanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -214,6 +215,8 @@ export function StoragePage({
     <DownloadTierPanel />
 
     <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />
+
+    <ForeignStoragePanel />
 
     <SnapraidReplacementPanel
       inventory={storageInventory}

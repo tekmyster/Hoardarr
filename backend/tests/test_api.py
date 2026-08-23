@@ -1711,6 +1711,18 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     assert expansion.json()["available_disks"][0]["existing_data"]["state"] == "unknown"
     assert expansion.json()["candidates"][0]["kind"] == "import_existing"
 
+    foreign = client.get("/api/v1/storage/foreign")
+    assert foreign.status_code == 200, foreign.text
+    assert foreign.json()["snapshot"]["id"] == snapshot_id
+    assert foreign.json()["policy"] == {
+        "default_access": "read_only",
+        "automatic_mount": False,
+        "automatic_assembly": False,
+        "mutation_performed": False,
+    }
+    assert foreign.json()["candidates"] == []
+    assert foreign.json()["unrecognized_device_count"] == 1
+
     wizard = client.post(
         "/api/v1/wizards",
         headers=_state_headers(csrf),

@@ -12,6 +12,7 @@ import type {
   ConnectivityServiceInput,
   Drive,
   DeviceMaintenancePlan,
+  ForeignStorageAssessment,
   HardwareSnapshot,
   MergerFsInventory,
   MetricAlertDocument,
@@ -434,6 +435,10 @@ class HoardarrApi {
 
   async storageExpansion(signal?: AbortSignal): Promise<StorageExpansionAssessment> {
     return this.request<StorageExpansionAssessment>("/storage/expansion", { signal });
+  }
+
+  async foreignStorage(signal?: AbortSignal): Promise<ForeignStorageAssessment> {
+    return this.request<ForeignStorageAssessment>("/storage/foreign", { signal });
   }
 
   async setDiskReservation(

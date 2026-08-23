@@ -50,6 +50,7 @@ from hoardarr.db.models import (
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
 from hoardarr.storage.expansion import build_expansion_assessment
+from hoardarr.storage.foreign import assess_foreign_storage
 from hoardarr.storage.groups import (
     StorageGroupError,
     activate_backend,
@@ -163,6 +164,16 @@ def storage_expansion_assessment(
     snapshot = _latest_hardware(session)
     inventory = discover_storage_inventory(hardware_snapshot=snapshot.payload_json)
     return build_expansion_assessment(session, snapshot=snapshot, storage_inventory=inventory)
+
+
+@router.get("/foreign")
+def foreign_storage_assessment(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Fingerprint persisted signatures without mounting or activating foreign storage."""
+
+    return assess_foreign_storage(session, snapshot=_latest_hardware(session))
 
 
 @router.post("/groups", status_code=201)
