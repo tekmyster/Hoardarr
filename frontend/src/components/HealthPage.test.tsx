@@ -37,6 +37,26 @@ describe("HealthPage", () => {
       pools: { status: "not_configured", items: [] },
       shares: { status: "not_configured", items: [] },
       controllers: { status: "Not reported", items: [], unavailable: [] },
+      enclosures: {
+        status: "healthy",
+        items: [{
+          id: "0x500a098000000424",
+          provider: "sg_ses",
+          descriptor: "DS424IOM6",
+          health: "healthy",
+          path: "sg4",
+          slots: [{ slot: 3, status: "healthy", identify: false, fault: false }],
+          temperature_c: 38,
+          fan_rpm: 7600,
+          fan_count: 2,
+          power_supplies: ["healthy", "healthy"],
+          voltages: [12.0],
+          locate: false,
+          fault: false,
+          expanders: ["healthy"],
+        }],
+        unavailable: [],
+      },
     };
     const telemetry: StorageTelemetryDocument = {
       captured_at: "2026-08-21T20:00:00Z",
@@ -54,8 +74,11 @@ describe("HealthPage", () => {
     expect(await screen.findByText(/reports warning/i)).toBeInTheDocument();
     expect(screen.getByText("Power-on hours", { selector: "th" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText("Not reported").length).toBeGreaterThan(1));
-    expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Healthy")).toHaveLength(1);
     expect(screen.getByText("No pools configured")).toBeInTheDocument();
+    expect(screen.getByText("DS424IOM6")).toBeInTheDocument();
+    expect(screen.getByText("38 °C")).toBeInTheDocument();
+    expect(screen.getByText(/7,600 RPM/)).toBeInTheDocument();
   });
 
   it("keeps partial health visible when one provider fails", async () => {

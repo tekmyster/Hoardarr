@@ -85,10 +85,22 @@ def test_vendor_and_enclosure_parsers_keep_missing_values_explicit() -> None:
     assert areca["controllers"][0]["health"] == "needs_attention"
     ses = parse_ses(
         '{"status":"OK","enclosure_descriptor":"shelf-1","elements":['
+        '{"element_type":"Temperature sensor","temperature_c":42},'
+        '{"element_type":"Cooling","speed_rpm":8200},'
+        '{"element_type":"Power supply","status":"OK"},'
+        '{"element_type":"Voltage sensor","voltage_v":12.1},'
+        '{"element_type":"SAS expander","status":"OK"},'
         '{"element_type":"Array device slot","slot":4,"status":"OK",'
         '"identify":false,"fault":false}]}'
     )
-    assert ses["enclosures"][0]["slots"][0]["slot"] == 4
+    enclosure = ses["enclosures"][0]
+    assert enclosure["slots"][0]["slot"] == 4
+    assert enclosure["id"] == NOT_REPORTED
+    assert enclosure["temperature_c"] == 42
+    assert enclosure["fan_rpm"] == 8200
+    assert enclosure["power_supplies"] == ["healthy"]
+    assert enclosure["voltages"] == [12.1]
+    assert enclosure["expanders"] == ["healthy"]
 
 
 def test_snapraid_status_never_reports_stale_parity_as_current() -> None:

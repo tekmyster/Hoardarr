@@ -185,6 +185,14 @@ can conflict. The SES logical ID or shelf UID is canonical. IOM A and IOM B are
 kept as independent paths so a partial cabling, IOM, or expander failure remains
 visible.
 
+The live SES health provider runs bounded, read-only `sg_ses --json` probes at
+the slow hardware-health cadence. It exposes only reported enclosure health,
+temperature, fan RPM/count, PSU state, voltage, locate/fault state, expander
+state, slots, and independent enclosure path count. A display descriptor is not
+treated as a stable identity: persistent enclosure telemetry requires the SES
+logical identifier, and absent sensors remain **Not reported**. The Health page
+shows the same normalized provider values rather than substituting zeros.
+
 When storage remains behind ONTAP, a SAN array, or another NAS controller, the
 host usually sees a virtual LUN rather than the internal drives. Hoardarr cannot
 derive an internal bay from that LUN. A vendor API add-on must report the array,

@@ -129,6 +129,7 @@ describe("StoragePage", () => {
       pools: { status: "configured", items: [{ id: "pool-1", name: "Media", type: "mergerfs", status: "healthy", total_bytes: 1000, used_bytes: 250, free_bytes: 750, members: 4, mountpoint: "/srv/hoardarr/media" }] },
       shares: { status: "configured", items: [{ id: "share-1", name: "Media", protocol: "smb", path: "/srv/hoardarr/media" }] },
       controllers: { status: "not_reported", items: [], unavailable: [] },
+      enclosures: { status: "Not reported", items: [], unavailable: [] },
     };
     render(<StoragePage snapshot={null} drives={[]} busy={false} status={null} error="Hardware scan timed out" onScan={vi.fn()} onAction={vi.fn()} onDriveAction={vi.fn()} storageInventory={inventory} />);
 

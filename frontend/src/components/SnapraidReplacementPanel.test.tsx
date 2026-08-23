@@ -58,6 +58,7 @@ const inventory = {
   },
   shares: { status: "not_configured", items: [] },
   controllers: { status: "Not reported", items: [], unavailable: [] },
+  enclosures: { status: "Not reported", items: [], unavailable: [] },
 } as StorageInventory;
 
 const plan: SnapraidReplacementPlan = {

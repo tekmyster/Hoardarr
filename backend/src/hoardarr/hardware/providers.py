@@ -218,31 +218,72 @@ def parse_ses(output: str) -> dict[str, Any]:
     if not isinstance(elements, list):
         raise ProviderError("output_invalid", "sg_ses enclosure elements are missing")
     slots: list[dict[str, Any]] = []
+    temperatures: list[float] = []
+    fans: list[int] = []
+    power_supplies: list[str] = []
+    voltages: list[float] = []
+    expanders: list[str] = []
+    locate = False
+    fault = False
     for item in elements:
-        if not isinstance(item, Mapping) or item.get("element_type") not in {
-            "Array device slot",
-            "Device slot",
-        }:
+        if not isinstance(item, Mapping):
             continue
-        slot = item.get("slot")
-        slots.append(
-            {
-                "slot": slot if isinstance(slot, (int, str)) else NOT_REPORTED,
-                "status": _status(item.get("status")),
-                "identify": item.get("identify")
-                if isinstance(item.get("identify"), bool)
-                else NOT_REPORTED,
-                "fault": item.get("fault") if isinstance(item.get("fault"), bool) else NOT_REPORTED,
-            }
-        )
+        element_type = str(item.get("element_type") or "").casefold()
+        status = _status(item.get("status"))
+        if element_type in {"array device slot", "device slot"}:
+            slot = item.get("slot")
+            identify = item.get("identify")
+            slot_fault = item.get("fault")
+            locate = locate or identify is True
+            fault = fault or slot_fault is True
+            slots.append(
+                {
+                    "slot": slot if isinstance(slot, (int, str)) else NOT_REPORTED,
+                    "status": status,
+                    "identify": identify if isinstance(identify, bool) else NOT_REPORTED,
+                    "fault": slot_fault if isinstance(slot_fault, bool) else NOT_REPORTED,
+                }
+            )
+        elif "temperature" in element_type and isinstance(
+            item.get("temperature_c"), (int, float)
+        ):
+            temperatures.append(float(item["temperature_c"]))
+        elif "cooling" in element_type and isinstance(item.get("speed_rpm"), (int, float)):
+            fans.append(max(0, int(item["speed_rpm"])))
+        elif "power supply" in element_type:
+            power_supplies.append(status)
+        elif "voltage" in element_type and isinstance(item.get("voltage_v"), (int, float)):
+            voltages.append(float(item["voltage_v"]))
+        elif "expander" in element_type:
+            expanders.append(status)
     descriptor = document.get("enclosure_descriptor")
+    logical_id = document.get("enclosure_logical_identifier") or document.get(
+        "primary_enclosure_logical_identifier"
+    )
+    if not isinstance(logical_id, str) or re.fullmatch(
+        r"(?:0x|naa\.)?[0-9A-Fa-f]{16,64}", logical_id
+    ) is None:
+        logical_id = None
     return {
         "provider": "sg_ses",
         "enclosures": [
             {
-                "id": descriptor if isinstance(descriptor, str) and descriptor else NOT_REPORTED,
+                "id": logical_id.casefold() if logical_id else NOT_REPORTED,
+                "descriptor": (
+                    descriptor[:256]
+                    if isinstance(descriptor, str) and descriptor
+                    else NOT_REPORTED
+                ),
                 "health": _status(document.get("status")),
                 "slots": slots,
+                "temperature_c": max(temperatures) if temperatures else NOT_REPORTED,
+                "fan_rpm": max(fans) if fans else NOT_REPORTED,
+                "fan_count": len(fans) if fans else NOT_REPORTED,
+                "power_supplies": power_supplies or NOT_REPORTED,
+                "voltages": voltages or NOT_REPORTED,
+                "locate": locate,
+                "fault": fault,
+                "expanders": expanders or NOT_REPORTED,
             }
         ],
     }

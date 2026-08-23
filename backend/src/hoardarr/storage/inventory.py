@@ -14,6 +14,7 @@ from hoardarr.hardware.providers import (
     aggregate_health,
     parse_arcconf,
     parse_areca,
+    parse_ses,
     parse_snapraid_status,
     parse_ssacli,
     parse_storcli,
@@ -300,6 +301,34 @@ def _controller_health() -> dict[str, Any]:
     return {"status": summary["health"], "items": values, "unavailable": errors}
 
 
+def _enclosure_health(sys_class_enclosure: Path) -> dict[str, Any]:
+    """Collect bounded, read-only SES health from each reported enclosure path."""
+
+    if not sys_class_enclosure.is_dir() or shutil.which("sg_ses") is None:
+        return {"status": NOT_REPORTED, "items": [], "unavailable": []}
+    values: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for enclosure in sorted(sys_class_enclosure.iterdir(), key=lambda item: item.name):
+        generic = next(iter(enclosure.glob("device/scsi_generic/*")), None)
+        if generic is None:
+            errors.append({"provider": "sg_ses", "path": enclosure.name, "status": NOT_REPORTED})
+            continue
+        output = _command("sg_ses", ["--json", f"/dev/{generic.name}"])
+        if output is None:
+            errors.append({"provider": "sg_ses", "path": generic.name, "status": NOT_REPORTED})
+            continue
+        try:
+            document = parse_ses(output)
+        except ProviderError:
+            errors.append({"provider": "sg_ses", "path": generic.name, "status": NOT_REPORTED})
+            continue
+        for item in document.get("enclosures", []):
+            if isinstance(item, dict):
+                values.append({**item, "provider": "sg_ses", "path": generic.name})
+    summary = aggregate_health(values)
+    return {"status": summary["health"], "items": values, "unavailable": errors}
+
+
 def _smb_shares(config: Path) -> list[dict[str, Any]]:
     if not config.is_file():
         return []
@@ -365,6 +394,7 @@ def _block_targets(config: Path) -> list[dict[str, Any]]:
 def discover_storage_inventory(
     *,
     sys_class_block: Path = Path("/sys/class/block"),
+    sys_class_enclosure: Path = Path("/sys/class/enclosure"),
     samba_config: Path = Path("/etc/samba/hoardarr-shares.conf"),
     nfs_exports: Path = Path("/etc/exports"),
     target_config: Path = Path("/etc/rtslib-fb-target/saveconfig.json"),
@@ -411,4 +441,5 @@ def discover_storage_inventory(
         "pools": {"status": "configured" if pools else "not_configured", "items": pools},
         "shares": {"status": "configured" if shares else "not_configured", "items": shares},
         "controllers": _controller_health(),
+        "enclosures": _enclosure_health(sys_class_enclosure),
     }

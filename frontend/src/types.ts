@@ -92,6 +92,26 @@ export interface StorageInventory {
     }>;
     unavailable: Array<{ provider: string; status: string }>;
   };
+  enclosures: {
+    status: string;
+    items: Array<{
+      id: string;
+      provider: string;
+      descriptor: string;
+      health: string;
+      path: string;
+      slots: Array<{ slot: string | number; status: string; identify: boolean | "Not reported"; fault: boolean | "Not reported" }>;
+      temperature_c: number | "Not reported";
+      fan_rpm: number | "Not reported";
+      fan_count: number | "Not reported";
+      power_supplies: string[] | "Not reported";
+      voltages: number[] | "Not reported";
+      locate: boolean;
+      fault: boolean;
+      expanders: string[] | "Not reported";
+    }>;
+    unavailable: Array<{ provider: string; path?: string; status: string }>;
+  };
 }
 
 export type StorageTopologyProtocol = "SAS" | "SATA" | "FC" | "FCoE" | "NVMe" | "USB" | "SCSI" | "Logical";

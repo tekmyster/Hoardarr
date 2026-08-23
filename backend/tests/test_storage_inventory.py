@@ -37,6 +37,64 @@ def test_live_inventory_reports_md_arrays_and_managed_shares(tmp_path: Path, mon
     assert [item["protocol"] for item in result["shares"]["items"]] == ["SMB", "NFS"]
 
 
+def test_enclosure_health_collects_reported_ses_sensors_and_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    enclosure_root = tmp_path / "sys/class/enclosure"
+    generic = enclosure_root / "enclosure0/device/scsi_generic/sg4"
+    generic.mkdir(parents=True)
+    monkeypatch.setattr(inventory.shutil, "which", lambda name, **_kwargs: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        inventory,
+        "_command",
+        lambda name, arguments: (
+            '{"status":"OK","enclosure_descriptor":"DS424IOM6",'
+            '"enclosure_logical_identifier":"0x500a098000000424","elements":['
+            '{"element_type":"Temperature sensor","temperature_c":38},'
+            '{"element_type":"Cooling","speed_rpm":7600},'
+            '{"element_type":"Power supply","status":"OK"},'
+            '{"element_type":"Voltage sensor","voltage_v":12.0},'
+            '{"element_type":"SAS expander","status":"OK"},'
+            '{"element_type":"Array device slot","slot":3,"status":"OK",'
+            '"identify":true,"fault":false}]}'
+            if name == "sg_ses" and arguments == ["--json", "/dev/sg4"]
+            else None
+        ),
+    )
+
+    result = inventory._enclosure_health(enclosure_root)
+
+    assert result["status"] == "healthy"
+    assert result["unavailable"] == []
+    assert result["items"] == [
+        {
+            "id": "0x500a098000000424",
+            "descriptor": "DS424IOM6",
+            "health": "healthy",
+            "slots": [
+                {"slot": 3, "status": "healthy", "identify": True, "fault": False}
+            ],
+            "temperature_c": 38.0,
+            "fan_rpm": 7600,
+            "fan_count": 1,
+            "power_supplies": ["healthy"],
+            "voltages": [12.0],
+            "locate": True,
+            "fault": False,
+            "expanders": ["healthy"],
+            "provider": "sg_ses",
+            "path": "sg4",
+        }
+    ]
+
+    monkeypatch.setattr(inventory, "_command", lambda _name, _arguments: "{malformed")
+    failed = inventory._enclosure_health(enclosure_root)
+    assert failed["items"] == []
+    assert failed["unavailable"] == [
+        {"provider": "sg_ses", "path": "sg4", "status": "Not reported"}
+    ]
+
+
 def test_snapraid_inventory_exposes_bounded_role_evidence(tmp_path: Path, monkeypatch) -> None:
     config_root = tmp_path / "snapraid"
     config_root.mkdir()

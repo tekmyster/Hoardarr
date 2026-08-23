@@ -356,7 +356,7 @@ class HoardarrApi {
   }
 
   async storageInventory(): Promise<StorageInventory> {
-    if (demoMode) return { captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } };
+    if (demoMode) return { captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] }, enclosures: { status: "Not reported", items: [], unavailable: [] } };
     return this.request<StorageInventory>("/storage/inventory");
   }
 
