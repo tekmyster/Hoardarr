@@ -969,6 +969,14 @@ class HoardarrApi {
     });
   }
 
+  async locateDrive(deviceId: string, enabled: boolean, durationSeconds = 300): Promise<{ operation: OperationDocument; automatic_clear: OperationDocument | null }> {
+    return this.request<{ operation: OperationDocument; automatic_clear: OperationDocument | null }>("/hardware/locate", {
+      method: "POST",
+      headers: { "Idempotency-Key": createIdempotencyKey() },
+      body: JSON.stringify({ device_id: deviceId, enabled, duration_seconds: durationSeconds }),
+    });
+  }
+
   async startWizard(mode: WizardMode, snapshotId: string): Promise<WizardDocument> {
     if (demoMode) return demoWizard(mode);
     return this.request<WizardDocument>("/wizards", {

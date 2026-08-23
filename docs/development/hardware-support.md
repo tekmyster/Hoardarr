@@ -367,6 +367,25 @@ Even a read-oriented utility such as `nvme`, `hdparm`, `sdparm`, `smartctl`,
 allowlisting alone is insufficient; each allowed invocation has a typed
 argument builder.
 
+### Enclosure Locate behavior
+
+The Storage topology view offers **Locate for 5 minutes** only when the latest
+real discovery has a stable drive identity, a HIGH-confidence enclosure/slot
+mapping, and exactly one enclosure SCSI-generic endpoint. Hoardarr builds and
+hashes a server-side binding containing the drive identity, serial/WWN,
+enclosure, slot, and mapping source. The worker revalidates that binding against
+fresh persisted discovery before it asks `sg_ses` to read the slot's identify
+state and before it sends the allowlisted `--set=ident` or `--clear=ident`
+command. It never accepts a device path or command arguments from the browser.
+
+Enabling Locate creates two Activity operations: the immediate set request and
+a durable, non-cancellable automatic clear scheduled five minutes later. A
+manual **Turn Locate off** action may clear it sooner. If the drive identity,
+slot mapping, or enclosure endpoint changes, Hoardarr fails closed rather than
+controlling a different bay. This implementation is software-verified with
+mocked SES command execution; actual LED behavior remains part of each physical
+enclosure certification profile.
+
 ## Vendor utility staging and licensing
 
 StorCLI/StorCLI2, PERCCLI/PERCCLI2, SSACLI, ARCCONF, Areca CLI, RACADM,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,18 +13,23 @@ from hoardarr.api.dependencies import (
     require_state_scope,
 )
 from hoardarr.api.problem import Problem
-from hoardarr.api.schemas import TopologyExpectationCreateRequest, TopologyExpectationRemoveRequest
+from hoardarr.api.schemas import (
+    HardwareLocateRequest,
+    TopologyExpectationCreateRequest,
+    TopologyExpectationRemoveRequest,
+)
 from hoardarr.api.serializers import operation_document, snapshot_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import HardwareSnapshot, TopologyDriftEvent, TopologyExpectation, utc_now
+from hoardarr.hardware.locate import LocateError, build_locate_plan
 from hoardarr.hardware.topology_expectations import (
     create_topology_expectation,
     drift_document,
     expectation_document,
     reconcile_topology_snapshot,
 )
-from hoardarr.operations.service import OperationConflict, create_operation
+from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 
 router = APIRouter(prefix="/hardware", tags=["hardware"])
 
@@ -56,6 +63,83 @@ def scan_hardware(
             target_id=operation.id,
         )
     return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.post("/locate", status_code=202)
+def locate_hardware(
+    payload: HardwareLocateRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    snapshot = session.scalar(
+        select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+    )
+    if snapshot is None:
+        raise Problem(
+            409, "hardware_snapshot_required", "Discovery required", "Run discovery first."
+        )
+    try:
+        plan = build_locate_plan(
+            snapshot.payload_json, device_id=payload.device_id, enabled=payload.enabled
+        )
+    except LocateError as exc:
+        raise Problem(422, exc.code, "Locate unavailable", str(exc)) from exc
+    request_document = {
+        "plan": plan,
+        "plan_sha256": document_hash(plan),
+        "duration_seconds": payload.duration_seconds,
+    }
+    try:
+        operation, created = create_operation(
+            session,
+            kind="hardware.locate",
+            principal=principal,
+            request=request_document,
+            idempotency_key=key,
+            resource_type="drive",
+            resource_id=payload.device_id,
+        )
+        automatic_clear = None
+        if payload.enabled:
+            clear_plan = {**plan, "enabled": False}
+            clear_plan["binding_sha256"] = plan["binding_sha256"]
+            clear_request = {
+                "plan": clear_plan,
+                "plan_sha256": document_hash(clear_plan),
+                "automatic_clear": True,
+                "duration_seconds": payload.duration_seconds,
+            }
+            clear_key = f"{key[:80]}:clear:{clear_request['plan_sha256'][:16]}"
+            automatic_clear, _clear_created = create_operation(
+                session,
+                kind="hardware.locate",
+                principal=principal,
+                request=clear_request,
+                idempotency_key=clear_key,
+                resource_type="drive",
+                resource_id=payload.device_id,
+                not_before=utc_now() + timedelta(seconds=payload.duration_seconds),
+            )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        record_audit(
+            session,
+            principal=principal,
+            action="hardware.locate.queue",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="drive",
+            target_id=payload.device_id,
+            details={"enabled": payload.enabled, "duration_seconds": payload.duration_seconds},
+        )
+    return {
+        "operation": operation_document(operation),
+        "automatic_clear": operation_document(automatic_clear) if automatic_clear else None,
+        "replayed": not created,
+    }
 
 
 @router.get("/snapshots")

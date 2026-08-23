@@ -101,6 +101,12 @@ class TopologyExpectationRemoveRequest(StrictModel):
     confirmation: Literal["REMOVE"]
 
 
+class HardwareLocateRequest(StrictModel):
+    device_id: str = Field(min_length=1, max_length=512)
+    enabled: bool = True
+    duration_seconds: int = Field(default=300, ge=10, le=300)
+
+
 class WizardStepRequest(StrictModel):
     revision: int = Field(ge=0)
     answers: dict[str, Any]

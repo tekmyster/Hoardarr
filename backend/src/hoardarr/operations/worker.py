@@ -38,6 +38,7 @@ from hoardarr.db.models import (
     WizardSession,
     utc_now,
 )
+from hoardarr.hardware.locate import LocateError, execute_locate_plan, validate_locate_plan
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError, run_hardware_detector
 from hoardarr.hardware.smp import enrich_smp_topology
@@ -110,6 +111,7 @@ LOGGER = logging.getLogger(__name__)
 SUPPORTED_OPERATION_KINDS = frozenset(
     {
         "hardware.scan",
+        "hardware.locate",
         "servarr.discover",
         "media.discover",
         "servarr.apply",
@@ -174,6 +176,9 @@ def _remove_connectivity_direct(
 
 class SessionFactory(Protocol):
     def __call__(self) -> Session: ...
+
+
+LocateExecutor = Callable[..., dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -1414,6 +1419,39 @@ def _execute_array_replacement(
     return MaintenanceExecution(result=result)
 
 
+def _execute_locate(
+    session_factory: SessionFactory,
+    item: WorkItem,
+    settings: Settings,
+    executor: LocateExecutor,
+) -> MaintenanceExecution:
+    plan = item.request.get("plan")
+    plan_sha256 = item.request.get("plan_sha256")
+    if (
+        not isinstance(plan, dict)
+        or not isinstance(plan_sha256, str)
+        or document_hash(plan) != plan_sha256
+        or item.resource_type != "drive"
+        or item.resource_id != plan.get("binding", {}).get("device_id")
+    ):
+        raise WorkFailure("invalid_operation_request", "The Locate request is invalid")
+    try:
+        validate_locate_plan(plan)
+        with session_factory() as session:
+            snapshot = session.scalar(
+                select(HardwareSnapshot)
+                .order_by(HardwareSnapshot.captured_at.desc())
+                .limit(1)
+            )
+            if snapshot is None:
+                raise LocateError("hardware_snapshot_required", "Run discovery again.")
+            hardware = deepcopy(snapshot.payload_json)
+        result = executor(plan, hardware, sysfs_root=settings.hardware_sysfs_root)
+    except LocateError as exc:
+        raise WorkFailure(exc.code, str(exc)) from exc
+    return MaintenanceExecution(result=result)
+
+
 def _execute_work(
     session_factory: SessionFactory,
     item: WorkItem,
@@ -1428,9 +1466,12 @@ def _execute_work(
     array_replacement_applier: ArrayReplacementApplier,
     connectivity_applier: ConnectivityApplier,
     connectivity_remover: ConnectivityRemover,
+    locate_executor: LocateExecutor,
 ) -> ExecutionResult:
     if item.kind == "hardware.scan":
         return _execute_hardware(settings, detector_runner)
+    if item.kind == "hardware.locate":
+        return _execute_locate(session_factory, item, settings, locate_executor)
     if item.kind in {"servarr.discover", "media.discover"}:
         return _execute_servarr(
             session_factory,
@@ -1851,6 +1892,7 @@ def _finalize_failure(
             "storage.redundancy.apply",
             "storage.transfer",
             "storage.transfer.cleanup",
+            "hardware.locate",
             "connectivity.apply",
             "connectivity.remove",
         }:
@@ -1963,6 +2005,7 @@ def run_once(
     array_replacement_applier: ArrayReplacementApplier = apply_array_replacement,
     connectivity_applier: ConnectivityApplier = _apply_connectivity_direct,
     connectivity_remover: ConnectivityRemover = _remove_connectivity_direct,
+    locate_executor: LocateExecutor = execute_locate_plan,
 ) -> bool:
     """Claim and execute one operation; return False when the queue is empty."""
 
@@ -1985,6 +2028,7 @@ def run_once(
             array_replacement_applier,
             connectivity_applier,
             connectivity_remover,
+            locate_executor,
         )
     except DrainPaused:
         _finalize_with_retry(

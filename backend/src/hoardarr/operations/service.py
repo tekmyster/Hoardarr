@@ -37,6 +37,7 @@ NON_CANCELLABLE_AFTER_START = frozenset(
         "storage.snapraid.replace",
         "storage.redundancy.apply",
         "storage.transfer",
+        "hardware.locate",
         "connectivity.apply",
         "connectivity.remove",
     }
@@ -185,6 +186,11 @@ def fail_operation(
 
 def request_cancellation(session: Session, operation: Operation) -> None:
     now = utc_now()
+    if (
+        operation.kind == "hardware.locate"
+        and operation.request_json.get("automatic_clear") is True
+    ):
+        raise OperationConflict("an automatic Locate clear cannot be cancelled")
     queued = session.execute(
         update(Operation)
         .where(Operation.id == operation.id, Operation.status == "queued")

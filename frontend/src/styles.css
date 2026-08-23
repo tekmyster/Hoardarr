@@ -517,6 +517,9 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .topology-drift-list header { display: flex; align-items: center; gap: 8px; }
 .topology-drift-list time { margin-left: auto; color: var(--muted); font-size: 12px; }
 .topology-drift-list p { margin: 0; }
+.topology-locate-control { display: grid; gap: 6px; margin-top: 8px; }
+.topology-locate-control .button { justify-self: start; }
+.topology-locate-control small { color: var(--muted); }
 .redundancy-storage-list { display: grid; gap: 8px; }
 .redundancy-storage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-soft); }
 .redundancy-storage-row > div:first-child { display: grid; gap: 3px; min-width: 0; }

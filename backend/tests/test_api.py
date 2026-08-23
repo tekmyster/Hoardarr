@@ -196,6 +196,112 @@ def test_expected_topology_api_persists_drift_history_and_requires_csrf(api_runt
     assert client.get("/api/v1/hardware/topology/expectation").json()["expectation"] is None
 
 
+def test_locate_api_queues_real_activity_and_bounded_automatic_clear(api_runtime: Any) -> None:
+    client, app, setup_token, secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    hardware = {
+        "schema_version": 1,
+        "source": {"kind": "fixture"},
+        "controllers": [],
+        "disks": [
+            {
+                "id": "wwn:locatable-drive",
+                "stable_identity": True,
+                "identity": {"serial": "SANITIZED", "wwn": "locatable-drive"},
+                "connection": {
+                    "enclosure_id": "enclosure-1",
+                    "slot": "3",
+                    "mapping_source": "sysfs enclosure_device",
+                    "mapping_confidence": "high",
+                },
+            }
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="fixture",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+
+    endpoint = "/api/v1/hardware/locate"
+    body = {"device_id": "wwn:locatable-drive", "enabled": True, "duration_seconds": 30}
+    missing_csrf = client.post(
+        endpoint, json=body, headers={"Idempotency-Key": "locate-drive-0001"}
+    )
+    assert missing_csrf.status_code == 403
+    queued = client.post(
+        endpoint,
+        json=body,
+        headers=_state_headers(csrf, **{"Idempotency-Key": "locate-drive-0001"}),
+    )
+    assert queued.status_code == 202, queued.text
+    operation_id = queued.json()["operation"]["id"]
+    automatic_clear_id = queued.json()["automatic_clear"]["id"]
+    assert queued.json()["automatic_clear"]["not_before"] is not None
+    replay = client.post(
+        endpoint,
+        json=body,
+        headers=_state_headers(csrf, **{"Idempotency-Key": "locate-drive-0001"}),
+    )
+    assert replay.status_code == 202
+    assert replay.json()["replayed"] is True
+    assert replay.json()["operation"]["id"] == operation_id
+    assert replay.json()["automatic_clear"]["id"] == automatic_clear_id
+    changed_duration = client.post(
+        endpoint,
+        json={**body, "duration_seconds": 60},
+        headers=_state_headers(csrf, **{"Idempotency-Key": "locate-drive-0001"}),
+    )
+    assert changed_duration.status_code == 409
+    assert changed_duration.json()["code"] == "idempotency_conflict"
+    clear_cancel = client.post(
+        f"/api/v1/operations/{automatic_clear_id}/cancel", headers=_state_headers(csrf)
+    )
+    assert clear_cancel.status_code == 409
+    assert clear_cancel.json()["code"] == "operation_not_cancellable"
+
+    calls: list[tuple[dict, dict, Path]] = []
+
+    def locate_executor(plan: dict, current: dict, *, sysfs_root: Path) -> dict:
+        calls.append((plan, current, sysfs_root))
+        return {
+            "device_id": plan["binding"]["device_id"],
+            "enclosure_id": plan["binding"]["enclosure_id"],
+            "slot": plan["binding"]["slot"],
+            "enabled": plan["enabled"],
+            "provider": "test",
+            "verification": "command accepted after read-only slot query",
+        }
+
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        worker_id="locate-worker",
+        locate_executor=locate_executor,
+    )
+    completed = client.get(f"/api/v1/operations/{operation_id}")
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "succeeded"
+    assert completed.json()["result"]["enabled"] is True
+    assert len(calls) == 1
+
+
 def test_disk_reservation_api_is_guarded_persistent_and_idempotent(api_runtime: Any) -> None:
     client, app, setup_token, _secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

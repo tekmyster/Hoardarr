@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import { api } from "../api/client";
 import { humanCapacity } from "../policy";
 import type {
   StorageEnclosure,
@@ -94,6 +96,55 @@ function LinkRail({ link }: { link: StorageTopologyLink }) {
 
 type TopologyDriveAction = "configure" | "test" | "import";
 
+function LocateControl({ deviceId }: { deviceId: string }) {
+  const [operationId, setOperationId] = useState<string | null>(null);
+  const [operationStatus, setOperationStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [requestedEnabled, setRequestedEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!operationId || !["queued", "running"].includes(operationStatus ?? "")) return;
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const operation = await api.operation(operationId);
+        if (!stopped) {
+          setOperationStatus(operation.status);
+          if (operation.status === "failed" || operation.status === "needs_attention") {
+            setError(operation.error?.message ?? "The enclosure did not accept the Locate request.");
+          }
+        }
+      } catch (requestError) {
+        if (!stopped) setError(requestError instanceof Error ? requestError.message : "Locate status is unavailable.");
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 1000);
+    void refresh();
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [operationId, operationStatus]);
+
+  const locate = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.locateDrive(deviceId, enabled, 300);
+      setRequestedEnabled(enabled);
+      setOperationId(result.operation.id);
+      setOperationStatus(result.operation.status);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Locate could not be queued.");
+    } finally { setBusy(false); }
+  };
+
+  return <div className="topology-locate-control">
+    <button type="button" className="button button-secondary" disabled={busy || ["queued", "running"].includes(operationStatus ?? "")} onClick={() => void locate(true)}>Locate for 5 minutes</button>
+    {operationStatus === "succeeded" && requestedEnabled === true && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void locate(false)}>Turn Locate off</button>}
+    {operationStatus && <small>Locate operation: {operationStatus.replaceAll("_", " ")}.{requestedEnabled === true ? " Hoardarr schedules an automatic clear after five minutes." : requestedEnabled === false ? " The clear command was sent to the enclosure." : ""}</small>}
+    {error && <small className="field-error" role="alert">{error}</small>}
+  </div>;
+}
+
 function DriveNode({ node, actionable, managed, onDriveAction, onManageLifecycle }: { node: StorageTopologyNode; actionable: boolean; managed: boolean; onDriveAction?: (action: TopologyDriveAction, driveId: string) => void; onManageLifecycle?: () => void }) {
   const driveHealth = health(node);
   const belowCapability = node.negotiated_speed_gbps != null && node.capable_speed_gbps != null && node.negotiated_speed_gbps < node.capable_speed_gbps;
@@ -125,6 +176,7 @@ function DriveNode({ node, actionable, managed, onDriveAction, onManageLifecycle
           <button type="button" className="button button-primary" onClick={() => onDriveAction?.("configure", node.stable_identity!)}>Set up this drive</button>
         </>}
     </div>}
+    {node.system_disk !== true && node.stable_identity && node.mapping_confidence === "high" && node.enclosure_id && node.slot != null && <LocateControl deviceId={node.stable_identity} />}
   </article>;
 }
 

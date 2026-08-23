@@ -1,15 +1,20 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "../api/client";
 import type { StorageTopology } from "../types";
 import { StorageTopologyPanels } from "./StorageTopologyPanels";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("StorageTopologyPanels", () => {
   it("maps enclosure bays and connects supported drive actions", async () => {
     const user = userEvent.setup();
     const onDriveAction = vi.fn();
+    const locate = vi.spyOn(api, "locateDrive").mockResolvedValue({
+      operation: { id: "locate-1", kind: "hardware.locate", status: "succeeded", resource: { type: "drive", id: "wwn:5000c50012345678" }, result: { enabled: true }, error: null, not_before: null, created_at: "2026-08-23T12:00:00Z", updated_at: "2026-08-23T12:00:01Z" },
+      automatic_clear: null,
+    });
     const topology: StorageTopology = {
       status: "available",
       nodes: [
@@ -68,6 +73,9 @@ describe("StorageTopologyPanels", () => {
     expect(onDriveAction).toHaveBeenCalledWith("test", "wwn:5000c50012345678");
     await user.click(screen.getByRole("button", { name: "Review existing data" }));
     expect(onDriveAction).toHaveBeenCalledWith("import", "wwn:5000c50012345678");
+    await user.click(screen.getByRole("button", { name: "Locate for 5 minutes" }));
+    expect(locate).toHaveBeenCalledWith("wwn:5000c50012345678", true, 300);
+    expect(await screen.findByText(/schedules an automatic clear/)).toBeInTheDocument();
     const sasRails = [...document.querySelectorAll<HTMLElement>(".topology-link.protocol-sas")];
     expect(sasRails.map((item) => item.style.getPropertyValue("--link-width"))).toEqual(["2px", "4px", "6px", "6px", "6px", "4px"]);
   });

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     snapraid_config_root: Path = Path("/etc/snapraid")
     connectivity_executor_timeout_seconds: float = Field(default=120.0, ge=5.0, le=600.0)
     network_sysfs_root: Path = Path("/sys")
+    hardware_sysfs_root: Path = Path("/sys")
     hardware_scan_timeout_seconds: int = Field(default=30, ge=5, le=300)
     hardware_scan_output_limit_bytes: int = Field(
         default=4 * 1024 * 1024,
