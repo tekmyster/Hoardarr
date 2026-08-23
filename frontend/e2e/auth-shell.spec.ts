@@ -628,6 +628,31 @@ test.describe("production sign-in shell", () => {
     await expect(page.locator(".graph-bars rect")).toHaveCount(1);
   });
 
+  test("shows durable ARR write activity used by storage lifecycle coordination", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    await page.route("**/api/v1/integrations", (route) => route.fulfill({ json: { items: [{
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "Sonarr",
+      expected_product: "sonarr",
+      discovered_product: "sonarr",
+      product_version: "4.0.0",
+      base_url: "http://sonarr:8989",
+      status: "connected",
+      capabilities: ["activity"],
+      state: {
+        active_writes: 2,
+        activity_observed_at: "2026-08-23T16:00:00Z",
+        activity: { quality: "available", active_writes: 2, downloading: 1, importing: 1, pending: 3, stalled: 0 },
+      },
+      last_checked_at: "2026-08-23T16:00:00Z",
+    }] } }));
+    await page.goto("/");
+    await page.getByRole("button", { name: "Applications" }).click();
+    await expect(page.getByRole("heading", { name: "Applications", exact: true })).toBeVisible();
+    await expect(page.getByText("Storage active")).toBeVisible();
+    await expect(page.getByText(/1 downloading · 1 importing · 3 pending/)).toBeVisible();
+  });
+
   test("productizes controller redundancy from single path through failover and recovery", async ({ page }, testInfo) => {
     test.setTimeout(90_000);
     const controls = await controllerRedundancyServer(page);

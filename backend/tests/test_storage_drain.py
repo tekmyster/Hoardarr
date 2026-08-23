@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from hoardarr.auth.service import Principal
@@ -174,7 +174,16 @@ def test_drain_preflight_blocks_capacity_open_files_health_and_arr_activity() ->
                 base_url="http://sonarr.test",
                 api_key_ciphertext=b"encrypted-test-key",
                 status="connected",
-                state_json={"active_writes": 2},
+                state_json={
+                    "active_writes": 2,
+                    "activity_observed_at": datetime.now(UTC).isoformat(),
+                    "activity": {
+                        "quality": "available",
+                        "active_writes": 2,
+                        "downloading": 1,
+                        "importing": 1,
+                    },
+                },
             )
         )
         session.flush()
@@ -206,6 +215,25 @@ def test_drain_preflight_blocks_capacity_open_files_health_and_arr_activity() ->
             "source_in_use",
         }
         assert plan["arr_activity"]["active_writes"] == 2
+
+        connection = session.scalar(select(IntegrationConnection))
+        assert connection is not None
+        stale_state = dict(connection.state_json)
+        stale_state["activity_observed_at"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        connection.state_json = stale_state
+        session.flush()
+        stale = build_drain_plan(
+            session,
+            group_id=group_id,
+            source_backend_id=source_id,
+            destination_backend_ids=[destination_id],
+            verification_mode="fast",
+            reserve_bytes=1_000,
+            filesystem_probe=insufficient,
+            open_use_probe=lambda _path: {"quality": "available", "open_handles": 0},
+        )
+        assert "arr_active_writes" not in {item["code"] for item in stale["blockers"]}
+        assert "arr_activity_not_reported" in {item["code"] for item in stale["warnings"]}
 
 
 def test_drain_preflight_rejects_duplicate_and_cross_group_destinations() -> None:

@@ -19,6 +19,7 @@ from hoardarr.db.models import (
     StorageEntity,
     StorageGroup,
 )
+from hoardarr.integrations.servarr import PRODUCTS
 from hoardarr.operations.service import document_hash
 
 
@@ -222,19 +223,42 @@ def _backend_health(session: Session, backend: StorageBackend) -> str:
 
 
 def arr_activity(session: Session) -> dict[str, Any]:
-    connections = list(
-        session.scalars(
+    connections = [
+        connection
+        for connection in session.scalars(
             select(IntegrationConnection).where(IntegrationConnection.adapter == "servarr")
         )
-    )
+        if "activity"
+        in PRODUCTS.get(
+            connection.discovered_product or connection.expected_product,
+            PRODUCTS["prowlarr"],
+        ).declared_capabilities
+    ]
     if not connections:
         return {"quality": "unsupported", "active_writes": 0, "applications": []}
     active: list[dict[str, Any]] = []
     reported = 0
+    now = datetime.now(UTC)
     for connection in connections:
         state = connection.state_json if isinstance(connection.state_json, dict) else {}
+        activity = state.get("activity") if isinstance(state.get("activity"), dict) else {}
         value = state.get("active_writes")
-        if isinstance(value, int) and value >= 0:
+        observed_raw = state.get("activity_observed_at")
+        try:
+            observed_at = datetime.fromisoformat(str(observed_raw))
+            if observed_at.tzinfo is None:
+                raise ValueError
+            age = now - observed_at.astimezone(UTC)
+            fresh = timedelta(minutes=-1) <= age <= timedelta(minutes=10)
+        except (TypeError, ValueError):
+            fresh = False
+        if (
+            activity.get("quality") == "available"
+            and fresh
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
             reported += 1
             if value:
                 active.append(
@@ -242,6 +266,9 @@ def arr_activity(session: Session) -> dict[str, Any]:
                         "integration_id": connection.id,
                         "product": connection.discovered_product or connection.expected_product,
                         "active_writes": value,
+                        "downloading": activity.get("downloading", 0),
+                        "importing": activity.get("importing", 0),
+                        "observed_at": observed_raw,
                     }
                 )
     quality = "available" if reported == len(connections) else "temporarily_unavailable"

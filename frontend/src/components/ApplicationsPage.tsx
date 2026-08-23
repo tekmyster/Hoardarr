@@ -21,6 +21,27 @@ const DEFAULT_FOLDERS: Record<IntegrationProduct, string> = {
   prowlarr: "No media root required",
 };
 
+function activitySummary(item: IntegrationDocument): { status: string; detail: string } {
+  const activity = item.state.activity;
+  if (!activity || typeof activity !== "object" || Array.isArray(activity)) {
+    return { status: "Not reported", detail: "Write-sensitive activity has not been checked yet." };
+  }
+  const values = activity as Record<string, unknown>;
+  if (values.quality === "unsupported") return { status: "Unsupported", detail: "This application does not expose media/download write activity." };
+  if (values.quality !== "available") return { status: "Temporarily unavailable", detail: "Hoardarr will not assume storage is idle while activity is unavailable." };
+  const active = typeof values.active_writes === "number" ? values.active_writes : null;
+  if (active === null) return { status: "Not reported", detail: "The application returned incomplete activity data." };
+  const downloading = typeof values.downloading === "number" ? values.downloading : 0;
+  const importing = typeof values.importing === "number" ? values.importing : 0;
+  const pending = typeof values.pending === "number" ? values.pending : 0;
+  return {
+    status: active > 0 ? "Storage active" : "Idle",
+    detail: active > 0
+      ? `${downloading} downloading · ${importing} importing${pending ? ` · ${pending} pending` : ""}`
+      : pending ? `No active writes · ${pending} pending` : "No active downloads or imports reported.",
+  };
+}
+
 export function ApplicationsPage({
   onChanged,
   onRecommendations,
@@ -89,7 +110,7 @@ export function ApplicationsPage({
     {error && <Notice tone="danger" title="Application request failed">{error}</Notice>}
     {status && <Notice tone="info" title="Applications">{status}</Notice>}
     <Card title="ARR applications" description="Connected applications supply their media and download paths to storage setup." actions={<button type="button" className="icon-add-button" aria-label="Add application" onClick={() => setAdding(true)}>+</button>}>
-      {loading ? <Spinner label="Loading applications…" /> : items.length ? <div className="settings-list">{items.map((item) => <section key={item.id} className="settings-row"><div><strong>{item.name}</strong><small>{item.discovered_product ?? item.expected_product} {item.product_version ?? ""}</small><code>{item.base_url}</code></div><div><StatusBadge status={item.status} /><button type="button" className="button button-secondary" onClick={() => void api.refreshIntegration(item.id)} disabled={busy}>Refresh</button></div></section>)}</div> : <div className="empty-state compact-empty"><h3>No applications connected</h3><p>Add an ARR application to discover its current folders.</p></div>}
+      {loading ? <Spinner label="Loading applications…" /> : items.length ? <div className="settings-list">{items.map((item) => { const activity = activitySummary(item); return <section key={item.id} className="settings-row"><div><strong>{item.name}</strong><small>{item.discovered_product ?? item.expected_product} {item.product_version ?? ""}</small><code>{item.base_url}</code><small><strong>{activity.status}</strong> · {activity.detail}</small>{typeof item.state.activity_observed_at === "string" && <small>Activity checked {new Date(item.state.activity_observed_at).toLocaleString()}</small>}</div><div><StatusBadge status={item.status} /><button type="button" className="button button-secondary" onClick={() => void api.refreshIntegration(item.id)} disabled={busy}>Refresh</button></div></section>; })}</div> : <div className="empty-state compact-empty"><h3>No applications connected</h3><p>Add an ARR application to discover its current folders.</p></div>}
     </Card>
     {adding && <Card title="Add application" description="Enter the address and API key shown in the application’s General settings.">
       <div className="form-grid two-columns">

@@ -25,31 +25,31 @@ PRODUCTS: dict[str, ProductDefinition] = {
         "/api/v3",
         frozenset({"sonarr"}),
         "supported",
-        frozenset({"root_folders", "remote_path_mappings", "download_clients"}),
+        frozenset({"root_folders", "remote_path_mappings", "download_clients", "activity"}),
     ),
     "radarr": ProductDefinition(
         "/api/v3",
         frozenset({"radarr"}),
         "supported",
-        frozenset({"root_folders", "remote_path_mappings", "download_clients"}),
+        frozenset({"root_folders", "remote_path_mappings", "download_clients", "activity"}),
     ),
     "lidarr": ProductDefinition(
         "/api/v1",
         frozenset({"lidarr"}),
         "supported_with_profile_selection",
-        frozenset({"root_folders", "remote_path_mappings", "download_clients"}),
+        frozenset({"root_folders", "remote_path_mappings", "download_clients", "activity"}),
     ),
     "readarr": ProductDefinition(
         "/api/v1",
         frozenset({"readarr"}),
         "legacy_opt_in",
-        frozenset({"root_folders", "remote_path_mappings", "download_clients"}),
+        frozenset({"root_folders", "remote_path_mappings", "download_clients", "activity"}),
     ),
     "whisparr": ProductDefinition(
         "/api/v3",
         frozenset({"whisparr"}),
         "experimental_opt_in",
-        frozenset({"root_folders", "remote_path_mappings", "download_clients"}),
+        frozenset({"root_folders", "remote_path_mappings", "download_clients", "activity"}),
     ),
     "prowlarr": ProductDefinition(
         "/api/v1",
@@ -261,6 +261,56 @@ def _minimal_schemas(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+_DOWNLOADING_STATES = frozenset({"downloading"})
+_IMPORTING_STATES = frozenset({"importpending", "importing"})
+_PENDING_STATES = frozenset({"queued", "delay", "paused"})
+_STALLED_STATES = frozenset({"warning", "error", "failed"})
+
+
+def _minimal_activity(value: Any) -> dict[str, Any]:
+    """Return bounded, title-free write activity from a Servarr queue response."""
+
+    if not isinstance(value, dict) or not isinstance(value.get("records"), list):
+        raise ServarrError("invalid_response", "Servarr queue response is incomplete")
+    records = value["records"]
+    total = value.get("totalRecords")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        total = len(records)
+    if total > len(records):
+        return {
+            "quality": "temporarily_unavailable",
+            "reason": "The bounded queue response did not include every active item.",
+            "reported_items": len(records),
+            "total_items": total,
+            "active_writes": 0,
+            "downloading": 0,
+            "importing": 0,
+            "pending": 0,
+            "stalled": 0,
+        }
+    counts = {"downloading": 0, "importing": 0, "pending": 0, "stalled": 0}
+    for item in records[:1000]:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").casefold()
+        tracked = str(item.get("trackedDownloadState") or "").casefold()
+        if tracked in _IMPORTING_STATES:
+            counts["importing"] += 1
+        elif status in _DOWNLOADING_STATES:
+            counts["downloading"] += 1
+        elif status in _PENDING_STATES:
+            counts["pending"] += 1
+        elif status in _STALLED_STATES:
+            counts["stalled"] += 1
+    return {
+        "quality": "available",
+        "reported_items": len(records),
+        "total_items": total,
+        "active_writes": counts["downloading"] + counts["importing"],
+        **counts,
+    }
+
+
 def discover_servarr(
     *,
     settings: Settings,
@@ -324,6 +374,21 @@ def discover_servarr(
             state[key] = sanitizer(remote)
             if capability not in capabilities:
                 capabilities.append(capability)
+        if "activity" in definition.declared_capabilities:
+            try:
+                queue = client.get_json(
+                    f"{definition.api_prefix}/queue?page=1&pageSize=1000&sortDirection=ascending"
+                )
+                activity = _minimal_activity(queue)
+            except ServarrError as exc:
+                if exc.code == "capability_missing":
+                    activity = {"quality": "unsupported", "active_writes": 0}
+                else:
+                    raise
+            state["activity"] = activity
+            if activity["quality"] == "available":
+                state["active_writes"] = activity["active_writes"]
+            capabilities.append("activity")
         return {
             "product": expected_product,
             "version": status.get("version"),
@@ -332,6 +397,48 @@ def discover_servarr(
             "capabilities": sorted(capabilities),
             "state": state,
         }
+
+
+def discover_servarr_activity(
+    *,
+    settings: Settings,
+    expected_product: str,
+    base_url: str,
+    approved_ips: list[str],
+    allow_localhost: bool,
+    api_key: str,
+    verify_tls: bool,
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, Any]:
+    """Probe only bounded write-sensitive activity for the durable worker cadence."""
+
+    definition = PRODUCTS.get(expected_product)
+    if definition is None:
+        raise ServarrError("unsupported_product", "Unsupported Servarr product")
+    if "activity" not in definition.declared_capabilities:
+        return {"product": expected_product, "activity": {"quality": "unsupported"}}
+    with PinnedServarrClient(
+        settings=settings,
+        base_url=base_url,
+        approved_ips=approved_ips,
+        allow_localhost=allow_localhost,
+        api_key=api_key,
+        verify_tls=verify_tls,
+        transport=transport,
+    ) as client:
+        status = client.get_json(f"{definition.api_prefix}/system/status")
+        if not isinstance(status, dict) or not isinstance(status.get("appName"), str):
+            raise ServarrError("invalid_response", "Servarr status response is incomplete")
+        product = status["appName"].strip().casefold()
+        if product not in definition.app_names:
+            raise ServarrError(
+                "product_mismatch",
+                f"Expected {expected_product}, but the endpoint identified itself as {product}",
+            )
+        queue = client.get_json(
+            f"{definition.api_prefix}/queue?page=1&pageSize=1000&sortDirection=ascending"
+        )
+        return {"product": expected_product, "activity": _minimal_activity(queue)}
 
 
 def normalize_mutation_plan(product: str, value: Any) -> dict[str, Any]:

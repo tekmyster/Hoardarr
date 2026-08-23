@@ -73,6 +73,8 @@ def test_servarr_uses_pinned_ip_original_host_and_fixed_api_prefix(
                 "urlBase": "/sonarr",
                 "isLinux": True,
             }
+        elif path.endswith("/queue"):
+            value = {"totalRecords": 0, "records": []}
         else:
             value = []
         return httpx.Response(200, headers={"Content-Type": "application/json"}, json=value)
@@ -147,6 +149,16 @@ def test_each_declared_servarr_product_has_a_verified_discovery_contract(
                     "fields": [{"name": "category"}],
                 }
             ]
+        elif request.url.path.endswith("/queue"):
+            value = {
+                "totalRecords": 4,
+                "records": [
+                    {"status": "downloading", "title": "must not persist"},
+                    {"status": "completed", "trackedDownloadState": "importPending"},
+                    {"status": "queued"},
+                    {"status": "warning"},
+                ],
+            }
         else:
             value = [
                 {
@@ -180,10 +192,23 @@ def test_each_declared_servarr_product_has_a_verified_discovery_contract(
         assert len(requests) == 1
     else:
         assert result["capabilities"] == [
+            "activity",
             "download_clients",
             "remote_path_mappings",
             "root_folders",
         ]
+        assert result["state"]["active_writes"] == 2
+        assert result["state"]["activity"] == {
+            "quality": "available",
+            "reported_items": 4,
+            "total_items": 4,
+            "active_writes": 2,
+            "downloading": 1,
+            "importing": 1,
+            "pending": 1,
+            "stalled": 1,
+        }
+        assert "must not persist" not in str(result)
         assert result["state"]["download_client_schemas"][0]["field_names"] == ["category"]
 
 

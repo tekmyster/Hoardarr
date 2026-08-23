@@ -57,6 +57,7 @@ class Settings(BaseSettings):
         le=64 * 1024 * 1024,
     )
     integration_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    integration_activity_interval_seconds: int = Field(default=30, ge=10, le=300)
     integration_allowed_networks: tuple[str, ...] = DEFAULT_INTEGRATION_NETWORKS
     worker_poll_seconds: float = Field(default=1.0, ge=0.1, le=30.0)
     update_channel: str = "stable"

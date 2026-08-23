@@ -43,6 +43,7 @@ from hoardarr.integrations.servarr import (
     ServarrError,
     apply_servarr_plan,
     discover_servarr,
+    discover_servarr_activity,
 )
 from hoardarr.integrations.url_policy import IntegrationTargetError
 from hoardarr.operations.service import (
@@ -115,6 +116,7 @@ INTEGRATION_AAD_RECORD_TYPE = "integration_connection"
 
 DetectorRunner = Callable[..., tuple[dict[str, Any], str]]
 ServarrDiscoverer = Callable[..., dict[str, Any]]
+ServarrActivityDiscoverer = Callable[..., dict[str, Any]]
 StorageApplier = Callable[..., dict[str, Any]]
 MaintenanceApplier = Callable[..., dict[str, Any]]
 SnapraidReplacementApplier = Callable[..., dict[str, Any]]
@@ -477,6 +479,39 @@ def _sanitize_client_schemas(value: object) -> list[dict[str, Any]]:
     return result
 
 
+def _sanitize_activity(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WorkFailure("invalid_discovery_result", "Servarr discovery returned invalid data")
+    quality = value.get("quality")
+    if quality not in {"available", "unsupported", "temporarily_unavailable"}:
+        raise WorkFailure("invalid_discovery_result", "Servarr discovery returned invalid data")
+    result: dict[str, Any] = {"quality": quality}
+    for name in (
+        "reported_items",
+        "total_items",
+        "active_writes",
+        "downloading",
+        "importing",
+        "pending",
+        "stalled",
+    ):
+        value_item = value.get(name)
+        if value_item is not None:
+            if (
+                not isinstance(value_item, int)
+                or isinstance(value_item, bool)
+                or not 0 <= value_item <= 1_000_000
+            ):
+                raise WorkFailure(
+                    "invalid_discovery_result", "Servarr discovery returned invalid data"
+                )
+            result[name] = value_item
+    reason = value.get("reason")
+    if isinstance(reason, str):
+        result["reason"] = _bounded_text(reason, maximum=512)
+    return result
+
+
 def _sanitize_discovery(
     discovery: dict[str, Any],
     *,
@@ -506,10 +541,16 @@ def _sanitize_discovery(
         ("remote_path_mappings", _sanitize_mappings),
         ("download_clients", _sanitize_clients),
         ("download_client_schemas", _sanitize_client_schemas),
+        ("activity", _sanitize_activity),
     )
     for name, sanitizer in sanitizers:
         if name in state_value:
             state[name] = sanitizer(state_value[name])
+    activity = state.get("activity")
+    if isinstance(activity, dict) and activity.get("quality") == "available":
+        active_writes = activity.get("active_writes")
+        if isinstance(active_writes, int):
+            state["active_writes"] = active_writes
     return {
         "product": expected_product,
         "version": _bounded_text(discovery.get("version"), maximum=64),
@@ -518,6 +559,90 @@ def _sanitize_discovery(
         "capabilities": capabilities,
         "state": state,
     }
+
+
+def refresh_servarr_activity(
+    session_factory: SessionFactory,
+    settings: Settings,
+    secret_box: SecretBox,
+    *,
+    discoverer: ServarrActivityDiscoverer = discover_servarr_activity,
+    transport: httpx.BaseTransport | None = None,
+) -> int:
+    """Refresh write-sensitive ARR state without tying it to API/browser lifetime."""
+
+    with session_factory() as session:
+        connection_ids = list(
+            session.scalars(
+                select(IntegrationConnection.id).where(
+                    IntegrationConnection.adapter == "servarr",
+                    IntegrationConnection.status == "connected",
+                )
+            )
+        )
+    refreshed = 0
+    for connection_id in connection_ids:
+        connection: ServarrConnectionData | None = None
+        fingerprint: str | None = None
+        try:
+            connection = _load_connection(
+                session_factory,
+                WorkItem(
+                    operation_id="activity-refresh",
+                    kind="servarr.activity",
+                    resource_type="integration_connection",
+                    resource_id=connection_id,
+                    request={},
+                ),
+            )
+            fingerprint = connection.fingerprint
+            api_key = secret_box.decrypt(
+                INTEGRATION_AAD_RECORD_TYPE,
+                connection.id,
+                connection.api_key_ciphertext,
+            )
+            remote = discoverer(
+                settings=settings,
+                expected_product=connection.expected_product,
+                base_url=connection.base_url,
+                approved_ips=connection.approved_ips,
+                allow_localhost=connection.allow_localhost,
+                api_key=api_key,
+                verify_tls=connection.verify_tls,
+                transport=transport,
+            )
+            if not isinstance(remote, dict) or remote.get("product") != connection.expected_product:
+                raise WorkFailure(
+                    "invalid_discovery_result", "Servarr activity returned invalid data"
+                )
+            activity = _sanitize_activity(remote.get("activity"))
+        except (SecretStoreError, ServarrError, IntegrationTargetError, WorkFailure) as exc:
+            LOGGER.warning(
+                "Servarr activity refresh unavailable for %s (%s)",
+                connection_id,
+                type(exc).__name__,
+            )
+            activity = {"quality": "temporarily_unavailable"}
+        observed_at = utc_now()
+        with session_factory() as session, session.begin():
+            record = session.get(IntegrationConnection, connection_id)
+            if record is None or record.adapter != "servarr":
+                continue
+            if fingerprint is not None and _connection_fingerprint(record) != fingerprint:
+                continue
+            state = deepcopy(record.state_json) if isinstance(record.state_json, dict) else {}
+            state["activity"] = activity
+            state["activity_observed_at"] = observed_at.isoformat()
+            active_writes = activity.get("active_writes")
+            if activity.get("quality") == "available" and isinstance(active_writes, int):
+                state["active_writes"] = active_writes
+            else:
+                state.pop("active_writes", None)
+            record.state_json = state
+            record.last_checked_at = observed_at
+            record.updated_at = observed_at
+            refreshed += 1
+    return refreshed
 
 
 def _contains_plaintext(value: object, plaintext: str) -> bool:
@@ -1338,7 +1463,10 @@ def _finalize_success(
         connection.discovered_product = discovery["product"]
         connection.product_version = discovery["version"]
         connection.capabilities_json = discovery["capabilities"]
-        connection.state_json = discovery["state"]
+        state = deepcopy(discovery["state"])
+        if "activity" in state:
+            state["activity_observed_at"] = utc_now().isoformat()
+        connection.state_json = state
         connection.last_checked_at = utc_now()
         connection.updated_at = utc_now()
         complete_operation(
@@ -1687,6 +1815,7 @@ def run_forever(
     stop_event: Event | None = None,
     detector_runner: DetectorRunner = run_hardware_detector,
     servarr_discoverer: ServarrDiscoverer = discover_servarr,
+    servarr_activity_discoverer: ServarrActivityDiscoverer = discover_servarr_activity,
     servarr_transport: httpx.BaseTransport | None = None,
 ) -> None:
     """Recover abandoned leases periodically, then process work until stopped."""
@@ -1697,12 +1826,28 @@ def run_forever(
         recover_abandoned_operations(session_factory=session_factory, settings=settings)
         recovery_interval = 30.0
         next_recovery = time.monotonic() + recovery_interval
+        next_servarr_activity = time.monotonic()
         while stop_event is None or not stop_event.is_set():
             try:
                 collect_for_worker(session_factory, settings, telemetry_service)
             except Exception as exc:
                 # Telemetry failure is isolated from destructive-operation durability.
                 LOGGER.warning("Telemetry collection failed (%s)", type(exc).__name__)
+            if time.monotonic() >= next_servarr_activity:
+                try:
+                    refresh_servarr_activity(
+                        session_factory,
+                        settings,
+                        secret_box,
+                        discoverer=servarr_activity_discoverer,
+                        transport=servarr_transport,
+                    )
+                except Exception as exc:
+                    # Application monitoring cannot stop durable storage work.
+                    LOGGER.warning("Servarr activity refresh failed (%s)", type(exc).__name__)
+                next_servarr_activity = (
+                    time.monotonic() + settings.integration_activity_interval_seconds
+                )
             if time.monotonic() >= next_recovery:
                 recover_abandoned_operations(session_factory=session_factory, settings=settings)
                 next_recovery = time.monotonic() + recovery_interval

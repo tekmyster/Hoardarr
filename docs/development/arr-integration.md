@@ -153,6 +153,23 @@ from logs and reports, and never returned by Hoardarr's public API. TLS
 verification is the default; accepting a private CA and temporarily allowing an
 unverified endpoint are distinct choices with clear warnings.
 
+## Lifecycle activity coordination
+
+The durable worker, not the browser, polls the bounded Servarr queue contract
+for Sonarr, Radarr, Lidarr, Readarr, and Whisparr. It stores title-free counts
+for downloading, importing, pending, and stalled work at a bounded cadence.
+Prowlarr does not expose the same media-write role and is excluded from drain
+coordination. An incomplete queue page, stale observation, authentication
+failure, or unavailable application is **temporarily unavailable**, never idle.
+
+Fresh downloading or import work blocks drain preflight and is rechecked before
+each file move. Linux open-file inspection remains an independent degraded
+fallback: it can reveal local activity, but Hoardarr does not claim that it is
+equivalent to the application API. The Applications page shows the latest
+quality and activity counts, while Storage Group drain previews show separate
+blockers/warnings. Scheduled starts and bounded maintenance windows let users
+coordinate longer jobs without keeping the Web UI open.
+
 ## Completion criteria
 
 The final summary reports independently whether:

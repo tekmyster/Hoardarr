@@ -27,6 +27,7 @@ from hoardarr.db.models import (
 )
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError
+from hoardarr.integrations.servarr import ServarrError
 from hoardarr.operations.service import (
     OperationConflict,
     append_event,
@@ -36,6 +37,7 @@ from hoardarr.operations.service import (
 from hoardarr.operations.worker import (
     INTEGRATION_AAD_RECORD_TYPE,
     recover_abandoned_operations,
+    refresh_servarr_activity,
     run_once,
 )
 from hoardarr.storage.tiering import plan_transfer
@@ -256,7 +258,7 @@ def test_servarr_discovery_decrypts_then_persists_only_allowlisted_state(
         return {
             "product": "sonarr",
             "version": "4.0.0",
-            "capabilities": ["root_folders", "not-a-real-capability"],
+            "capabilities": ["root_folders", "activity", "not-a-real-capability"],
             "api_key": api_key,
             "state": {
                 "status": {"app_name": "Sonarr", "secret": api_key},
@@ -273,6 +275,17 @@ def test_servarr_discovery_decrypts_then_persists_only_allowlisted_state(
                         "password": api_key,
                     }
                 ],
+                "activity": {
+                    "quality": "available",
+                    "reported_items": 3,
+                    "total_items": 3,
+                    "active_writes": 2,
+                    "downloading": 1,
+                    "importing": 1,
+                    "pending": 1,
+                    "stalled": 0,
+                    "title": api_key,
+                },
             },
         }
 
@@ -293,12 +306,14 @@ def test_servarr_discovery_decrypts_then_persists_only_allowlisted_state(
             )
         )
         assert connection is not None and connection.status == "connected"
-        assert connection.capabilities_json == ["root_folders"]
+        assert connection.capabilities_json == ["activity", "root_folders"]
         assert connection.state_json["status"] == {"app_name": "Sonarr"}
         assert connection.state_json["root_folders"] == [
             {"id": 1, "path": "/data/media/tv", "free_space": 123}
         ]
         assert "password" not in connection.state_json["download_clients"][0]
+        assert connection.state_json["active_writes"] == 2
+        assert "title" not in connection.state_json["activity"]
         assert operation is not None and operation.status == "succeeded"
         durable_output = json.dumps(
             {
@@ -308,6 +323,69 @@ def test_servarr_discovery_decrypts_then_persists_only_allowlisted_state(
             }
         )
         assert api_key not in durable_output
+
+
+def test_worker_refreshes_bounded_servarr_activity_without_api_consumers(tmp_path: Path) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    secret_box = SecretBox(b"s" * 32)
+    connection_id = "servarr-activity"
+    with session_factory() as session, session.begin():
+        session.add(
+            IntegrationConnection(
+                id=connection_id,
+                name="Radarr",
+                expected_product="radarr",
+                discovered_product="radarr",
+                base_url="http://10.0.0.21:7878",
+                approved_ips_json=["10.0.0.21"],
+                api_key_ciphertext=secret_box.encrypt(
+                    INTEGRATION_AAD_RECORD_TYPE, connection_id, "activity-secret"
+                ),
+                verify_tls=False,
+                status="connected",
+                state_json={"status": {"app_name": "Radarr"}},
+            )
+        )
+
+    def activity(**kwargs: object) -> dict[str, Any]:
+        assert kwargs["api_key"] == "activity-secret"
+        return {
+            "product": "radarr",
+            "activity": {
+                "quality": "available",
+                "reported_items": 3,
+                "total_items": 3,
+                "active_writes": 2,
+                "downloading": 1,
+                "importing": 1,
+                "pending": 1,
+                "stalled": 0,
+                "untrusted_title": "not persisted",
+            },
+        }
+
+    assert refresh_servarr_activity(
+        session_factory, settings, secret_box, discoverer=activity
+    ) == 1
+    with session_factory() as session:
+        connection = session.get(IntegrationConnection, connection_id)
+        assert connection is not None
+        assert connection.state_json["active_writes"] == 2
+        assert connection.state_json["activity"]["downloading"] == 1
+        assert "untrusted_title" not in connection.state_json["activity"]
+        assert connection.state_json["activity_observed_at"]
+
+    def unavailable(**_kwargs: object) -> dict[str, Any]:
+        raise ServarrError("connection_failed", "must not persist remote detail")
+
+    assert refresh_servarr_activity(
+        session_factory, settings, secret_box, discoverer=unavailable
+    ) == 1
+    with session_factory() as session:
+        connection = session.get(IntegrationConnection, connection_id)
+        assert connection is not None
+        assert connection.state_json["activity"] == {"quality": "temporarily_unavailable"}
+        assert "active_writes" not in connection.state_json
 
 
 def test_servarr_credential_failure_is_stable_and_secret_safe(tmp_path: Path) -> None:
