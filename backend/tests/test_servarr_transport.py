@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 from hoardarr.core.config import Settings
-from hoardarr.integrations.servarr import PinnedServarrClient, ServarrError, discover_servarr
+from hoardarr.integrations.servarr import (
+    PinnedServarrClient,
+    ServarrError,
+    discover_servarr,
+    discover_servarr_activity,
+)
 from hoardarr.integrations.url_policy import (
     IntegrationTargetError,
     normalize_and_resolve_target,
@@ -124,6 +129,13 @@ def test_each_declared_servarr_product_has_a_verified_discovery_contract(
         lambda _hostname, _port, _timeout: ("10.20.30.40",),
     )
     requests: list[str] = []
+    write_commands = {
+        "sonarr": ("RenameSeries", "MoveSeries", "DownloadedEpisodesScan"),
+        "radarr": ("RenameMovie", "MoveMovie", "DownloadedMoviesScan"),
+        "lidarr": ("RenameFiles", "MoveArtist", "DownloadedTracksScan"),
+        "readarr": ("RenameFiles", "MoveAuthor", "DownloadedBooksScan"),
+        "whisparr": ("RenameSeries", "MoveSeries", "DownloadedEpisodesScan"),
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request.url.path)
@@ -159,6 +171,15 @@ def test_each_declared_servarr_product_has_a_verified_discovery_contract(
                     {"status": "warning"},
                 ],
             }
+        elif request.url.path.endswith("/command"):
+            rename, move, import_command = write_commands[product]
+            value = [
+                {"name": rename, "status": "started", "body": "must not persist"},
+                {"name": move, "status": "queued", "message": "must not persist"},
+                {"name": import_command, "status": "running"},
+                {"name": rename, "status": "completed"},
+                {"name": "RefreshMonitoredDownloads", "status": "started"},
+            ]
         else:
             value = [
                 {
@@ -197,19 +218,54 @@ def test_each_declared_servarr_product_has_a_verified_discovery_contract(
             "remote_path_mappings",
             "root_folders",
         ]
-        assert result["state"]["active_writes"] == 2
+        assert result["state"]["active_writes"] == 5
         assert result["state"]["activity"] == {
             "quality": "available",
             "reported_items": 4,
             "total_items": 4,
-            "active_writes": 2,
+            "active_writes": 5,
             "downloading": 1,
             "importing": 1,
             "pending": 1,
             "stalled": 1,
+            "renaming": 1,
+            "moving": 1,
+            "importing_commands": 1,
+            "commands_reported": 5,
         }
         assert "must not persist" not in str(result)
         assert result["state"]["download_client_schemas"][0]["field_names"] == ["category"]
+
+
+def test_activity_fails_closed_when_command_queue_is_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(
+        "hoardarr.integrations.url_policy._resolve",
+        lambda _hostname, _port, _timeout: ("10.20.30.40",),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/system/status"):
+            value: object = {"appName": "Sonarr", "version": "4.0.0"}
+        elif request.url.path.endswith("/queue"):
+            value = {"totalRecords": 0, "records": []}
+        else:
+            value = {"records": [{"name": "RenameSeries", "status": "started"}]}
+        return httpx.Response(200, headers={"Content-Type": "application/json"}, json=value)
+
+    with pytest.raises(ServarrError, match="command response is incomplete"):
+        discover_servarr_activity(
+            settings=settings,
+            expected_product="sonarr",
+            base_url="https://sonarr.internal:8989",
+            approved_ips=["10.20.30.40"],
+            allow_localhost=False,
+            api_key="fixture-secret",
+            verify_tls=True,
+            transport=httpx.MockTransport(handler),
+        )
 
 
 def test_dns_is_revalidated_before_each_request(

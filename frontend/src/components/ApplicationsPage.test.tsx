@@ -57,7 +57,7 @@ describe("ApplicationsPage", () => {
         base_url: "http://sonarr:8989",
         status: "connected",
         capabilities: ["activity"],
-        state: { activity: { quality: "available", active_writes: 2, downloading: 1, importing: 1, pending: 3 }, activity_observed_at: "2026-08-23T16:00:00Z" },
+        state: { activity: { quality: "available", active_writes: 4, downloading: 1, importing: 1, renaming: 1, moving: 1, pending: 3 }, activity_observed_at: "2026-08-23T16:00:00Z" },
         last_checked_at: "2026-08-23T16:00:00Z",
       },
       {
@@ -77,7 +77,7 @@ describe("ApplicationsPage", () => {
     render(<ApplicationsPage />);
 
     expect(await screen.findByText("Storage active")).toBeInTheDocument();
-    expect(screen.getByText(/1 downloading · 1 importing · 3 pending/)).toBeInTheDocument();
+    expect(screen.getByText(/1 downloading · 1 importing · 1 renaming · 1 moving · 3 pending/)).toBeInTheDocument();
     expect(screen.getByText("Temporarily unavailable")).toBeInTheDocument();
     expect(screen.getByText(/will not assume storage is idle/)).toBeInTheDocument();
   });

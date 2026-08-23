@@ -506,6 +506,10 @@ def _sanitize_activity(value: object) -> dict[str, Any]:
         "importing",
         "pending",
         "stalled",
+        "commands_reported",
+        "renaming",
+        "moving",
+        "importing_commands",
     ):
         value_item = value.get(name)
         if value_item is not None:

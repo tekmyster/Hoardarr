@@ -278,6 +278,34 @@ _DOWNLOADING_STATES = frozenset({"downloading"})
 _IMPORTING_STATES = frozenset({"importpending", "importing"})
 _PENDING_STATES = frozenset({"queued", "delay", "paused"})
 _STALLED_STATES = frozenset({"warning", "error", "failed"})
+_ACTIVE_COMMAND_STATES = frozenset({"queued", "started", "running"})
+_WRITE_COMMANDS: dict[str, dict[str, frozenset[str]]] = {
+    "sonarr": {
+        "renaming": frozenset({"RenameSeries"}),
+        "moving": frozenset({"MoveSeries", "BulkMoveSeries"}),
+        "importing_commands": frozenset({"DownloadedEpisodesScan", "ManualImport"}),
+    },
+    "radarr": {
+        "renaming": frozenset({"RenameMovie", "RenameMovieFolder"}),
+        "moving": frozenset({"MoveMovie", "BulkMoveMovie"}),
+        "importing_commands": frozenset({"DownloadedMoviesScan", "ManualImport"}),
+    },
+    "lidarr": {
+        "renaming": frozenset({"RenameFiles", "RenameArtist"}),
+        "moving": frozenset({"MoveArtist", "BulkMoveArtist"}),
+        "importing_commands": frozenset({"DownloadedTracksScan", "ManualImport"}),
+    },
+    "readarr": {
+        "renaming": frozenset({"RenameFiles", "RenameAuthor"}),
+        "moving": frozenset({"MoveAuthor", "BulkMoveAuthor"}),
+        "importing_commands": frozenset({"DownloadedBooksScan", "ManualImport"}),
+    },
+    "whisparr": {
+        "renaming": frozenset({"RenameSeries"}),
+        "moving": frozenset({"MoveSeries", "BulkMoveSeries"}),
+        "importing_commands": frozenset({"DownloadedEpisodesScan", "ManualImport"}),
+    },
+}
 
 
 def _minimal_activity(value: Any) -> dict[str, Any]:
@@ -322,6 +350,44 @@ def _minimal_activity(value: Any) -> dict[str, Any]:
         "active_writes": counts["downloading"] + counts["importing"],
         **counts,
     }
+
+
+def _minimal_commands(product: str, value: Any) -> dict[str, int]:
+    """Count only active, write-sensitive commands without retaining command payloads."""
+
+    if not isinstance(value, list) or len(value) > 1000:
+        raise ServarrError("invalid_response", "Servarr command response is incomplete")
+    commands = _WRITE_COMMANDS.get(product)
+    if commands is None:
+        raise ServarrError("unsupported_product", "Unsupported Servarr product")
+    counts = {"renaming": 0, "moving": 0, "importing_commands": 0}
+    for item in value:
+        if not isinstance(item, dict):
+            raise ServarrError("invalid_response", "Servarr command response is incomplete")
+        status = str(item.get("status") or "").casefold()
+        if status not in _ACTIVE_COMMAND_STATES:
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            raise ServarrError("invalid_response", "Servarr command response is incomplete")
+        for kind, known_names in commands.items():
+            if name in known_names:
+                counts[kind] += 1
+                break
+    return counts
+
+
+def _merge_activity_commands(
+    product: str, queue_value: Any, command_value: Any
+) -> dict[str, Any]:
+    activity = _minimal_activity(queue_value)
+    if activity["quality"] != "available":
+        return activity
+    command_counts = _minimal_commands(product, command_value)
+    activity.update(command_counts)
+    activity["active_writes"] += sum(command_counts.values())
+    activity["commands_reported"] = len(command_value)
+    return activity
 
 
 def discover_servarr(
@@ -392,7 +458,8 @@ def discover_servarr(
                 queue = client.get_json(
                     f"{definition.api_prefix}/queue?page=1&pageSize=1000&sortDirection=ascending"
                 )
-                activity = _minimal_activity(queue)
+                commands = client.get_json(f"{definition.api_prefix}/command")
+                activity = _merge_activity_commands(expected_product, queue, commands)
             except ServarrError as exc:
                 if exc.code == "capability_missing":
                     activity = {"quality": "unsupported", "active_writes": 0}
@@ -451,7 +518,11 @@ def discover_servarr_activity(
         queue = client.get_json(
             f"{definition.api_prefix}/queue?page=1&pageSize=1000&sortDirection=ascending"
         )
-        return {"product": expected_product, "activity": _minimal_activity(queue)}
+        commands = client.get_json(f"{definition.api_prefix}/command")
+        return {
+            "product": expected_product,
+            "activity": _merge_activity_commands(expected_product, queue, commands),
+        }
 
 
 def normalize_mutation_plan(product: str, value: Any) -> dict[str, Any]:

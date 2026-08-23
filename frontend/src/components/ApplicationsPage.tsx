@@ -53,12 +53,22 @@ function activitySummary(item: IntegrationDocument): { status: string; detail: s
   if (active === null) return { status: "Not reported", detail: "The application returned incomplete activity data." };
   const downloading = typeof values.downloading === "number" ? values.downloading : 0;
   const importing = typeof values.importing === "number" ? values.importing : 0;
+  const importingCommands = typeof values.importing_commands === "number" ? values.importing_commands : 0;
+  const renaming = typeof values.renaming === "number" ? values.renaming : 0;
+  const moving = typeof values.moving === "number" ? values.moving : 0;
   const pending = typeof values.pending === "number" ? values.pending : 0;
+  const parts = [
+    downloading ? `${downloading} downloading` : "",
+    importing || importingCommands ? `${importing + importingCommands} importing` : "",
+    renaming ? `${renaming} renaming` : "",
+    moving ? `${moving} moving` : "",
+    pending ? `${pending} pending` : "",
+  ].filter(Boolean);
   return {
     status: active > 0 ? "Storage active" : "Idle",
     detail: active > 0
-      ? `${downloading} downloading · ${importing} importing${pending ? ` · ${pending} pending` : ""}`
-      : pending ? `No active writes · ${pending} pending` : "No active downloads or imports reported.",
+      ? parts.join(" · ")
+      : pending ? `No active writes · ${pending} pending` : "No active downloads, imports, renames, or moves reported.",
   };
 }
 

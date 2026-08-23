@@ -358,6 +358,10 @@ def test_worker_refreshes_bounded_servarr_activity_without_api_consumers(tmp_pat
                 "active_writes": 2,
                 "downloading": 1,
                 "importing": 1,
+                "renaming": 1,
+                "moving": 1,
+                "importing_commands": 1,
+                "commands_reported": 3,
                 "pending": 1,
                 "stalled": 0,
                 "untrusted_title": "not persisted",
@@ -372,6 +376,7 @@ def test_worker_refreshes_bounded_servarr_activity_without_api_consumers(tmp_pat
         assert connection is not None
         assert connection.state_json["active_writes"] == 2
         assert connection.state_json["activity"]["downloading"] == 1
+        assert connection.state_json["activity"]["renaming"] == 1
         assert "untrusted_title" not in connection.state_json["activity"]
         assert connection.state_json["activity_observed_at"]
 

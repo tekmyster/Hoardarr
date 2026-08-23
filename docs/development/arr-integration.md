@@ -155,14 +155,19 @@ unverified endpoint are distinct choices with clear warnings.
 
 ## Lifecycle activity coordination
 
-The durable worker, not the browser, polls the bounded Servarr queue contract
+The durable worker, not the browser, polls the bounded Servarr download queue and
+active-command contracts. Product-aware command mappings cover import scans,
+renames, and storage moves; Hoardarr stores counts and quality only, never media
+titles, source paths, or command payloads. Unknown non-writing commands are ignored,
+while an incomplete or unavailable command response prevents Hoardarr from claiming
+the application is idle.
 for Sonarr, Radarr, Lidarr, Readarr, and Whisparr. It stores title-free counts
 for downloading, importing, pending, and stalled work at a bounded cadence.
 Prowlarr does not expose the same media-write role and is excluded from drain
 coordination. An incomplete queue page, stale observation, authentication
 failure, or unavailable application is **temporarily unavailable**, never idle.
 
-Fresh downloading or import work blocks drain preflight and is rechecked before
+Fresh downloading, import, rename, or move work blocks drain preflight and is rechecked before
 each file move. Linux open-file inspection remains an independent degraded
 fallback: it can reveal local activity, but Hoardarr does not claim that it is
 equivalent to the application API. The Applications page shows the latest
