@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import hoardarr.api.routes.auth as auth_routes
+import hoardarr.storage.drain as drain_service
 from hoardarr import __version__
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import create_initial_owner, issue_setup_token
@@ -92,7 +93,9 @@ def test_authenticated_read_only_settings_requests_do_not_require_csrf_origin(
     assert response.json() == {"items": []}
 
 
-def test_storage_group_api_preserves_identity_and_guards_lifecycle(api_runtime: Any) -> None:
+def test_storage_group_api_preserves_identity_and_guards_lifecycle(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client, _app, setup_token, _secret_box = api_runtime
     assert client.get("/api/v1/storage/groups").status_code == 401
     csrf = _claim_owner(client, setup_token)
@@ -110,12 +113,20 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(api_runtime: 
                     "model": "Media Disk",
                     "capacity_bytes": 8_000_000_000_000,
                     "health_state": "healthy",
-                }
+                },
+                {
+                    "stable_identity": "wwn:5000c500feed0002",
+                    "kernel_path": "/dev/sdc",
+                    "serial": "SANITIZED-0002",
+                    "model": "Media Disk",
+                    "capacity_bytes": 8_000_000_000_000,
+                    "health_state": "healthy",
+                },
             ]
         },
     )
     assert reconciled.status_code == 200, reconciled.text
-    disk_id = reconciled.json()["items"][0]["id"]
+    disks = {item["stable_identity"]: item["id"] for item in reconciled.json()["items"]}
 
     created = client.post(
         "/api/v1/storage/groups",
@@ -131,18 +142,71 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(api_runtime: 
     assigned = client.post(
         f"/api/v1/storage/groups/{group_id}/backends",
         headers=headers,
-        json={"physical_disk_id": disk_id, "role": "data"},
+        json={
+            "physical_disk_id": disks["wwn:5000c500feed0001"],
+            "namespace_path": "/srv/hoardarr/backends/source",
+            "role": "data",
+        },
     )
     assert assigned.status_code == 201, assigned.text
     backend_id = assigned.json()["item"]["backends"][0]["id"]
+    destination = client.post(
+        f"/api/v1/storage/groups/{group_id}/backends",
+        headers=headers,
+        json={
+            "physical_disk_id": disks["wwn:5000c500feed0002"],
+            "namespace_path": "/srv/hoardarr/backends/destination",
+            "role": "data",
+        },
+    )
+    assert destination.status_code == 201, destination.text
+    destination_id = next(
+        item["id"]
+        for item in destination.json()["item"]["backends"]
+        if item["id"] != backend_id
+    )
 
-    for state in ("active", "preferred_write"):
+    for selected_backend, state in (
+        (backend_id, "active"),
+        (destination_id, "active"),
+        (backend_id, "preferred_write"),
+    ):
         response = client.post(
-            f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/transition",
+            f"/api/v1/storage/groups/{group_id}/backends/{selected_backend}/transition",
             headers=headers,
             json={"target_state": state},
         )
         assert response.status_code == 200, response.text
+
+    monkeypatch.setattr(
+        drain_service,
+        "inspect_filesystem",
+        lambda path: drain_service.FilesystemFacts(
+            path,
+            101 if path.endswith("source") else 202,
+            20_000,
+            8_000 if path.endswith("source") else 1_000,
+            12_000 if path.endswith("source") else 19_000,
+        ),
+    )
+    monkeypatch.setattr(
+        drain_service,
+        "inspect_open_use",
+        lambda _path: {"quality": "available", "open_handles": 0, "processes": []},
+    )
+    preview = client.post(
+        f"/api/v1/storage/groups/{group_id}/drain/preview",
+        headers=headers,
+        json={
+            "source_backend_id": backend_id,
+            "destination_backend_ids": [destination_id],
+            "verification_mode": "accurate",
+            "reserve_bytes": 1_000,
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["plan"]["ready"] is True
+    assert len(preview.json()["plan"]["plan_sha256"]) == 64
     guarded = client.post(
         f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/transition",
         headers=headers,
@@ -153,8 +217,9 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(api_runtime: 
 
     document = client.get("/api/v1/storage/groups").json()["items"][0]
     assert document["namespace_path"] == "/srv/hoardarr/media"
-    assert document["backends"][0]["stable_identity"] == "disk:wwn:5000c500feed0001"
-    assert document["backends"][0]["lifecycle_state"] == "preferred_write"
+    source_document = next(item for item in document["backends"] if item["id"] == backend_id)
+    assert source_document["stable_identity"] == "disk:wwn:5000c500feed0001"
+    assert source_document["lifecycle_state"] == "preferred_write"
 
 
 def test_device_maintenance_preview_apply_and_worker_are_bound(api_runtime: Any) -> None:

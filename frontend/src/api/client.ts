@@ -36,6 +36,7 @@ import type {
   SetupStatus,
   StorageOperationProgress,
   StorageInventory,
+  StorageDrainPlan,
   StorageGroupDocument,
   StorageRedundancyPlan,
   StorageRedundancyEventDocument,
@@ -381,12 +382,39 @@ class HoardarrApi {
     return result.item;
   }
 
-  async assignStorageGroupDisk(groupId: string, physicalDiskId: string): Promise<StorageGroupDocument> {
+  async assignStorageGroupDisk(
+    groupId: string,
+    physicalDiskId: string,
+    namespacePath?: string,
+  ): Promise<StorageGroupDocument> {
     const result = await this.request<{ item: StorageGroupDocument }>(
       `/storage/groups/${encodeURIComponent(groupId)}/backends`,
-      { method: "POST", body: JSON.stringify({ physical_disk_id: physicalDiskId, role: "data" }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          physical_disk_id: physicalDiskId,
+          namespace_path: namespacePath || undefined,
+          role: "data",
+        }),
+      },
     );
     return result.item;
+  }
+
+  async previewStorageGroupDrain(
+    groupId: string,
+    input: {
+      source_backend_id: string;
+      destination_backend_ids: string[];
+      verification_mode: "fast" | "accurate" | "paranoid";
+      reserve_bytes: number;
+    },
+  ): Promise<StorageDrainPlan> {
+    const result = await this.request<{ plan: StorageDrainPlan }>(
+      `/storage/groups/${encodeURIComponent(groupId)}/drain/preview`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+    return result.plan;
   }
 
   async transitionStorageBackend(

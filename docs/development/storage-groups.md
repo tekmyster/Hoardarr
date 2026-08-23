@@ -8,11 +8,32 @@ The persistent lifecycle is:
 
 `discovered → assigned → active → preferred_write → draining → verifying → read_only → retired`
 
-The first production slice implements registration, assignment, activation, and single preferred
-write placement. Moving a preference atomically demotes the previous preferred backend. Drain,
-verification, retirement, reuse, and wipe states are represented but cannot be entered through the
-direct transition API: a durable operation must own them so copy or verification safety cannot be
-skipped.
+The first production slices implement registration, assignment, activation, single preferred-write
+placement, and immutable drain preflight. Moving a preference atomically demotes the previous
+preferred backend. Drain execution, verification, retirement, reuse, and wipe states cannot be
+entered through the direct transition API: a durable operation must own them so copy or
+verification safety cannot be skipped.
+
+## Drain preflight
+
+`POST /api/v1/storage/groups/{group_id}/drain/preview` performs a read-only preflight and returns an
+immutable SHA-256-bound plan. It does not move data. The planner binds the source and destinations
+to stable backend identities and configured mount paths, rejects cross-group/duplicate/inactive
+destinations, rejects path overlap, checks destination health, and uses filesystem facts to compare:
+
+`source filesystem used bytes + configured reserve <= aggregate destination available bytes`
+
+That value is deliberately conservative when a source mount contains files outside the selected
+namespace. The UI shows the exact inputs rather than calling the value a file inventory.
+
+Linux preflight also performs a bounded `/proc/*/fd` inspection for open files. Connected Servarr
+applications contribute active-write state only when their stored provider state actually reports
+it; missing provider data is a warning, not a fabricated zero. Active open handles, reported ARR
+writes, unhealthy destinations, or insufficient capacity make the plan `ready: false`.
+
+Verification modes are explicit: `fast` retains size/mtime methodology, `accurate` requires full
+file hashes, and `paranoid` adds another full read pass. The checkpointed mover will implement these
+methods under `DRAIN-04`, `DRAIN-07`, and `DRAIN-09`.
 
 ## Identity and namespace safety
 
@@ -30,11 +51,13 @@ skipped.
 - `GET/POST /api/v1/storage/groups`
 - `POST /api/v1/storage/groups/{group_id}/backends`
 - `POST /api/v1/storage/groups/{group_id}/backends/{backend_id}/transition`
+- `POST /api/v1/storage/groups/{group_id}/drain/preview`
 - `GET /api/v1/storage/disks`
 - `POST /api/v1/storage/disks/reconcile`
 
 Reads require authentication. Mutations require the `operate` scope and normal browser Origin/CSRF
 checks. Unsafe lifecycle skips return Problem Details with `durable_operation_required`.
 
-The drain/evacuate engine and verification profiles remain tracked by `DRAIN-01` through
-`DRAIN-12`. The UI does not advertise those actions as available yet.
+The UI exposes **Preview drain** only when another active data/archive backend and a source mount
+path exist. It labels the result as preflight-only. Apply remains unavailable until the durable,
+checkpointed mover tracked by `DRAIN-02` through `DRAIN-12` is complete.

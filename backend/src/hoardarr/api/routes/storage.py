@@ -21,6 +21,7 @@ from hoardarr.api.schemas import (
     SnapraidReplacementPreviewRequest,
     StorageBackendAssignRequest,
     StorageBackendTransitionRequest,
+    StorageDrainPreviewRequest,
     StorageGroupCreateRequest,
     StorageRedundancyApplyRequest,
     StorageRedundancyPreviewRequest,
@@ -33,6 +34,7 @@ from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import HardwareSnapshot, Operation
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
+from hoardarr.storage.drain import DrainPlanError, build_drain_plan
 from hoardarr.storage.groups import (
     StorageGroupError,
     assign_backend,
@@ -73,6 +75,11 @@ def _group_problem(exc: StorageGroupError) -> Problem:
         else 422
     )
     return Problem(status, exc.code, "Storage lifecycle request rejected", str(exc))
+
+
+def _drain_problem(exc: DrainPlanError) -> Problem:
+    status = 404 if exc.code.endswith("_not_found") else 409 if "state" in exc.code else 422
+    return Problem(status, exc.code, "Drain preflight rejected", str(exc))
 
 
 def _latest_hardware(session: Session) -> HardwareSnapshot:
@@ -215,6 +222,29 @@ def change_storage_backend_state(
         details={"group_id": group_id, "target_state": payload.target_state},
     )
     return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
+
+
+@router.post("/groups/{group_id}/drain/preview")
+def preview_storage_group_drain(
+    group_id: str,
+    payload: StorageDrainPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Build an immutable, read-only drain preflight; this endpoint never starts movement."""
+
+    try:
+        plan = build_drain_plan(
+            session,
+            group_id=group_id,
+            source_backend_id=payload.source_backend_id,
+            destination_backend_ids=payload.destination_backend_ids,
+            verification_mode=payload.verification_mode,
+            reserve_bytes=payload.reserve_bytes,
+        )
+    except DrainPlanError as exc:
+        raise _drain_problem(exc) from exc
+    return {"plan": plan}
 
 
 @router.get("/disks")

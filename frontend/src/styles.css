@@ -304,6 +304,11 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .storage-group > header h3 { margin: 0 0 4px; }
 .storage-group-assign { margin-top: 12px; justify-content: flex-start; }
 .storage-group-assign label { min-width: min(100%, 420px); }
+.storage-group td small { display: block; margin-top: 4px; color: var(--text-muted); }
+.storage-drain-preview { margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 4px; background: var(--surface-soft); }
+.storage-drain-preview h3 { display: inline-block; margin: 0 10px 8px 0; }
+.storage-drain-preview p { max-width: 86ch; }
+.storage-drain-preview > small { display: block; overflow-wrap: anywhere; }
 .event-list { margin: 10px 0 0; padding-left: 20px; }
 .event-list time { color: var(--muted); font-variant-numeric: tabular-nums; }
 @media (max-width: 720px) { .storage-group > header, .storage-group-assign { align-items: stretch; flex-direction: column; } }

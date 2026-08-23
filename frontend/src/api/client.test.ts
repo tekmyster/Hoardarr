@@ -230,6 +230,30 @@ describe("hardware snapshot normalization", () => {
     });
   });
 
+  it("submits the bounded drain preflight contract without starting an operation", async () => {
+    const plan = { kind: "storage.drain", schema_version: 1, ready: false, plan_sha256: "a".repeat(64) };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ plan }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      source_backend_id: "11111111-1111-4111-8111-111111111111",
+      destination_backend_ids: ["22222222-2222-4222-8222-222222222222"],
+      verification_mode: "accurate" as const,
+      reserve_bytes: 1_073_741_824,
+    };
+
+    await expect(api.previewStorageGroupDrain("33333333-3333-4333-8333-333333333333", input))
+      .resolves.toEqual(plan);
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(
+      /\/api\/v1\/storage\/groups\/33333333-3333-4333-8333-333333333333\/drain\/preview$/,
+    );
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(request.method).toBe("POST");
+    expect(JSON.parse(String(request.body))).toEqual(input);
+  });
+
   it("restores a browser session and uses its renewed request token", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

@@ -282,3 +282,10 @@ class StorageBackendTransitionRequest(StrictModel):
         "wipe_pending",
     ]
     reason: str | None = Field(default=None, max_length=512)
+
+
+class StorageDrainPreviewRequest(StrictModel):
+    source_backend_id: str = Field(min_length=36, max_length=36)
+    destination_backend_ids: list[str] = Field(min_length=1, max_length=64)
+    verification_mode: Literal["fast", "accurate", "paranoid"] = "accurate"
+    reserve_bytes: int = Field(default=1_073_741_824, ge=0, le=10**15)

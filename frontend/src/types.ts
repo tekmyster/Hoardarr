@@ -522,6 +522,38 @@ export interface StorageGroupDocument {
   }>;
 }
 
+export interface StorageDrainPlan {
+  schema_version: 1;
+  kind: "storage.drain";
+  storage_group_id: string;
+  storage_group_namespace: string;
+  source: {
+    backend_id: string;
+    stable_identity: string;
+    path: string;
+    filesystem_device: number;
+    required_bytes: number;
+    health: string;
+    lifecycle_state: string;
+  };
+  destinations: Array<{
+    backend_id: string;
+    stable_identity: string;
+    path: string;
+    filesystem_device: number;
+    free_bytes: number;
+    total_bytes: number;
+    health: string;
+  }>;
+  verification: { mode: "fast" | "accurate" | "paranoid"; full_hashes: boolean; additional_read_pass: boolean };
+  capacity: { required_bytes: number; destination_free_bytes: number; reserve_bytes: number };
+  blockers: Array<{ code: string; message: string }>;
+  warnings: Array<{ code: string; message: string }>;
+  ready: boolean;
+  phases: string[];
+  plan_sha256: string;
+}
+
 export interface StorageRedundancyPlan {
   schema_version: 1;
   operation: "redundancy.add" | "redundancy.remove" | "redundancy.replace" | "redundancy.configure";

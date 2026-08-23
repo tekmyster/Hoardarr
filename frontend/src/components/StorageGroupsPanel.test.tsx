@@ -92,6 +92,69 @@ describe("StorageGroupsPanel", () => {
     ));
   });
 
+  it("shows a real immutable drain preflight without implying that files moved", async () => {
+    const drainGroup: StorageGroupDocument = {
+      ...group,
+      backends: [
+        { ...group.backends[0], lifecycle_state: "preferred_write" },
+        {
+          ...group.backends[0],
+          id: "55555555-5555-4555-8555-555555555555",
+          stable_identity: "disk:wwn:destination",
+          physical_disk_id: "66666666-6666-4666-8666-666666666666",
+          namespace_path: "/srv/hoardarr/backends/b",
+          lifecycle_state: "active",
+        },
+      ],
+    };
+    vi.spyOn(api, "storageGroups").mockResolvedValue([drainGroup]);
+    vi.spyOn(api, "registeredDisks").mockResolvedValue([]);
+    const preview = vi.spyOn(api, "previewStorageGroupDrain").mockResolvedValue({
+      schema_version: 1,
+      kind: "storage.drain",
+      storage_group_id: group.id,
+      storage_group_namespace: group.namespace_path,
+      source: {
+        backend_id: drainGroup.backends[0].id,
+        stable_identity: drainGroup.backends[0].stable_identity,
+        path: drainGroup.backends[0].namespace_path!,
+        filesystem_device: 101,
+        required_bytes: 8_000,
+        health: "healthy",
+        lifecycle_state: "preferred_write",
+      },
+      destinations: [{
+        backend_id: drainGroup.backends[1].id,
+        stable_identity: drainGroup.backends[1].stable_identity,
+        path: drainGroup.backends[1].namespace_path!,
+        filesystem_device: 202,
+        free_bytes: 20_000,
+        total_bytes: 30_000,
+        health: "healthy",
+      }],
+      verification: { mode: "accurate", full_hashes: true, additional_read_pass: false },
+      capacity: { required_bytes: 8_000, destination_free_bytes: 20_000, reserve_bytes: 1_073_741_824 },
+      blockers: [],
+      warnings: [],
+      ready: true,
+      phases: ["preflight", "copy", "verify"],
+      plan_sha256: "a".repeat(64),
+    });
+    const user = userEvent.setup();
+    render(<StorageGroupsPanel />);
+
+    const drainButtons = await screen.findAllByRole("button", { name: "Preview drain" });
+    await user.click(drainButtons[0]);
+    await waitFor(() => expect(preview).toHaveBeenCalledWith(group.id, {
+      source_backend_id: drainGroup.backends[0].id,
+      destination_backend_ids: [drainGroup.backends[1].id],
+      verification_mode: "accurate",
+      reserve_bytes: 1_073_741_824,
+    }));
+    expect(screen.getByText("Drain preflight")).toBeInTheDocument();
+    expect(screen.getByText(/This preview does not move or delete files/)).toBeInTheDocument();
+  });
+
   it("aborts initial history requests when the panel unmounts", () => {
     const observed: AbortSignal[] = [];
     vi.spyOn(api, "storageGroups").mockImplementation((signal) => {
