@@ -58,6 +58,7 @@ const assessment: StorageExpansionAssessment = {
     migration_work: "Review, format, mount, and verify placement.",
     restrictions: ["Parity must be at least as large as the largest data disk."],
     target: { provider: "mergerfs", instance_id: "mergerfs:0123456789abcdef", mountpoint: "/srv/hoardarr/media" },
+    configuration: { topology: "mergerfs" },
   }],
   methodology: "Read-only analysis; no changes were made.",
 };
@@ -90,6 +91,7 @@ describe("StorageExpansionPanel", () => {
       hardware_snapshot_sha256: assessment.hardware_snapshot_sha256,
       disk_ids: assessment.candidates[0].disk_ids,
       target: assessment.candidates[0].target,
+      configuration: assessment.candidates[0].configuration,
     });
   });
 

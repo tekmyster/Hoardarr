@@ -252,6 +252,49 @@ def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:
         assert mirror["capacity"]["estimated_usable_delta_bytes"] == 9_900_000_000
         assert mirror["recommended"] is False
         assert len(mirror["disk_ids"]) == 2
+        assert mirror["configuration"] == {
+            "topology": "zfs",
+            "vdev_type": "mirror",
+            "vdev_width": 2,
+        }
+
+
+def test_five_matched_blank_disks_offer_source_backed_raidz_geometry_math() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        observations = []
+        for index in range(5):
+            identity = f"wwn:raidz-{index}"
+            register_disk(
+                session,
+                {
+                    "stable_identity": identity,
+                    "kernel_path": f"/dev/test{index}",
+                    "capacity_bytes": 10_000_000_000,
+                    "media_type": "hdd",
+                    "health_state": "healthy",
+                },
+            )
+            observations.append(_observation(identity))
+        result = build_expansion_assessment(
+            session, snapshot=_snapshot(session, observations)
+        )
+        candidates = {item["kind"]: item for item in result["candidates"]}
+        assert candidates["new_zfs_raidz1"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 40_000_000_000
+        assert candidates["new_zfs_raidz2"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 30_000_000_000
+        assert candidates["new_zfs_raidz3"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 20_000_000_000
+        assert candidates["new_zfs_raidz2"]["configuration"] == {
+            "topology": "zfs",
+            "vdev_type": "raidz2",
+            "vdev_width": 5,
+        }
 
 
 def test_system_disk_is_visible_as_protected_but_never_becomes_a_candidate() -> None:

@@ -134,6 +134,7 @@ def _candidate(
     restrictions: list[str] | None = None,
     methodology: str,
     target: dict[str, str] | None = None,
+    configuration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     document: dict[str, Any] = {
         "kind": kind,
@@ -154,6 +155,7 @@ def _candidate(
         "migration_work": migration,
         "restrictions": restrictions or [],
         "target": target,
+        "configuration": configuration or {},
     }
     document["id"] = document_hash(document)[:24]
     return document
@@ -260,6 +262,7 @@ def build_expansion_assessment(
                         "Usable capacity is not estimated until the existing filesystem is "
                         "inspected."
                     ),
+                    configuration={"topology": "import"},
                 )
             )
             continue
@@ -305,6 +308,7 @@ def build_expansion_assessment(
                             "instance_id": str(mergerfs_target["id"]),
                             "mountpoint": str(mergerfs_target["mountpoint"]),
                         },
+                        configuration={"topology": "mergerfs"},
                     )
                 )
             if disk["media_type"] in {"ssd", "nvme"}:
@@ -336,6 +340,7 @@ def build_expansion_assessment(
                             "The estimate is the new tier's formatted capacity before filesystem "
                             "overhead."
                         ),
+                        configuration={"topology": "download-cache"},
                     )
                 )
         candidates.append(
@@ -357,6 +362,7 @@ def build_expansion_assessment(
                 methodology=(
                     "Usable capacity is approximated as raw capacity before filesystem overhead."
                 ),
+                configuration={"topology": "individual"},
             )
         )
 
@@ -368,11 +374,9 @@ def build_expansion_assessment(
         if second_capacity and first_capacity / second_capacity <= 1.05:
             candidates.append(
                 _candidate(
-                    kind="zfs_mirror_vdev" if has_zfs else "new_zfs_mirror",
+                    kind="new_zfs_mirror",
                     disk_ids=[first["id"], second["id"]],
-                    title="Add a matched two-drive protected pair"
-                    if has_zfs
-                    else "Create a protected two-drive pool",
+                    title="Create a protected two-drive pool",
                     summary=(
                         "Store one copy on each selected disk so one drive can fail without losing "
                         "the pool."
@@ -386,15 +390,83 @@ def build_expansion_assessment(
                         "Create a new ZFS mirror vdev after identity revalidation and exact "
                         "approval."
                     ),
-                    recommended=has_zfs,
+                    recommended=False,
                     mode="advanced",
                     restrictions=["Both disks must remain dedicated to the ZFS vdev."],
                     methodology=(
                         "Mirror usable capacity equals the smallest member capacity before pool "
                         "overhead."
                     ),
+                    configuration={"topology": "zfs", "vdev_type": "mirror", "vdev_width": 2},
                 )
             )
+
+    # Offer complete, executable single-vdev RAIDZ geometries only when all
+    # selected blank disks are closely matched.  Mixed-size sets remain visible
+    # as individual/mergerFS choices instead of hiding stranded ZFS capacity.
+    if len(matched) >= 3:
+        capacities = [int(item["capacity_bytes"] or 0) for item in matched]
+        smallest = min(capacities)
+        largest = max(capacities)
+        if smallest > 0 and largest / smallest <= 1.05:
+            geometry = (
+                ("raidz1", 1, 3),
+                ("raidz2", 2, 4),
+                ("raidz3", 3, 5),
+            )
+            for vdev_type, parity_count, minimum in geometry:
+                if len(matched) < minimum:
+                    continue
+                selected = matched
+                width = len(selected)
+                raw = sum(int(item["capacity_bytes"] or 0) for item in selected)
+                usable = smallest * (width - parity_count)
+                candidates.append(
+                    _candidate(
+                        kind=f"new_zfs_{vdev_type}",
+                        disk_ids=[item["id"] for item in selected],
+                        title=f"Create a {width}-drive protected ZFS pool",
+                        summary=(
+                            f"Use {vdev_type.upper()} so the pool tolerates {parity_count} "
+                            f"drive failure{'s' if parity_count != 1 else ''}."
+                        ),
+                        group=None,
+                        raw_delta=raw,
+                        usable_delta=usable,
+                        protection=(
+                            f"Can tolerate {parity_count} drive failure"
+                            f"{'s' if parity_count != 1 else ''} in this vdev."
+                        ),
+                        expansion=(
+                            "Capacity grows by adding another complete vdev; individual disks "
+                            "cannot be appended to this RAIDZ vdev."
+                        ),
+                        migration=(
+                            "Create a new ZFS pool after immutable identity review and explicit "
+                            "destructive approval."
+                        ),
+                        recommended=(
+                            (width == 3 and vdev_type == "raidz1")
+                            or (width >= 4 and vdev_type == "raidz2")
+                        ),
+                        mode="advanced",
+                        restrictions=[
+                            "All selected disks become dedicated members of one ZFS vdev.",
+                            "Changing RAIDZ width later requires adding another vdev or "
+                            "migrating data.",
+                        ],
+                        methodology=(
+                            "Estimated usable capacity is the smallest member capacity multiplied "
+                            "by data columns (drive count minus parity columns), before ZFS "
+                            "overhead."
+                        ),
+                        configuration={
+                            "topology": "zfs",
+                            "vdev_type": vdev_type,
+                            "vdev_width": width,
+                        },
+                    )
+                )
 
     group_documents = []
     for group in groups:

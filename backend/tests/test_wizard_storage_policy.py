@@ -383,6 +383,7 @@ def test_existing_mergerfs_expansion_target_and_snapshot_are_bound_into_plan(
             "instance_id": "mergerfs:0123456789abcdef",
             "mountpoint": "/mnt/combined-storage",
         },
+        "configuration": {"topology": "mergerfs"},
     }
     _wizard, plan, _snapshot_record = _storage_plan(
         session,
@@ -426,6 +427,109 @@ def test_existing_mergerfs_expansion_rejects_stale_assessment(session: Session) 
                         "instance_id": "mergerfs:0123456789abcdef",
                         "mountpoint": "/mnt/combined-storage",
                     },
+                    "configuration": {"topology": "mergerfs"},
+                },
+            ),
+        )
+
+
+def test_zfs_expansion_candidate_binds_reviewed_geometry_into_immutable_plan(
+    session: Session,
+) -> None:
+    payload = _direct_payload(drive_count=4)
+    snapshot = _snapshot(session, payload)
+    disk_ids = [str(item["id"]) for item in payload["disks"]]  # type: ignore[index]
+    expansion = {
+        "candidate_id": "c" * 24,
+        "kind": "new_zfs_raidz2",
+        "storage_group_id": None,
+        "hardware_snapshot_sha256": snapshot.sha256,
+        "disk_ids": disk_ids,
+        "target": None,
+        "configuration": {
+            "topology": "zfs",
+            "vdev_type": "raidz2",
+            "vdev_width": 4,
+        },
+    }
+    answers = _storage_answers(
+        selected_device_ids=disk_ids,
+        topology="zfs",
+        portable_systems=["linux"],
+        expansion=expansion,
+        layout_options={
+            "name": "media",
+            "vdevs": [{"type": "raidz2", "device_ids": disk_ids}],
+            "ashift": 12,
+            "recordsize": "1M",
+            "compression": "lz4",
+            "mountpoint": "/data",
+            "scrub_schedule": "monthly",
+            "snapshots": {"enabled": False, "retention": 0},
+        },
+    )
+    wizard = create_wizard(session, mode="advanced", hardware_snapshot_id=snapshot.id)
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=0,
+        step="storage",
+        answers=answers,
+    )
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=wizard.revision,
+        step="layout",
+        answers=DEFAULT_LAYOUT,
+    )
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=wizard.revision,
+        step="applications",
+        answers={},
+    )
+    plan = create_plan(session, wizard_id=wizard.id, expected_revision=wizard.revision)
+    storage = plan.document_json["storage"]
+    assert storage["expansion"] == expansion
+    assert storage["layout_options"]["vdevs"] == [
+        {"type": "raidz2", "device_ids": disk_ids, "tolerated_failures": 2}
+    ]
+
+
+def test_zfs_expansion_candidate_rejects_changed_geometry(session: Session) -> None:
+    payload = _direct_payload(drive_count=4)
+    snapshot = _snapshot(session, payload)
+    disk_ids = [str(item["id"]) for item in payload["disks"]]  # type: ignore[index]
+    wizard = create_wizard(session, mode="advanced", hardware_snapshot_id=snapshot.id)
+    with pytest.raises(WizardValidationError, match="geometry no longer matches"):
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=0,
+            step="storage",
+            answers=_storage_answers(
+                selected_device_ids=disk_ids,
+                topology="zfs",
+                portable_systems=["linux"],
+                expansion={
+                    "candidate_id": "d" * 24,
+                    "kind": "new_zfs_raidz2",
+                    "storage_group_id": None,
+                    "hardware_snapshot_sha256": snapshot.sha256,
+                    "disk_ids": disk_ids,
+                    "target": None,
+                    "configuration": {
+                        "topology": "zfs",
+                        "vdev_type": "raidz2",
+                        "vdev_width": 4,
+                    },
+                },
+                layout_options={
+                    "name": "media",
+                    "vdevs": [{"type": "raidz1", "device_ids": disk_ids}],
+                    "mountpoint": "/data",
                 },
             ),
         )

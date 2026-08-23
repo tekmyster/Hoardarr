@@ -135,6 +135,7 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "hardware_snapshot_sha256",
         "disk_ids",
         "target",
+        "configuration",
     }
     unknown = sorted(set(expansion) - allowed)
     if unknown:
@@ -143,7 +144,17 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
     if not isinstance(candidate_id, str) or not _EXPANSION_CANDIDATE_RE.fullmatch(candidate_id):
         _error("storage.expansion.candidate_id", "must identify the reviewed expansion choice")
     kind = expansion.get("kind")
-    if not isinstance(kind, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,63}", kind):
+    supported_kinds = {
+        "import_existing",
+        "add_mergerfs_member",
+        "add_download_tier",
+        "new_storage_group",
+        "new_zfs_mirror",
+        "new_zfs_raidz1",
+        "new_zfs_raidz2",
+        "new_zfs_raidz3",
+    }
+    if kind not in supported_kinds:
         _error("storage.expansion.kind", "is invalid")
     snapshot_sha256 = expansion.get("hardware_snapshot_sha256")
     if not isinstance(snapshot_sha256, str) or not _SHA256_RE.fullmatch(snapshot_sha256):
@@ -152,26 +163,62 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
     group_id = expansion.get("storage_group_id")
     if group_id is not None and (not isinstance(group_id, str) or len(group_id) > 36):
         _error("storage.expansion.storage_group_id", "is invalid")
-    target = _as_mapping(expansion.get("target"), field="storage.expansion.target")
-    if set(target) != {"provider", "instance_id", "mountpoint"}:
-        _error("storage.expansion.target", "must contain provider, instance_id, and mountpoint")
-    if target.get("provider") != "mergerfs":
-        _error("storage.expansion.target.provider", "must be mergerfs")
-    instance_id = target.get("instance_id")
-    if not isinstance(instance_id, str) or not _MERGERFS_INSTANCE_RE.fullmatch(instance_id):
-        _error("storage.expansion.target.instance_id", "must identify a mergerFS instance")
-    mountpoint = _mergerfs_mountpoint(target.get("mountpoint"))
+    target_value = expansion.get("target")
+    target = None
+    if target_value is not None:
+        raw_target = _as_mapping(target_value, field="storage.expansion.target")
+        if set(raw_target) != {"provider", "instance_id", "mountpoint"}:
+            _error("storage.expansion.target", "must contain provider, instance_id, and mountpoint")
+        if raw_target.get("provider") != "mergerfs":
+            _error("storage.expansion.target.provider", "must be mergerfs")
+        instance_id = raw_target.get("instance_id")
+        if not isinstance(instance_id, str) or not _MERGERFS_INSTANCE_RE.fullmatch(instance_id):
+            _error("storage.expansion.target.instance_id", "must identify a mergerFS instance")
+        target = {
+            "provider": "mergerfs",
+            "instance_id": instance_id,
+            "mountpoint": _mergerfs_mountpoint(raw_target.get("mountpoint")),
+        }
+    if kind == "add_mergerfs_member" and target is None:
+        _error("storage.expansion.target", "is required for an existing mergerFS expansion")
+    if kind != "add_mergerfs_member" and target is not None:
+        _error("storage.expansion.target", "is only valid for an existing mergerFS expansion")
+    configuration = _as_mapping(
+        expansion.get("configuration", {}), field="storage.expansion.configuration"
+    )
+    if set(configuration) - {"topology", "vdev_type", "vdev_width"}:
+        _error("storage.expansion.configuration", "contains unsupported fields")
+    expected_configuration: dict[str, Any] = {
+        "import_existing": {"topology": "import"},
+        "add_mergerfs_member": {"topology": "mergerfs"},
+        "add_download_tier": {"topology": "download-cache"},
+        "new_storage_group": {"topology": "individual"},
+        "new_zfs_mirror": {"topology": "zfs", "vdev_type": "mirror", "vdev_width": 2},
+        "new_zfs_raidz1": {"topology": "zfs", "vdev_type": "raidz1"},
+        "new_zfs_raidz2": {"topology": "zfs", "vdev_type": "raidz2"},
+        "new_zfs_raidz3": {"topology": "zfs", "vdev_type": "raidz3"},
+    }[str(kind)]
+    if configuration.get("topology") != expected_configuration["topology"]:
+        _error("storage.expansion.configuration.topology", "does not match the candidate kind")
+    if "vdev_type" in expected_configuration and (
+        configuration.get("vdev_type") != expected_configuration["vdev_type"]
+    ):
+        _error("storage.expansion.configuration.vdev_type", "does not match the candidate kind")
+    if str(kind).startswith("new_zfs_"):
+        width = configuration.get("vdev_width")
+        minimum = {"mirror": 2, "raidz1": 3, "raidz2": 4, "raidz3": 5}[
+            str(configuration.get("vdev_type"))
+        ]
+        if not isinstance(width, int) or not minimum <= width <= 64:
+            _error("storage.expansion.configuration.vdev_width", "is invalid")
     return {
         "candidate_id": candidate_id,
         "kind": kind,
         "storage_group_id": group_id,
         "hardware_snapshot_sha256": snapshot_sha256,
         "disk_ids": disk_ids,
-        "target": {
-            "provider": "mergerfs",
-            "instance_id": instance_id,
-            "mountpoint": mountpoint,
-        },
+        "target": target,
+        "configuration": dict(configuration),
     }
 
 
@@ -884,6 +931,9 @@ def normalize_storage_answers(
         if "expansion" in normalized:
             target = normalized["expansion"]["target"]
             if (
+                target is None
+                or normalized["expansion"]["kind"] != "add_mergerfs_member"
+                or
                 normalized["mergerfs"]["mode"] != "existing"
                 or normalized["mergerfs"]["instance_id"] != target["instance_id"]
                 or normalized["mergerfs"]["mountpoint"] != target["mountpoint"]
@@ -904,6 +954,27 @@ def normalize_storage_answers(
                 _error(exc.field, str(exc))
     elif storage.get("layout_options") is not None:
         _error("storage.layout_options", "is only valid for ZFS, Linux RAID, or SnapRAID")
+    if "expansion" in normalized:
+        configuration = normalized["expansion"]["configuration"]
+        expected_topology = configuration.get("topology")
+        if expected_topology is not None and expected_topology != topology:
+            _error(
+                "storage.expansion.configuration.topology",
+                "does not match the reviewed expansion choice",
+            )
+        if topology == "zfs" and configuration.get("vdev_type") is not None:
+            vdevs = normalized.get("layout_options", {}).get("vdevs", [])
+            expected_type = configuration.get("vdev_type")
+            expected_width = configuration.get("vdev_width")
+            if (
+                len(vdevs) != 1
+                or vdevs[0].get("type") != expected_type
+                or len(vdevs[0].get("device_ids", [])) != expected_width
+            ):
+                _error(
+                    "storage.expansion.configuration",
+                    "the ZFS geometry no longer matches the reviewed expansion choice",
+                )
     if storage.get("format_options") is not None:
         normalized["format_options"] = {
             "filesystem": format_decision["filesystem"],

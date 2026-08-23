@@ -377,7 +377,7 @@ test.describe("production sign-in shell", () => {
       detected_capabilities: { mergerfs: true, snapraid: false, zfs: false },
       candidates: [{
         id: "0123456789abcdef01234567",
-        kind: "mergerfs_add_member",
+        kind: "add_mergerfs_member",
         disk_ids: ["serial:test:ssd-1", "serial:test:ssd-2"],
         storage_group_id: "media",
         storage_group_name: "Media",
@@ -391,6 +391,7 @@ test.describe("production sign-in shell", () => {
         migration_work: "No existing media files need to move.",
         restrictions: ["Review SnapRAID parity capacity separately."],
         target: { provider: "mergerfs", instance_id: "mergerfs:0123456789abcdef", mountpoint: "/data/media" },
+        configuration: { topology: "mergerfs" },
       }],
       methodology: "Read-only assessment bound to the latest hardware snapshot.",
     } }));
@@ -407,6 +408,64 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.locator(".selected-drives article")).toHaveCount(2);
     await expect(dialog.getByText("/dev/sdb", { exact: true })).toBeVisible();
     await expect(dialog.getByText("/dev/sdc", { exact: true })).toBeVisible();
+  });
+
+  test("opens a reviewed RAIDZ2 expansion candidate with its exact geometry", async ({ page }) => {
+    await storageWizardServer(page);
+    const disks = [1, 2, 3, 4].map((number) => ({
+      id: `serial:test:ssd-${number}`,
+      stable_identity: `serial:SSD-${number}`,
+      kernel_path: `/dev/sd${String.fromCharCode(97 + number)}`,
+      vendor: "TEST",
+      model: "SSD-1TB",
+      capacity_bytes: 1_000_000_000_000,
+      media_type: "ssd",
+      health: "healthy",
+      existing_data: { state: "none_detected", detail: "Complete scan found no signatures." },
+      eligible: true,
+      blockers: [],
+      warnings: [],
+    }));
+    await page.route("**/api/v1/storage/expansion", (route) => route.fulfill({ json: {
+      schema_version: 1,
+      hardware_snapshot_id: "snap-storage",
+      hardware_snapshot_sha256: "c".repeat(64),
+      captured_at: new Date().toISOString(),
+      storage_groups: [],
+      available_disks: disks,
+      reserved_disks: [],
+      detected_capabilities: { mergerfs: false, snapraid: false, zfs: true },
+      candidates: [{
+        id: "abcdef0123456789abcdef01",
+        kind: "new_zfs_raidz2",
+        disk_ids: disks.map((disk) => disk.id),
+        storage_group_id: null,
+        storage_group_name: null,
+        title: "Create a 4-drive protected ZFS pool",
+        summary: "Use RAIDZ2 so the pool tolerates two drive failures.",
+        recommended: true,
+        setup_mode: "advanced",
+        capacity: { raw_delta_bytes: 4_000_000_000_000, estimated_usable_delta_bytes: 2_000_000_000_000, methodology: "Smallest capacity multiplied by two data columns." },
+        protection_impact: "Can tolerate two drive failures in this vdev.",
+        future_expansion: "Capacity grows by adding another complete vdev.",
+        migration_work: "Create after immutable review and exact approval.",
+        restrictions: ["All four disks become dedicated ZFS members."],
+        target: null,
+        configuration: { topology: "zfs", vdev_type: "raidz2", vdev_width: 4 },
+      }],
+      methodology: "Read-only assessment bound to the latest hardware snapshot.",
+    } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    const candidate = page.getByRole("article", { name: "Create a 4-drive protected ZFS pool" });
+    await candidate.getByRole("button", { name: "Customize this plan" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.locator('input[name="storage-role"][value="zfs"]')).toBeChecked();
+    await expect(dialog.getByLabel("Protection layout")).toHaveValue("raidz2");
+    await expect(dialog.getByLabel("Drives per vdev")).toHaveValue("4");
+    await expect(dialog.locator(".selected-drives article")).toHaveCount(4);
   });
 
   test("reserves and releases an expansion disk through the real Storage UI", async ({ page }) => {
@@ -451,6 +510,7 @@ test.describe("production sign-in shell", () => {
         migration_work: "No disk changes occur until approval.",
         restrictions: [],
         target: null,
+        configuration: { topology: "individual" },
       }],
       methodology: "Read-only assessment; no changes were made.",
     });

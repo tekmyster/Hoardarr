@@ -1433,7 +1433,15 @@ export default function App() {
 
       if (action === "advanced") {
         setMode("advanced");
-        setActiveStep(2);
+        setActiveStep(expansion ? 5 : 2);
+        if (expansion?.configuration.topology === "zfs") {
+          setStorageRole("zfs");
+          const type = expansion.configuration.vdev_type;
+          if (type === "mirror" || type === "raidz1" || type === "raidz2" || type === "raidz3") {
+            setZfsVdevType(type);
+          }
+          setZfsVdevWidth(expansion.configuration.vdev_width ?? driveIds.length);
+        }
       } else {
         setMode("guided");
         setActiveStep(action === "configure" ? 2 : action === "expand" ? 5 : 3);
@@ -1442,12 +1450,15 @@ export default function App() {
       if (action === "import" || action === "test") setPreserveData(true);
       if (action === "configure" || action === "cache" || action === "expand") setPreserveData(false);
       if (action !== "test") {
+        const plannedTopology = expansion?.configuration.topology;
         setStorageRole(
-          action === "cache" ? "download-cache" : action === "import" ? "import" : action === "expand" ? "mergerfs" : "individual",
+          plannedTopology && isStorageRole(plannedTopology)
+            ? plannedTopology
+            : action === "cache" ? "download-cache" : action === "import" ? "import" : action === "expand" ? "mergerfs" : "individual",
         );
       }
       if (action === "expand") {
-        const target = expansion?.target.instance_id;
+        const target = expansion?.target?.instance_id;
         if (expansion && !mergerFsInventory?.items.some((item) => item.id === target)) {
           throw new Error("The recommended combined-storage target is no longer detected. Refresh expansion choices.");
         }
@@ -2244,6 +2255,7 @@ function stringArray(value: unknown): string[] {
 function expansionSelectionValue(value: unknown): StorageExpansionSelection | null {
   const expansion = objectValue(value);
   const target = objectValue(expansion.target);
+  const configuration = objectValue(expansion.configuration);
   const candidateId = stringValue(expansion.candidate_id, "");
   const kind = stringValue(expansion.kind, "");
   const snapshot = stringValue(expansion.hardware_snapshot_sha256, "");
@@ -2255,16 +2267,20 @@ function expansionSelectionValue(value: unknown): StorageExpansionSelection | nu
     || !kind
     || !/^[a-f0-9]{64}$/.test(snapshot)
     || !diskIds.length
-    || !/^mergerfs:[a-f0-9]{16}$/.test(instanceId)
-    || !mountpoint.startsWith("/")
   ) return null;
+  const hasTarget = /^mergerfs:[a-f0-9]{16}$/.test(instanceId) && mountpoint.startsWith("/");
   return {
     candidate_id: candidateId,
     kind,
     storage_group_id: typeof expansion.storage_group_id === "string" ? expansion.storage_group_id : null,
     hardware_snapshot_sha256: snapshot,
     disk_ids: diskIds,
-    target: { provider: "mergerfs", instance_id: instanceId, mountpoint },
+    target: hasTarget ? { provider: "mergerfs", instance_id: instanceId, mountpoint } : null,
+    configuration: {
+      ...(typeof configuration.topology === "string" ? { topology: configuration.topology } : {}),
+      ...(typeof configuration.vdev_type === "string" ? { vdev_type: configuration.vdev_type } : {}),
+      ...(typeof configuration.vdev_width === "number" ? { vdev_width: configuration.vdev_width } : {}),
+    },
   };
 }
 

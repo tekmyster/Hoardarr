@@ -593,7 +593,8 @@ export interface StorageExpansionSelection {
   storage_group_id: string | null;
   hardware_snapshot_sha256: string;
   disk_ids: string[];
-  target: StorageExpansionTarget;
+  target: StorageExpansionTarget | null;
+  configuration: { topology?: string; vdev_type?: string; vdev_width?: number };
 }
 
 export interface StorageExpansionAssessment {
@@ -648,6 +649,7 @@ export interface StorageExpansionAssessment {
     migration_work: string;
     restrictions: string[];
     target: StorageExpansionTarget | null;
+    configuration: { topology?: string; vdev_type?: string; vdev_width?: number };
   }>;
   methodology: string;
 }
