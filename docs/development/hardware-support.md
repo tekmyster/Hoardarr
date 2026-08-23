@@ -69,6 +69,24 @@ they do not imply a disk association.
 Destructive workflows accept only a policy-approved confidence level and
 re-resolve device identity immediately before execution.
 
+## Expected topology and drift
+
+Live discovery remains an observation, not configuration. An operator may save
+one completed hardware snapshot as the active expected topology. Hoardarr stores
+that baseline separately from later snapshots and tracks only stable facts that
+the source actually reported: controllers, enclosure identities, paths, drives,
+confirmed enclosure/bay locations, and negotiated/capable rates.
+
+Each later backend scan reconciles the baseline even when no browser is open.
+Missing or newly attached controllers, enclosures, and paths, a missing drive, a
+drive that moved from a previously reported bay, and a link that negotiated
+below its saved rate become durable drift episodes. Repeated scans update the
+same active episode; recovery resolves it and preserves its timestamps. A new
+controller/path is informational until the operator decides whether to replace
+the baseline. Unknown bays and unreported link rates do not become fabricated
+differences. The baseline can be replaced or monitoring can be stopped from the
+Storage page; neither action changes any hardware.
+
 ## SAS PHY evidence and slow links
 
 For the exact SAS PHY present in a disk's Linux transport path, Hoardarr reads

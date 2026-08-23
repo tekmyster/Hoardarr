@@ -162,6 +162,59 @@ class HardwareSnapshot(Base):
     )
 
 
+class TopologyExpectation(Base):
+    __tablename__ = "topology_expectations"
+    __table_args__ = (Index("ix_topology_expectations_active_updated", "active", "updated_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_snapshot_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("hardware_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    expected_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class TopologyDriftEvent(Base):
+    __tablename__ = "topology_drift_events"
+    __table_args__ = (
+        Index("ix_topology_drift_expectation_state", "expectation_id", "state"),
+        Index("ix_topology_drift_fingerprint_state", "fingerprint", "state"),
+        Index("ix_topology_drift_last_seen", "last_seen_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    expectation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("topology_expectations.id", ondelete="CASCADE"), nullable=False
+    )
+    snapshot_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("hardware_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    message: Mapped[str] = mapped_column(String(512), nullable=False)
+    expected_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    observed_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class WizardSession(Base):
     __tablename__ = "wizard_sessions"
 

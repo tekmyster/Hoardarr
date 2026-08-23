@@ -91,8 +91,13 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
         "storage_lifecycle_events",
         "storage_drain_jobs",
         "storage_drain_entries",
+        "topology_expectations",
+        "topology_drift_events",
     } <= set(inspect(engine).get_table_names())
     assert "not_before" in {column["name"] for column in inspect(engine).get_columns("operations")}
+    assert {"expectation_id", "fingerprint", "state", "resolved_at"} <= {
+        column["name"] for column in inspect(engine).get_columns("topology_drift_events")
+    }
     engine.dispose()
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT username FROM users").fetchone() == ("owner",)

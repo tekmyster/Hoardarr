@@ -38,6 +38,7 @@ from hoardarr.db.models import (
     StorageGroup,
     User,
 )
+from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
 from hoardarr.operations.service import document_hash
 from hoardarr.operations.worker import refresh_media_libraries, run_once
 from hoardarr.storage.groups import register_disk
@@ -87,6 +88,112 @@ def _claim_owner(client: TestClient, setup_token: str) -> str:
 
 def _state_headers(csrf: str, **extra: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf, **extra}
+
+
+def test_expected_topology_api_persists_drift_history_and_requires_csrf(api_runtime: Any) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    baseline_hardware = {
+        "schema_version": 1,
+        "source": {"kind": "fixture"},
+        "controllers": [
+            {
+                "address": "0000:01:00.0",
+                "bus_type": "pci",
+                "provider": {"name": "LSI SAS3008"},
+            }
+        ],
+        "disks": [
+            {
+                "id": "wwn:expected-drive",
+                "kernel_path": "/dev/sdb",
+                "model": "MEDIA",
+                "identity": {"serial": "SANITIZED"},
+                "connection": {
+                    "controller_address": "0000:01:00.0",
+                    "protocol": "sas",
+                    "transport": "sas",
+                    "path_id": "end_device-6:0:3",
+                    "enclosure_id": "shelf-1",
+                    "slot": "03",
+                    "negotiated_speed_gbps": 12.0,
+                },
+            }
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        operation = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(operation)
+        session.flush()
+        baseline = HardwareSnapshot(
+            operation_id=operation.id,
+            detector_schema_version=1,
+            source="fixture",
+            payload_json=baseline_hardware,
+            sha256=document_hash(baseline_hardware),
+        )
+        session.add(baseline)
+        session.flush()
+        baseline_id = baseline.id
+
+    missing_csrf = client.post(
+        "/api/v1/hardware/topology/expectations",
+        json={"snapshot_id": baseline_id, "name": "Media shelf", "confirmation": "SAVE"},
+    )
+    assert missing_csrf.status_code == 403
+    saved = client.post(
+        "/api/v1/hardware/topology/expectations",
+        headers=_state_headers(csrf),
+        json={"snapshot_id": baseline_id, "name": "Media shelf", "confirmation": "SAVE"},
+    )
+    assert saved.status_code == 201, saved.text
+    expectation_id = saved.json()["expectation"]["id"]
+
+    changed_hardware = {**baseline_hardware, "disks": []}
+    with app.state.session_factory() as session, session.begin():
+        operation = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({"changed": True}),
+            request_json={"changed": True},
+        )
+        session.add(operation)
+        session.flush()
+        changed = HardwareSnapshot(
+            operation_id=operation.id,
+            detector_schema_version=1,
+            source="fixture",
+            payload_json=changed_hardware,
+            sha256=document_hash(changed_hardware),
+        )
+        session.add(changed)
+        session.flush()
+        assert reconcile_topology_snapshot(session, changed)["opened"] > 0
+
+    status = client.get("/api/v1/hardware/topology/expectation")
+    assert status.status_code == 200
+    assert status.json()["expectation"]["id"] == expectation_id
+    assert {item["kind"] for item in status.json()["active_drifts"]} >= {
+        "missing_controller",
+        "missing_drive",
+    }
+    removed = client.request(
+        "DELETE",
+        f"/api/v1/hardware/topology/expectations/{expectation_id}",
+        headers=_state_headers(csrf),
+        json={"confirmation": "REMOVE"},
+    )
+    assert removed.status_code == 200
+    assert client.get("/api/v1/hardware/topology/expectation").json()["expectation"] is None
 
 
 def test_disk_reservation_api_is_guarded_persistent_and_idempotent(api_runtime: Any) -> None:

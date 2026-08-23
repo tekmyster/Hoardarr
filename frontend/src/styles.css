@@ -504,6 +504,19 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .storage-summary-grid span { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .storage-summary-grid strong { overflow-wrap: anywhere; color: #35474f; font-size: 20px; font-weight: 500; }
 .storage-summary-grid small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.topology-expectation-empty, .topology-expectation-content { display: grid; gap: 14px; }
+.topology-expectation-empty label { display: grid; gap: 6px; max-width: 440px; color: var(--text); font-weight: 700; }
+.topology-expectation-empty input { width: 100%; }
+.topology-expectation-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.topology-expectation-summary > div { display: grid; align-content: start; gap: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-alt); }
+.topology-expectation-summary span, .topology-expectation-summary small { color: var(--muted); }
+.topology-drift-list { display: grid; gap: 8px; }
+.topology-drift-list article { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--border); border-left: 4px solid var(--warning); border-radius: 3px; background: var(--surface-alt); }
+.topology-drift-list article.topology-drift-critical { border-left-color: var(--danger); }
+.topology-drift-list article.topology-drift-info { border-left-color: var(--accent); }
+.topology-drift-list header { display: flex; align-items: center; gap: 8px; }
+.topology-drift-list time { margin-left: auto; color: var(--muted); font-size: 12px; }
+.topology-drift-list p { margin: 0; }
 .redundancy-storage-list { display: grid; gap: 8px; }
 .redundancy-storage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-soft); }
 .redundancy-storage-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
@@ -795,6 +808,7 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 }
 
 @media (max-width: 780px) {
+  .topology-expectation-summary { grid-template-columns: 1fr; }
   .topbar { grid-template-columns: 1fr auto; }.topbar-title { display: none; }.topbar-actions .button:first-child { display: none; }.shell-body { display: block; }.sidebar { position: static; width: 100%; height: auto; overflow-x: auto; }.demo-banner + .shell-body .sidebar { height: auto; }.sidebar ul { display: flex; margin: 0; }.sidebar li { flex: 0 0 auto; }.sidebar li button { border-left: 0; border-bottom: 3px solid transparent; padding: 9px 13px; }.sidebar li button.active { border-left: 0; border-bottom-color: var(--accent); }.sidebar li button span { display: none; }.sidebar-version { display: none; }.main { padding: 16px 10px 36px; }.wizard-layout { display: block; }.step-list { position: static; margin-bottom: 12px; padding-bottom: 12px; }.step-list ol { display: none; }.wizard-heading { padding: 18px; }.wizard-content { padding: 10px; }.card-header { align-items: flex-start; }.card-body { padding: 14px; }.two-columns, .download-layout, .review-grid, .settings-list, .server-settings-grid, .server-time-grid, .api-key-create { grid-template-columns: 1fr; }.wizard-footer { padding: 10px; }.interface-row { grid-template-columns: 22px minmax(160px, 1fr); }.interface-row > span:last-child { grid-column: 2; }.selected-drives dl { grid-template-columns: 1fr; }.permissions-table > div, .review-line { grid-template-columns: 1fr; gap: 3px; }.review-line > strong, .review-line > code { text-align: left; }.snapshot-meta { align-items: flex-start; flex-direction: column; }.input-action { grid-template-columns: 1fr auto; }.input-action input { grid-column: 1 / -1; }.generated-credential { grid-template-columns: 1fr 1fr; }.generated-credential input { grid-column: 1 / -1; }.library-row { grid-template-columns: 22px 1fr; padding: 8px 0; }.library-row > span:not(.library-name) { grid-column: 2; }.page-toolbar { align-items: center; }.api-key-row { align-items: flex-start; flex-direction: column; }.api-key-secret-row { grid-template-columns: 1fr 1fr; }.api-key-secret-row input { grid-column: 1 / -1; }
   .automatic-setting { grid-template-columns: 28px 1fr; }.automatic-setting .recommended-badge { grid-column: 2; }
   .auth-input { font-size: 16px; }

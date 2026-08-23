@@ -50,6 +50,8 @@ import type {
   TelemetrySettingsDocument,
   TierTransferPlan,
   TierTransferSummary,
+  TopologyExpectationDocument,
+  TopologyExpectationStatus,
   UpdateCheckDocument,
   UpdateStatusDocument,
   WizardDocument,
@@ -946,6 +948,25 @@ class HoardarrApi {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;
     }
+  }
+
+  async topologyExpectation(): Promise<TopologyExpectationStatus> {
+    return this.request<TopologyExpectationStatus>("/hardware/topology/expectation");
+  }
+
+  async saveTopologyExpectation(snapshotId: string, name: string): Promise<TopologyExpectationDocument> {
+    const result = await this.request<{ expectation: TopologyExpectationDocument }>("/hardware/topology/expectations", {
+      method: "POST",
+      body: JSON.stringify({ snapshot_id: snapshotId, name, confirmation: "SAVE" }),
+    });
+    return result.expectation;
+  }
+
+  async removeTopologyExpectation(expectationId: string): Promise<void> {
+    await this.request(`/hardware/topology/expectations/${encodeURIComponent(expectationId)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation: "REMOVE" }),
+    });
   }
 
   async startWizard(mode: WizardMode, snapshotId: string): Promise<WizardDocument> {

@@ -41,6 +41,7 @@ from hoardarr.db.models import (
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError, run_hardware_detector
 from hoardarr.hardware.smp import enrich_smp_topology
+from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
 from hoardarr.integrations.media import (
     MEDIA_PRODUCTS,
     correlate_library_storage,
@@ -1643,6 +1644,7 @@ def _finalize_success(
             session.add(snapshot)
             session.flush()
             disk_registry = reconcile_snapshot_disks(session, execution.payload)
+            topology_drift = reconcile_topology_snapshot(session, snapshot)
             operation.resource_id = snapshot.id
             complete_operation(
                 session,
@@ -1653,6 +1655,7 @@ def _finalize_success(
                     "schema_version": snapshot.detector_schema_version,
                     "source": snapshot.source,
                     "disk_registry": disk_registry,
+                    "topology_drift": topology_drift,
                 },
             )
             return

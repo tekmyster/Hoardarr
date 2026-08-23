@@ -222,6 +222,44 @@ export interface StorageTopology {
   direct_attached_drive_ids: string[];
 }
 
+export interface TopologyExpectationDocument {
+  id: string;
+  name: string;
+  source_snapshot_id: string;
+  expected: {
+    schema_version: number;
+    source_snapshot_id: string;
+    source_snapshot_sha256: string;
+    nodes: Array<Record<string, unknown>>;
+  };
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TopologyDriftEventDocument {
+  id: string;
+  expectation_id: string;
+  snapshot_id: string;
+  kind: string;
+  severity: "critical" | "warning" | "info";
+  entity_type: string;
+  entity_id: string;
+  message: string;
+  expected: Record<string, unknown>;
+  observed: Record<string, unknown>;
+  state: "active" | "resolved";
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+}
+
+export interface TopologyExpectationStatus {
+  expectation: TopologyExpectationDocument | null;
+  active_drifts: TopologyDriftEventDocument[];
+  recent_events: TopologyDriftEventDocument[];
+}
+
 export interface ApiKeyDocument {
   id: string;
   name: string;

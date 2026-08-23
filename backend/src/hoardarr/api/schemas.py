@@ -83,6 +83,24 @@ class WizardCreateRequest(StrictModel):
     hardware_snapshot_id: str | None = Field(default=None, max_length=36)
 
 
+class TopologyExpectationCreateRequest(StrictModel):
+    snapshot_id: str = Field(min_length=1, max_length=36)
+    name: str = Field(min_length=1, max_length=128)
+    confirmation: Literal["SAVE"]
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name cannot be blank")
+        return cleaned
+
+
+class TopologyExpectationRemoveRequest(StrictModel):
+    confirmation: Literal["REMOVE"]
+
+
 class WizardStepRequest(StrictModel):
     revision: int = Field(ge=0)
     answers: dict[str, Any]

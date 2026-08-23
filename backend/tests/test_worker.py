@@ -171,9 +171,10 @@ def test_hardware_scan_creates_an_immutable_snapshot(tmp_path: Path) -> None:
             "snapshot_id": snapshot.id,
             "sha256": snapshot.sha256,
             "schema_version": 1,
-            "source": "sysfs",
-            "disk_registry": {"observed": 1, "created": 1, "updated": 0, "skipped": 0},
-        }
+                "source": "sysfs",
+                "disk_registry": {"observed": 1, "created": 1, "updated": 0, "skipped": 0},
+                "topology_drift": {"active": 0, "opened": 0, "resolved": 0},
+            }
     assert not run_once(
         session_factory=session_factory,
         settings=settings,

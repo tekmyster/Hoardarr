@@ -12,6 +12,7 @@ import { StorageExpansionPanel } from "./StorageExpansionPanel";
 import { SnapraidReplacementPanel } from "./SnapraidReplacementPanel";
 import { ArrayReplacementPanel } from "./ArrayReplacementPanel";
 import { DownloadTierPanel } from "./DownloadTierPanel";
+import { TopologyExpectationPanel } from "./TopologyExpectationPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -230,6 +231,8 @@ export function StoragePage({
       onDriveAction={(action, driveId) => onDriveAction(action, driveId)}
       onManageLifecycle={() => document.getElementById("storage-groups-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
     />
+
+    <TopologyExpectationPanel snapshotId={snapshot?.id ?? null} />
 
     <StorageRedundancyPanel initialManagedId={focusedStorageId} />
 
