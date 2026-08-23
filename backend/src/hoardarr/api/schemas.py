@@ -263,6 +263,10 @@ class PhysicalDiskReconcileRequest(StrictModel):
     items: list[PhysicalDiskObservationRequest] = Field(min_length=1, max_length=1024)
 
 
+class PhysicalDiskReservationRequest(StrictModel):
+    action: Literal["reserve", "release"]
+
+
 class StorageBackendAssignRequest(StrictModel):
     physical_disk_id: str | None = Field(default=None, min_length=36, max_length=36)
     storage_entity_id: str | None = Field(default=None, min_length=36, max_length=36)

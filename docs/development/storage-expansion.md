@@ -1,12 +1,13 @@
 # Storage expansion planning
 
 The Storage page includes a read-only expansion assessment bound to the latest persisted hardware
-snapshot and current Storage Groups. It does not assign, reserve, format, mount, or otherwise change
-a disk.
+snapshot and current Storage Groups. Loading or refreshing that assessment does not assign, reserve,
+format, mount, or otherwise change a disk.
 
 `GET /api/v1/storage/expansion` returns:
 
 - currently unassigned registered disks and their stable identities;
+- disks deliberately reserved for later, separated from executable candidates;
 - current Storage Group namespace total/used/free capacity when its filesystem reports it;
 - per-member utilization spread using distinct filesystem identities, explicitly presented as
   context rather than a defect;
@@ -41,6 +42,12 @@ selected. The wizard remains the canonical persistent plan, identity revalidatio
 approval, durable operation, and execution boundary. The assessment itself is deliberately not a
 second apply mechanism.
 
+An operator may explicitly choose **Reserve for later** on a single candidate. That authenticated,
+CSRF-protected API action changes only the durable physical-disk lifecycle state; it never opens the
+device or writes storage metadata. Reserved disks are excluded from wizard assignment and expansion
+candidates until **Release disk** is used. The transition is idempotent, audited, and independently
+rejects protected system storage.
+
 Current limitations are recorded in the unified roadmap: richer current-state capacity/forecast
-analysis, additional ZFS vdev geometries, explicit SnapRAID parity expansion selection, reserve-disk
-persistence, and end-to-end immutable apply evidence remain in the EXPAND dependency family.
+analysis, additional ZFS vdev geometries, explicit SnapRAID parity expansion selection, and
+end-to-end immutable apply evidence remain in the EXPAND dependency family.

@@ -179,11 +179,14 @@ def build_expansion_assessment(
         if value
     }
     disks = list(session.scalars(select(PhysicalDisk).order_by(PhysicalDisk.first_seen_at)))
-    available = [
-        _disk_document(disk, observations.get(disk.stable_identity))
+    unassigned = [
+        (disk.lifecycle_state, _disk_document(disk, observations.get(disk.stable_identity)))
         for disk in disks
-        if disk.id not in assigned_ids and disk.lifecycle_state in {"discovered", "reuse_ready"}
+        if disk.id not in assigned_ids
+        and disk.lifecycle_state in {"discovered", "reuse_ready", "reserved"}
     ]
+    available = [document for state, document in unassigned if state != "reserved"]
+    reserved = [document for state, document in unassigned if state == "reserved"]
     groups = list(session.scalars(select(StorageGroup).order_by(StorageGroup.name)))
     pools = ((storage_inventory or {}).get("pools") or {}).get("items")
     pool_items = pools if isinstance(pools, list) else []
@@ -448,6 +451,7 @@ def build_expansion_assessment(
         "captured_at": snapshot.captured_at.isoformat(),
         "storage_groups": group_documents,
         "available_disks": available,
+        "reserved_disks": reserved,
         "detected_capabilities": {
             "mergerfs": has_mergerfs,
             "snapraid": has_snapraid,

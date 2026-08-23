@@ -566,6 +566,21 @@ export interface StorageDrainPlan {
   plan_sha256: string;
 }
 
+export interface StorageExpansionDisk {
+  id: string;
+  stable_identity: string;
+  kernel_path: string | null;
+  vendor: string | null;
+  model: string | null;
+  capacity_bytes: number | null;
+  media_type: string;
+  health: string;
+  existing_data: { state: "detected" | "none_detected" | "unknown"; detail: string };
+  eligible: boolean;
+  blockers: string[];
+  warnings: string[];
+}
+
 export interface StorageExpansionAssessment {
   schema_version: 1;
   hardware_snapshot_id: string;
@@ -595,20 +610,8 @@ export interface StorageExpansionAssessment {
     protection: { data_backends: number; parity_backends: number; summary: string };
     preferred_backend_id: string | null;
   }>;
-  available_disks: Array<{
-    id: string;
-    stable_identity: string;
-    kernel_path: string | null;
-    vendor: string | null;
-    model: string | null;
-    capacity_bytes: number | null;
-    media_type: string;
-    health: string;
-    existing_data: { state: "detected" | "none_detected" | "unknown"; detail: string };
-    eligible: boolean;
-    blockers: string[];
-    warnings: string[];
-  }>;
+  available_disks: StorageExpansionDisk[];
+  reserved_disks: StorageExpansionDisk[];
   detected_capabilities: { mergerfs: boolean; snapraid: boolean; zfs: boolean };
   candidates: Array<{
     id: string;

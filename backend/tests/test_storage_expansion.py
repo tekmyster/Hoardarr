@@ -270,3 +270,26 @@ def test_system_disk_is_visible_as_protected_but_never_becomes_a_candidate() -> 
             "Protected system storage cannot be used for expansion or import."
         ]
         assert result["candidates"] == []
+
+
+def test_reserved_disk_is_reported_but_excluded_from_candidates() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        disk, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:reserved",
+                "kernel_path": "/dev/sdz",
+                "capacity_bytes": 1_000_000_000,
+                "health_state": "healthy",
+            },
+        )
+        disk.lifecycle_state = "reserved"
+        result = build_expansion_assessment(
+            session,
+            snapshot=_snapshot(session, [_observation("wwn:reserved")]),
+        )
+        assert result["available_disks"] == []
+        assert [item["id"] for item in result["reserved_disks"]] == [disk.id]
+        assert result["candidates"] == []

@@ -32,7 +32,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/hardware/snapshots/latest")) return route.fulfill({ status: 404, json: { title: "Not found" } });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
     if (pathname.endsWith("/storage/groups") || pathname.endsWith("/storage/disks")) return json({ items: [] });
-    if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "none", hardware_snapshot_sha256: "0".repeat(64), captured_at: new Date().toISOString(), storage_groups: [], available_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
+    if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "none", hardware_snapshot_sha256: "0".repeat(64), captured_at: new Date().toISOString(), storage_groups: [], available_disks: [], reserved_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
     if (pathname.endsWith("/storage/logical")) return json({ items: [] });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations")) return json({ items: [] });
@@ -346,7 +346,14 @@ test.describe("production sign-in shell", () => {
       hardware_snapshot_id: "snap-storage",
       hardware_snapshot_sha256: "c".repeat(64),
       captured_at: new Date().toISOString(),
-      storage_groups: [{ id: "media", name: "Media", namespace_path: "/data/media", purpose: "media", backend_count: 1, raw_capacity_bytes: 4_000_000_000_000, preferred_backend_id: "backend-1" }],
+      storage_groups: [{
+        id: "media", name: "Media", namespace_path: "/data/media", purpose: "media", backend_count: 1,
+        raw_capacity_bytes: 4_000_000_000_000,
+        capacity: { total_bytes: 4_000_000_000_000, used_bytes: 1_000_000_000_000, free_bytes: 3_000_000_000_000, quality: "available", source: "statvfs Storage Group namespace" },
+        distribution: { reported_members: 1, minimum_utilization_percent: 25, maximum_utilization_percent: 25, spread_percentage_points: null, methodology: "Maximum minus minimum utilization." },
+        protection: { data_backends: 1, parity_backends: 0, summary: "No parity backend is configured in this Storage Group." },
+        preferred_backend_id: "backend-1",
+      }],
       available_disks: [1, 2].map((number) => ({
         id: `serial:test:ssd-${number}`,
         stable_identity: `serial:SSD-${number}`,
@@ -361,6 +368,7 @@ test.describe("production sign-in shell", () => {
         blockers: [],
         warnings: [],
       })),
+      reserved_disks: [],
       detected_capabilities: { mergerfs: true, snapraid: false, zfs: false },
       candidates: [{
         id: "expand-media",
@@ -393,6 +401,65 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.locator(".selected-drives article")).toHaveCount(2);
     await expect(dialog.getByText("/dev/sdb", { exact: true })).toBeVisible();
     await expect(dialog.getByText("/dev/sdc", { exact: true })).toBeVisible();
+  });
+
+  test("reserves and releases an expansion disk through the real Storage UI", async ({ page }) => {
+    await storageWizardServer(page);
+    const disk = {
+      id: "serial:test:ssd-1",
+      stable_identity: "serial:SSD-1",
+      kernel_path: "/dev/sdb",
+      vendor: "TEST",
+      model: "SSD-1TB",
+      capacity_bytes: 1_000_000_000_000,
+      media_type: "ssd",
+      health: "available",
+      existing_data: { state: "none_detected", detail: "No signatures were found." },
+      eligible: true,
+      blockers: [],
+      warnings: [],
+    };
+    let reserved = false;
+    const assessment = () => ({
+      schema_version: 1,
+      hardware_snapshot_id: "snap-storage",
+      hardware_snapshot_sha256: "c".repeat(64),
+      captured_at: new Date().toISOString(),
+      storage_groups: [],
+      available_disks: reserved ? [] : [disk],
+      reserved_disks: reserved ? [disk] : [],
+      detected_capabilities: { mergerfs: false, snapraid: false, zfs: false },
+      candidates: reserved ? [] : [{
+        id: "reserve-candidate",
+        kind: "new_storage_group",
+        disk_ids: [disk.id],
+        storage_group_id: null,
+        storage_group_name: null,
+        title: "Create a separate storage location",
+        summary: "Keep this disk independent.",
+        recommended: true,
+        setup_mode: "configure",
+        capacity: { raw_delta_bytes: disk.capacity_bytes, estimated_usable_delta_bytes: disk.capacity_bytes, methodology: "Raw capacity before filesystem overhead." },
+        protection_impact: "A single disk has no drive-failure protection.",
+        future_expansion: "It can become a combined member later.",
+        migration_work: "No disk changes occur until approval.",
+        restrictions: [],
+      }],
+      methodology: "Read-only assessment; no changes were made.",
+    });
+    await page.route("**/api/v1/storage/expansion", (route) => route.fulfill({ json: assessment() }));
+    await page.route("**/api/v1/storage/disks/*/reservation", (route) => {
+      const body = route.request().postDataJSON() as { action: "reserve" | "release" };
+      reserved = body.action === "reserve";
+      return route.fulfill({ json: { item: { ...disk, lifecycle_state: reserved ? "reserved" : "discovered", last_seen_at: new Date().toISOString() } } });
+    });
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByRole("button", { name: "Reserve for later" }).click();
+    await expect(page.getByRole("heading", { name: "Reserved for later" })).toBeVisible();
+    await page.getByRole("button", { name: "Release disk" }).click();
+    await expect(page.getByRole("button", { name: "Reserve for later" })).toBeVisible();
   });
 
   test("guides a Plex user from four drives to protected media and download folders", async ({ page }) => {

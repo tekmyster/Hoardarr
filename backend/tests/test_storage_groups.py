@@ -14,6 +14,7 @@ from hoardarr.storage.groups import (
     group_documents,
     normalize_namespace,
     register_disk,
+    set_disk_reservation,
     transition_backend,
 )
 
@@ -66,6 +67,61 @@ def test_disk_registry_preserves_identity_across_kernel_path_changes() -> None:
         assert second.id == original_id
         assert disk_documents(session)[0]["kernel_path"] == "/dev/sdz"
         assert disk_documents(session)[0]["health_state"] == "healthy"
+
+
+def test_disk_reservation_is_persistent_idempotent_and_blocks_assignment() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    with Session(engine) as session:
+        disk, _ = register_disk(session, {"stable_identity": "wwn:future-disk"})
+        group = create_group(
+            session,
+            name="Future media",
+            namespace_path="/srv/hoardarr/future",
+            purpose="media",
+            principal=actor,
+        )
+        reserved = set_disk_reservation(session, disk_id=disk.id, action="reserve")
+        assert reserved.lifecycle_state == "reserved"
+        assert set_disk_reservation(session, disk_id=disk.id, action="reserve") is reserved
+        session.commit()
+
+        try:
+            assign_backend(
+                session,
+                group_id=group.id,
+                physical_disk_id=disk.id,
+                storage_entity_id=None,
+                namespace_path="/srv/hoardarr/backends/future",
+                role="data",
+                principal=actor,
+            )
+        except StorageGroupError as exc:
+            assert exc.code == "disk_not_assignable"
+        else:
+            raise AssertionError("reserved disk was assigned")
+
+        released = set_disk_reservation(session, disk_id=disk.id, action="release")
+        assert released.lifecycle_state == "discovered"
+
+
+def test_system_disk_cannot_be_reserved() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        disk, _ = register_disk(session, {"stable_identity": "wwn:system-disk"})
+        try:
+            set_disk_reservation(
+                session,
+                disk_id=disk.id,
+                action="reserve",
+                protected_identities={disk.stable_identity},
+            )
+        except StorageGroupError as exc:
+            assert exc.code == "system_disk_protected"
+        else:
+            raise AssertionError("system disk was reserved")
 
 
 def test_group_assignment_activation_and_single_preferred_writer() -> None:

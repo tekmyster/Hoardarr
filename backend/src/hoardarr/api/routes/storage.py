@@ -18,6 +18,7 @@ from hoardarr.api.schemas import (
     DeviceMaintenanceApplyRequest,
     DeviceMaintenancePreviewRequest,
     PhysicalDiskReconcileRequest,
+    PhysicalDiskReservationRequest,
     SnapraidReplacementApplyRequest,
     SnapraidReplacementPreviewRequest,
     StorageBackendAssignRequest,
@@ -45,6 +46,7 @@ from hoardarr.storage.groups import (
     disk_documents,
     group_documents,
     register_disk,
+    set_disk_reservation,
     transition_backend,
 )
 from hoardarr.storage.inventory import discover_storage_inventory
@@ -397,6 +399,43 @@ def reconcile_registered_disks(
         "created": created,
         "updated": len(payload.items) - created,
     }
+
+
+@router.post("/disks/{disk_id}/reservation")
+def change_disk_reservation(
+    disk_id: str,
+    payload: PhysicalDiskReservationRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    snapshot = _latest_hardware(session)
+    protected = {
+        str(item.get("id"))
+        for item in snapshot.payload_json.get("disks", [])[:4096]
+        if isinstance(item, dict)
+        and (item.get("system_disk") is True or item.get("system_device") is True)
+    }
+    try:
+        disk = set_disk_reservation(
+            session,
+            disk_id=disk_id,
+            action=payload.action,
+            protected_identities=protected,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action=f"storage.disk.{payload.action}",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="physical_disk",
+        target_id=disk.id,
+        details={"stable_identity": disk.stable_identity, "lifecycle_state": disk.lifecycle_state},
+    )
+    return {"item": next(item for item in disk_documents(session) if item["id"] == disk.id)}
 
 
 @router.get("/logical")

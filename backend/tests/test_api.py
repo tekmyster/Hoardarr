@@ -33,6 +33,7 @@ from hoardarr.db.models import (
 )
 from hoardarr.operations.service import document_hash
 from hoardarr.operations.worker import run_once
+from hoardarr.storage.groups import register_disk
 from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.storage.tiering import plan_transfer
 from hoardarr.wizard.service import DEFAULT_LAYOUT
@@ -79,6 +80,96 @@ def _claim_owner(client: TestClient, setup_token: str) -> str:
 
 def _state_headers(csrf: str, **extra: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf, **extra}
+
+
+def test_disk_reservation_api_is_guarded_persistent_and_idempotent(api_runtime: Any) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    hardware = {
+        "schema_version": 1,
+        "source": {"kind": "fixture"},
+        "controllers": [],
+        "disks": [
+            {
+                "id": "wwn:future-disk",
+                "stable_identity": True,
+                "system_device": False,
+                "kernel_path": "/dev/sdz",
+                "partitions": [],
+                "signatures": [],
+                "signature_scan": {"status": "complete", "source": "wipefs"},
+            },
+            {
+                "id": "wwn:system-disk",
+                "stable_identity": True,
+                "system_device": True,
+                "kernel_path": "/dev/sda",
+                "partitions": [],
+                "signatures": [],
+                "signature_scan": {"status": "complete", "source": "wipefs"},
+            },
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        operation = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(operation)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=operation.id,
+                detector_schema_version=1,
+                source="fixture",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+        future, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:future-disk",
+                "kernel_path": "/dev/sdz",
+                "capacity_bytes": 1_000_000_000,
+                "health_state": "healthy",
+            },
+        )
+        system, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:system-disk",
+                "kernel_path": "/dev/sda",
+                "capacity_bytes": 1_000_000_000,
+                "health_state": "healthy",
+            },
+        )
+
+    endpoint = f"/api/v1/storage/disks/{future.id}/reservation"
+    missing_csrf = client.post(endpoint, json={"action": "reserve"})
+    assert missing_csrf.status_code == 403
+    reserved = client.post(endpoint, headers=_state_headers(csrf), json={"action": "reserve"})
+    replayed = client.post(endpoint, headers=_state_headers(csrf), json={"action": "reserve"})
+    assert reserved.status_code == replayed.status_code == 200
+    assert reserved.json()["item"]["lifecycle_state"] == "reserved"
+    assessment = client.get("/api/v1/storage/expansion").json()
+    assert [item["id"] for item in assessment["available_disks"]] == [system.id]
+    assert assessment["available_disks"][0]["eligible"] is False
+    assert [item["id"] for item in assessment["reserved_disks"]] == [future.id]
+    blocked = client.post(
+        f"/api/v1/storage/disks/{system.id}/reservation",
+        headers=_state_headers(csrf),
+        json={"action": "reserve"},
+    )
+    assert blocked.status_code == 422
+    assert blocked.json()["type"].endswith("system_disk_protected")
+    released = client.post(endpoint, headers=_state_headers(csrf), json={"action": "release"})
+    assert released.status_code == 200
+    assert released.json()["item"]["lifecycle_state"] == "discovered"
 
 
 def test_authenticated_read_only_settings_requests_do_not_require_csrf_origin(

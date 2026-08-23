@@ -236,6 +236,45 @@ def reconcile_snapshot_disks(session: Session, snapshot: dict[str, Any]) -> dict
     return {"observed": len(observed), "created": created, "updated": updated, "skipped": skipped}
 
 
+def set_disk_reservation(
+    session: Session,
+    *,
+    disk_id: str,
+    action: str,
+    protected_identities: set[str] | None = None,
+) -> PhysicalDisk:
+    """Reserve an unassigned disk for a future plan without touching the device."""
+
+    disk = session.get(PhysicalDisk, disk_id)
+    if disk is None:
+        raise StorageGroupError("physical_disk_not_found", "The registered disk does not exist.")
+    protected_identities = protected_identities or set()
+    if disk.stable_identity in protected_identities:
+        raise StorageGroupError(
+            "system_disk_protected",
+            "Protected system storage cannot be reserved for a storage change.",
+        )
+    if action == "reserve":
+        if disk.lifecycle_state == "reserved":
+            return disk
+        if disk.lifecycle_state not in {"discovered", "reuse_ready"}:
+            raise StorageGroupError(
+                "disk_not_reservable",
+                f"A disk in {disk.lifecycle_state.replace('_', ' ')} state cannot be reserved.",
+            )
+        disk.lifecycle_state = "reserved"
+    elif action == "release":
+        if disk.lifecycle_state != "reserved":
+            raise StorageGroupError(
+                "disk_not_reserved", "Only a reserved, unassigned disk can be released."
+            )
+        disk.lifecycle_state = "discovered"
+    else:
+        raise StorageGroupError("invalid_reservation_action", "Use reserve or release.")
+    session.flush()
+    return disk
+
+
 def assign_backend(
     session: Session,
     *,
@@ -261,6 +300,11 @@ def assign_backend(
     if storage_entity_id and entity is None:
         raise StorageGroupError(
             "storage_entity_not_found", "The logical storage object does not exist."
+        )
+    if disk is not None and disk.lifecycle_state not in {"discovered", "reuse_ready"}:
+        raise StorageGroupError(
+            "disk_not_assignable",
+            f"A disk in {disk.lifecycle_state.replace('_', ' ')} state cannot be assigned.",
         )
     stable_identity = (
         f"disk:{disk.stable_identity}" if disk else f"storage:{entity.stable_identity}"

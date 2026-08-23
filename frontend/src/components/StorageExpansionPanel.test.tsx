@@ -36,6 +36,7 @@ const assessment: StorageExpansionAssessment = {
     blockers: [],
     warnings: [],
   }],
+  reserved_disks: [],
   detected_capabilities: { mergerfs: true, snapraid: true, zfs: false },
   candidates: [{
     id: "candidate-one",
@@ -103,5 +104,32 @@ describe("StorageExpansionPanel", () => {
     view.rerender(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-two" />);
     expect(await screen.findByLabelText("Add capacity to Media")).toBeInTheDocument();
     await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  });
+
+  it("reserves a disk for later and shows the persistent reserved state", async () => {
+    const reserved = { ...assessment.available_disks[0] };
+    vi.spyOn(api, "storageExpansion")
+      .mockResolvedValueOnce(assessment)
+      .mockResolvedValueOnce({ ...assessment, available_disks: [], reserved_disks: [reserved], candidates: [] });
+    const reservation = vi.spyOn(api, "setDiskReservation").mockResolvedValue({
+      id: reserved.id,
+      stable_identity: reserved.stable_identity,
+      kernel_path: reserved.kernel_path,
+      serial: null,
+      wwn: null,
+      vendor: reserved.vendor,
+      model: reserved.model,
+      capacity_bytes: reserved.capacity_bytes,
+      media_type: reserved.media_type,
+      health_state: reserved.health,
+      lifecycle_state: "reserved",
+      last_seen_at: "2026-08-23T12:00:00Z",
+    });
+    const user = userEvent.setup();
+    render(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-one" />);
+    await user.click(await screen.findByRole("button", { name: "Reserve for later" }));
+    await screen.findByRole("heading", { name: "Reserved for later" });
+    expect(screen.getByRole("button", { name: "Release disk" })).toBeInTheDocument();
+    expect(reservation).toHaveBeenCalledWith(reserved.id, "reserve");
   });
 });

@@ -375,6 +375,17 @@ class HoardarrApi {
     return this.request<StorageExpansionAssessment>("/storage/expansion", { signal });
   }
 
+  async setDiskReservation(
+    diskId: string,
+    action: "reserve" | "release",
+  ): Promise<PhysicalDiskDocument> {
+    const result = await this.request<{ item: PhysicalDiskDocument }>(
+      `/storage/disks/${encodeURIComponent(diskId)}/reservation`,
+      { method: "POST", body: JSON.stringify({ action }) },
+    );
+    return result.item;
+  }
+
   async createStorageGroup(input: {
     name: string;
     namespace_path: string;
