@@ -25,6 +25,24 @@ There is one extension model, not two marketplaces:
 - Third-party code needing isolation runs as a bounded systemd service with an explicit contract.
 - Container-only extensions are not a second canonical runtime.
 
+### Canonical provider boundary
+
+Provider API version `1` has two deliberately different trust boundaries:
+
+| Provider category | Runtime | Allowed responsibility | Not allowed |
+|---|---|---|---|
+| Built-in hardware providers | Hoardarr process | Bounded read-only collection, parsing, normalization, capability detection | Arbitrary command strings, storage mutation, third-party module loading |
+| Built-in storage providers | Hoardarr process plus the fixed storage executor contract | Pure planning/validation and calls to typed executor operations | Direct browser-supplied commands or bypassing identity/system-disk checks |
+| Built-in ARR/media providers | Hoardarr process | Product-aware bounded HTTP adapters, preview, and approved supported writes | Generic proxying, arbitrary URLs after validation, secret logging |
+| Signed local add-ons | Dedicated systemd service | Manifest-declared API, package, privilege, schema, UI and update compatibility | Loading third-party Python into the API/worker process |
+
+The hardware registry publishes `api_version`, `execution_model`, and `trust`
+for every built-in provider. `/api/v1/system/capabilities` publishes the same
+boundary so installed releases can be audited. A new built-in provider requires
+repository review, bounded input/output, timeout/error tests, and a current API
+version. A third-party provider uses the one signed local add-on lifecycle; it
+does not create another plugin marketplace or gain an in-process escape hatch.
+
 ## Failover traceability
 
 | Capability | Current state |

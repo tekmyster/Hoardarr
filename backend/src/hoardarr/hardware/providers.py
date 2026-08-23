@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 NOT_REPORTED = "Not reported"
+PROVIDER_API_VERSION = 1
 
 
 class ProviderError(ValueError):
@@ -21,6 +22,9 @@ class ProviderDefinition:
     family: str
     commands: tuple[str, ...]
     capability: str
+    api_version: int = PROVIDER_API_VERSION
+    execution_model: str = "in_process"
+    trust: str = "built_in"
 
 
 PROVIDERS = (
@@ -51,6 +55,9 @@ def detect_providers(available_commands: Sequence[str]) -> list[dict[str, Any]]:
                 "name": provider.name,
                 "family": provider.family,
                 "capability": provider.capability,
+                "api_version": provider.api_version,
+                "execution_model": provider.execution_model,
+                "trust": provider.trust,
                 "available": command is not None,
                 "command": command or NOT_REPORTED,
             }

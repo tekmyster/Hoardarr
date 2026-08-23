@@ -1530,6 +1530,15 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     assert client.get("/health/ready").status_code == 200
     csrf = _claim_owner(client, setup_token)
 
+    capabilities = client.get("/api/v1/system/capabilities")
+    assert capabilities.status_code == 200, capabilities.text
+    assert capabilities.json()["provider_runtime"] == {
+        "api_version": 1,
+        "in_process": "built_in_only",
+        "third_party": "signed_systemd_addon",
+        "arbitrary_in_process_code": False,
+    }
+
     overview = client.get("/api/v1/system/overview")
     assert overview.status_code == 200, overview.text
     overview_document = overview.json()

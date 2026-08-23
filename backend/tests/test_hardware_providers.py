@@ -30,6 +30,12 @@ def test_provider_detection_covers_controller_pool_and_enclosure_families() -> N
         "generic_ses",
     }
     assert all(item["command"] == NOT_REPORTED for item in values if not item["available"])
+    assert all(
+        item["api_version"] == 1
+        and item["execution_model"] == "in_process"
+        and item["trust"] == "built_in"
+        for item in values
+    )
 
 
 def test_storcli_parser_preserves_only_reported_slot_mapping() -> None:

@@ -8,6 +8,7 @@ from hoardarr.api.dependencies import authenticated_principal, database_session
 from hoardarr.api.serializers import integration_document, operation_document
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import HardwareSnapshot, IntegrationConnection, Operation
+from hoardarr.hardware.providers import PROVIDER_API_VERSION
 from hoardarr.storage.inventory import discover_storage_inventory
 from hoardarr.storage.telemetry import storage_telemetry
 from hoardarr.system.overview import (
@@ -59,6 +60,12 @@ def capabilities(_principal: Principal = Depends(authenticated_principal)) -> di
         },
         "updates": {"status": "signed_update_available"},
         "addons": {"status": "signed_local_runtime_available", "marketplace": False},
+        "provider_runtime": {
+            "api_version": PROVIDER_API_VERSION,
+            "in_process": "built_in_only",
+            "third_party": "signed_systemd_addon",
+            "arbitrary_in_process_code": False,
+        },
     }
 
 
