@@ -9,14 +9,18 @@ from sqlalchemy.orm import Session
 
 from hoardarr.db.models import HardwareSnapshot, StorageBackend
 from hoardarr.operations.service import document_hash
+from hoardarr.storage.maintenance import IDENTITY_FIELDS, reviewed_device
 
 SUPPORTED_FILESYSTEMS = {
-    "ext4": {"name": "ext4", "read_only_options": ["ro", "noload"]},
-    "xfs": {"name": "XFS", "read_only_options": ["ro", "norecovery"]},
-    "btrfs": {"name": "Btrfs", "read_only_options": ["ro", "nologreplay"]},
-    "ntfs": {"name": "NTFS", "read_only_options": ["ro"]},
-    "ntfs3": {"name": "NTFS", "read_only_options": ["ro"]},
-    "exfat": {"name": "exFAT", "read_only_options": ["ro"]},
+    "ext4": {"name": "ext4", "read_only_options": ["ro", "noload", "nodev", "nosuid", "noexec"]},
+    "xfs": {"name": "XFS", "read_only_options": ["ro", "norecovery", "nodev", "nosuid", "noexec"]},
+    "btrfs": {
+        "name": "Btrfs",
+        "read_only_options": ["ro", "nologreplay", "nodev", "nosuid", "noexec"],
+    },
+    "ntfs": {"name": "NTFS", "read_only_options": ["ro", "nodev", "nosuid", "noexec"]},
+    "ntfs3": {"name": "NTFS", "read_only_options": ["ro", "nodev", "nosuid", "noexec"]},
+    "exfat": {"name": "exFAT", "read_only_options": ["ro", "nodev", "nosuid", "noexec"]},
 }
 STACK_SIGNATURES = {
     "linux_raid_member": ("linux_md", "Linux MD", "mdadm"),
@@ -32,19 +36,31 @@ def _text(value: Any, *, limit: int = 512) -> str | None:
     return normalized[:limit] if normalized else None
 
 
-def _signature_documents(disk: dict[str, Any]) -> list[dict[str, str | None]]:
-    documents: list[dict[str, str | None]] = []
-    sources: list[Any] = [disk.get("signatures")]
+class ForeignStorageError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def _signature_documents(disk: dict[str, Any]) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    sources: list[tuple[Any, str | None, int | None]] = [
+        (disk.get("signatures"), _text(disk.get("kernel_path"), limit=4096), None)
+    ]
     partitions = disk.get("partitions")
     if isinstance(partitions, list):
         for partition in partitions[:256]:
             if not isinstance(partition, dict):
                 continue
-            sources.append(partition.get("signatures"))
+            partition_path = _text(partition.get("kernel_path"), limit=4096)
+            partition_number = (
+                partition.get("number") if isinstance(partition.get("number"), int) else None
+            )
+            sources.append((partition.get("signatures"), partition_path, partition_number))
             filesystem = partition.get("filesystem")
             if isinstance(filesystem, dict):
-                sources.append([filesystem])
-    for source in sources:
+                sources.append(([filesystem], partition_path, partition_number))
+    for source, kernel_path, partition_number in sources:
         if not isinstance(source, list):
             continue
         for raw in source[:256]:
@@ -59,6 +75,8 @@ def _signature_documents(disk: dict[str, Any]) -> list[dict[str, str | None]]:
                 "uuid": _text(raw.get("uuid"), limit=256),
                 "label": _text(raw.get("label"), limit=256),
                 "source": _text(raw.get("source"), limit=64) or "not_reported",
+                "kernel_path": kernel_path,
+                "partition_number": partition_number,
             }
             if document not in documents:
                 documents.append(document)
@@ -126,6 +144,7 @@ def _member(disk: dict[str, Any]) -> dict[str, Any]:
         },
         "confidence": _confidence(disk, signatures),
         "signatures": signatures,
+        "reviewed_device": reviewed_device(disk),
     }
 
 
@@ -183,15 +202,27 @@ def _candidate_document(
     safety_blocked = bool(blockers)
     inspection_available = False
     if profile == "standalone_filesystem" and not blockers and filesystems:
-        blockers.append(
-            "The immutable provider-specific no-recovery inspection executor is not enabled yet."
-        )
+        filesystem_signatures = [
+            signature
+            for member in members
+            for signature in member["signatures"]
+            if str(signature["type"]).casefold() in SUPPORTED_FILESYSTEMS
+        ]
+        signature = filesystem_signatures[0] if len(filesystem_signatures) == 1 else {}
+        is_whole_device = signature.get("kernel_path") == members[0].get("kernel_path")
+        is_numbered_partition = isinstance(signature.get("partition_number"), int)
+        if len(members) == 1 and (is_whole_device or is_numbered_partition):
+            inspection_available = True
+        else:
+            blockers.append("Automatic inspection requires one unambiguous filesystem source path.")
     elif profile != "standalone_filesystem" and not blockers:
         blockers.append(
             "A provider-specific no-activation member preview is required before this stack "
             "can be mounted."
         )
-    state = "blocked" if safety_blocked else "degraded-review"
+    state = (
+        "ready" if inspection_available else ("blocked" if safety_blocked else "degraded-review")
+    )
     capacity_values = [item["capacity_bytes"] for item in members]
     capacity = (
         sum(int(value) for value in capacity_values)
@@ -226,7 +257,9 @@ def _candidate_document(
             {
                 "id": "inspect_read_only",
                 "available": inspection_available,
-                "reason": blockers[0] if blockers else "Read-only inspection is unavailable.",
+                "reason": blockers[0]
+                if blockers
+                else "A bounded read-only inventory can be reviewed and queued.",
             },
             {
                 "id": "copy_into_hoardarr",
@@ -244,6 +277,153 @@ def _candidate_document(
         ],
         "mutation_performed": False,
     }
+
+
+def build_inspection_plan(
+    session: Session,
+    *,
+    snapshot: HardwareSnapshot,
+    candidate_id: str,
+) -> dict[str, Any]:
+    assessment = assess_foreign_storage(session, snapshot=snapshot)
+    matches = [item for item in assessment["candidates"] if item["id"] == candidate_id]
+    if len(matches) != 1:
+        raise ForeignStorageError(
+            "foreign_candidate_not_found", "Run discovery and select the source again."
+        )
+    candidate = matches[0]
+    mode = next(item for item in candidate["modes"] if item["id"] == "inspect_read_only")
+    if mode["available"] is not True:
+        raise ForeignStorageError("foreign_inspection_blocked", str(mode["reason"]))
+    member = candidate["members"][0]
+    signatures = [
+        item
+        for item in member["signatures"]
+        if str(item["type"]).casefold() in SUPPORTED_FILESYSTEMS
+    ]
+    if len(signatures) != 1:
+        raise ForeignStorageError(
+            "foreign_source_ambiguous", "The filesystem source is not unambiguous."
+        )
+    signature = signatures[0]
+    filesystem_type = str(signature["type"]).casefold()
+    device = member["reviewed_device"]
+    source = {
+        "kind": (
+            "whole_device" if signature["kernel_path"] == member["kernel_path"] else "partition"
+        ),
+        "kernel_path_at_preview": signature["kernel_path"],
+        "partition_number": signature["partition_number"],
+        "filesystem_type": filesystem_type,
+        "filesystem_uuid": signature["uuid"],
+        "filesystem_label": signature["label"],
+        "signature_source": signature["source"],
+        "read_only_options": list(SUPPORTED_FILESYSTEMS[filesystem_type]["read_only_options"]),
+    }
+    plan = {
+        "schema_version": 1,
+        "operation": "foreign.inspect_read_only",
+        "candidate_id": candidate_id,
+        "hardware_snapshot_id": snapshot.id,
+        "hardware_snapshot_sha256": snapshot.sha256,
+        "device": device,
+        "device_binding_sha256": document_hash(device),
+        "source": source,
+        "limits": {
+            "maximum_entries": 100_000,
+            "maximum_extension_groups": 256,
+            "maximum_errors": 100,
+        },
+        "access": "read_only",
+        "persistent_mount": False,
+        "automatic_activation": False,
+        "mutation_performed": False,
+    }
+    return {**plan, "plan_sha256": document_hash(plan)}
+
+
+def validate_inspection_plan(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "operation",
+        "candidate_id",
+        "hardware_snapshot_id",
+        "hardware_snapshot_sha256",
+        "device",
+        "device_binding_sha256",
+        "source",
+        "limits",
+        "access",
+        "persistent_mount",
+        "automatic_activation",
+        "mutation_performed",
+        "plan_sha256",
+    }:
+        raise ForeignStorageError("foreign_plan_invalid", "The inspection plan is invalid.")
+    plan = dict(value)
+    expected_hash = plan.pop("plan_sha256", None)
+    device = plan.get("device")
+    source = plan.get("source")
+    limits = plan.get("limits")
+    candidate_id = plan.get("candidate_id")
+    snapshot_sha256 = plan.get("hardware_snapshot_sha256")
+    source_fields = {
+        "kind",
+        "kernel_path_at_preview",
+        "partition_number",
+        "filesystem_type",
+        "filesystem_uuid",
+        "filesystem_label",
+        "signature_source",
+        "read_only_options",
+    }
+    source_path = source.get("kernel_path_at_preview") if isinstance(source, dict) else None
+    partition_number = source.get("partition_number") if isinstance(source, dict) else None
+    if (
+        plan.get("schema_version") != 1
+        or plan.get("operation") != "foreign.inspect_read_only"
+        or plan.get("access") != "read_only"
+        or plan.get("persistent_mount") is not False
+        or plan.get("automatic_activation") is not False
+        or plan.get("mutation_performed") is not False
+        or not isinstance(candidate_id, str)
+        or not candidate_id.startswith("foreign:")
+        or len(candidate_id) != 32
+        or any(character not in "0123456789abcdef" for character in candidate_id[8:])
+        or not isinstance(plan.get("hardware_snapshot_id"), str)
+        or not isinstance(snapshot_sha256, str)
+        or len(snapshot_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in snapshot_sha256)
+        or not isinstance(device, dict)
+        or set(device) != set(IDENTITY_FIELDS)
+        or not isinstance(device.get("id"), str)
+        or device.get("stable_identity") is not True
+        or document_hash(device) != plan.get("device_binding_sha256")
+        or not isinstance(source, dict)
+        or set(source) != source_fields
+        or not isinstance(source_path, str)
+        or not source_path.startswith("/dev/")
+        or "\0" in source_path
+        or source.get("kind") not in {"whole_device", "partition"}
+        or (
+            source.get("kind") == "partition"
+            and (
+                not isinstance(partition_number, int)
+                or isinstance(partition_number, bool)
+                or not 1 <= partition_number <= 4096
+            )
+        )
+        or (source.get("kind") == "whole_device" and partition_number is not None)
+        or str(source.get("filesystem_type")).casefold() not in SUPPORTED_FILESYSTEMS
+        or source.get("read_only_options")
+        != SUPPORTED_FILESYSTEMS[str(source.get("filesystem_type")).casefold()]["read_only_options"]
+        or not isinstance(limits, dict)
+        or limits
+        != {"maximum_entries": 100_000, "maximum_extension_groups": 256, "maximum_errors": 100}
+        or expected_hash != document_hash(plan)
+    ):
+        raise ForeignStorageError("foreign_plan_invalid", "The inspection plan is invalid.")
+    return value
 
 
 def assess_foreign_storage(
@@ -293,9 +473,7 @@ def assess_foreign_storage(
             )
             continue
         signature_type = next(
-            item
-            for item, details in STACK_SIGNATURES.items()
-            if details[0] == profile
+            item for item, details in STACK_SIGNATURES.items() if details[0] == profile
         )
         _stack, name, tool = STACK_SIGNATURES[signature_type]
         candidates.append(
@@ -322,8 +500,6 @@ def assess_foreign_storage(
         },
         "candidates": candidates,
         "unrecognized_device_count": sum(
-            1
-            for member in members
-            if not member["signatures"] and not member["system_device"]
+            1 for member in members if not member["signatures"] and not member["system_device"]
         ),
     }

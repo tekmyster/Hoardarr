@@ -330,16 +330,19 @@ class TierTransferCleanupRequest(StrictModel):
 class DeviceMaintenancePreviewRequest(StrictModel):
     device_id: str = Field(min_length=1, max_length=512)
     action: Literal["wipe", "sector_conversion"]
-    method: Literal[
-        "quick",
-        "metadata_clear",
-        "hdd_overwrite",
-        "ata_secure_erase",
-        "nvme_sanitize",
-        "nvme_crypto_erase",
-        "scsi_sanitize",
-        "scsi_crypto_erase",
-    ] | None = None
+    method: (
+        Literal[
+            "quick",
+            "metadata_clear",
+            "hdd_overwrite",
+            "ata_secure_erase",
+            "nvme_sanitize",
+            "nvme_crypto_erase",
+            "scsi_sanitize",
+            "scsi_crypto_erase",
+        ]
+        | None
+    ) = None
     passes: int = Field(default=1, ge=1, le=7)
     target_logical_bytes: Literal[512, 4096] | None = None
 
@@ -360,6 +363,16 @@ class DeviceMaintenanceApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     confirmation: Literal["I AGREE"]
+
+
+class ForeignInspectionPreviewRequest(StrictModel):
+    candidate_id: str = Field(pattern=r"^foreign:[0-9a-f]{24}$")
+
+
+class ForeignInspectionApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["INSPECT READ ONLY"]
 
 
 class SnapraidReplacementPreviewRequest(StrictModel):

@@ -58,9 +58,17 @@ mkfs.ext4 -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$loop"
 mkdir "$work/mnt"
 mount "$loop" "$work/mnt"
 mkdir "$work/mnt/Movies" "$work/mnt/TV"
+printf 'hoardarr deterministic archive movie\n' >"$work/mnt/Movies/sample.mkv"
+printf 'hoardarr deterministic archive episode\n' >"$work/mnt/TV/episode.mkv"
 setfacl -m u::rwx,g::r-x,o::--- "$work/mnt"
 getfacl "$work/mnt" >/dev/null
 umount "$work/mnt"
+"$python" "$repo/tests/integration/foreign_readonly_inspection.py" \
+  --loop "$loop" \
+  --work-root "$work" \
+  --evidence "$repo/dist/validation/foreign-readonly-inspection.json"
+jq -e '.classification == "VERIFIED IN ISOLATION" and .access == "read_only" and (.persistent_mount | not) and (.mutation_performed | not) and .journal_state == "succeeded" and .private_mount_removed and .source_unmounted_after and .file_count >= 2 and .read_errors == 0' \
+  "$repo/dist/validation/foreign-readonly-inspection.json"
 
 [[ "${HOARDARR_EXTENDED_STORAGE_TESTS:-0}" == "1" ]] || exit 0
 

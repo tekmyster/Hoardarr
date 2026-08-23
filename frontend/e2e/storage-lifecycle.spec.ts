@@ -15,6 +15,7 @@ async function storageLifecycleServer(page: Page) {
   let destinationLifecycle = "assigned";
   let lastGroupLifecycle = "assigned";
   let released = false;
+  let foreignInspectionStarted = false;
   const group = () => ({
     id: groupId,
     name: "Media",
@@ -91,6 +92,48 @@ async function storageLifecycleServer(page: Page) {
     if (pathname.endsWith("/onboarding/network/interfaces")) return json({ items: [] });
     if (pathname.endsWith("/networking")) return json({ configuration: null, pending_confirmation: false, capabilities: { available: true, tools: {} }, interfaces: [], current: { hostname: "hoardarr", timezone: "UTC", addresses: {}, default_interface: null, default_gateway: null } });
     if (pathname.endsWith("/hardware/snapshots/latest")) return json({ title: "Not found" }, 404);
+    if (pathname.endsWith("/storage/foreign/inspection/preview")) return json({ plan: {
+      schema_version: 1,
+      operation: "foreign.inspect_read_only",
+      candidate_id: "foreign:archive",
+      hardware_snapshot_id: "snapshot-foreign",
+      hardware_snapshot_sha256: "d".repeat(64),
+      device: { id: "wwn:archive", model: "Disposable archive disk", capacity_bytes: 8_000_000_000 },
+      source: { kind: "whole_device", kernel_path_at_preview: "/dev/loop9", partition_number: null, filesystem_type: "xfs", filesystem_uuid: "archive-fs", filesystem_label: "Archive", signature_source: "wipefs", read_only_options: ["ro", "norecovery", "nodev", "nosuid", "noexec"] },
+      limits: { maximum_entries: 100_000, maximum_extension_groups: 256, maximum_errors: 100 },
+      access: "read_only",
+      persistent_mount: false,
+      automatic_activation: false,
+      mutation_performed: false,
+      plan_sha256: "e".repeat(64),
+    } });
+    if (pathname.endsWith("/storage/foreign/inspection")) {
+      const body = request.postDataJSON() as { confirmation: string };
+      expect(body.confirmation).toBe("INSPECT READ ONLY");
+      foreignInspectionStarted = true;
+      return json({ operation: { id: "foreign-operation", kind: "storage.foreign.inspect", status: "succeeded", resource: { type: "foreign_storage", id: "foreign:archive" }, result: { access: "read_only", persistent_mount: false, mutation_performed: false, inventory: { file_count: 24, total_bytes: 8192, read_errors: [] } } } }, 202);
+    }
+    if (pathname.endsWith("/storage/foreign")) return json({
+      snapshot: { id: "snapshot-foreign", captured_at: now, sha256: "d".repeat(64) },
+      policy: { default_access: "read_only", automatic_mount: false, automatic_assembly: false, mutation_performed: false },
+      candidates: [{
+        id: "foreign:archive",
+        profile: "standalone_filesystem",
+        profile_name: "Standalone filesystem",
+        origin: { name: "Not reported", confidence: "unknown", reason: "Filesystem metadata cannot identify the previous system." },
+        confidence: "high",
+        state: "ready",
+        members: [{ device_id: "wwn:archive", kernel_path: "/dev/loop9", model: "Disposable archive disk", capacity_bytes: 8_000_000_000, stable_identity: true, system_device: false, read_only: false, removable: false, mounted: false, mountpoints: [], signature_scan: { status: "complete", source: "wipefs", reason: null }, confidence: "high", signatures: [{ type: "xfs", usage: "filesystem", uuid: "archive-fs", label: "Archive", source: "wipefs" }] }],
+        filesystems: ["XFS"],
+        signature_types: ["xfs"],
+        capacity_bytes: 8_000_000_000,
+        warnings: [],
+        blockers: [],
+        modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
+        mutation_performed: false,
+      }],
+      unrecognized_device_count: 0,
+    });
     if (pathname.endsWith("/storage/groups") && request.method() === "GET") {
       const value = group();
       groupReads += 1;
@@ -177,7 +220,10 @@ async function storageLifecycleServer(page: Page) {
     }
     if (pathname.endsWith("/operations")) return json({ items: operationStatus ? [operation()] : [] });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
+    if (pathname.endsWith("/storage/transfers/summary")) return json({ active: 0, pending: 0, failed: 0, completed: 0, bytes_moved: 0, current_throughput_bytes_per_second: 0, estimated_drain_seconds: null, hardlink_rate: null, copy_rate: null, seeding_retained_bytes: 0, recoverable_bytes: 0 });
     if (pathname.endsWith("/storage/logical")) return json({ items: [] });
+    if (pathname.endsWith("/hardware/topology/plan-templates")) return json({ items: [] });
+    if (pathname.endsWith("/hardware/topology/plans")) return json({ items: [] });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations") || pathname.endsWith("/wizards")) return json({ items: [] });
     if (pathname.endsWith("/system/overview")) return json({ captured_at: now, source: "live", system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.11", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] }, storage: { snapshot: null, drive_count: 2, raw_capacity_bytes: 2_000_000_000_000, health: "healthy", pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] } }, network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: now, detail: null, neighbors: [] } }, activity: { operations: [] }, applications: { connections: [] }, alerts: [] });
@@ -190,6 +236,7 @@ async function storageLifecycleServer(page: Page) {
     groupReads: () => groupReads,
     lastGroupLifecycle: () => lastGroupLifecycle,
     released: () => released,
+    foreignInspectionStarted: () => foreignInspectionStarted,
   };
 }
 
@@ -234,4 +281,22 @@ test("drains and retires a Storage Group source through the real browser workflo
   await page.getByText("Recent lifecycle activity").click();
   await expect(page.getByText("backend released for reuse")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("storage-lifecycle-completed.png"), fullPage: true });
+});
+
+test("reviews and completes a bounded read-only foreign inventory in the real Storage UI", async ({ page }, testInfo) => {
+  const observed = await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await page.getByText("Inspect storage from another system").click();
+  await expect(page.getByText("Standalone filesystem")).toBeVisible();
+  await expect(page.getByText("Not reported")).toBeVisible();
+  await page.getByRole("button", { name: "Review read-only inspection" }).click();
+  await expect(page.getByText("No storage configuration will change")).toBeVisible();
+  await expect(page.getByText("100,000 entries")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("foreign-readonly-review.png"), fullPage: true });
+  await page.getByRole("button", { name: "INSPECT READ ONLY" }).click();
+  await expect(page.getByText("Read-only inventory completed")).toBeVisible();
+  await expect(page.getByText(/24 files/)).toBeVisible();
+  expect(observed.foreignInspectionStarted()).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("foreign-readonly-completed.png"), fullPage: true });
 });

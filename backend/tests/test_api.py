@@ -1665,12 +1665,12 @@ def test_authenticated_hardware_worker_and_wizard_flow(
                 "partitions": [],
                 "signatures": [],
                 "maintenance_capabilities": {
-                        "ata_secure_erase": False,
-                        "nvme_block_erase": False,
-                        "nvme_crypto_erase": False,
-                        "scsi_block_erase": False,
-                        "scsi_crypto_erase": False,
-                        "sector_format_passthrough": False,
+                    "ata_secure_erase": False,
+                    "nvme_block_erase": False,
+                    "nvme_crypto_erase": False,
+                    "scsi_block_erase": False,
+                    "scsi_crypto_erase": False,
+                    "sector_format_passthrough": False,
                     "supported_logical_sector_bytes": [],
                     "source": "Not reported",
                     "smart_self_test": {
@@ -1955,6 +1955,148 @@ def test_storage_step_api_rejects_read_only_device(api_runtime: Any) -> None:
             ),
         }
     ]
+
+
+def test_foreign_inspection_api_is_snapshot_bound_idempotent_and_durable(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, secret_box = api_runtime
+    assert (
+        client.post(
+            "/api/v1/storage/foreign/inspection/preview",
+            json={"candidate_id": "foreign:0123456789abcdef01234567"},
+        ).status_code
+        == 401
+    )
+    csrf = _claim_owner(client, setup_token)
+    hardware = {
+        "schema_version": 1,
+        "source": {"kind": "sysfs"},
+        "disks": [
+            {
+                "id": "wwn:foreign-api",
+                "stable_identity": True,
+                "kernel_path": "/dev/sdz",
+                "identity": {
+                    "serial": "FOREIGN-API",
+                    "wwn": "5000000000000002",
+                    "eui64": None,
+                    "nguid": None,
+                },
+                "vendor": "TEST",
+                "model": "Archive",
+                "capacity_bytes": 8_000_000_000,
+                "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+                "system_disk": False,
+                "read_only": False,
+                "mountpoints": [],
+                "partitions": [],
+                "signatures": [
+                    {
+                        "type": "ext4",
+                        "usage": "filesystem",
+                        "uuid": "foreign-fs-api",
+                        "label": "Archive",
+                        "source": "wipefs",
+                    }
+                ],
+                "signature_scan": {"status": "complete", "source": "wipefs", "reason": None},
+            }
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="sysfs",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+
+    assessment = client.get("/api/v1/storage/foreign")
+    candidate = assessment.json()["candidates"][0]
+    assert candidate["state"] == "ready"
+    endpoint = "/api/v1/storage/foreign/inspection/preview"
+    assert client.post(endpoint, json={"candidate_id": candidate["id"]}).status_code == 403
+    preview = client.post(
+        endpoint,
+        headers=_state_headers(csrf),
+        json={"candidate_id": candidate["id"]},
+    )
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()["plan"]
+    assert plan["persistent_mount"] is False
+    apply_headers = _state_headers(csrf, **{"Idempotency-Key": "foreign-inspection-api-0001"})
+    wrong_confirmation = client.post(
+        "/api/v1/storage/foreign/inspection",
+        headers=apply_headers,
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "APPLY",
+        },
+    )
+    assert wrong_confirmation.status_code == 422
+    accepted = client.post(
+        "/api/v1/storage/foreign/inspection",
+        headers=apply_headers,
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "INSPECT READ ONLY",
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    replay = client.post(
+        "/api/v1/storage/foreign/inspection",
+        headers=apply_headers,
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "INSPECT READ ONLY",
+        },
+    )
+    assert replay.status_code == 202
+    assert replay.json()["replayed"] is True
+    assert replay.json()["operation"]["id"] == accepted.json()["operation"]["id"]
+
+    def inspect_applier(*_args: object, **kwargs: object) -> dict[str, Any]:
+        return {
+            "operation_id": kwargs["operation_id"],
+            "candidate_id": plan["candidate_id"],
+            "access": "read_only",
+            "persistent_mount": False,
+            "mutation_performed": False,
+            "inventory": {"file_count": 3, "total_bytes": 1024, "read_errors": []},
+        }
+
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        worker_id="foreign-inspection-api-worker",
+        foreign_inspection_applier=inspect_applier,
+    )
+    completed = client.get(f"/api/v1/operations/{accepted.json()['operation']['id']}")
+    assert completed.json()["status"] == "succeeded"
+    assert completed.json()["result"]["inventory"]["file_count"] == 3
+    with app.state.session_factory() as session:
+        audit = session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "storage.foreign.inspect_read_only")
+        )
+        assert audit is not None
 
 
 def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: Any) -> None:

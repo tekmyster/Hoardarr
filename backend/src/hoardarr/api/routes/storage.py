@@ -20,6 +20,8 @@ from hoardarr.api.schemas import (
     ArrayReplacementPreviewRequest,
     DeviceMaintenanceApplyRequest,
     DeviceMaintenancePreviewRequest,
+    ForeignInspectionApplyRequest,
+    ForeignInspectionPreviewRequest,
     PhysicalDiskReconcileRequest,
     PhysicalDiskReservationRequest,
     SnapraidReplacementApplyRequest,
@@ -50,7 +52,12 @@ from hoardarr.db.models import (
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
 from hoardarr.storage.expansion import build_expansion_assessment
-from hoardarr.storage.foreign import assess_foreign_storage
+from hoardarr.storage.foreign import (
+    ForeignStorageError,
+    assess_foreign_storage,
+    build_inspection_plan,
+    validate_inspection_plan,
+)
 from hoardarr.storage.groups import (
     StorageGroupError,
     activate_backend,
@@ -174,6 +181,81 @@ def foreign_storage_assessment(
     """Fingerprint persisted signatures without mounting or activating foreign storage."""
 
     return assess_foreign_storage(session, snapshot=_latest_hardware(session))
+
+
+@router.post("/foreign/inspection/preview")
+def preview_foreign_inspection(
+    payload: ForeignInspectionPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Build an immutable, non-persistent, read-only filesystem inventory plan."""
+
+    try:
+        plan = build_inspection_plan(
+            session,
+            snapshot=_latest_hardware(session),
+            candidate_id=payload.candidate_id,
+        )
+    except ForeignStorageError as exc:
+        raise Problem(422, exc.code, "Inspection unavailable", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": plan["plan_sha256"]}
+
+
+@router.post("/foreign/inspection", status_code=202)
+def start_foreign_inspection(
+    payload: ForeignInspectionApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        plan = validate_inspection_plan(payload.plan)
+    except ForeignStorageError as exc:
+        raise Problem(422, exc.code, "Invalid inspection plan", str(exc)) from exc
+    if payload.plan_sha256 != plan["plan_sha256"]:
+        raise Problem(409, "foreign_plan_changed", "Plan changed", "Preview the source again.")
+    if _latest_hardware(session).sha256 != plan["hardware_snapshot_sha256"]:
+        raise Problem(
+            409,
+            "hardware_snapshot_changed",
+            "Discovery changed",
+            "Run discovery and review the source again.",
+        )
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.foreign.inspect",
+            principal=principal,
+            request={
+                "plan": plan,
+                "plan_sha256": plan["plan_sha256"],
+                "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
+            },
+            idempotency_key=key,
+            resource_type="foreign_storage",
+            resource_id=str(plan["candidate_id"]),
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.foreign.inspect_read_only",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="foreign_storage",
+            target_id=str(plan["candidate_id"]),
+            details={
+                "plan_sha256": plan["plan_sha256"],
+                "device_id": plan["device"]["id"],
+                "filesystem_type": plan["source"]["filesystem_type"],
+                "persistent_mount": False,
+            },
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
 
 
 @router.post("/groups", status_code=201)

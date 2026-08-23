@@ -25,10 +25,40 @@ volume metadata alone never assigns an Unraid, Synology, QNAP, or other product
 origin; the UI shows **Not reported** until a reviewed adapter has stronger
 evidence.
 
-The current Storage-page panel is an assessment surface. Its inspection control
-remains disabled until the next implementation stage supplies the immutable,
-provider-specific no-recovery mount plan and executor. A disabled control is not
-evidence that read-only mounting or copy intake has been implemented.
+Standalone filesystems with one unambiguous source path can proceed to a real
+read-only inspection. `POST /api/v1/storage/foreign/inspection/preview` binds an
+immutable plan to the latest snapshot digest, stable device identity,
+filesystem type and UUID, source partition, provider-specific no-recovery mount
+options, and fixed inventory limits. `POST /api/v1/storage/foreign/inspection`
+requires the exact phrase `INSPECT READ ONLY` and queues a durable
+`storage.foreign.inspect` Activity operation.
+
+The privileged storage executor then performs a fresh live device-identity and
+activation check, resolves a persistent `/dev/disk/by-id` alias, runs
+`wipefs --no-act --json`, and refuses changed or ambiguous signatures. It mounts
+only beneath the root-owned `/mnt/hoardarr/imports` inspection root with `ro`,
+`nodev`, `nosuid`, `noexec`, and the filesystem-specific replay/recovery guard:
+
+- ext4: `noload`
+- XFS: `norecovery`
+- Btrfs: `nologreplay`
+- NTFS/NTFS3/exFAT: read-only without an unsupported replay claim
+
+`findmnt` must report the resulting mount as read-only before inventory begins.
+The inventory is metadata-only, does not follow symlinks, and is bounded to
+100,000 entries, 256 extension groups, and 100 reported read/stat errors. It
+records file and directory counts, bytes, the largest file, timestamp extrema,
+extension distribution, and case/Unicode collision counts. The executor always
+attempts to detach the private root-owned mount in `finally`; detach failure is
+`needs_attention`, success removes the temporary directory, and no fstab entry
+or persistent adoption state is created. The report and real phase progress
+remain in Activity after the mount is gone.
+
+MD/LVM/ZFS member groups remain assessment-only. Hoardarr does not activate
+those stacks until each provider has a reviewed no-activation completeness and
+health preview followed by its own read-only assembly executor. Copy intake,
+adoption, Unraid classification, and NAS-origin adapters remain later tasks and
+are not implied by standalone inspection.
 
 ## Principles
 
@@ -37,7 +67,7 @@ evidence that read-only mounting or copy intake has been implemented.
   unrelated standalone media.
 - Report confidence and evidence for every detected platform, pool, array,
   filesystem, and member role.
-- Default to read-only inspection in a private namespace.
+- Default to read-only inspection under a private root-owned temporary path.
 - Use filesystem-, pool-, and volume-manager-specific no-recovery behavior.
 - Never assume that a generic read-only flag prevents journal replay or other
   metadata changes.

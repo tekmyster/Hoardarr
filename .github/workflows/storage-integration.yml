@@ -124,6 +124,7 @@ jobs:
         with:
           name: storage-expansion-evidence
           path: |
+            dist/validation/foreign-readonly-inspection.json
             dist/validation/snapraid-expansion.json
             dist/validation/snapraid-replacement.json
             dist/validation/md-replacement.json

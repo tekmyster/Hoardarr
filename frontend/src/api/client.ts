@@ -13,6 +13,7 @@ import type {
   Drive,
   DeviceMaintenancePlan,
   ForeignStorageAssessment,
+  ForeignInspectionPlan,
   HardwareSnapshot,
   MergerFsInventory,
   MetricAlertDocument,
@@ -439,6 +440,30 @@ class HoardarrApi {
 
   async foreignStorage(signal?: AbortSignal): Promise<ForeignStorageAssessment> {
     return this.request<ForeignStorageAssessment>("/storage/foreign", { signal });
+  }
+
+  async previewForeignInspection(candidateId: string): Promise<ForeignInspectionPlan> {
+    const result = await this.request<{ plan: ForeignInspectionPlan }>(
+      "/storage/foreign/inspection/preview",
+      { method: "POST", body: JSON.stringify({ candidate_id: candidateId }) },
+    );
+    return result.plan;
+  }
+
+  async startForeignInspection(plan: ForeignInspectionPlan): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      "/storage/foreign/inspection",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({
+          plan,
+          plan_sha256: plan.plan_sha256,
+          confirmation: "INSPECT READ ONLY",
+        }),
+      },
+    );
+    return result.operation;
   }
 
   async setDiskReservation(

@@ -15,12 +15,18 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from hoardarr.operations.service import document_hash
+from hoardarr.storage.foreign import (
+    ForeignStorageError,
+    validate_inspection_plan,
+)
 from hoardarr.storage.layouts import (
     LayoutError,
     layout_commands,
@@ -182,6 +188,7 @@ class Paths:
     lock_root: Path = Path("/run/hoardarr/storage-locks")
     fstab: Path = Path("/etc/fstab")
     mount_root: Path = Path("/mnt/hoardarr/disks")
+    inspection_root: Path = Path("/mnt/hoardarr/imports")
     sys_class_block: Path = Path("/sys/class/block")
     proc_swaps: Path = Path("/proc/swaps")
     samba_config: Path = Path("/etc/samba/smb.conf")
@@ -195,6 +202,7 @@ class Paths:
 CommandRunner = Callable[[list[str], int], None]
 CommandProbe = Callable[[list[str], int], str]
 InventoryProvider = Callable[[], dict[str, Any]]
+InspectionInventoryProvider = Callable[[Path, Mapping[str, int]], dict[str, Any]]
 ZfsStateProvider = Callable[[str], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
 
@@ -274,6 +282,29 @@ def _capture(command: list[str], timeout_seconds: int) -> str:
     return result.stdout
 
 
+def _capture_read_only(command: list[str], timeout_seconds: int) -> str:
+    if not command or any(not isinstance(part, str) or "\0" in part for part in command):
+        raise ExecutorFailure("executor_command_invalid", "A typed storage command was invalid.")
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        raise ExecutorFailure(
+            "foreign_probe_failed", "The source signature could not be revalidated read-only."
+        ) from exc
+    if len(result.stdout) > MAXIMUM_RESPONSE_BYTES:
+        raise ExecutorFailure("foreign_probe_invalid", "The source signature report was oversized.")
+    return result.stdout
+
+
 def _nvme_sanitize_status(output: str) -> str:
     try:
         document = json.loads(output)
@@ -302,9 +333,7 @@ def _nvme_sanitize_status(output: str) -> str:
         raise ExecutorFailure(
             "sanitize_status_invalid", "The NVMe sanitize status was not reported."
         )
-    return {1: "succeeded", 2: "in_progress", 3: "failed", 4: "succeeded"}.get(
-        raw & 0x7, "unknown"
-    )
+    return {1: "succeeded", 2: "in_progress", 3: "failed", 4: "succeeded"}.get(raw & 0x7, "unknown")
 
 
 def _wait_for_nvme_sanitize(
@@ -313,9 +342,7 @@ def _wait_for_nvme_sanitize(
     deadline = time.monotonic() + timeout_seconds
     observations = 0
     while True:
-        output = probe(
-            [_tool("nvme"), "sanitize-log", stable_path, "--output-format=json"], 30
-        )
+        output = probe([_tool("nvme"), "sanitize-log", stable_path, "--output-format=json"], 30)
         observations += 1
         status = _nvme_sanitize_status(output)
         if status == "succeeded":
@@ -2989,6 +3016,465 @@ def apply_device_maintenance(
         return result
 
 
+def _foreign_source_path(
+    paths: Paths, live_disk: Mapping[str, Any], source: Mapping[str, Any]
+) -> Path:
+    stable_disk = _stable_path(paths, live_disk)
+    if source.get("kind") == "whole_device":
+        return stable_disk
+    number = source.get("partition_number")
+    partitions = live_disk.get("partitions")
+    matches = (
+        [
+            item
+            for item in partitions
+            if isinstance(partitions, list)
+            and isinstance(item, Mapping)
+            and item.get("number") == number
+        ]
+        if isinstance(partitions, list)
+        else []
+    )
+    if len(matches) != 1:
+        raise ExecutorFailure(
+            "foreign_partition_changed", "The reviewed source partition is no longer present."
+        )
+    live_path = matches[0].get("kernel_path")
+    if not isinstance(live_path, str) or not live_path.startswith("/dev/"):
+        raise ExecutorFailure("foreign_partition_changed", "The source partition path is invalid.")
+    stable_partition = Path(f"{stable_disk}-part{number}")
+    try:
+        if not stable_partition.is_symlink() or stable_partition.resolve(strict=True) != Path(
+            live_path
+        ).resolve(strict=True):
+            raise OSError("partition alias mismatch")
+    except OSError as exc:
+        raise ExecutorFailure(
+            "stable_device_path_unavailable",
+            "The source partition has no matching persistent /dev/disk/by-id path.",
+        ) from exc
+    return stable_partition
+
+
+def _parse_wipefs_signatures(output: str) -> list[dict[str, str | None]]:
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ExecutorFailure(
+            "foreign_probe_invalid", "The source signature report was malformed."
+        ) from exc
+    raw = payload.get("signatures") if isinstance(payload, dict) else None
+    if not isinstance(raw, list) or len(raw) > 64:
+        raise ExecutorFailure("foreign_probe_invalid", "The source signature report was malformed.")
+    result: list[dict[str, str | None]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ExecutorFailure(
+                "foreign_probe_invalid", "The source signature report was malformed."
+            )
+        folded = {str(key).casefold(): value for key, value in item.items()}
+        signature_type = folded.get("type")
+        if not isinstance(signature_type, str) or len(signature_type) > 64:
+            raise ExecutorFailure(
+                "foreign_probe_invalid", "The source signature report was malformed."
+            )
+        result.append(
+            {
+                "type": signature_type.casefold(),
+                "uuid": str(folded["uuid"])[:256] if folded.get("uuid") not in {None, ""} else None,
+                "label": str(folded["label"])[:256]
+                if folded.get("label") not in {None, ""}
+                else None,
+                "usage": str(folded["usage"])[:64]
+                if folded.get("usage") not in {None, ""}
+                else None,
+            }
+        )
+    return result
+
+
+def _verify_foreign_signature(
+    source: Path, expected: Mapping[str, Any], probe: CommandProbe
+) -> None:
+    output = probe(
+        [
+            _tool("wipefs"),
+            "--no-act",
+            "--json",
+            "--output",
+            "TYPE,UUID,LABEL,USAGE",
+            os.fspath(source),
+        ],
+        60,
+    )
+    signatures = _parse_wipefs_signatures(output)
+    matches = [item for item in signatures if item["type"] == expected.get("filesystem_type")]
+    expected_uuid = expected.get("filesystem_uuid")
+    if expected_uuid is not None:
+        matches = [item for item in matches if item["uuid"] == expected_uuid]
+    if len(matches) != 1:
+        raise ExecutorFailure(
+            "foreign_signature_changed",
+            "The source filesystem signature no longer matches the reviewed plan.",
+        )
+
+
+def _verify_read_only_mount(
+    target: Path, expected_filesystem: str, probe: CommandProbe
+) -> dict[str, Any]:
+    output = probe(
+        [
+            _tool("findmnt"),
+            "--json",
+            "--mountpoint",
+            os.fspath(target),
+            "--output",
+            "SOURCE,FSTYPE,OPTIONS",
+        ],
+        30,
+    )
+    try:
+        payload = json.loads(output)
+        filesystems = payload.get("filesystems") if isinstance(payload, dict) else None
+        item = filesystems[0] if isinstance(filesystems, list) and len(filesystems) == 1 else None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ExecutorFailure(
+            "foreign_mount_unverified", "The read-only mount could not be verified."
+        ) from exc
+    if not isinstance(item, Mapping):
+        raise ExecutorFailure(
+            "foreign_mount_unverified", "The read-only mount could not be verified."
+        )
+    options = item.get("options")
+    option_set = (
+        {value.strip() for value in options.split(",")} if isinstance(options, str) else set()
+    )
+    if "ro" not in option_set or "rw" in option_set:
+        raise ExecutorFailure(
+            "foreign_mount_not_read_only",
+            "The source did not mount read-only; it was immediately detached.",
+            needs_attention=True,
+        )
+    reported_filesystem = item.get("fstype")
+    allowed_filesystems = (
+        {"ntfs", "ntfs3", "fuseblk"}
+        if expected_filesystem in {"ntfs", "ntfs3"}
+        else {expected_filesystem}
+    )
+    if (
+        not isinstance(reported_filesystem, str)
+        or reported_filesystem.casefold() not in allowed_filesystems
+    ):
+        raise ExecutorFailure(
+            "foreign_mount_filesystem_changed",
+            "The mounted filesystem type does not match the reviewed plan.",
+            needs_attention=True,
+        )
+    return {
+        "source": str(item.get("source"))[:4096] if item.get("source") is not None else None,
+        "filesystem_type": str(item.get("fstype"))[:64] if item.get("fstype") is not None else None,
+        "options": sorted(option_set),
+    }
+
+
+def _inventory_foreign_tree(root: Path, limits: Mapping[str, int]) -> dict[str, Any]:
+    maximum_entries = int(limits["maximum_entries"])
+    maximum_extensions = int(limits["maximum_extension_groups"])
+    maximum_errors = int(limits["maximum_errors"])
+    file_count = directory_count = total_bytes = 0
+    oldest: float | None = None
+    newest: float | None = None
+    largest: dict[str, Any] | None = None
+    extensions: Counter[str] = Counter()
+    errors: list[dict[str, str]] = []
+    case_names: dict[tuple[str, str], str] = {}
+    unicode_names: dict[tuple[str, str], str] = {}
+    case_collisions = unicode_collisions = 0
+    truncated = False
+
+    def record_error(path: str, exc: OSError) -> None:
+        if len(errors) < maximum_errors:
+            errors.append({"path": path[:1024], "error": type(exc).__name__})
+
+    def walk_error(exc: OSError) -> None:
+        record_error(os.fspath(getattr(exc, "filename", "Not reported")), exc)
+
+    for current, directories, files in os.walk(
+        root, topdown=True, followlinks=False, onerror=walk_error
+    ):
+        directories.sort()
+        files.sort()
+        relative_parent = os.path.relpath(current, root)
+        for name in [*directories, *files]:
+            if file_count + directory_count >= maximum_entries:
+                truncated = True
+                directories[:] = []
+                break
+            relative = name if relative_parent == "." else f"{relative_parent}/{name}"
+            key_parent = relative_parent.casefold()
+            case_key = (key_parent, name.casefold())
+            unicode_key = (key_parent, unicodedata.normalize("NFC", name).casefold())
+            previous_case = case_names.setdefault(case_key, name)
+            previous_unicode = unicode_names.setdefault(unicode_key, name)
+            case_collisions += int(previous_case != name)
+            unicode_collisions += int(previous_unicode != name)
+            path = Path(current) / name
+            try:
+                details = path.lstat()
+            except OSError as exc:
+                record_error(relative, exc)
+                continue
+            if stat.S_ISDIR(details.st_mode):
+                directory_count += 1
+                continue
+            if not stat.S_ISREG(details.st_mode):
+                continue
+            file_count += 1
+            total_bytes += details.st_size
+            oldest = details.st_mtime if oldest is None else min(oldest, details.st_mtime)
+            newest = details.st_mtime if newest is None else max(newest, details.st_mtime)
+            if largest is None or details.st_size > largest["bytes"]:
+                largest = {"path": relative[:1024], "bytes": details.st_size}
+            suffix = path.suffix.casefold()[:64] or "[no extension]"
+            extensions[suffix] += 1
+        if truncated:
+            break
+    top_extensions = [
+        {"extension": extension, "files": count}
+        for extension, count in extensions.most_common(maximum_extensions)
+    ]
+    return {
+        "file_count": file_count,
+        "directory_count": directory_count,
+        "total_bytes": total_bytes,
+        "largest_file": largest,
+        "oldest_mtime_unix": oldest,
+        "newest_mtime_unix": newest,
+        "extension_distribution": top_extensions,
+        "case_collision_count": case_collisions,
+        "unicode_collision_count": unicode_collisions,
+        "read_errors": errors,
+        "truncated": truncated,
+        "maximum_entries": maximum_entries,
+    }
+
+
+def _prepare_private_executor_directory(path: Path, *, purpose: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = path.lstat()
+    except OSError as exc:
+        raise ExecutorFailure(
+            "foreign_private_path_unavailable",
+            f"The private {purpose} path could not be prepared.",
+            needs_attention=True,
+        ) from exc
+    if not stat.S_ISDIR(details.st_mode) or (
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
+    ):
+        raise ExecutorFailure(
+            "foreign_private_path_unsafe",
+            f"The private {purpose} path has unsafe ownership or permissions.",
+            needs_attention=True,
+        )
+    _assert_no_symlink_components(path)
+
+
+def apply_foreign_inspection(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    inventory_provider: InventoryProvider | None = None,
+    runner: CommandRunner = _run,
+    probe: CommandProbe = _capture_read_only,
+    tree_inventory: InspectionInventoryProvider = _inventory_foreign_tree,
+) -> dict[str, Any]:
+    if set(request) != {"operation", "operation_id", "plan_sha256", "plan", "confirmation_sha256"}:
+        raise ExecutorFailure("request_invalid", "The storage request is invalid.")
+    operation_id = request.get("operation_id")
+    plan_sha = request.get("plan_sha256")
+    plan = request.get("plan")
+    if (
+        request.get("operation") != "apply_foreign_inspection"
+        or not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(plan_sha, str)
+        or not SHA256_RE.fullmatch(plan_sha)
+        or not isinstance(plan, dict)
+        or plan.get("plan_sha256") != plan_sha
+        or request.get("confirmation_sha256")
+        != document_hash({"confirmation": "INSPECT READ ONLY"})
+    ):
+        raise ExecutorFailure(
+            "foreign_inspection_consent_missing", "Exact read-only inspection approval is required."
+        )
+    try:
+        validate_inspection_plan(plan)
+    except ForeignStorageError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+    paths = paths or Paths()
+    validate_quarantine(paths.quarantine_marker)
+    provider = inventory_provider or (lambda: _live_inventory(paths))
+    device = dict(plan["device"])
+    document = {
+        "storage": {
+            "selected_devices": [device],
+            "snapshot_binding": {
+                "selected_device_ids": [device["id"]],
+                "device_binding_sha256": document_hash([device]),
+            },
+        }
+    }
+    _prepare_private_executor_directory(paths.transaction_root, purpose="inspection journal")
+    journal_path = _journal_path(paths, operation_id)
+    prior = _load_prior_journal(journal_path, plan_sha)
+    if prior is not None:
+        return {**prior, "replayed": True}
+    target = paths.inspection_root / operation_id
+    with _device_locks(paths, [str(device["id"])]):
+        live = _selected_live_devices(document, provider())
+        _ensure_not_active(paths, live)
+        current = live[str(device["id"])]
+        source = _foreign_source_path(paths, current, plan["source"])
+        _verify_foreign_signature(source, plan["source"], probe)
+        _prepare_private_executor_directory(paths.inspection_root, purpose="inspection mount")
+        if target.exists():
+            raise ExecutorFailure(
+                "foreign_mountpoint_busy",
+                "The private inspection path already exists.",
+                needs_attention=True,
+            )
+        target.mkdir(mode=0o700)
+        journal: dict[str, Any] = {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "plan_sha256": plan_sha,
+            "state": "running",
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "phase": "Revalidating source identity and signature",
+            "completed_steps": 1,
+            "total_steps": 4,
+            "completed_actions": ["identity-and-signature"],
+            "current_action": None,
+            "notices": [],
+        }
+        atomic_json(journal_path, journal)
+        mounted = False
+        mount_attempted = False
+        result: dict[str, Any] | None = None
+        failure: Exception | None = None
+        try:
+            options = ",".join(plan["source"]["read_only_options"])
+            journal.update(
+                phase="Mounting source read-only without recovery",
+                current_action={"id": "mount-read-only", "type": "foreign.mount.read_only"},
+                updated_at=time.time(),
+            )
+            atomic_json(journal_path, journal)
+            mount_command = [
+                _tool("mount"),
+                "--read-only",
+                "--types",
+                plan["source"]["filesystem_type"],
+                "--options",
+                options,
+                os.fspath(source),
+                os.fspath(target),
+            ]
+            mount_attempted = True
+            runner(mount_command, 120)
+            mounted = True
+            mount_evidence = _verify_read_only_mount(
+                target, plan["source"]["filesystem_type"], probe
+            )
+            journal.update(
+                phase="Inventorying files and metadata",
+                completed_steps=2,
+                completed_actions=[*journal["completed_actions"], "mount-read-only"],
+                current_action={"id": "inventory", "type": "foreign.inventory"},
+                updated_at=time.time(),
+            )
+            atomic_json(journal_path, journal)
+            report = tree_inventory(target, plan["limits"])
+            journal.update(
+                phase="Detaching private read-only inspection",
+                completed_steps=3,
+                completed_actions=[*journal["completed_actions"], "inventory"],
+                current_action={"id": "unmount", "type": "foreign.unmount"},
+                updated_at=time.time(),
+            )
+            atomic_json(journal_path, journal)
+            result = {
+                "operation_id": operation_id,
+                "candidate_id": plan["candidate_id"],
+                "device_id": device["id"],
+                "filesystem": {
+                    "type": plan["source"]["filesystem_type"],
+                    "uuid": plan["source"]["filesystem_uuid"],
+                    "label": plan["source"]["filesystem_label"],
+                },
+                "mount_evidence": mount_evidence,
+                "inventory": report,
+                "access": "read_only",
+                "persistent_mount": False,
+                "mutation_performed": False,
+                "replayed": False,
+            }
+        except Exception as exc:
+            failure = exc
+        finally:
+            if mount_attempted and not mounted:
+                mounted = os.path.ismount(target)
+            if mounted:
+                try:
+                    runner([_tool("umount"), "--", os.fspath(target)], 120)
+                    mounted = False
+                except Exception as exc:
+                    failure = ExecutorFailure(
+                        "foreign_unmount_failed",
+                        "The private read-only inspection mount could not be detached.",
+                        needs_attention=True,
+                    )
+                    failure.__cause__ = exc
+            if not mounted:
+                try:
+                    target.rmdir()
+                except OSError as exc:
+                    if target.exists():
+                        failure = ExecutorFailure(
+                            "foreign_cleanup_failed",
+                            "The private inspection directory could not be removed.",
+                            needs_attention=True,
+                        )
+                        failure.__cause__ = exc
+        if failure is not None:
+            journal.update(
+                state="needs_attention" if getattr(failure, "needs_attention", False) else "failed",
+                phase="Read-only inspection failed",
+                current_action=None,
+                updated_at=time.time(),
+            )
+            atomic_json(journal_path, journal)
+            if isinstance(failure, ExecutorFailure):
+                raise failure
+            raise ExecutorFailure(
+                "foreign_inventory_failed", "The read-only inventory could not be completed."
+            ) from failure
+        assert result is not None
+        journal.update(
+            state="succeeded",
+            phase="Read-only inspection completed",
+            completed_steps=4,
+            completed_actions=[*journal["completed_actions"], "unmount"],
+            current_action=None,
+            updated_at=time.time(),
+            result=result,
+        )
+        atomic_json(journal_path, journal)
+        return result
+
+
 def apply_snapraid_replacement(
     request: Mapping[str, Any],
     *,
@@ -4048,6 +4534,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_snapraid_replacement(request, paths=paths)
         elif request.get("operation") == "apply_array_replacement":
             result = apply_array_replacement(request, paths=paths)
+        elif request.get("operation") == "apply_foreign_inspection":
+            result = apply_foreign_inspection(request, paths=paths)
         elif request.get("operation") == "apply_storage_redundancy":
             result = apply_storage_redundancy(request, paths=paths)
         else:

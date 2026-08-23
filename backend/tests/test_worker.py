@@ -84,7 +84,13 @@ def _enqueue(
 
 def test_running_host_mutation_cannot_be_recorded_as_cancelled(tmp_path: Path) -> None:
     _settings, session_factory = _runtime(tmp_path)
-    for kind in ("storage.apply", "storage.transfer", "connectivity.apply", "connectivity.remove"):
+    for kind in (
+        "storage.apply",
+        "storage.transfer",
+        "storage.foreign.inspect",
+        "connectivity.apply",
+        "connectivity.remove",
+    ):
         operation_id = _enqueue(session_factory, kind=kind)
         with session_factory() as session, session.begin():
             operation = session.get(Operation, operation_id)
@@ -171,10 +177,10 @@ def test_hardware_scan_creates_an_immutable_snapshot(tmp_path: Path) -> None:
             "snapshot_id": snapshot.id,
             "sha256": snapshot.sha256,
             "schema_version": 1,
-                "source": "sysfs",
-                "disk_registry": {"observed": 1, "created": 1, "updated": 0, "skipped": 0},
-                "topology_drift": {"active": 0, "opened": 0, "resolved": 0},
-            }
+            "source": "sysfs",
+            "disk_registry": {"observed": 1, "created": 1, "updated": 0, "skipped": 0},
+            "topology_drift": {"active": 0, "opened": 0, "resolved": 0},
+        }
     assert not run_once(
         session_factory=session_factory,
         settings=settings,
@@ -369,9 +375,7 @@ def test_worker_refreshes_bounded_servarr_activity_without_api_consumers(tmp_pat
             },
         }
 
-    assert refresh_servarr_activity(
-        session_factory, settings, secret_box, discoverer=activity
-    ) == 1
+    assert refresh_servarr_activity(session_factory, settings, secret_box, discoverer=activity) == 1
     with session_factory() as session:
         connection = session.get(IntegrationConnection, connection_id)
         assert connection is not None
@@ -384,9 +388,9 @@ def test_worker_refreshes_bounded_servarr_activity_without_api_consumers(tmp_pat
     def unavailable(**_kwargs: object) -> dict[str, Any]:
         raise ServarrError("connection_failed", "must not persist remote detail")
 
-    assert refresh_servarr_activity(
-        session_factory, settings, secret_box, discoverer=unavailable
-    ) == 1
+    assert (
+        refresh_servarr_activity(session_factory, settings, secret_box, discoverer=unavailable) == 1
+    )
     with session_factory() as session:
         connection = session.get(IntegrationConnection, connection_id)
         assert connection is not None
@@ -672,6 +676,53 @@ def test_recovery_reconciles_completed_storage_after_worker_loss(tmp_path: Path)
             "cancellation_too_late",
             "succeeded",
         ]
+
+
+def test_recovery_reconciles_completed_foreign_inspection_after_worker_loss(
+    tmp_path: Path,
+) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    request = {
+        "plan": {"candidate_id": "foreign:0123456789abcdef01234567"},
+        "plan_sha256": "a" * 64,
+        "confirmation_sha256": document_hash({"confirmation": "INSPECT READ ONLY"}),
+    }
+    operation = Operation(
+        kind="storage.foreign.inspect",
+        actor_type="browser_session",
+        actor_id="test-user",
+        resource_type="foreign_storage",
+        resource_id="foreign:0123456789abcdef01234567",
+        idempotency_key="foreign-inspection-recovery",
+        request_sha256=document_hash(request),
+        request_json=request,
+        status="running",
+        lease_owner="lost-worker",
+        heartbeat_at=utc_now() - timedelta(minutes=20),
+    )
+    with session_factory() as session, session.begin():
+        session.add(operation)
+    result = {
+        "operation_id": operation.id,
+        "candidate_id": operation.resource_id,
+        "access": "read_only",
+        "persistent_mount": False,
+        "mutation_performed": False,
+        "inventory": {"file_count": 2},
+    }
+
+    assert (
+        recover_abandoned_operations(
+            session_factory=session_factory,
+            settings=settings,
+            storage_status=lambda *_args, **_kwargs: {"state": "succeeded", "result": result},
+        )
+        == 1
+    )
+    with session_factory() as session:
+        recovered = session.get(Operation, operation.id)
+        assert recovered is not None and recovered.status == "succeeded"
+        assert recovered.result_json == result
 
 
 def test_worker_executes_exact_durable_tier_transfer(

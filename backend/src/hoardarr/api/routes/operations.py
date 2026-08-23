@@ -181,6 +181,7 @@ def get_operation_progress(
     if operation.kind not in {
         "storage.apply",
         "storage.maintenance",
+        "storage.foreign.inspect",
         "storage.snapraid.replace",
     }:
         raise Problem(

@@ -1,7 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { ForeignStorageAssessment } from "../types";
+import type { ForeignInspectionPlan, ForeignStorageAssessment } from "../types";
 import { ForeignStoragePanel } from "./ForeignStoragePanel";
 
 const assessment: ForeignStorageAssessment = {
@@ -21,8 +22,8 @@ const assessment: ForeignStorageAssessment = {
       confidence: "unknown",
       reason: "Filesystem metadata cannot identify the previous NAS.",
     },
-    confidence: "medium",
-    state: "degraded-review",
+    confidence: "high",
+    state: "ready",
     members: [{
       device_id: "wwn:archive",
       kernel_path: "/dev/sdb",
@@ -35,7 +36,7 @@ const assessment: ForeignStorageAssessment = {
       mounted: false,
       mountpoints: [],
       signature_scan: { status: "partial", source: "udev", reason: "Cached evidence" },
-      confidence: "medium",
+      confidence: "high",
       signatures: [{ type: "xfs", usage: "filesystem", uuid: "fs-1", label: null, source: "udev" }],
     }],
     filesystems: ["XFS"],
@@ -43,7 +44,7 @@ const assessment: ForeignStorageAssessment = {
     capacity_bytes: 8_000_000_000,
     warnings: ["A fresh fingerprint is required."],
     blockers: [],
-    modes: [{ id: "inspect_read_only", available: false, reason: "Review first" }],
+    modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
     mutation_performed: false,
   }],
   unrecognized_device_count: 0,
@@ -59,8 +60,57 @@ describe("ForeignStoragePanel", () => {
     expect(await screen.findByText("Standalone filesystem")).toBeInTheDocument();
     expect(screen.getByText("Read-only is the default")).toBeInTheDocument();
     expect(screen.getByText("Not reported")).toBeInTheDocument();
-    expect(screen.getByText("Partial evidence")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Read-only inspection plan" })).toBeDisabled();
+    expect(screen.getByText("Confirmed evidence")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review read-only inspection" })).toBeEnabled();
+  });
+
+  it("reviews, starts, and reports a real durable read-only inventory", async () => {
+    const user = userEvent.setup();
+    const plan: ForeignInspectionPlan = {
+      schema_version: 1,
+      operation: "foreign.inspect_read_only",
+      candidate_id: "foreign:one",
+      hardware_snapshot_id: "snapshot-1",
+      hardware_snapshot_sha256: "a".repeat(64),
+      device: { id: "wwn:archive", model: "Archive disk", capacity_bytes: 8_000_000_000 },
+      source: {
+        kind: "whole_device",
+        kernel_path_at_preview: "/dev/sdb",
+        partition_number: null,
+        filesystem_type: "xfs",
+        filesystem_uuid: "fs-1",
+        filesystem_label: "Archive",
+        signature_source: "wipefs",
+        read_only_options: ["ro", "norecovery", "nodev", "nosuid", "noexec"],
+      },
+      limits: { maximum_entries: 100_000, maximum_extension_groups: 256, maximum_errors: 100 },
+      access: "read_only",
+      persistent_mount: false,
+      automatic_activation: false,
+      mutation_performed: false,
+      plan_sha256: "b".repeat(64),
+    };
+    vi.spyOn(api, "foreignStorage").mockResolvedValue(assessment);
+    vi.spyOn(api, "previewForeignInspection").mockResolvedValue(plan);
+    vi.spyOn(api, "startForeignInspection").mockResolvedValue({
+      id: "operation-1",
+      kind: "storage.foreign.inspect",
+      status: "succeeded",
+      result: {
+        access: "read_only",
+        persistent_mount: false,
+        mutation_performed: false,
+        inventory: { file_count: 12, total_bytes: 4096, read_errors: [] },
+      },
+    });
+    render(<ForeignStoragePanel />);
+
+    await user.click(await screen.findByRole("button", { name: "Review read-only inspection" }));
+    expect(await screen.findByText("No storage configuration will change")).toBeInTheDocument();
+    expect(screen.getByText("100,000 entries")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "INSPECT READ ONLY" }));
+    expect(await screen.findByText("Read-only inventory completed")).toBeInTheDocument();
+    expect(screen.getByText(/12 files/)).toBeInTheDocument();
   });
 
   it("keeps unknown media honest rather than calling it empty", async () => {

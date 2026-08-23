@@ -5,7 +5,12 @@ from sqlalchemy.orm import Session
 
 from hoardarr.db.models import Base, HardwareSnapshot, Operation
 from hoardarr.operations.service import document_hash
-from hoardarr.storage.foreign import assess_foreign_storage
+from hoardarr.storage.foreign import (
+    ForeignStorageError,
+    assess_foreign_storage,
+    build_inspection_plan,
+    validate_inspection_plan,
+)
 
 
 def _snapshot(session: Session, disks: list[dict[str, object]]) -> HardwareSnapshot:
@@ -83,11 +88,84 @@ def test_standalone_filesystem_is_a_non_mutating_review_candidate() -> None:
     assert candidate["profile"] == "standalone_filesystem"
     assert candidate["filesystems"] == ["ext4"]
     assert candidate["confidence"] == "high"
-    assert candidate["state"] == "degraded-review"
+    assert candidate["state"] == "ready"
     assert candidate["origin"]["name"] == "Not reported"
-    assert candidate["modes"][0]["available"] is False
+    assert candidate["modes"][0]["available"] is True
     assert candidate["modes"][1]["available"] is False
     assert candidate["mutation_performed"] is False
+
+
+def test_inspection_plan_binds_source_identity_signature_and_limits() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        snapshot = _snapshot(session, [_disk("wwn:archive", "ext4", signature_uuid="fs-1")])
+        candidate_id = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]["id"]
+        plan = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
+
+    assert validate_inspection_plan(plan) == plan
+    assert plan["device"]["id"] == "wwn:archive"
+    assert plan["source"] == {
+        "kind": "whole_device",
+        "kernel_path_at_preview": "/dev/archive",
+        "partition_number": None,
+        "filesystem_type": "ext4",
+        "filesystem_uuid": "fs-1",
+        "filesystem_label": None,
+        "signature_source": "fixture",
+        "read_only_options": ["ro", "noload", "nodev", "nosuid", "noexec"],
+    }
+    assert plan["persistent_mount"] is False
+    assert plan["mutation_performed"] is False
+
+
+def test_inspection_plan_rejects_tampering() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        snapshot = _snapshot(session, [_disk("wwn:archive", "xfs", signature_uuid="fs-2")])
+        candidate_id = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]["id"]
+        plan = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
+    plan["source"]["read_only_options"] = ["ro"]
+
+    try:
+        validate_inspection_plan(plan)
+    except ForeignStorageError as exc:
+        assert exc.code == "foreign_plan_invalid"
+    else:  # pragma: no cover - makes the safety assertion explicit.
+        raise AssertionError("tampered mount options were accepted")
+
+
+def test_partition_filesystem_plan_uses_the_reviewed_partition_not_parent_disk() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        disk = _disk("wwn:partitioned", "gpt")
+        disk["signatures"][0]["usage"] = "partition_table"  # type: ignore[index]
+        filesystem = {
+            "type": "ext4",
+            "usage": "filesystem",
+            "uuid": "partition-fs",
+            "label": "Media",
+            "source": "wipefs",
+        }
+        disk["partitions"] = [
+            {
+                "kernel_path": "/dev/partitioned1",
+                "number": 1,
+                "mountpoints": [],
+                "signatures": [filesystem],
+                "filesystem": filesystem,
+            }
+        ]
+        snapshot = _snapshot(session, [disk])
+        candidate_id = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]["id"]
+        plan = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
+
+    assert plan["source"]["kind"] == "partition"
+    assert plan["source"]["partition_number"] == 1
+    assert plan["source"]["kernel_path_at_preview"] == "/dev/partitioned1"
+    assert plan["source"]["filesystem_uuid"] == "partition-fs"
 
 
 def test_partial_mounted_and_system_evidence_fails_closed() -> None:

@@ -69,6 +69,7 @@ from hoardarr.storage.client import (
     StorageExecutorError,
     apply_array_replacement,
     apply_device_maintenance,
+    apply_foreign_inspection,
     apply_snapraid_replacement,
     apply_storage_plan,
     apply_storage_redundancy,
@@ -119,6 +120,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.transfer",
         "storage.transfer.cleanup",
         "storage.maintenance",
+        "storage.foreign.inspect",
         "storage.snapraid.replace",
         "storage.array.replace",
         "storage.redundancy.apply",
@@ -135,6 +137,7 @@ ServarrDiscoverer = Callable[..., dict[str, Any]]
 ServarrActivityDiscoverer = Callable[..., dict[str, Any]]
 StorageApplier = Callable[..., dict[str, Any]]
 MaintenanceApplier = Callable[..., dict[str, Any]]
+ForeignInspectionApplier = Callable[..., dict[str, Any]]
 SnapraidReplacementApplier = Callable[..., dict[str, Any]]
 ArrayReplacementApplier = Callable[..., dict[str, Any]]
 StorageStatus = Callable[..., dict[str, Any]]
@@ -1355,6 +1358,39 @@ def _execute_maintenance(
     return MaintenanceExecution(result=result)
 
 
+def _execute_foreign_inspection(
+    item: WorkItem,
+    settings: Settings,
+    applier: ForeignInspectionApplier,
+) -> MaintenanceExecution:
+    plan = item.request.get("plan")
+    plan_sha256 = item.request.get("plan_sha256")
+    confirmation_sha256 = item.request.get("confirmation_sha256")
+    if (
+        not isinstance(plan, dict)
+        or not isinstance(plan_sha256, str)
+        or plan.get("plan_sha256") != plan_sha256
+        or confirmation_sha256 != document_hash({"confirmation": "INSPECT READ ONLY"})
+        or item.resource_type != "foreign_storage"
+        or item.resource_id != plan.get("candidate_id")
+    ):
+        raise WorkFailure(
+            "invalid_operation_request", "The read-only inspection request is invalid"
+        )
+    try:
+        result = applier(
+            settings.storage_executor_socket,
+            operation_id=item.operation_id,
+            plan_sha256=plan_sha256,
+            plan=plan,
+            confirmation_sha256=confirmation_sha256,
+            timeout_seconds=settings.storage_executor_timeout_seconds,
+        )
+    except StorageExecutorError as exc:
+        raise WorkFailure(exc.code, str(exc), needs_attention=exc.needs_attention) from exc
+    return MaintenanceExecution(result=result)
+
+
 def _execute_snapraid_replacement(
     item: WorkItem,
     settings: Settings,
@@ -1439,9 +1475,7 @@ def _execute_locate(
         validate_locate_plan(plan)
         with session_factory() as session:
             snapshot = session.scalar(
-                select(HardwareSnapshot)
-                .order_by(HardwareSnapshot.captured_at.desc())
-                .limit(1)
+                select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
             )
             if snapshot is None:
                 raise LocateError("hardware_snapshot_required", "Run discovery again.")
@@ -1462,6 +1496,7 @@ def _execute_work(
     servarr_transport: httpx.BaseTransport | None,
     storage_applier: StorageApplier,
     maintenance_applier: MaintenanceApplier,
+    foreign_inspection_applier: ForeignInspectionApplier,
     snapraid_replacement_applier: SnapraidReplacementApplier,
     array_replacement_applier: ArrayReplacementApplier,
     connectivity_applier: ConnectivityApplier,
@@ -1493,6 +1528,8 @@ def _execute_work(
         return _execute_storage(session_factory, item, settings, storage_applier)
     if item.kind == "storage.maintenance":
         return _execute_maintenance(item, settings, maintenance_applier)
+    if item.kind == "storage.foreign.inspect":
+        return _execute_foreign_inspection(item, settings, foreign_inspection_applier)
     if item.kind == "storage.snapraid.replace":
         return _execute_snapraid_replacement(item, settings, snapraid_replacement_applier)
     if item.kind == "storage.array.replace":
@@ -2001,6 +2038,7 @@ def run_once(
     servarr_transport: httpx.BaseTransport | None = None,
     storage_applier: StorageApplier = apply_storage_plan,
     maintenance_applier: MaintenanceApplier = apply_device_maintenance,
+    foreign_inspection_applier: ForeignInspectionApplier = apply_foreign_inspection,
     snapraid_replacement_applier: SnapraidReplacementApplier = apply_snapraid_replacement,
     array_replacement_applier: ArrayReplacementApplier = apply_array_replacement,
     connectivity_applier: ConnectivityApplier = _apply_connectivity_direct,
@@ -2024,6 +2062,7 @@ def run_once(
             servarr_transport,
             storage_applier,
             maintenance_applier,
+            foreign_inspection_applier,
             snapraid_replacement_applier,
             array_replacement_applier,
             connectivity_applier,
@@ -2097,6 +2136,7 @@ def recover_abandoned_operations(
                         (
                             "storage.apply",
                             "storage.maintenance",
+                            "storage.foreign.inspect",
                             "storage.snapraid.replace",
                             "storage.redundancy.apply",
                         )
@@ -2190,6 +2230,7 @@ def recover_abandoned_operations(
             max_age_by_kind={
                 "storage.apply": storage_max_age,
                 "storage.maintenance": storage_max_age,
+                "storage.foreign.inspect": storage_max_age,
                 "storage.snapraid.replace": storage_max_age,
                 "storage.array.replace": storage_max_age,
                 "storage.redundancy.apply": storage_max_age,

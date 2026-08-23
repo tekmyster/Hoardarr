@@ -898,7 +898,7 @@ export interface ForeignStorageAssessment {
     profile_name: string;
     origin: { name: string; confidence: "unknown" | "low" | "medium" | "high"; reason: string };
     confidence: "unknown" | "low" | "medium" | "high";
-    state: "degraded-review" | "blocked";
+    state: "ready" | "degraded-review" | "blocked";
     members: Array<{
       device_id: string;
       kernel_path: string | null;
@@ -929,6 +929,31 @@ export interface ForeignStorageAssessment {
     mutation_performed: false;
   }>;
   unrecognized_device_count: number;
+}
+
+export interface ForeignInspectionPlan {
+  schema_version: 1;
+  operation: "foreign.inspect_read_only";
+  candidate_id: string;
+  hardware_snapshot_id: string;
+  hardware_snapshot_sha256: string;
+  device: { id: string; model: string | null; capacity_bytes: number | null; [key: string]: unknown };
+  source: {
+    kind: "whole_device" | "partition";
+    kernel_path_at_preview: string;
+    partition_number: number | null;
+    filesystem_type: string;
+    filesystem_uuid: string | null;
+    filesystem_label: string | null;
+    signature_source: string;
+    read_only_options: string[];
+  };
+  limits: { maximum_entries: number; maximum_extension_groups: number; maximum_errors: number };
+  access: "read_only";
+  persistent_mount: false;
+  automatic_activation: false;
+  mutation_performed: false;
+  plan_sha256: string;
 }
 
 export interface StorageExpansionSelection {
