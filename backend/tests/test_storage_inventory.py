@@ -71,9 +71,7 @@ def test_enclosure_health_collects_reported_ses_sensors_and_fails_closed(
             "id": "0x500a098000000424",
             "descriptor": "DS424IOM6",
             "health": "healthy",
-            "slots": [
-                {"slot": 3, "status": "healthy", "identify": True, "fault": False}
-            ],
+            "slots": [{"slot": 3, "status": "healthy", "identify": True, "fault": False}],
             "temperature_c": 38.0,
             "fan_rpm": 7600,
             "fan_count": 1,
@@ -185,7 +183,7 @@ errors: No known data errors
     item = inventory._zfs_pools()[0]
 
     assert item["pool_guid"] == "1234567890123456789"
-    assert item["configuration"] == topology.document()
+    assert item["configuration"] == {**topology.document(), "member_capacities": {}}
     assert item["configuration"]["vdev_type"] == "mirror"
     assert item["configuration"]["vdev_width"] == 2
     assert item["configuration"]["vdev_count"] == 1

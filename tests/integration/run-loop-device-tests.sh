@@ -77,8 +77,24 @@ mkfs.xfs -f -K "$md_device"
 mkdir "$work/md"
 mount "$md_device" "$work/md"
 touch "$work/md/md-verified"
-umount "$work/md"
+printf 'linux md replacement data integrity\n' >"$work/md/md-verified"
+md_hash_before="$(sha256sum "$work/md/md-verified" | awk '{print $1}')"
 mdadm --detail "$md_device" | grep -q 'Raid Level : raid6'
+assert_test_loop "${md_members[0]}"
+mdadm "$md_device" --fail "${md_members[0]}" --remove "${md_members[0]}"
+make_loop md-replacement 512M
+md_replacement="$created_loop"
+assert_test_loop "$md_replacement"
+"$python" "$repo/tests/integration/array_replace.py" \
+  --provider linux_md \
+  --target "$(basename "$(readlink -f "$md_device")")" \
+  --replacement-loop "$md_replacement" \
+  --work-root "$work" \
+  --mounted-file "$work/md/md-verified" \
+  --expected-sha256 "$md_hash_before" \
+  --evidence "$repo/dist/validation/md-replacement.json"
+mdadm --detail "$md_device" | grep -q 'State : clean'
+umount "$work/md"
 mdadm --stop "$md_device"
 md_device=""
 
@@ -120,6 +136,21 @@ zfs_vdev_count_before="$(jq -r .vdev_count "$work/zfs-before.json")"
 [[ "$(zpool get -Hp -o value guid "$zpool_name")" == "$zfs_guid_before" ]]
 [[ "$(sha256sum "$work/zfs/zfs-verified" | awk '{print $1}')" == "$zfs_hash_before" ]]
 [[ "$(zpool status -P "$zpool_name" | grep -Ec 'mirror-[0-9]+')" -eq 2 ]]
+make_loop zfs-replacement 512M
+zfs_replacement="$created_loop"
+assert_test_loop "$zfs_replacement"
+"$python" "$repo/tests/integration/array_replace.py" \
+  --provider zfs \
+  --target "$zpool_name" \
+  --old-member "${zfs_members[0]}" \
+  --replacement-loop "$zfs_replacement" \
+  --work-root "$work" \
+  --mounted-file "$work/zfs/zfs-verified" \
+  --expected-sha256 "$zfs_hash_before" \
+  --evidence "$repo/dist/validation/zfs-replacement.json"
+[[ "$(zpool get -Hp -o value guid "$zpool_name")" == "$zfs_guid_before" ]]
+[[ "$(sha256sum "$work/zfs/zfs-verified" | awk '{print $1}')" == "$zfs_hash_before" ]]
+zpool status "$zpool_name" | grep -q 'state: ONLINE'
 zpool destroy -f "$zpool_name"
 zpool_name=""
 

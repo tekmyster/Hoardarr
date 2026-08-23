@@ -53,8 +53,15 @@ class IntegrationResolveRequest(StrictModel):
 class IntegrationCreateRequest(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     product: Literal[
-        "sonarr", "radarr", "lidarr", "readarr", "whisparr", "prowlarr",
-        "plex", "jellyfin", "emby",
+        "sonarr",
+        "radarr",
+        "lidarr",
+        "readarr",
+        "whisparr",
+        "prowlarr",
+        "plex",
+        "jellyfin",
+        "emby",
     ]
     base_url: str = Field(min_length=8, max_length=2048)
     api_key: SecretStr = Field(min_length=8, max_length=1024)
@@ -219,6 +226,18 @@ class SnapraidReplacementPreviewRequest(StrictModel):
 
 
 class SnapraidReplacementApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["I AGREE"]
+
+
+class ArrayReplacementPreviewRequest(StrictModel):
+    target_id: str = Field(pattern=r"^(?:zfs:[A-Za-z][A-Za-z0-9_.:-]{0,254}|md:md[0-9]+)$")
+    old_member_path: str | None = Field(default=None, min_length=5, max_length=4096)
+    replacement_device_id: str = Field(min_length=1, max_length=512)
+
+
+class ArrayReplacementApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     confirmation: Literal["I AGREE"]

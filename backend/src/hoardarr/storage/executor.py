@@ -50,6 +50,11 @@ from hoardarr.storage.redundancy import (
     stable_path_identity,
     validate_redundancy_plan,
 )
+from hoardarr.storage.replacement import (
+    ArrayReplacementError,
+    configuration_hash,
+    validate_array_replacement_plan,
+)
 from hoardarr.storage.snapraid import (
     SnapraidReplacementError,
     existing_data_summary,
@@ -280,6 +285,60 @@ def _live_zfs_pool_state(pool_name: str) -> dict[str, Any]:
             "The existing ZFS pool did not report a safe, uniform data-vdev identity.",
         )
     return {"pool_guid": guid, **topology.document()}
+
+
+def _live_md_array_state(array_name: str) -> dict[str, Any]:
+    if re.fullmatch(r"md[0-9]+", array_name) is None:
+        raise ExecutorFailure("md_array_identity_invalid", "The reviewed MD array name is invalid.")
+    array_path = Path("/dev") / array_name
+    metadata = Path("/sys/class/block") / array_name / "md"
+    try:
+        completed = subprocess.run(
+            [_tool("mdadm"), "--detail", "--export", str(array_path)],
+            check=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+        if len(completed.stdout) > 1024 * 1024:
+            raise OSError("oversized mdadm output")
+        detail = dict(
+            line.split("=", 1)
+            for line in completed.stdout.splitlines()
+            if line.startswith("MD_") and "=" in line
+        )
+        level = (metadata / "level").read_text(encoding="utf-8").strip()
+        raid_disks = int((metadata / "raid_disks").read_text(encoding="utf-8").strip())
+        degraded = int((metadata / "degraded").read_text(encoding="utf-8").strip())
+        sync_action = (metadata / "sync_action").read_text(encoding="utf-8").strip()
+        member_paths = sorted(
+            f"/dev/{item.name}"
+            for item in (Path("/sys/class/block") / array_name / "slaves").iterdir()
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise ExecutorFailure(
+            "md_array_identity_unavailable",
+            "The existing Linux MD identity and recovery state could not be read safely.",
+        ) from exc
+    array_uuid = detail.get("MD_UUID")
+    if not isinstance(array_uuid, str) or not array_uuid:
+        raise ExecutorFailure("md_array_identity_unavailable", "The MD UUID was not reported.")
+    configuration = {
+        "array_path": str(array_path),
+        "array_uuid": array_uuid,
+        "level": level,
+        "raid_disks": raid_disks,
+        "member_paths": member_paths,
+    }
+    return {
+        **configuration,
+        "config_sha256": configuration_hash(configuration),
+        "degraded": bool(degraded),
+        "sync_action": sync_action,
+    }
 
 
 def _smartctl(command: list[str], *, allow_unsupported_log: bool = False) -> str:
@@ -2958,6 +3017,7 @@ def apply_snapraid_replacement(
                 runner(command, timeout)
                 journal["completed_steps"] = index
                 journal["completed_actions"].append(f"replace:{index}")
+
             def recovery_step(
                 *, step: int, action_id: str, phase: str, command: list[str], timeout: int
             ) -> None:
@@ -3029,6 +3089,275 @@ def apply_snapraid_replacement(
             {
                 "state": "succeeded",
                 "phase": "SnapRAID replacement completed",
+                "completed_steps": journal["total_steps"],
+                "current_action": None,
+                "result": result,
+                "updated_at": time.time(),
+            }
+        )
+        atomic_json(journal_path, journal)
+        return result
+
+
+def apply_array_replacement(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    inventory_provider: InventoryProvider | None = None,
+    runner: CommandRunner = _run,
+    zfs_state_provider: ZfsStateProvider = _live_zfs_pool_state,
+    md_state_provider: Callable[[str], dict[str, Any]] = _live_md_array_state,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    expected = {"operation", "operation_id", "plan_sha256", "plan", "confirmation_sha256"}
+    operation_id = request.get("operation_id")
+    plan_sha = request.get("plan_sha256")
+    raw_plan = request.get("plan")
+    if (
+        set(request) != expected
+        or request.get("operation") != "apply_array_replacement"
+        or not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(plan_sha, str)
+        or not SHA256_RE.fullmatch(plan_sha)
+        or not isinstance(raw_plan, dict)
+        or document_hash(raw_plan) != plan_sha
+        or request.get("confirmation_sha256") != document_hash({"confirmation": "I AGREE"})
+    ):
+        raise ExecutorFailure(
+            "destructive_consent_missing", "Exact destructive approval is required."
+        )
+    try:
+        plan = validate_array_replacement_plan(raw_plan)
+    except ArrayReplacementError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+    paths = paths or Paths()
+    validate_quarantine(paths.quarantine_marker)
+    provider = inventory_provider or (lambda: _live_inventory(paths))
+    device = dict(plan["device"])
+    identity_document = {
+        "storage": {
+            "selected_devices": [device],
+            "snapshot_binding": {
+                "selected_device_ids": [device["id"]],
+                "device_binding_sha256": document_hash([device]),
+            },
+        }
+    }
+    try:
+        paths.transaction_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = paths.transaction_root.lstat()
+    except OSError as exc:
+        raise ExecutorFailure(
+            "transaction_journal_unavailable", "Storage activity tracking is unavailable."
+        ) from exc
+    if not stat.S_ISDIR(details.st_mode) or (
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
+    ):
+        raise ExecutorFailure("transaction_journal_unsafe", "Storage activity tracking is unsafe.")
+    journal_path = _journal_path(paths, operation_id)
+    prior = _load_prior_journal(journal_path, plan_sha)
+    if prior is not None:
+        return {**prior, "replayed": True}
+
+    def state() -> dict[str, Any]:
+        return (
+            zfs_state_provider(str(plan["target_name"]))
+            if plan["provider"] == "zfs"
+            else md_state_provider(str(plan["target_name"]))
+        )
+
+    def verify_binding(current: Mapping[str, Any], *, post: bool = False) -> None:
+        if plan["provider"] == "zfs":
+            if current.get("pool_guid") != plan["target_identity"]:
+                raise ExecutorFailure(
+                    "zfs_pool_changed", "The ZFS pool identity changed after review."
+                )
+            if not post and current.get("config_sha256") != plan["configuration_sha256"]:
+                raise ExecutorFailure("zfs_pool_changed", "The ZFS topology changed after review.")
+        else:
+            if (
+                current.get("array_uuid") != plan["target_identity"]
+                or current.get("level") != plan["level"]
+                or current.get("raid_disks") != plan["member_count"]
+            ):
+                raise ExecutorFailure(
+                    "md_array_changed", "The Linux MD identity or geometry changed after review."
+                )
+            if not post and current.get("config_sha256") != plan["configuration_sha256"]:
+                raise ExecutorFailure(
+                    "md_array_changed", "The Linux MD membership changed after review."
+                )
+
+    with _device_locks(paths, [str(device["id"])]):
+        live = _selected_live_devices(identity_document, provider())
+        _ensure_not_active(paths, live)
+        if existing_data_summary(live[str(device["id"])]) != plan["existing_data"]:
+            raise ExecutorFailure(
+                "replacement_contents_changed", "The replacement contents changed after review."
+            )
+        replacement_path = _stable_path(paths, live[str(device["id"])])
+        replacement_kernel_path = _kernel_path(live[str(device["id"])]).as_posix()
+        minimum = plan.get("minimum_capacity_bytes")
+        if isinstance(minimum, int) and int(device.get("capacity_bytes") or 0) < minimum:
+            raise ExecutorFailure("replacement_too_small", "The replacement drive is too small.")
+        initial_state = state()
+        verify_binding(initial_state)
+        journal: dict[str, Any] = {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "plan_sha256": plan_sha,
+            "state": "running",
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "phase": "Revalidating storage identity",
+            "completed_steps": 0,
+            "total_steps": 5
+            if plan["provider"] == "zfs"
+            else (7 if plan["old_member_path"] else 5),
+            "current_action": None,
+            "completed_actions": [],
+            "notices": [],
+        }
+        atomic_json(journal_path, journal)
+
+        def step(action_id: str, phase: str, command: list[str], timeout: int) -> None:
+            live_now = _selected_live_devices(identity_document, provider())
+            _ensure_not_active(paths, live_now)
+            if _stable_path(paths, live_now[str(device["id"])]) != replacement_path:
+                raise ExecutorFailure(
+                    "drive_identity_changed", "The replacement drive identity changed."
+                )
+            journal.update(
+                {"phase": phase, "current_action": {"id": action_id}, "updated_at": time.time()}
+            )
+            atomic_json(journal_path, journal)
+            runner(command, timeout)
+            journal["completed_steps"] += 1
+            journal["completed_actions"].append(action_id)
+            journal["updated_at"] = time.time()
+            atomic_json(journal_path, journal)
+
+        mutation_started = False
+        try:
+            step(
+                "replace:wipe-signatures",
+                "Clearing replacement drive signatures",
+                [_tool("wipefs"), "--all", replacement_path.as_posix()],
+                300,
+            )
+            verify_binding(state())
+            if plan["provider"] == "zfs":
+                mutation_started = True
+                step(
+                    "replace:zfs-resilver",
+                    "Replacing ZFS member and waiting for resilver",
+                    [
+                        _tool("zpool"),
+                        "replace",
+                        "-w",
+                        str(plan["target_name"]),
+                        str(plan["old_member_path"]),
+                        replacement_path.as_posix(),
+                    ],
+                    86400,
+                )
+            else:
+                array_path = f"/dev/{plan['target_name']}"
+                old_member = plan.get("old_member_path")
+                mutation_started = True
+                if old_member:
+                    step(
+                        "replace:md-add-spare",
+                        "Adding the replacement as an MD spare",
+                        [_tool("mdadm"), array_path, "--add-spare", replacement_path.as_posix()],
+                        300,
+                    )
+                    step(
+                        "replace:md-start",
+                        "Starting proactive Linux MD replacement",
+                        [
+                            _tool("mdadm"),
+                            array_path,
+                            "--replace",
+                            str(old_member),
+                            "--with",
+                            replacement_path.as_posix(),
+                        ],
+                        300,
+                    )
+                else:
+                    step(
+                        "replace:md-add",
+                        "Adding replacement to the degraded Linux MD array",
+                        [_tool("mdadm"), array_path, "--add", replacement_path.as_posix()],
+                        300,
+                    )
+                deadline = time.monotonic() + 86400
+                while True:
+                    current = state()
+                    verify_binding(current, post=True)
+                    if current.get("sync_action") in {"idle", "none"} and not current.get(
+                        "degraded"
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise ExecutorFailure(
+                            "md_recovery_timeout",
+                            "Linux MD recovery did not finish in time.",
+                            needs_attention=True,
+                        )
+                    journal.update(
+                        {"phase": "Waiting for Linux MD recovery", "updated_at": time.time()}
+                    )
+                    atomic_json(journal_path, journal)
+                    sleep(2)
+                journal["completed_steps"] += 1
+                journal["completed_actions"].append("replace:md-recovery-complete")
+                if old_member:
+                    step(
+                        "replace:md-remove-old",
+                        "Removing the replaced Linux MD member",
+                        [_tool("mdadm"), array_path, "--remove", str(old_member)],
+                        300,
+                    )
+            final_state = state()
+            verify_binding(final_state, post=True)
+            members = final_state.get("member_paths", [])
+            if (
+                final_state.get("degraded") is True
+                or not {replacement_path.as_posix(), replacement_kernel_path}.intersection(members)
+                or (plan["old_member_path"] is not None and plan["old_member_path"] in members)
+            ):
+                raise ExecutorFailure(
+                    "array_replacement_verification_failed",
+                    "The provider did not report the expected healthy replacement membership.",
+                    needs_attention=True,
+                )
+            journal["completed_steps"] = journal["total_steps"]
+        except Exception as exc:
+            journal.update({"state": "needs_attention", "updated_at": time.time()})
+            atomic_json(journal_path, journal)
+            if mutation_started and isinstance(exc, ExecutorFailure) and not exc.needs_attention:
+                raise ExecutorFailure(
+                    "array_replacement_needs_attention",
+                    "Replacement started, but final provider verification did not complete.",
+                    needs_attention=True,
+                ) from exc
+            raise
+        result = {
+            "operation_id": operation_id,
+            "provider": plan["provider"],
+            "target_id": plan["target_id"],
+            "target_identity": plan["target_identity"],
+            "replacement_device_id": device["id"],
+            "state": "healthy",
+            "replayed": False,
+        }
+        journal.update(
+            {
+                "state": "succeeded",
+                "phase": "Array replacement completed",
                 "completed_steps": journal["total_steps"],
                 "current_action": None,
                 "result": result,
@@ -3579,6 +3908,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_device_maintenance(request, paths=paths)
         elif request.get("operation") == "apply_snapraid_replacement":
             result = apply_snapraid_replacement(request, paths=paths)
+        elif request.get("operation") == "apply_array_replacement":
+            result = apply_array_replacement(request, paths=paths)
         elif request.get("operation") == "apply_storage_redundancy":
             result = apply_storage_redundancy(request, paths=paths)
         else:

@@ -10,6 +10,7 @@ import { StorageRedundancyPanel } from "./StorageRedundancyPanel";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
 import { StorageExpansionPanel } from "./StorageExpansionPanel";
 import { SnapraidReplacementPanel } from "./SnapraidReplacementPanel";
+import { ArrayReplacementPanel } from "./ArrayReplacementPanel";
 import { DownloadTierPanel } from "./DownloadTierPanel";
 
 export type StorageAction = "add" | "move" | "change";
@@ -213,6 +214,11 @@ export function StoragePage({
     <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />
 
     <SnapraidReplacementPanel
+      inventory={storageInventory}
+      availableDrives={drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id))}
+    />
+
+    <ArrayReplacementPanel
       inventory={storageInventory}
       availableDrives={drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id))}
     />

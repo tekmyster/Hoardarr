@@ -37,7 +37,7 @@ export function SnapraidReplacementPanel({
   const selectedPool = pools.find((item) => item.name === poolName) ?? pools[0] ?? null;
   const dataDisks = useMemo(
     () => selectedPool?.configuration?.quality === "available"
-      ? selectedPool.configuration.data_disks
+      ? selectedPool.configuration.data_disks ?? []
       : [],
     [selectedPool],
   );

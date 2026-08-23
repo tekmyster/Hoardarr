@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import hoardarr.api.routes.auth as auth_routes
+import hoardarr.api.routes.storage as storage_routes
 import hoardarr.storage.drain as drain_service
 import hoardarr.storage.groups as group_service
 from hoardarr import __version__
@@ -258,9 +259,7 @@ def test_storage_group_api_preserves_identity_and_guards_lifecycle(
     )
     assert destination.status_code == 201, destination.text
     destination_id = next(
-        item["id"]
-        for item in destination.json()["item"]["backends"]
-        if item["id"] != backend_id
+        item["id"] for item in destination.json()["item"]["backends"] if item["id"] != backend_id
     )
 
     bypass = client.post(
@@ -425,9 +424,7 @@ def test_retired_backend_release_api_requires_scope_csrf_and_exact_confirmation(
         disk = session.get(PhysicalDisk, disk_id)
         assert backend is not None and disk is not None
         backend.lifecycle_state = "retired"
-        backend.config_json = {
-            "drain": {"operation_id": "completed-drain", "phase": "retired"}
-        }
+        backend.config_json = {"drain": {"operation_id": "completed-drain", "phase": "retired"}}
         disk.lifecycle_state = "retired"
 
     endpoint = f"/api/v1/storage/groups/{group_id}/backends/{backend_id}/retirement"
@@ -705,6 +702,125 @@ def test_snapraid_replacement_is_immutable_reserved_and_executed(api_runtime: An
         settings=app.state.settings,
         secret_box=secret_box,
         snapraid_replacement_applier=applier,
+    )
+    assert client.get(f"/api/v1/operations/{operation_id}").json()["status"] == "succeeded"
+
+
+def test_zfs_replacement_preview_is_bound_reserved_and_durable(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, app, setup_token, secret_box = api_runtime
+    assert (
+        client.post(
+            "/api/v1/storage/arrays/replacements/preview",
+            json={
+                "target_id": "zfs:media",
+                "old_member_path": "/dev/disk/by-id/scsi-old",
+                "replacement_device_id": "wwn:zfs-replacement",
+            },
+        ).status_code
+        == 401
+    )
+    csrf = _claim_owner(client, setup_token)
+    disk = {
+        "id": "wwn:zfs-replacement",
+        "stable_identity": True,
+        "system_device": False,
+        "selectable": True,
+        "read_only": False,
+        "kernel_path": "/dev/sdz",
+        "vendor": "TEST",
+        "model": "DISPOSABLE",
+        "identity": {
+            "serial": "ZFS-REPLACE",
+            "wwn": "zfs-replacement",
+            "eui64": None,
+            "nguid": None,
+        },
+        "capacity_bytes": 2_000_000_000,
+        "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+        "partitions": [],
+        "signatures": [],
+        "signature_scan": {"status": "complete"},
+    }
+    hardware = {"schema_version": 1, "source": {"kind": "test"}, "disks": [disk]}
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="user",
+            actor_id="00000000-0000-0000-0000-000000000001",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="test",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+    monkeypatch.setattr(
+        storage_routes,
+        "discover_storage_inventory",
+        lambda **_kwargs: {
+            "pools": {
+                "items": [
+                    {
+                        "id": "zfs:media",
+                        "name": "media",
+                        "pool_guid": "1234567890123456789",
+                        "degraded": True,
+                        "configuration": {
+                            "quality": "available",
+                            "vdev_type": "mirror",
+                            "member_paths": [
+                                "/dev/disk/by-id/scsi-old",
+                                "/dev/disk/by-id/scsi-live",
+                            ],
+                            "member_capacities": {"/dev/disk/by-id/scsi-old": 1_000_000_000},
+                            "config_sha256": "a" * 64,
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    preview = client.post(
+        "/api/v1/storage/arrays/replacements/preview",
+        headers=_state_headers(csrf),
+        json={
+            "target_id": "zfs:media",
+            "old_member_path": "/dev/disk/by-id/scsi-old",
+            "replacement_device_id": disk["id"],
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    body = {
+        "plan": preview.json()["plan"],
+        "plan_sha256": preview.json()["plan_sha256"],
+        "confirmation": "I AGREE",
+    }
+    headers = _state_headers(csrf, **{"Idempotency-Key": "zfs-replace-one"})
+    accepted = client.post("/api/v1/storage/arrays/replacements", headers=headers, json=body)
+    replayed = client.post("/api/v1/storage/arrays/replacements", headers=headers, json=body)
+    assert accepted.status_code == replayed.status_code == 202
+    assert replayed.json()["replayed"] is True
+    operation_id = accepted.json()["operation"]["id"]
+
+    def applier(_socket: object, **values: object) -> dict[str, object]:
+        assert values["plan_sha256"] == body["plan_sha256"]
+        return {"operation_id": operation_id, "state": "healthy"}
+
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        array_replacement_applier=applier,
     )
     assert client.get(f"/api/v1/operations/{operation_id}").json()["status"] == "succeeded"
 
@@ -1236,15 +1352,15 @@ def test_authenticated_hardware_worker_and_wizard_flow(
                     "ata_secure_erase": False,
                     "nvme_block_erase": False,
                     "sector_format_passthrough": False,
-                        "supported_logical_sector_bytes": [],
+                    "supported_logical_sector_bytes": [],
+                    "source": "Not reported",
+                    "smart_self_test": {
+                        "status": "not_reported",
+                        "short_minutes": None,
+                        "extended_minutes": None,
                         "source": "Not reported",
-                        "smart_self_test": {
-                            "status": "not_reported",
-                            "short_minutes": None,
-                            "extended_minutes": None,
-                            "source": "Not reported",
-                        },
                     },
+                },
             }
         ],
     }
@@ -1847,6 +1963,8 @@ def test_controller_redundancy_api_preserves_logical_storage_and_is_idempotent(
         assert stored is not None
         assert stored.mountpoint == "/media"
         assert stored.filesystem_uuid == "11111111-1111-4111-8111-111111111111"
+
+
 def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
     api_runtime: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1881,16 +1999,18 @@ def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
             "capabilities": ["media_libraries"],
             "state": {
                 "status": {"app_name": "Plex", "version": "1.42.0"},
-                "libraries": [{
-                    "id": "movies",
-                    "name": "Movies",
-                    "media_type": "movie",
-                    "paths": [str(movies)],
-                    "item_count": 4020,
-                    "capacity_bytes": None,
-                    "quality": "available",
-                    "untrusted_extra": credential,
-                }],
+                "libraries": [
+                    {
+                        "id": "movies",
+                        "name": "Movies",
+                        "media_type": "movie",
+                        "paths": [str(movies)],
+                        "item_count": 4020,
+                        "capacity_bytes": None,
+                        "quality": "available",
+                        "untrusted_extra": credential,
+                    }
+                ],
             },
         }
 
@@ -1907,8 +2027,7 @@ def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
     assert connection.json()["capabilities"] == ["media_libraries"]
     assert connection.json()["state"]["libraries"][0]["item_count"] == 4020
     assert (
-        connection.json()["state"]["libraries"][0]["storage_mapping"]["quality"]
-        == "not_reported"
+        connection.json()["state"]["libraries"][0]["storage_mapping"]["quality"] == "not_reported"
     )
     assert "untrusted_extra" not in connection.text
     assert credential not in connection.text
@@ -1928,12 +2047,15 @@ def test_media_library_connection_is_read_only_and_persists_sanitized_discovery(
         result["state"]["libraries"][0]["item_count"] = 4021
         return result
 
-    assert refresh_media_libraries(
-        app.state.session_factory,
-        app.state.settings,
-        secret_box,
-        discoverer=refreshed_discovery,
-    ) == 1
+    assert (
+        refresh_media_libraries(
+            app.state.session_factory,
+            app.state.settings,
+            secret_box,
+            discoverer=refreshed_discovery,
+        )
+        == 1
+    )
     refreshed = client.get(f"/api/v1/integrations/{connection_id}")
     mapping = refreshed.json()["state"]["libraries"][0]["storage_mapping"]
     assert mapping["confidence"] == "high"

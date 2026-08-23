@@ -59,6 +59,7 @@ export interface StorageInventory {
       mountpoint: string | null;
       branches?: string[];
       device_names?: string[];
+      pool_guid?: string | null;
       degraded?: boolean;
       maintenance?: string;
       progress_percent?: number | "Not reported";
@@ -67,12 +68,19 @@ export interface StorageInventory {
       bad_blocks?: number | "Not reported";
       last_sync?: string;
       configuration?: {
-        quality: "available" | "temporarily_unavailable";
-        data_disks: Array<{ name: string; path: string }>;
-        parity_disks: Array<{ level: number; path: string }>;
-        content_files: string[];
+        quality?: "available" | "temporarily_unavailable" | "unsupported";
+        data_disks?: Array<{ name: string; path: string }>;
+        parity_disks?: Array<{ level: number; path: string }>;
+        content_files?: string[];
         config_sha256: string | null;
-        errors: string[];
+        errors?: string[];
+        vdev_type?: "mirror" | "raidz1" | "raidz2" | "raidz3" | null;
+        member_paths?: string[];
+        member_capacities?: Record<string, number>;
+        array_path?: string;
+        array_uuid?: string | null;
+        level?: "raid1" | "raid5" | "raid6" | "raid10";
+        raid_disks?: number;
       };
     }>;
   };
@@ -504,6 +512,26 @@ export interface SnapraidReplacementPlan {
     signature_types: string[];
     scan_status: "complete" | "partial" | "unavailable";
   };
+  destructive: true;
+}
+
+export interface ArrayReplacementPlan {
+  schema_version: 1;
+  kind: "array_replacement";
+  provider: "zfs" | "linux_md";
+  target_id: string;
+  target_name: string;
+  target_identity: string;
+  configuration_sha256: string;
+  level: string;
+  member_count: number;
+  degraded: boolean;
+  old_member_path: string | null;
+  minimum_capacity_bytes: number | null;
+  device: SnapraidReplacementPlan["device"];
+  device_binding_sha256: string;
+  hardware_snapshot_sha256: string;
+  existing_data: SnapraidReplacementPlan["existing_data"];
   destructive: true;
 }
 

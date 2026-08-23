@@ -35,6 +35,7 @@ import type {
   ResourceUsageDocument,
   SetupStatus,
   SnapraidReplacementPlan,
+  ArrayReplacementPlan,
   StorageOperationProgress,
   StorageBackendActivationPlan,
   StorageInventory,
@@ -706,6 +707,32 @@ class HoardarrApi {
   ): Promise<OperationDocument> {
     const result = await this.request<{ operation: OperationDocument }>(
       "/storage/snapraid/replacements",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({ plan, plan_sha256: planSha256, confirmation: "I AGREE" }),
+      },
+    );
+    return result.operation;
+  }
+
+  async previewArrayReplacement(input: {
+    target_id: string;
+    old_member_path: string | null;
+    replacement_device_id: string;
+  }): Promise<{ plan: ArrayReplacementPlan; plan_sha256: string }> {
+    return this.request("/storage/arrays/replacements/preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async applyArrayReplacement(
+    plan: ArrayReplacementPlan,
+    planSha256: string,
+  ): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      "/storage/arrays/replacements",
       {
         method: "POST",
         headers: { "Idempotency-Key": createIdempotencyKey() },

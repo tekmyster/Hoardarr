@@ -143,6 +143,15 @@ def _zfs_pools() -> list[dict[str, Any]]:
         if not valid_pool_guid(pool_guid):
             pool_guid = None
         device_names = [Path(candidate).name for candidate in topology.member_paths]
+        member_capacities: dict[str, int] = {}
+        for member_path in topology.member_paths:
+            capacity_output = _command("blockdev", ["--getsize64", member_path])
+            try:
+                capacity = int((capacity_output or "").strip())
+            except ValueError:
+                continue
+            if capacity > 0:
+                member_capacities[member_path] = capacity
         try:
             provider = parse_zpool_status(status_output) if status_output else None
             items.append(
@@ -158,7 +167,10 @@ def _zfs_pools() -> list[dict[str, Any]]:
                     "mountpoint": mountpoints.get(name),
                     "device_names": sorted(set(device_names)),
                     "pool_guid": pool_guid,
-                    "configuration": topology.document(),
+                    "configuration": {
+                        **topology.document(),
+                        "member_capacities": member_capacities,
+                    },
                     "degraded": provider["degraded"] if provider else health.casefold() != "online",
                     "maintenance": provider["scan"] if provider else NOT_REPORTED,
                     "progress_percent": provider["scan_percent"] if provider else NOT_REPORTED,
@@ -201,6 +213,33 @@ def _md_arrays(sys_class_block: Path) -> list[dict[str, Any]]:
             ),
             None,
         )
+        member_paths = sorted(f"/dev/{path.name}" for path in device.glob("slaves/*"))
+        array_path = f"/dev/{device.name}"
+        detail_output = _command("mdadm", ["--detail", "--export", array_path])
+        detail: dict[str, str] = {}
+        for line in (detail_output or "").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.startswith("MD_") and len(value) <= 512:
+                detail[key] = value.strip()
+        array_uuid = detail.get("MD_UUID")
+        configuration = {
+            "array_path": array_path,
+            "array_uuid": array_uuid,
+            "level": level,
+            "raid_disks": members,
+            "member_paths": member_paths,
+        }
+        canonical = {
+            **configuration,
+            "member_paths": sorted(member_paths),
+        }
+        configuration["config_sha256"] = (
+            hashlib.sha256(
+                json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if array_uuid
+            else None
+        )
         items.append(
             {
                 "id": f"md:{device.name}",
@@ -213,6 +252,7 @@ def _md_arrays(sys_class_block: Path) -> list[dict[str, Any]]:
                 "members": members,
                 "mountpoint": mountpoint,
                 "device_names": sorted(path.name for path in device.glob("slaves/*")),
+                "configuration": configuration,
                 "degraded": bool(degraded),
                 "maintenance": action,
                 "progress_percent": progress,

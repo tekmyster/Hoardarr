@@ -16,6 +16,8 @@ from hoardarr.api.dependencies import (
 )
 from hoardarr.api.problem import Problem
 from hoardarr.api.schemas import (
+    ArrayReplacementApplyRequest,
+    ArrayReplacementPreviewRequest,
     DeviceMaintenanceApplyRequest,
     DeviceMaintenancePreviewRequest,
     PhysicalDiskReconcileRequest,
@@ -70,6 +72,12 @@ from hoardarr.storage.redundancy import (
     redundancy_event_documents,
     storage_documents,
     validate_redundancy_plan,
+)
+from hoardarr.storage.replacement import (
+    ArrayReplacementError,
+    build_md_replacement_plan,
+    build_zfs_replacement_plan,
+    validate_array_replacement_plan,
 )
 from hoardarr.storage.reservations import active_storage_reservations, reserved_device_ids
 from hoardarr.storage.snapraid import (
@@ -878,6 +886,102 @@ def apply_snapraid_replacement(
                 "pool_name": plan["pool_name"],
                 "data_name": plan["data_name"],
                 "plan_sha256": payload.plan_sha256,
+            },
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.post("/arrays/replacements/preview")
+def preview_array_replacement(
+    payload: ArrayReplacementPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    snapshot = _latest_hardware(session)
+    disks = snapshot.payload_json.get("disks", [])
+    matches = [
+        item
+        for item in disks
+        if isinstance(item, dict) and item.get("id") == payload.replacement_device_id
+    ]
+    inventory = discover_storage_inventory(hardware_snapshot=snapshot.payload_json)
+    pools = inventory.get("pools", {}).get("items", [])
+    targets = [
+        item for item in pools if isinstance(item, dict) and item.get("id") == payload.target_id
+    ]
+    if len(matches) != 1:
+        raise Problem(404, "drive_not_found", "Replacement drive not found", "Run discovery again.")
+    if len(targets) != 1:
+        raise Problem(404, "storage_not_found", "Storage not found", "Run storage discovery again.")
+    try:
+        plan = (
+            build_zfs_replacement_plan(
+                pool=targets[0],
+                member_path=payload.old_member_path or "",
+                disk=matches[0],
+                hardware_snapshot_sha256=snapshot.sha256,
+            )
+            if payload.target_id.startswith("zfs:")
+            else build_md_replacement_plan(
+                array=targets[0],
+                member_path=payload.old_member_path,
+                disk=matches[0],
+                hardware_snapshot_sha256=snapshot.sha256,
+            )
+        )
+    except ArrayReplacementError as exc:
+        raise Problem(422, exc.code, "Replacement unavailable", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": document_hash(plan)}
+
+
+@router.post("/arrays/replacements", status_code=202)
+def apply_array_replacement(
+    payload: ArrayReplacementApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    if document_hash(payload.plan) != payload.plan_sha256:
+        raise Problem(409, "array_replacement_plan_changed", "Plan changed", "Preview again.")
+    try:
+        plan = validate_array_replacement_plan(payload.plan)
+    except ArrayReplacementError as exc:
+        raise Problem(422, exc.code, "Invalid replacement plan", str(exc)) from exc
+    if _latest_hardware(session).sha256 != plan["hardware_snapshot_sha256"]:
+        raise Problem(409, "hardware_snapshot_changed", "Discovery changed", "Preview again.")
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.array.replace",
+            principal=principal,
+            request={
+                "plan": plan,
+                "plan_sha256": payload.plan_sha256,
+                "confirmation_sha256": document_hash({"confirmation": "I AGREE"}),
+            },
+            idempotency_key=key,
+            resource_type="drive",
+            resource_id=str(plan["device"]["id"]),
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        if str(plan["device"]["id"]) in reserved_device_ids(
+            session, exclude_operation_id=operation.id
+        ):
+            raise Problem(409, "drive_reserved", "Drive is busy", "Another operation uses it.")
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.array.replace",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type=str(plan["provider"]),
+            target_id=str(plan["target_id"]),
+            details={
+                "plan_sha256": payload.plan_sha256,
+                "replacement_device_id": plan["device"]["id"],
             },
         )
     return {"operation": operation_document(operation), "replayed": not created}

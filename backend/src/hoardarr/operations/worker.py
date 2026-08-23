@@ -64,6 +64,7 @@ from hoardarr.operations.service import (
 )
 from hoardarr.storage.client import (
     StorageExecutorError,
+    apply_array_replacement,
     apply_device_maintenance,
     apply_snapraid_replacement,
     apply_storage_plan,
@@ -115,6 +116,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.transfer.cleanup",
         "storage.maintenance",
         "storage.snapraid.replace",
+        "storage.array.replace",
         "storage.redundancy.apply",
         "storage.drain",
         "connectivity.apply",
@@ -130,6 +132,7 @@ ServarrActivityDiscoverer = Callable[..., dict[str, Any]]
 StorageApplier = Callable[..., dict[str, Any]]
 MaintenanceApplier = Callable[..., dict[str, Any]]
 SnapraidReplacementApplier = Callable[..., dict[str, Any]]
+ArrayReplacementApplier = Callable[..., dict[str, Any]]
 StorageStatus = Callable[..., dict[str, Any]]
 ConnectivityApplier = Callable[..., dict[str, Any]]
 ConnectivityRemover = Callable[..., dict[str, Any]]
@@ -632,8 +635,7 @@ def _sanitize_media_discovery(
             {
                 "id": library_id,
                 "name": name,
-                "media_type": _bounded_text(row.get("media_type"), maximum=64)
-                or "Not reported",
+                "media_type": _bounded_text(row.get("media_type"), maximum=64) or "Not reported",
                 "paths": paths,
                 "item_count": item_count,
                 "capacity_bytes": capacity,
@@ -883,9 +885,7 @@ def refresh_media_libraries(
                     and (fingerprint is None or _connection_fingerprint(record) == fingerprint)
                 ):
                     state = (
-                        deepcopy(record.state_json)
-                        if isinstance(record.state_json, dict)
-                        else {}
+                        deepcopy(record.state_json) if isinstance(record.state_json, dict) else {}
                     )
                     state["library_refresh_quality"] = "temporarily_unavailable"
                     state["library_refresh_observed_at"] = utc_now().isoformat()
@@ -1380,6 +1380,37 @@ def _execute_snapraid_replacement(
     return MaintenanceExecution(result=result)
 
 
+def _execute_array_replacement(
+    item: WorkItem,
+    settings: Settings,
+    applier: ArrayReplacementApplier,
+) -> MaintenanceExecution:
+    plan = item.request.get("plan")
+    plan_sha256 = item.request.get("plan_sha256")
+    confirmation_sha256 = item.request.get("confirmation_sha256")
+    if (
+        not isinstance(plan, dict)
+        or not isinstance(plan_sha256, str)
+        or document_hash(plan) != plan_sha256
+        or confirmation_sha256 != document_hash({"confirmation": "I AGREE"})
+        or item.resource_type != "drive"
+        or item.resource_id != plan.get("device", {}).get("id")
+    ):
+        raise WorkFailure("invalid_operation_request", "The array replacement request is invalid")
+    try:
+        result = applier(
+            settings.storage_executor_socket,
+            operation_id=item.operation_id,
+            plan_sha256=plan_sha256,
+            plan=plan,
+            confirmation_sha256=confirmation_sha256,
+            timeout_seconds=settings.storage_executor_timeout_seconds,
+        )
+    except StorageExecutorError as exc:
+        raise WorkFailure(exc.code, str(exc), needs_attention=exc.needs_attention) from exc
+    return MaintenanceExecution(result=result)
+
+
 def _execute_work(
     session_factory: SessionFactory,
     item: WorkItem,
@@ -1391,6 +1422,7 @@ def _execute_work(
     storage_applier: StorageApplier,
     maintenance_applier: MaintenanceApplier,
     snapraid_replacement_applier: SnapraidReplacementApplier,
+    array_replacement_applier: ArrayReplacementApplier,
     connectivity_applier: ConnectivityApplier,
     connectivity_remover: ConnectivityRemover,
 ) -> ExecutionResult:
@@ -1419,6 +1451,8 @@ def _execute_work(
         return _execute_maintenance(item, settings, maintenance_applier)
     if item.kind == "storage.snapraid.replace":
         return _execute_snapraid_replacement(item, settings, snapraid_replacement_applier)
+    if item.kind == "storage.array.replace":
+        return _execute_array_replacement(item, settings, array_replacement_applier)
     if item.kind == "storage.redundancy.apply":
         raw_plan = item.request.get("plan")
         if not isinstance(raw_plan, dict):
@@ -1901,9 +1935,7 @@ def _finalize_with_retry(operation_id: str, callback: Callable[[], None]) -> Non
     LOGGER.error("Operation %s finalization exhausted its retries", operation_id)
 
 
-def _finalize_paused(
-    session_factory: SessionFactory, item: WorkItem, worker_id: str
-) -> None:
+def _finalize_paused(session_factory: SessionFactory, item: WorkItem, worker_id: str) -> None:
     with session_factory() as session, session.begin():
         operation = _leased_operation(session, item, worker_id)
         if operation is None:
@@ -1923,6 +1955,7 @@ def run_once(
     storage_applier: StorageApplier = apply_storage_plan,
     maintenance_applier: MaintenanceApplier = apply_device_maintenance,
     snapraid_replacement_applier: SnapraidReplacementApplier = apply_snapraid_replacement,
+    array_replacement_applier: ArrayReplacementApplier = apply_array_replacement,
     connectivity_applier: ConnectivityApplier = _apply_connectivity_direct,
     connectivity_remover: ConnectivityRemover = _remove_connectivity_direct,
 ) -> bool:
@@ -1944,6 +1977,7 @@ def run_once(
             storage_applier,
             maintenance_applier,
             snapraid_replacement_applier,
+            array_replacement_applier,
             connectivity_applier,
             connectivity_remover,
         )
@@ -2108,6 +2142,7 @@ def recover_abandoned_operations(
                 "storage.apply": storage_max_age,
                 "storage.maintenance": storage_max_age,
                 "storage.snapraid.replace": storage_max_age,
+                "storage.array.replace": storage_max_age,
                 "storage.redundancy.apply": storage_max_age,
                 "connectivity.apply": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "connectivity.remove": int(settings.connectivity_executor_timeout_seconds) + 120,

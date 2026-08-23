@@ -158,6 +158,33 @@ def apply_snapraid_replacement(
     return result
 
 
+def apply_array_replacement(
+    socket_path: Path,
+    *,
+    operation_id: str,
+    plan_sha256: str,
+    plan: dict[str, Any],
+    confirmation_sha256: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    result = _request_executor(
+        socket_path,
+        {
+            "operation": "apply_array_replacement",
+            "operation_id": operation_id,
+            "plan_sha256": plan_sha256,
+            "plan": plan,
+            "confirmation_sha256": confirmation_sha256,
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    if result.get("operation_id") != operation_id:
+        raise StorageExecutorError(
+            "executor_response_invalid", "The storage service returned an invalid response."
+        )
+    return result
+
+
 def apply_storage_redundancy(
     socket_path: Path,
     *,
