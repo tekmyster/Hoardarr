@@ -39,9 +39,22 @@ const plan: TierTransferPlan = {
   sha256: "a".repeat(64),
 };
 
+const summary = {
+  queue: {
+    queued_count: 2, running_count: 1, failed_count: 1,
+    queued_bytes: 2_147_483_648, running_planned_bytes: 536_870_912,
+    retained_for_seeding_count: 1, retained_for_seeding_bytes: 1_073_741_824,
+    observed_bytes_per_second: 104_857_600, rate_sample_count: 4,
+    estimated_queued_seconds: 21, estimate_quality: "estimated" as const,
+    estimate_methodology: "Queued bytes divided by measured completed transfers.",
+  },
+  tiers: [{ storage_group_id: "group-media", storage_group_name: "Media", backend_id: "landing", role: "landing" as const, path: "/data/downloads", quality: "available" as const, total_bytes: 10_737_418_240, used_bytes: 4_294_967_296, free_bytes: 6_442_450_944 }],
+};
+
 describe("DownloadTierPanel", () => {
   it("keeps an honest empty state until a real landing backend exists", async () => {
     vi.spyOn(api, "storageGroups").mockResolvedValue([]);
+    vi.spyOn(api, "tierTransferSummary").mockResolvedValue({ queue: { ...summary.queue, queued_count: 0, queued_bytes: 0, estimated_queued_seconds: 0, estimate_quality: "available", estimate_methodology: "No queued transfer bytes remain." }, tiers: [] });
     render(<DownloadTierPanel />);
     expect(await screen.findByText("No download SSD or NVMe is configured")).toBeInTheDocument();
     expect(screen.getByText(/until a real landing backend exists/)).toBeInTheDocument();
@@ -49,6 +62,7 @@ describe("DownloadTierPanel", () => {
 
   it("reviews cross-filesystem torrent semantics and starts real retained cleanup", async () => {
     vi.spyOn(api, "storageGroups").mockResolvedValue(groups);
+    vi.spyOn(api, "tierTransferSummary").mockResolvedValue(summary);
     const preview = vi.spyOn(api, "previewTierTransfer").mockResolvedValue({ plan, plan_sha256: "b".repeat(64) });
     vi.spyOn(api, "applyTierTransfer").mockResolvedValue({ id: "transfer-1", kind: "storage.transfer", status: "succeeded", result: { state: "retained" } });
     const cleanupTransfer = vi.spyOn(api, "cleanupTierTransfer").mockResolvedValue({ id: "cleanup-1", kind: "storage.transfer.cleanup", status: "queued" });
@@ -56,6 +70,9 @@ describe("DownloadTierPanel", () => {
     render(<DownloadTierPanel />);
 
     await screen.findByDisplayValue("/data/downloads/completed/example.mkv");
+    expect(screen.getByText("2 · 2.15 GB")).toBeInTheDocument();
+    expect(screen.getByText("About 1 min")).toBeInTheDocument();
+    expect(screen.getByText(/4.29 GB used · 6.44 GB free/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Review transfer" }));
     await waitFor(() => expect(preview).toHaveBeenCalledWith(expect.objectContaining({
       workload: "torrent",

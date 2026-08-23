@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from hoardarr.storage.tiering import (
     execute_transfer,
     plan_transfer,
     transfer_phases,
+    transfer_queue_summary,
 )
 
 
@@ -101,6 +103,111 @@ def test_transfer_revalidates_identity_and_space(tmp_path: Path) -> None:
     assert result["state"] == "completed"
     assert destination.read_bytes() == b"payload"
     assert not source.exists()
+
+
+def test_transfer_rejects_source_size_change_after_review(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    output.mkdir()
+    source.write_bytes(b"changed after review")
+    plan = plan_transfer(
+        {
+            "workload": "torrent",
+            "source": "/data/downloads/source",
+            "destination": "/data/media/source",
+            "source_identity": "source",
+            "destination_identity": "destination",
+            "method": "copy",
+            "required_bytes": 7,
+        }
+    )
+    object.__setattr__(plan, "source", str(source))
+    object.__setattr__(plan, "destination", str(output / "source"))
+    with pytest.raises(TieringError) as error:
+        execute_transfer(
+            plan,
+            identity_provider=lambda path: "source" if path == source else "destination",
+        )
+    assert error.value.code == "source_changed"
+
+
+def test_transfer_queue_summary_uses_exact_bytes_and_sufficient_measured_rates() -> None:
+    def operation(
+        identifier: str,
+        *,
+        kind: str = "storage.transfer",
+        status: str,
+        size: int = 0,
+        result: dict[str, object] | None = None,
+        transfer_id: str | None = None,
+    ) -> SimpleNamespace:
+        request = (
+            {"transfer_id": transfer_id}
+            if kind == "storage.transfer.cleanup"
+            else {"plan": {"required_bytes": size}}
+        )
+        return SimpleNamespace(
+            id=identifier,
+            kind=kind,
+            status=status,
+            request_json=request,
+            result_json=result,
+        )
+
+    rows = [
+        operation("queued", status="queued", size=1_000),
+        operation("running", status="running", size=500),
+        operation(
+            "retained",
+            status="succeeded",
+            size=400,
+            result={
+                "state": "retained",
+                "processed_bytes": 400,
+                "observed_bytes_per_second": 100,
+            },
+        ),
+        operation(
+            "complete-2",
+            status="succeeded",
+            size=600,
+            result={
+                "state": "completed",
+                "processed_bytes": 600,
+                "observed_bytes_per_second": 100,
+            },
+        ),
+        operation(
+            "complete-3",
+            status="succeeded",
+            size=1_000,
+            result={
+                "state": "completed",
+                "processed_bytes": 1_000,
+                "observed_bytes_per_second": 100,
+            },
+        ),
+        operation(
+            "cleanup",
+            kind="storage.transfer.cleanup",
+            status="succeeded",
+            transfer_id="retained",
+        ),
+        operation("failure", status="failed", size=100),
+    ]
+    summary = transfer_queue_summary(rows)
+    assert summary["queued_count"] == 1
+    assert summary["queued_bytes"] == 1_000
+    assert summary["running_planned_bytes"] == 500
+    assert summary["estimated_queued_seconds"] == 10
+    assert summary["estimate_quality"] == "estimated"
+    assert summary["rate_sample_count"] == 3
+    assert summary["retained_for_seeding_count"] == 0
+    assert summary["failed_count"] == 1
+
+    insufficient = transfer_queue_summary(rows[:2])
+    assert insufficient["estimated_queued_seconds"] is None
+    assert insufficient["estimate_quality"] == "not_reported"
 
 
 def test_transfer_resumes_verified_partial_and_never_overwrites_destination(tmp_path: Path) -> None:

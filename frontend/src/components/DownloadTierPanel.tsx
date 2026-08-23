@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { humanCapacity } from "../policy";
-import type { OperationDocument, StorageGroupDocument, TierTransferPlan } from "../types";
+import type { OperationDocument, StorageGroupDocument, TierTransferPlan, TierTransferSummary } from "../types";
 import { Card, Notice, Spinner, StatusBadge } from "./ui";
 
 type BackendChoice = {
@@ -24,6 +24,7 @@ function backendChoices(groups: StorageGroupDocument[], roles: ReadonlySet<strin
 
 export function DownloadTierPanel() {
   const [groups, setGroups] = useState<StorageGroupDocument[]>([]);
+  const [summary, setSummary] = useState<TierTransferSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,9 +41,10 @@ export function DownloadTierPanel() {
 
   useEffect(() => {
     let active = true;
-    void api.storageGroups().then((items) => {
+    void Promise.all([api.storageGroups(), api.tierTransferSummary()]).then(([items, nextSummary]) => {
       if (!active) return;
       setGroups(items);
+      setSummary(nextSummary);
       const landingPath = backendChoices(items, new Set(["cache", "landing"]))[0]?.path;
       const mediaPath = backendChoices(items, new Set(["data"]))[0]?.path;
       if (landingPath) setSource(`${landingPath}/completed/example.mkv`);
@@ -52,6 +54,13 @@ export function DownloadTierPanel() {
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!operation || ["queued", "running"].includes(operation.status)) return;
+    let active = true;
+    void api.tierTransferSummary().then((value) => { if (active) setSummary(value); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [operation?.id, operation?.status]);
 
   useEffect(() => {
     if (!operation || !["queued", "running"].includes(operation.status)) return;
@@ -120,6 +129,17 @@ export function DownloadTierPanel() {
   return <Card title="Download & landing tier" description="Move completed downloads from fast working storage into the media library without pretending cross-filesystem copies are hardlinks.">
     {loading ? <Spinner label="Loading configured download storage…" /> : !landing.length ? <div className="empty-state compact-empty"><h3>No download SSD or NVMe is configured</h3><p>Select an unassigned fast drive and choose <strong>Use for downloads/cache</strong>. Hoardarr will keep this panel empty until a real landing backend exists.</p></div> : !media.length ? <Notice tone="warning" title="No media destination is configured">Create or import a data backend before moving completed downloads.</Notice> : <>
       {error && <Notice tone="danger" title="Download transfer needs attention">{error}</Notice>}
+      {summary && <section aria-label="Download tier status">
+        <dl className="review-grid">
+          <div><dt>Queued migrations</dt><dd>{summary.queue.queued_count} · {humanCapacity(summary.queue.queued_bytes)}</dd></div>
+          <div><dt>Running</dt><dd>{summary.queue.running_count}{summary.queue.running_count ? ` · up to ${humanCapacity(summary.queue.running_planned_bytes)}` : ""}</dd></div>
+          <div><dt>Queued drain estimate</dt><dd>{summary.queue.estimated_queued_seconds === null ? "Not reported" : summary.queue.estimated_queued_seconds === 0 ? "Nothing queued" : `About ${Math.max(1, Math.ceil(summary.queue.estimated_queued_seconds / 60))} min`}</dd></div>
+          <div><dt>Retained for seeding</dt><dd>{summary.queue.retained_for_seeding_count} · {humanCapacity(summary.queue.retained_for_seeding_bytes)}</dd></div>
+          <div><dt>Transfer failures</dt><dd>{summary.queue.failed_count}</dd></div>
+        </dl>
+        <p className="muted">{summary.queue.estimate_methodology}{summary.queue.observed_bytes_per_second !== null ? ` Observed rate: ${humanCapacity(summary.queue.observed_bytes_per_second)}/s from ${summary.queue.rate_sample_count} completed transfers.` : ""}</p>
+        <div className="tier-capacity-list">{summary.tiers.map((tier) => <article key={tier.backend_id} className="compact-panel"><strong>{tier.storage_group_name} · {tier.role}</strong>{tier.quality === "available" && tier.total_bytes !== null && tier.used_bytes !== null && tier.free_bytes !== null ? <p>{humanCapacity(tier.used_bytes)} used · {humanCapacity(tier.free_bytes)} free · {humanCapacity(tier.total_bytes)} total</p> : <p>Capacity {tier.quality === "not_reported" ? "Not reported" : "temporarily unavailable"}</p>}<small>{tier.path ?? "Path Not reported"}</small></article>)}</div>
+      </section>}
       {!preview && !operation && <div className="form-grid two-columns">
         <label>Workload<select value={workload} onChange={(event) => { setWorkload(event.target.value as "torrent" | "usenet"); resetReview(); }}><option value="torrent">Torrent — keep source while seeding</option><option value="usenet">Usenet — move after repair and unpack</option></select></label>
         <label>Download storage<select value={landing.find((item) => source.startsWith(item.path))?.id ?? ""} onChange={(event) => { const selected = landing.find((item) => item.id === event.target.value); if (selected) setSource(`${selected.path}/completed/example.mkv`); resetReview(); }}>{landing.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.path}</option>)}</select></label>

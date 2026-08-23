@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +38,13 @@ from hoardarr.api.schemas import (
 from hoardarr.api.serializers import operation_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
-from hoardarr.db.models import HardwareSnapshot, Operation, StorageDrainJob
+from hoardarr.db.models import (
+    HardwareSnapshot,
+    Operation,
+    StorageBackend,
+    StorageDrainJob,
+    StorageGroup,
+)
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
 from hoardarr.storage.expansion import build_expansion_assessment
@@ -71,7 +78,7 @@ from hoardarr.storage.snapraid import (
     validate_replacement_plan,
 )
 from hoardarr.storage.telemetry import storage_telemetry
-from hoardarr.storage.tiering import TieringError, plan_transfer
+from hoardarr.storage.tiering import TieringError, plan_transfer, transfer_queue_summary
 
 router = APIRouter(prefix="/storage", tags=["storage"])
 
@@ -918,6 +925,62 @@ def preview_transfer(
 ) -> dict[str, object]:
     plan = _transfer_plan(payload)
     return {"plan": plan, "plan_sha256": document_hash(plan)}
+
+
+@router.get("/transfers/summary")
+def transfer_summary(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    operations = session.scalars(
+        select(Operation)
+        .where(Operation.kind.in_(("storage.transfer", "storage.transfer.cleanup")))
+        .order_by(Operation.created_at.desc())
+        .limit(1000)
+    ).all()
+    tiers: list[dict[str, object]] = []
+    backends = session.execute(
+        select(StorageBackend, StorageGroup)
+        .join(StorageGroup, StorageGroup.id == StorageBackend.storage_group_id)
+        .where(
+            StorageBackend.role.in_(("cache", "landing")),
+            StorageBackend.lifecycle_state.notin_(("retired", "reuse_ready")),
+        )
+        .order_by(StorageGroup.name, StorageBackend.id)
+        .limit(64)
+    ).all()
+    for backend, group in backends:
+        quality = "temporarily_unavailable"
+        total_bytes: int | None = None
+        free_bytes: int | None = None
+        used_bytes: int | None = None
+        path = backend.namespace_path
+        if isinstance(path, str) and path:
+            try:
+                usage = shutil.disk_usage(path)
+            except OSError:
+                pass
+            else:
+                quality = "available"
+                total_bytes = usage.total
+                free_bytes = usage.free
+                used_bytes = usage.used
+        else:
+            quality = "not_reported"
+        tiers.append(
+            {
+                "storage_group_id": group.id,
+                "storage_group_name": group.name,
+                "backend_id": backend.id,
+                "role": backend.role,
+                "path": path,
+                "quality": quality,
+                "total_bytes": total_bytes,
+                "used_bytes": used_bytes,
+                "free_bytes": free_bytes,
+            }
+        )
+    return {"queue": transfer_queue_summary(operations), "tiers": tiers}
 
 
 @router.post("/transfers", status_code=202)

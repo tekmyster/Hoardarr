@@ -48,6 +48,7 @@ import type {
   TelemetryForecastDocument,
   TelemetrySettingsDocument,
   TierTransferPlan,
+  TierTransferSummary,
   UpdateCheckDocument,
   UpdateStatusDocument,
   WizardDocument,
@@ -382,6 +383,10 @@ class HoardarrApi {
     completed_steps: string[];
   }): Promise<{ plan: TierTransferPlan; plan_sha256: string }> {
     return this.request("/storage/transfers/preview", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async tierTransferSummary(): Promise<TierTransferSummary> {
+    return this.request<TierTransferSummary>("/storage/transfers/summary");
   }
 
   async applyTierTransfer(plan: TierTransferPlan, planSha256: string): Promise<OperationDocument> {

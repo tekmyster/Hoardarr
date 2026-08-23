@@ -82,6 +82,19 @@ method is a hardlink, copy, or move. A cross-filesystem transfer is never called
 a hardlink. Progress shown by this surface is the durable operation state; it
 does not synthesize a percentage when the worker has not reported one.
 
+The status area reads queued and running byte totals from immutable durable
+transfer plans. Completed copy/move operations record their actual processed
+bytes and elapsed time. Hoardarr requires at least three such observations
+before showing an approximate queued drain time; until then the estimate is
+**Not reported**. The displayed methodology and sample count remain visible.
+Hardlinks are excluded from copy-rate history because they do not transfer file
+content. Configured tier capacity is read only from explicit Storage Group
+`cache`/`landing` membership, not inferred from SSD media type or old jobs.
+
+The executor rechecks the reviewed source size immediately before copying. A
+changed file fails safely and must be reviewed again rather than silently moving
+a different number of bytes than the approved plan.
+
 ZFS L2ARC is a read cache, a SLOG is a synchronous intent-log device, and a ZFS
 special vdev stores selected allocation classes. None of them should be
 presented as a general SSD download write cache. A special vdev is pool-critical

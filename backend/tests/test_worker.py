@@ -714,5 +714,10 @@ def test_worker_executes_exact_durable_tier_transfer(
     with session_factory() as session:
         operation = session.get(Operation, operation_id)
         assert operation is not None and operation.status == "succeeded"
-        assert operation.result_json == {"state": "completed", "method": "move"}
+        assert operation.result_json is not None
+        assert operation.result_json["state"] == "completed"
+        assert operation.result_json["method"] == "move"
+        assert operation.result_json["processed_bytes"] == 1024
+        assert operation.result_json["elapsed_seconds"] > 0
+        assert operation.result_json["observed_bytes_per_second"] > 0
     assert observed == [plan]

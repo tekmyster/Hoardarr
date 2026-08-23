@@ -19,7 +19,9 @@ from hoardarr.db.models import (
     HardwareSnapshot,
     MetricSample,
     Operation,
+    StorageBackend,
     StorageEntity,
+    StorageGroup,
     StoragePath,
     TelemetryState,
 )
@@ -119,8 +121,6 @@ class TelemetryService:
             .order_by(Operation.created_at.desc())
             .limit(5000)
         ).all()
-        if not operations:
-            return []
         completed = [item for item in operations if item.status == "succeeded"]
         pending = sum(item.status in {"queued", "running"} for item in operations)
         failed = sum(item.status == "failed" for item in operations)
@@ -161,34 +161,41 @@ class TelemetryService:
             )
             for metric_id, value in values
         ]
-        # Occupancy is tied to a configured durable transfer source identity,
-        # never inferred from SSD/HDD media type. A missing source is reported.
-        tier_sources: dict[str, str] = {}
-        for item in operations:
-            plan = item.request_json.get("plan", item.request_json)
-            if not isinstance(plan, dict):
-                continue
-            source = plan.get("source")
-            identity = plan.get("source_identity")
-            if isinstance(source, str) and isinstance(identity, str) and identity:
-                tier_sources[identity] = os.path.dirname(source) or source
-        for identity, source in tier_sources.items():
+        # Occupancy is tied only to explicit Storage Group cache/landing membership,
+        # never inferred from media type or the presence of a past transfer.
+        tier_sources = session.execute(
+            select(StorageBackend, StorageGroup)
+            .join(StorageGroup, StorageGroup.id == StorageBackend.storage_group_id)
+            .where(
+                StorageBackend.role.in_(("cache", "landing")),
+                StorageBackend.lifecycle_state.notin_(("retired", "reuse_ready")),
+            )
+            .order_by(StorageBackend.id)
+            .limit(256)
+        ).all()
+        for backend, group in tier_sources:
+            source = backend.namespace_path
             utilization: float | None = None
-            try:
-                facts = os.statvfs(source)
-                total = facts.f_blocks * facts.f_frsize
-                free = facts.f_bavail * facts.f_frsize
-                if total > 0:
-                    utilization = (total - free) / total * 100
-            except OSError:
-                pass
+            if isinstance(source, str) and source:
+                try:
+                    facts = os.statvfs(source)
+                    total = facts.f_blocks * facts.f_frsize
+                    free = facts.f_bavail * facts.f_frsize
+                    if total > 0:
+                        utilization = (total - free) / total * 100
+                except OSError:
+                    pass
             readings.append(
                 _reading(
                     EntityReading(
                         "storage_tier",
-                        f"tier:{identity}"[:512],
-                        "Download tier",
-                        labels={"configured_path": source[:512]},
+                        f"tier:{backend.stable_identity}"[:512],
+                        f"{group.name} download tier"[:256],
+                        labels={
+                            "configured_path": (source or "")[:512],
+                            "storage_group_id": group.id,
+                            "role": backend.role,
+                        },
                     ),
                     "tier.occupancy",
                     utilization,

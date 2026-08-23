@@ -665,6 +665,34 @@ export interface TierTransferPlan {
   sha256: string;
 }
 
+export interface TierTransferSummary {
+  queue: {
+    queued_count: number;
+    running_count: number;
+    failed_count: number;
+    queued_bytes: number;
+    running_planned_bytes: number;
+    retained_for_seeding_count: number;
+    retained_for_seeding_bytes: number;
+    observed_bytes_per_second: number | null;
+    rate_sample_count: number;
+    estimated_queued_seconds: number | null;
+    estimate_quality: "available" | "estimated" | "not_reported";
+    estimate_methodology: string;
+  };
+  tiers: Array<{
+    storage_group_id: string;
+    storage_group_name: string;
+    backend_id: string;
+    role: "cache" | "landing";
+    path: string | null;
+    quality: "available" | "not_reported" | "temporarily_unavailable";
+    total_bytes: number | null;
+    used_bytes: number | null;
+    free_bytes: number | null;
+  }>;
+}
+
 export interface StorageDrainPlan {
   schema_version: 1;
   kind: "storage.drain";

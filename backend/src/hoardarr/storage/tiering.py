@@ -3,10 +3,11 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import math
 import os
 import shutil
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -16,6 +17,90 @@ class TieringError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+def transfer_queue_summary(operations: Iterable[Any]) -> dict[str, Any]:
+    """Summarize bounded durable transfer state using only measured byte inputs."""
+
+    rows = list(operations)[:1000]
+    transfers = [row for row in rows if row.kind == "storage.transfer"]
+    cleaned_ids = {
+        row.request_json.get("transfer_id")
+        for row in rows
+        if row.kind == "storage.transfer.cleanup"
+        and row.status == "succeeded"
+        and isinstance(row.request_json, dict)
+        and isinstance(row.request_json.get("transfer_id"), str)
+    }
+    queued_bytes = 0
+    running_planned_bytes = 0
+    retained_bytes = 0
+    retained_count = 0
+    failed_count = 0
+    rate_samples: list[tuple[int, float]] = []
+    for row in transfers:
+        request = row.request_json if isinstance(row.request_json, dict) else {}
+        plan = request.get("plan")
+        size = plan.get("required_bytes") if isinstance(plan, dict) else None
+        bounded_size = (
+            size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else 0
+        )
+        if row.status == "queued":
+            queued_bytes += bounded_size
+        elif row.status == "running":
+            running_planned_bytes += bounded_size
+        elif row.status == "failed":
+            failed_count += 1
+        if row.status != "succeeded" or not isinstance(row.result_json, dict):
+            continue
+        if row.result_json.get("state") == "retained" and row.id not in cleaned_ids:
+            retained_count += 1
+            retained_bytes += bounded_size
+        rate = row.result_json.get("observed_bytes_per_second")
+        processed = row.result_json.get("processed_bytes")
+        if (
+            isinstance(rate, (int, float))
+            and not isinstance(rate, bool)
+            and rate > 0
+            and math.isfinite(float(rate))
+            and isinstance(processed, int)
+            and not isinstance(processed, bool)
+            and processed > 0
+        ):
+            rate_samples.append((processed, float(rate)))
+    rate_samples = rate_samples[:20]
+    observed_rate: float | None = None
+    if len(rate_samples) >= 3:
+        total_bytes = sum(item[0] for item in rate_samples)
+        total_seconds = sum(item[0] / item[1] for item in rate_samples)
+        if total_seconds > 0:
+            observed_rate = total_bytes / total_seconds
+    if queued_bytes == 0:
+        estimate_seconds: int | None = 0
+        estimate_quality = "available"
+        estimate_reason = "No queued transfer bytes remain."
+    elif observed_rate is None:
+        estimate_seconds = None
+        estimate_quality = "not_reported"
+        estimate_reason = "At least three completed copy or move transfers are required."
+    else:
+        estimate_seconds = max(1, math.ceil(queued_bytes / observed_rate))
+        estimate_quality = "estimated"
+        estimate_reason = "Queued bytes divided by the weighted rate of recent completed transfers."
+    return {
+        "queued_count": sum(row.status == "queued" for row in transfers),
+        "running_count": sum(row.status == "running" for row in transfers),
+        "failed_count": failed_count,
+        "queued_bytes": queued_bytes,
+        "running_planned_bytes": running_planned_bytes,
+        "retained_for_seeding_count": retained_count,
+        "retained_for_seeding_bytes": retained_bytes,
+        "observed_bytes_per_second": observed_rate,
+        "rate_sample_count": len(rate_samples),
+        "estimated_queued_seconds": estimate_seconds,
+        "estimate_quality": estimate_quality,
+        "estimate_methodology": estimate_reason,
+    }
 
 
 @dataclass(frozen=True)
@@ -256,6 +341,8 @@ def _execute_transfer_posix(
         source_stat = os.fstat(source_fd)
         if not stat.S_ISREG(source_stat.st_mode):
             raise TieringError("source_invalid", "source is not a regular file")
+        if source_stat.st_size != plan.required_bytes:
+            raise TieringError("source_changed", "source size changed after transfer review")
         try:
             os.stat(destination.name, dir_fd=destination_parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -404,6 +491,8 @@ def execute_transfer(
     _assert_no_symlink(destination.parent)
     if not source.exists():
         raise TieringError("source_missing", "source no longer exists")
+    if source.stat().st_size != plan.required_bytes:
+        raise TieringError("source_changed", "source size changed after transfer review")
     if (
         identity_provider(source) != plan.source_identity
         or identity_provider(destination.parent) != plan.destination_identity

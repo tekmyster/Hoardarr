@@ -1449,10 +1449,19 @@ def _execute_work(
             plan = plan_transfer(value)
             if plan.document() != value:
                 raise TieringError("transfer_plan_changed", "transfer plan changed")
+            transfer_started = time.monotonic()
             result = execute_transfer(
                 plan,
                 identity_provider=lambda path: f"dev:{path.stat().st_dev}",
             )
+            elapsed_seconds = max(time.monotonic() - transfer_started, 0.000001)
+            if plan.method != "hardlink":
+                result = {
+                    **result,
+                    "processed_bytes": plan.required_bytes,
+                    "elapsed_seconds": round(elapsed_seconds, 6),
+                    "observed_bytes_per_second": plan.required_bytes / elapsed_seconds,
+                }
         except (TieringError, OSError, TypeError) as exc:
             code = exc.code if isinstance(exc, TieringError) else "transfer_failed"
             raise WorkFailure(code, "The storage transfer could not be completed") from exc

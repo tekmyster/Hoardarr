@@ -25,8 +25,9 @@ from hoardarr.db.models import (
     MetricEntity,
     MetricRollup,
     MetricSample,
-    Operation,
+    StorageBackend,
     StorageEntity,
+    StorageGroup,
     StoragePath,
     TelemetryState,
 )
@@ -582,19 +583,21 @@ def test_tier_occupancy_uses_configured_transfer_identity_and_real_capacity(
     )
     with factory() as session, session.begin():
         session.add(
-            Operation(
-                kind="storage.transfer",
-                status="queued",
-                actor_type="browser_session",
-                actor_id="00000000-0000-0000-0000-000000000001",
-                request_sha256="a" * 64,
-                request_json={
-                    "plan": {
-                        "source": "/data/downloads/job.mkv",
-                        "source_identity": "wwn:fast-tier",
-                        "required_bytes": 10,
-                    }
-                },
+            StorageGroup(
+                id="tier-group",
+                name="Downloads",
+                namespace_path="/data/downloads",
+                purpose="downloads",
+            )
+        )
+        session.flush()
+        session.add(
+            StorageBackend(
+                storage_group_id="tier-group",
+                stable_identity="wwn:fast-tier",
+                namespace_path="/data/downloads",
+                role="landing",
+                lifecycle_state="preferred_write",
             )
         )
     service = TelemetryService(settings)
@@ -603,6 +606,7 @@ def test_tier_occupancy_uses_configured_transfer_identity_and_real_capacity(
     occupancy = next(item for item in readings if item.metric_id == "tier.occupancy")
     assert occupancy.value == 75
     assert occupancy.entity.stable_id == "tier:wwn:fast-tier"
+    assert occupancy.entity.labels["storage_group_id"] == "tier-group"
     service.executor.shutdown(wait=True, cancel_futures=True)
     engine.dispose()
 

@@ -585,6 +585,11 @@ def test_tier_transfer_preview_apply_is_authenticated_and_idempotent(
     assert first.status_code == second.status_code == 202
     assert first.json()["replayed"] is False
     assert second.json()["replayed"] is True
+    summary = client.get("/api/v1/storage/transfers/summary")
+    assert summary.status_code == 200
+    assert summary.json()["queue"]["queued_count"] == 1
+    assert summary.json()["queue"]["queued_bytes"] == 4096
+    assert summary.json()["queue"]["estimated_queued_seconds"] is None
     changed = client.post(
         "/api/v1/storage/transfers",
         headers=headers,
