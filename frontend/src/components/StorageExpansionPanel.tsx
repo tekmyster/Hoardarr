@@ -13,6 +13,20 @@ function capacity(value: number | null): string {
   return value === null ? "Not calculated" : humanCapacity(value);
 }
 
+function forecastSummary(group: StorageExpansionAssessment["storage_groups"][number]): string {
+  const forecast = group.growth_forecast;
+  if (!forecast) return "Capacity forecast not reported.";
+  if (forecast.status === "available") {
+    const projected = forecast.projected?.["90"];
+    return projected
+      ? `Projected 90% full in about ${projected.days} days (${projected.date})`
+      : "Growth is measurable, but no 90% projection is available.";
+  }
+  if (forecast.status === "stable_or_declining") return "Usage is stable or declining over the retained history.";
+  if (forecast.status === "insufficient_history") return "Capacity forecast needs at least seven days of history.";
+  return forecast.reason ?? "Capacity forecast not reported.";
+}
+
 export function StorageExpansionPanel({
   onPlan,
   snapshotId,
@@ -68,7 +82,7 @@ export function StorageExpansionPanel({
     {loading && !assessment ? <p role="status">Analyzing current Storage Groups and unassigned disks…</p> : assessment && assessment.available_disks.length === 0 && reservedDisks.length === 0 ? <div className="empty-state compact-empty"><h3>No unassigned disks detected</h3><p>Add or release a disk, then run a storage scan. Existing managed storage will not be changed.</p></div> : assessment && <>
       <p>{assessment.methodology}</p>
       {reservedDisks.length > 0 && <section aria-label="Disks reserved for later"><h4>Reserved for later</h4><p>These disks stay unmodified and are excluded from new storage plans until released.</p><div className="expansion-disk-list">{reservedDisks.map((disk) => <article key={disk.id}><div><strong>{disk.vendor} {disk.model}</strong><code>{disk.kernel_path ?? disk.stable_identity}</code></div><span>{capacity(disk.capacity_bytes)}</span><StatusBadge status="reserved" /><button className="button button-secondary" type="button" disabled={reservationBusy === disk.id} onClick={() => void changeReservation(disk.id, "release")}>{reservationBusy === disk.id ? "Releasing…" : "Release disk"}</button></article>)}</div></section>}
-      {assessment.storage_groups.length > 0 && <div className="expansion-disk-list" aria-label="Current Storage Group state">{assessment.storage_groups.map((group) => <article key={group.id}><div><strong>{group.name}</strong><code>{group.namespace_path}</code></div><span>{group.capacity.quality === "available" ? `${capacity(group.capacity.free_bytes)} free of ${capacity(group.capacity.total_bytes)}` : "Capacity not reported"}</span><span>{group.protection.summary}</span><span>{group.distribution.spread_percentage_points === null ? "Member balance not reported" : `${group.distribution.spread_percentage_points.toFixed(1)} point member-usage spread`}</span></article>)}</div>}
+      {assessment.storage_groups.length > 0 && <div className="expansion-disk-list" aria-label="Current Storage Group state">{assessment.storage_groups.map((group) => <article key={group.id}><div><strong>{group.name}</strong><code>{group.namespace_path}</code></div><span>{group.capacity.quality === "available" ? `${capacity(group.capacity.free_bytes)} free of ${capacity(group.capacity.total_bytes)}` : "Capacity not reported"}</span><span>{group.protection.summary}</span><span>{group.distribution.spread_percentage_points === null ? "Member balance not reported" : `${group.distribution.spread_percentage_points.toFixed(1)} point member-usage spread`}</span><span>{forecastSummary(group)}</span>{group.growth_forecast.methodology && <details><summary>Forecast method</summary><p>{group.growth_forecast.methodology}</p><small>{group.growth_forecast.data_points ?? 0} daily observations across {group.growth_forecast.history_days?.toFixed(1) ?? "0"} days</small></details>}</article>)}</div>}
       <div className="expansion-capabilities" aria-label="Detected expansion capabilities"><span>mergerFS: <strong>{assessment.detected_capabilities.mergerfs ? "Detected" : "Not configured"}</strong></span><span>SnapRAID: <strong>{assessment.detected_capabilities.snapraid ? "Detected" : "Not configured"}</strong></span><span>ZFS: <strong>{assessment.detected_capabilities.zfs ? "Detected" : "Not configured"}</strong></span></div>
       <div className="expansion-disk-list">{assessment.available_disks.map((disk) => <article key={disk.id}><div><strong>{disk.vendor} {disk.model}</strong><code>{disk.kernel_path ?? disk.stable_identity}</code></div><span>{capacity(disk.capacity_bytes)}</span><StatusBadge status={disk.health} /><span>{disk.existing_data.state === "none_detected" ? "No existing data detected" : disk.existing_data.state === "detected" ? "Existing storage detected" : "Existing data unknown"}</span>{disk.blockers.length > 0 && <small>{disk.blockers.join(" ")}</small>}</article>)}</div>
       {assessment.candidates.length === 0 ? <Notice tone="warning" title="No safe expansion plan yet">The detected disks need health, identity, or existing-data review before Hoardarr can recommend a change.</Notice> : <div className="expansion-candidate-list">{assessment.candidates.map((candidate) => <article key={candidate.id} className={candidate.recommended ? "recommended" : ""} aria-label={candidate.title}>

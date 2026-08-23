@@ -20,6 +20,16 @@ const assessment: StorageExpansionAssessment = {
     capacity: { total_bytes: 16_000_000_000_000, used_bytes: 8_000_000_000_000, free_bytes: 8_000_000_000_000, quality: "available", source: "statvfs Storage Group namespace" },
     distribution: { reported_members: 2, minimum_utilization_percent: 40, maximum_utilization_percent: 60, spread_percentage_points: 20, methodology: "Maximum minus minimum utilization." },
     protection: { data_backends: 2, parity_backends: 1, summary: "1 parity backend configured" },
+    growth_forecast: {
+      status: "available",
+      reason: null,
+      metric_entity_id: "55555555-5555-4555-8555-555555555555",
+      data_points: 30,
+      history_days: 29,
+      growth_bytes_per_day: 100_000_000_000,
+      projected: { "90": { days: 43, date: "2026-10-05" } },
+      methodology: "Theil-Sen median daily slope from stored capacity observations.",
+    },
     preferred_backend_id: "33333333-3333-4333-8333-333333333333",
   }],
   available_disks: [{
@@ -79,6 +89,7 @@ describe("StorageExpansionPanel", () => {
     expect(screen.getByText("8 TB free of 16 TB")).toBeInTheDocument();
     expect(screen.getByText("20.0 point member-usage spread")).toBeInTheDocument();
     expect(screen.getByText("1 parity backend configured")).toBeInTheDocument();
+    expect(screen.getByText(/Projected 90% full in about 43 days/)).toBeInTheDocument();
     expect(within(candidate).getAllByText("8 TB", { exact: true })).toHaveLength(2);
     expect(screen.getByText(/SnapRAID protection must be resynchronized/)).toBeInTheDocument();
     await user.click(screen.getByText("Restrictions and calculation details"));

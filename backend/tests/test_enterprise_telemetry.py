@@ -772,6 +772,18 @@ def test_forecasts_require_history_and_do_not_invent_tbw() -> None:
     assert available.status == "available"
     assert available.growth_bytes_per_day == pytest.approx(10)
     assert available.projected["90"]["days"] == 51
+    dense = capacity_forecast(
+        [
+            (start + timedelta(days=day, hours=hour), 100.0 + day * 10 + hour / 100)
+            for day in range(30)
+            for hour in range(24)
+        ],
+        total_bytes=1_000,
+        now=start + timedelta(days=30),
+    )
+    assert dense.status == "available"
+    assert dense.data_points == 30
+    assert dense.history_days == pytest.approx(29)
     wear = endurance_forecast(
         [(start + timedelta(days=index), 10.0 + index / 10) for index in range(30)],
         now=start + timedelta(days=30),

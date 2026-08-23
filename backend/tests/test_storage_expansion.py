@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from hoardarr.auth.service import Principal
-from hoardarr.db.models import Base, HardwareSnapshot, Operation
+from hoardarr.db.models import (
+    Base,
+    HardwareSnapshot,
+    MetricEntity,
+    MetricSample,
+    Operation,
+    StorageEntity,
+)
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.expansion import FilesystemUsage, build_expansion_assessment
 from hoardarr.storage.groups import assign_backend, create_group, register_disk, transition_backend
@@ -226,6 +235,85 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
         assert current_state["protection"]["summary"] == (
             "No parity backend is configured in this Storage Group."
         )
+        assert current_state["growth_forecast"]["status"] == "not_reported"
+
+
+def test_expansion_state_correlates_a_sufficient_logical_capacity_forecast() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        actor = _principal()
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        storage = StorageEntity(
+            name="MediaPool",
+            stable_identity="naa.6000forecast",
+            storage_kind="block",
+            filesystem_uuid="forecast-fs",
+            mountpoint=group.namespace_path,
+            presentation_device="/dev/mapper/media",
+            capacity_bytes=1_000,
+            logical_sector_bytes=512,
+            physical_sector_bytes=4096,
+            topology_state="single_path",
+            provider="scsi",
+        )
+        session.add(storage)
+        session.flush()
+        backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=None,
+            storage_entity_id=storage.id,
+            namespace_path=group.namespace_path,
+            role="data",
+            principal=actor,
+        )
+        transition_backend(
+            session,
+            group_id=group.id,
+            backend_id=backend.id,
+            target_state="active",
+            principal=actor,
+            reason="fixture",
+        )
+        metric_entity = MetricEntity(
+            entity_type="logical_storage",
+            stable_id="logical-storage:naa.6000forecast",
+            display_name="MediaPool",
+        )
+        session.add(metric_entity)
+        session.flush()
+        start = datetime.now(UTC) - timedelta(days=29)
+        for day in range(30):
+            session.add(
+                MetricSample(
+                    entity_id=metric_entity.id,
+                    metric_id="capacity.used",
+                    value=100 + day * 10,
+                    quality="available",
+                    source="fixture",
+                    collection_interval_seconds=86_400,
+                    raw=True,
+                    observed_at=start + timedelta(days=day),
+                )
+            )
+        session.flush()
+        result = build_expansion_assessment(
+            session,
+            snapshot=_snapshot(session, []),
+            filesystem_probe=lambda _path: FilesystemUsage(900, 1_000, 390, 610),
+        )
+        forecast = result["storage_groups"][0]["growth_forecast"]
+        assert forecast["status"] == "available"
+        assert forecast["metric_entity_id"] == metric_entity.id
+        assert forecast["growth_bytes_per_day"] == 10
+        assert forecast["projected"]["90"]["days"] == 51
 
 
 def test_two_matched_blank_disks_produce_explicit_mirror_math() -> None:

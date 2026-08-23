@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
 from typing import Any
 
@@ -74,11 +74,19 @@ def capacity_forecast(
     minimum_days: int = 7,
 ) -> CapacityForecast:
     current = _aware(now or datetime.now(UTC))
-    valid = sorted(
+    observations = sorted(
         (timestamp, value)
         for timestamp, value in used_points
         if math.isfinite(value) and value >= 0
     )
+    # Capacity is a slow-moving gauge. Keep the last observation from each UTC
+    # day so collection cadence cannot make a dense recent window crowd older
+    # evidence out of the bounded Theil-Sen input.
+    daily: dict[date, tuple[datetime, float]] = {}
+    for timestamp, value in observations:
+        aware_timestamp = _aware(timestamp)
+        daily[aware_timestamp.date()] = (aware_timestamp, float(value))
+    valid = [daily[key] for key in sorted(daily)]
     span = _history_span_days(valid)
     method = (
         "Theil-Sen median daily slope from stored capacity observations; dates are rounded "

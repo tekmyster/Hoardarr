@@ -664,6 +664,16 @@ export interface StorageExpansionAssessment {
       methodology: string;
     };
     protection: { data_backends: number; parity_backends: number; summary: string };
+    growth_forecast: {
+      status: "available" | "stable_or_declining" | "insufficient_history" | "not_reported";
+      reason: string | null;
+      metric_entity_id: string | null;
+      data_points?: number;
+      history_days?: number;
+      growth_bytes_per_day?: number | null;
+      projected?: Record<string, { days: number; date: string } | null>;
+      methodology?: string;
+    };
     preferred_backend_id: string | null;
   }>;
   available_disks: StorageExpansionDisk[];

@@ -5,13 +5,24 @@ import shutil
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import HardwareSnapshot, PhysicalDisk, StorageBackend, StorageGroup
+from hoardarr.db.models import (
+    HardwareSnapshot,
+    MetricEntity,
+    MetricRollup,
+    MetricSample,
+    PhysicalDisk,
+    StorageBackend,
+    StorageEntity,
+    StorageGroup,
+)
 from hoardarr.operations.service import document_hash
+from hoardarr.telemetry.analytics import capacity_forecast
 
 
 @dataclass(frozen=True)
@@ -25,6 +36,82 @@ class FilesystemUsage:
 def inspect_filesystem_usage(path: str) -> FilesystemUsage:
     usage = shutil.disk_usage(path)
     return FilesystemUsage(os.stat(path).st_dev, usage.total, usage.used, usage.free)
+
+
+def _group_capacity_forecast(
+    session: Session,
+    group: StorageGroup,
+    backends: list[StorageBackend],
+    total_bytes: int | None,
+) -> dict[str, Any]:
+    storage_ids = {item.storage_entity_id for item in backends if item.storage_entity_id}
+    entities = list(
+        session.scalars(
+            select(StorageEntity).where(
+                (StorageEntity.id.in_(storage_ids))
+                | (StorageEntity.mountpoint == group.namespace_path)
+            )
+        )
+    )
+    unique = {item.id: item for item in entities}
+    if len(unique) != 1:
+        return {
+            "status": "not_reported",
+            "reason": (
+                "No logical telemetry entity maps uniquely to this Storage Group."
+                if not unique
+                else "More than one logical telemetry entity maps to this Storage Group."
+            ),
+            "metric_entity_id": None,
+        }
+    storage = next(iter(unique.values()))
+    metric_entity = session.scalar(
+        select(MetricEntity).where(
+            MetricEntity.entity_type == "logical_storage",
+            MetricEntity.stable_id == f"logical-storage:{storage.stable_identity}",
+        )
+    )
+    if metric_entity is None:
+        return {
+            "status": "insufficient_history",
+            "reason": "Capacity telemetry has not been persisted for this storage yet.",
+            "metric_entity_id": None,
+        }
+    start = datetime.now(UTC) - timedelta(days=30)
+    raw = session.execute(
+        select(MetricSample.observed_at, MetricSample.value)
+        .where(
+            MetricSample.entity_id == metric_entity.id,
+            MetricSample.metric_id == "capacity.used",
+            MetricSample.observed_at >= start,
+            MetricSample.value.is_not(None),
+        )
+        .order_by(MetricSample.observed_at)
+        .limit(5000)
+    ).all()
+    rolled = session.execute(
+        select(MetricRollup.period_start, MetricRollup.last)
+        .where(
+            MetricRollup.entity_id == metric_entity.id,
+            MetricRollup.metric_id == "capacity.used",
+            MetricRollup.resolution == "day",
+            MetricRollup.period_start >= start,
+            MetricRollup.last.is_not(None),
+        )
+        .order_by(MetricRollup.period_start)
+        .limit(365)
+    ).all()
+    points = [
+        (timestamp, float(value))
+        for timestamp, value in [*rolled, *raw]
+        if value is not None
+    ]
+    forecast = capacity_forecast(points, total_bytes=total_bytes).document()
+    return {
+        **forecast,
+        "metric_entity_id": metric_entity.id,
+        "reason": None,
+    }
 
 
 def _snapshot_disks(snapshot: HardwareSnapshot) -> dict[str, dict[str, Any]]:
@@ -508,6 +595,12 @@ def build_expansion_assessment(
             for item in backends
             if item.role in {"data", "archive"} and item.lifecycle_state != "retired"
         ]
+        forecast = _group_capacity_forecast(
+            session,
+            group,
+            backends,
+            aggregate_usage.total_bytes if aggregate_usage else None,
+        )
         group_documents.append(
             {
                 "id": group.id,
@@ -542,6 +635,7 @@ def build_expansion_assessment(
                         else "No parity backend is configured in this Storage Group."
                     ),
                 },
+                "growth_forecast": forecast,
                 "preferred_backend_id": next(
                     (item.id for item in backends if item.lifecycle_state == "preferred_write"),
                     None,
