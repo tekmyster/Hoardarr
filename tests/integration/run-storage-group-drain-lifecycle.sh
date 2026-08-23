@@ -8,13 +8,15 @@ trap 'rc=$?; printf "FAILED at line %s: %s (rc=%s)\n" "$LINENO" "$BASH_COMMAND" 
 }
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d -t hoardarr-drain.XXXXXXXX)"
+managed="/mnt/hoardarr/drain-ci-$$"
 loops=()
 cleanup() {
   set +e
-  for mountpoint in "$work/source" "$work/destination"; do
+  for mountpoint in "$managed/source" "$managed/destination"; do
     mountpoint -q "$mountpoint" && umount "$mountpoint"
   done
   for loop in "${loops[@]}"; do losetup -d "$loop" 2>/dev/null || true; done
+  [[ "$managed" == /mnt/hoardarr/drain-ci-[0-9]* ]] && rm -rf -- "$managed"
   rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -28,14 +30,14 @@ for name in source destination; do
   ! grep -Fxq "$loop" <<<"$protected"
   [[ -z "$(findmnt -rn -S "$loop" -o TARGET)" ]]
   mkfs.ext4 -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$loop"
-  mkdir "$work/$name"
-  mount -o noatime "$loop" "$work/$name"
+  mkdir -p "$managed/$name"
+  mount -o noatime "$loop" "$managed/$name"
 done
 mkdir -p "$repo/dist/validation"
 python="${HOARDARR_TEST_PYTHON:-$repo/backend/.venv/bin/python}"
 "$python" "$repo/tests/integration/storage_group_drain_lifecycle.py" \
-  --source "$work/source" \
-  --destination "$work/destination" \
+  --source "$managed/source" \
+  --destination "$managed/destination" \
   --source-device "${loops[0]}" \
   --destination-device "${loops[1]}" \
   --state "$work/state" \

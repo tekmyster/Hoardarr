@@ -162,7 +162,7 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
             {
                 "stable_identity": "wwn:fresh",
                 "kernel_path": "/dev/sdb",
-                "capacity_bytes": 2_000_000_000,
+                "capacity_bytes": 4_000_000_000,
                 "media_type": "ssd",
                 "health_state": "healthy",
             },
@@ -190,7 +190,30 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
                                 "/srv/hoardarr/backends/member-two",
                             ],
                         },
-                        {"type": "SnapRAID"},
+                        {
+                            "id": "snapraid:media",
+                            "type": "SnapRAID",
+                            "configuration": {
+                                "quality": "available",
+                                "config_sha256": "a" * 64,
+                                "data_disks": [
+                                    {
+                                        "name": "d1",
+                                        "path": "/srv/hoardarr/backends/current",
+                                    },
+                                    {
+                                        "name": "d2",
+                                        "path": "/srv/hoardarr/backends/member-two",
+                                    },
+                                ],
+                                "parity_disks": [
+                                    {
+                                        "level": 1,
+                                        "path": "/srv/hoardarr/backends/parity/snapraid.parity",
+                                    }
+                                ],
+                            },
+                        },
                     ]
                 }
             },
@@ -210,7 +233,7 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
         assert candidates["add_mergerfs_member"]["recommended"] is True
         assert (
             candidates["add_mergerfs_member"]["capacity"]["estimated_usable_delta_bytes"]
-            == 2_000_000_000
+                == 4_000_000_000
         )
         assert "resynchronized" in candidates["add_mergerfs_member"]["protection_impact"]
         assert candidates["add_mergerfs_member"]["target"] == {
@@ -218,6 +241,16 @@ def test_media_group_gets_real_mergerfs_and_download_tier_candidates() -> None:
             "instance_id": "mergerfs:0123456789abcdef",
             "mountpoint": "/srv/hoardarr/media",
         }
+        assert candidates["add_mergerfs_member"]["configuration"] == {
+            "topology": "mergerfs",
+            "snapraid_role": "data",
+            "snapraid_instance_id": "snapraid:media",
+            "snapraid_config_sha256": "a" * 64,
+        }
+        assert candidates["add_snapraid_parity"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 0
+        assert candidates["add_snapraid_parity"]["configuration"]["snapraid_role"] == "parity"
         assert candidates["add_download_tier"]["setup_mode"] == "cache"
         assert candidates["new_storage_group"]["recommended"] is False
         current_state = result["storage_groups"][0]

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from hoardarr.hardware.providers import (
@@ -19,6 +21,78 @@ from hoardarr.hardware.providers import (
 )
 from hoardarr.storage.mergerfs import discover_mergerfs
 from hoardarr.storage.topology import add_logical_topology, build_storage_topology
+
+_SNAPRAID_PARITY_RE = re.compile(r"^(?:(\d+)-)?parity$")
+
+
+def _snapraid_path(value: str) -> str | None:
+    candidate = value.strip()
+    path = PurePosixPath(candidate)
+    if not candidate.startswith("/") or "\x00" in candidate or ".." in path.parts:
+        return None
+    return str(path)
+
+
+def _snapraid_configuration(config: Path) -> dict[str, Any]:
+    """Read the bounded, non-secret topology portion of a SnapRAID configuration."""
+
+    try:
+        if config.is_symlink() or config.stat().st_size > 1024 * 1024:
+            raise OSError("unsafe SnapRAID configuration")
+        raw = config.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError):
+        return {
+            "quality": "temporarily_unavailable",
+            "data_disks": [],
+            "parity_disks": [],
+            "content_files": [],
+            "config_sha256": None,
+            "errors": ["SnapRAID configuration could not be safely read."],
+        }
+    data_disks: list[dict[str, str]] = []
+    parity_disks: list[dict[str, object]] = []
+    content_files: list[str] = []
+    errors: list[str] = []
+    for line_number, raw_line in enumerate(raw.splitlines()[:16_384], start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split(maxsplit=2)
+        parity_match = _SNAPRAID_PARITY_RE.fullmatch(fields[0])
+        if parity_match:
+            value = _snapraid_path(line[len(fields[0]) :].strip())
+            if value is None:
+                errors.append(f"Invalid parity path on line {line_number}.")
+                continue
+            level = int(parity_match.group(1) or "1")
+            parity_disks.append({"level": level, "path": value})
+        elif fields[0] == "content":
+            value = _snapraid_path(line[len("content") :].strip())
+            if value is None:
+                errors.append(f"Invalid content path on line {line_number}.")
+                continue
+            content_files.append(value)
+        elif fields[0] == "data":
+            if len(fields) != 3 or not fields[1] or len(fields[1]) > 128:
+                errors.append(f"Invalid data declaration on line {line_number}.")
+                continue
+            value = _snapraid_path(fields[2])
+            if value is None:
+                errors.append(f"Invalid data path on line {line_number}.")
+                continue
+            data_disks.append({"name": fields[1], "path": value})
+    if len(data_disks) != len({item["name"] for item in data_disks}):
+        errors.append("SnapRAID data names are not unique.")
+    if len(parity_disks) != len({item["level"] for item in parity_disks}):
+        errors.append("SnapRAID parity levels are not unique.")
+    return {
+        "quality": "available" if not errors else "temporarily_unavailable",
+        "data_disks": data_disks,
+        "parity_disks": sorted(parity_disks, key=lambda item: int(item["level"])),
+        "content_files": sorted(set(content_files)),
+        "config_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+        "errors": errors[:32],
+    }
 
 
 def _command(name: str, arguments: list[str]) -> str | None:
@@ -147,6 +221,7 @@ def _snapraid_arrays(config_root: Path) -> list[dict[str, Any]]:
         return []
     items: list[dict[str, Any]] = []
     for config in sorted(config_root.glob("*.conf")):
+        configuration = _snapraid_configuration(config)
         output = _command("snapraid", ["-c", str(config), "status"])
         if output is None:
             status = {
@@ -186,6 +261,7 @@ def _snapraid_arrays(config_root: Path) -> list[dict[str, Any]]:
                 "unsynced_items": status["unsynced_items"],
                 "bad_blocks": status["bad_blocks"],
                 "last_sync": status["last_sync"],
+                "configuration": configuration,
             }
         )
     return items

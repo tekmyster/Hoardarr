@@ -433,6 +433,44 @@ def test_existing_mergerfs_expansion_rejects_stale_assessment(session: Session) 
         )
 
 
+def test_snapraid_parity_expansion_role_and_config_digest_are_bound_into_plan(
+    session: Session,
+) -> None:
+    snapshot_sha256 = document_hash(_usb_payload())
+    expansion = {
+        "candidate_id": "e" * 24,
+        "kind": "add_snapraid_parity",
+        "storage_group_id": "11111111-1111-4111-8111-111111111111",
+        "hardware_snapshot_sha256": snapshot_sha256,
+        "disk_ids": ["serial:cisco:ssd-240g:stp26501raw"],
+        "target": {
+            "provider": "mergerfs",
+            "instance_id": "mergerfs:0123456789abcdef",
+            "mountpoint": "/mnt/combined-storage",
+        },
+        "configuration": {
+            "topology": "mergerfs",
+            "snapraid_role": "parity",
+            "snapraid_instance_id": "snapraid:media",
+            "snapraid_config_sha256": "a" * 64,
+        },
+    }
+    _wizard, plan, _snapshot_record = _storage_plan(
+        session,
+        storage_answers=_storage_answers(
+            topology="mergerfs",
+            mergerfs={
+                "mode": "existing",
+                "instance_id": "mergerfs:0123456789abcdef",
+                "name": "combined-storage",
+                "mountpoint": "/mnt/combined-storage",
+            },
+            expansion=expansion,
+        ),
+    )
+    assert plan.document_json["storage"]["expansion"] == expansion
+
+
 def test_zfs_expansion_candidate_binds_reviewed_geometry_into_immutable_plan(
     session: Session,
 ) -> None:

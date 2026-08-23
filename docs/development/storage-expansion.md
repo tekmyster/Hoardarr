@@ -33,7 +33,8 @@ For a completely scanned blank disk, the planner can currently describe:
 
 - an independent Storage Group;
 - an additional mergerFS member when a mergerFS pool is actually detected;
-- the SnapRAID resynchronization/parity-size consequence when SnapRAID is actually detected;
+- an explicit SnapRAID data-member role when the exact configuration is evidence-matched to the
+  mergerFS branches, plus a separate parity-member choice when the disk is large enough;
 - an SSD/NVMe download tier for an existing media Storage Group; and
 - a matched two-disk ZFS mirror/new mirror vdev candidate with smallest-member capacity math.
 
@@ -56,12 +57,26 @@ mount definitions. The runtime command has a rollback path if branch activation 
 fails. This software path is covered with deterministic executor tests; disposable Linux execution
 remains tracked separately from the implementation claim.
 
+SnapRAID topology is read from a bounded local configuration parser. It exposes only data, parity,
+and content paths plus a configuration digest; unrelated directives and exclusion patterns are not
+returned through the inventory API. An expansion plan binds the exact `snapraid:<name>` identity,
+configuration SHA-256, and the selected `data` or `parity` role. The worker refuses a changed
+configuration. A data member is added to both mergerFS and SnapRAID; a parity member is mounted and
+added only to SnapRAID, so it is never counted as usable media capacity. The updated configuration
+is validated and synchronized with structured `snapraid -c ... status/sync` arguments. Validation,
+runtime activation, or persistent-mount failures before synchronization restore the prior
+configuration and runtime membership. Once synchronization starts, the expanded configuration and
+mount are deliberately retained on failure so files written to a newly active data member cannot
+be hidden by an unsafe rollback. The operation enters needs-attention state and explains that parity
+is stale until a later sync succeeds; parity is never described as current merely because the disk
+was added.
+
 An operator may explicitly choose **Reserve for later** on a single candidate. That authenticated,
 CSRF-protected API action changes only the durable physical-disk lifecycle state; it never opens the
 device or writes storage metadata. Reserved disks are excluded from wizard assignment and expansion
 candidates until **Release disk** is used. The transition is idempotent, audited, and independently
 rejects protected system storage.
 
-Current limitations are recorded in the unified roadmap: richer current-state capacity/forecast
-analysis, additional ZFS vdev geometries, explicit SnapRAID parity expansion selection, and the
-disposable-Linux expansion fault matrix remain in the EXPAND dependency family.
+Current limitations are recorded in the unified roadmap: additional ZFS multi-vdev expansion
+recommendations and the disposable-Linux expansion fault matrix remain in the EXPAND dependency
+family.

@@ -292,7 +292,13 @@ def build_expansion_assessment(
         for item in pool_items
         if isinstance(item, dict) and str(item.get("type", "")).casefold() == "mergerfs"
     ]
+    snapraid_pools = [
+        item
+        for item in pool_items
+        if isinstance(item, dict) and str(item.get("type", "")).casefold() == "snapraid"
+    ]
     group_mergerfs_targets: dict[str, dict[str, Any]] = {}
+    group_snapraid_targets: dict[str, dict[str, Any]] = {}
     for group in groups:
         backend_paths = {
             item.namespace_path
@@ -312,6 +318,26 @@ def build_expansion_assessment(
         ]
         if len(matches) == 1:
             group_mergerfs_targets[group.id] = matches[0]
+            mergerfs_branches = {
+                str(path) for path in matches[0].get("branches", []) if isinstance(path, str)
+            }
+            snapraid_matches = []
+            for snapraid_pool in snapraid_pools:
+                configuration = snapraid_pool.get("configuration")
+                if (
+                    not isinstance(configuration, dict)
+                    or configuration.get("quality") != "available"
+                ):
+                    continue
+                data_paths = {
+                    str(item.get("path"))
+                    for item in configuration.get("data_disks", [])
+                    if isinstance(item, dict) and isinstance(item.get("path"), str)
+                }
+                if data_paths.intersection(backend_paths | mergerfs_branches):
+                    snapraid_matches.append(snapraid_pool)
+            if len(snapraid_matches) == 1:
+                group_snapraid_targets[group.id] = snapraid_matches[0]
 
     candidates: list[dict[str, Any]] = []
     usable_blank = [
@@ -357,6 +383,22 @@ def build_expansion_assessment(
         for group in media_groups:
             mergerfs_target = group_mergerfs_targets.get(group.id)
             if mergerfs_target is not None:
+                snapraid_target = group_snapraid_targets.get(group.id)
+                snapraid_configuration = (
+                    snapraid_target.get("configuration")
+                    if isinstance(snapraid_target, dict)
+                    and isinstance(snapraid_target.get("configuration"), dict)
+                    else None
+                )
+                configuration: dict[str, Any] = {"topology": "mergerfs"}
+                if snapraid_configuration is not None:
+                    configuration.update(
+                        {
+                            "snapraid_role": "data",
+                            "snapraid_instance_id": snapraid_target["id"],
+                            "snapraid_config_sha256": snapraid_configuration["config_sha256"],
+                        }
+                    )
                 candidates.append(
                     _candidate(
                         kind="add_mergerfs_member",
@@ -371,7 +413,7 @@ def build_expansion_assessment(
                         usable_delta=capacity,
                         protection=(
                             "SnapRAID protection must be resynchronized after the member is added."
-                            if has_snapraid
+                            if snapraid_target is not None
                             else "Combined storage alone does not add drive-failure protection."
                         ),
                         expansion="Different-size members can be added later.",
@@ -383,7 +425,7 @@ def build_expansion_assessment(
                         mode="expand",
                         restrictions=(
                             ["Parity must be at least as large as the largest protected data disk."]
-                            if has_snapraid
+                            if snapraid_target is not None
                             else []
                         ),
                         methodology=(
@@ -395,9 +437,87 @@ def build_expansion_assessment(
                             "instance_id": str(mergerfs_target["id"]),
                             "mountpoint": str(mergerfs_target["mountpoint"]),
                         },
-                        configuration={"topology": "mergerfs"},
+                        configuration=configuration,
                     )
                 )
+                if snapraid_configuration is not None:
+                    parity_paths = [
+                        str(item.get("path"))
+                        for item in snapraid_configuration.get("parity_disks", [])
+                        if isinstance(item, dict) and isinstance(item.get("path"), str)
+                    ]
+                    largest_data_capacity = max(
+                        (
+                            int(item.capacity_bytes or 0)
+                            for item in session.scalars(
+                                select(PhysicalDisk)
+                                .join(
+                                    StorageBackend,
+                                    StorageBackend.physical_disk_id == PhysicalDisk.id,
+                                )
+                                .where(
+                                    StorageBackend.storage_group_id == group.id,
+                                    StorageBackend.role.in_(("data", "archive")),
+                                    StorageBackend.lifecycle_state != "retired",
+                                )
+                            )
+                        ),
+                        default=0,
+                    )
+                    restrictions = [
+                        "The parity disk must be at least as large as every protected data disk.",
+                        "Parity capacity does not increase the media folder's usable capacity.",
+                    ]
+                    if capacity < largest_data_capacity:
+                        restrictions.insert(
+                            0,
+                            "This disk is too small to protect the largest current data disk.",
+                        )
+                    if len(parity_paths) < 6 and capacity >= largest_data_capacity:
+                        candidates.append(
+                            _candidate(
+                                kind="add_snapraid_parity",
+                                disk_ids=[disk["id"]],
+                                title=f"Add another parity disk to {group.name}",
+                                summary=(
+                                    "Increase parity protection without adding this disk to the "
+                                    "combined media folder."
+                                ),
+                                group=group,
+                                raw_delta=capacity,
+                                usable_delta=0,
+                                protection=(
+                                    f"Adds parity level {len(parity_paths) + 1}; a full sync is "
+                                    "required before the added protection is current."
+                                ),
+                                expansion="Media capacity is unchanged; protection capacity grows.",
+                                migration=(
+                                    "Format and mount the parity disk, update the exact SnapRAID "
+                                    "configuration, validate it, then perform a durable parity "
+                                    "sync."
+                                ),
+                                recommended=False,
+                                mode="advanced",
+                                restrictions=restrictions,
+                                methodology=(
+                                    "A parity member contributes protection rather than file "
+                                    "storage, so usable media capacity changes by zero bytes."
+                                ),
+                                target={
+                                    "provider": "mergerfs",
+                                    "instance_id": str(mergerfs_target["id"]),
+                                    "mountpoint": str(mergerfs_target["mountpoint"]),
+                                },
+                                configuration={
+                                    "topology": "mergerfs",
+                                    "snapraid_role": "parity",
+                                    "snapraid_instance_id": snapraid_target["id"],
+                                    "snapraid_config_sha256": snapraid_configuration[
+                                        "config_sha256"
+                                    ],
+                                },
+                            )
+                        )
             if disk["media_type"] in {"ssd", "nvme"}:
                 candidates.append(
                     _candidate(

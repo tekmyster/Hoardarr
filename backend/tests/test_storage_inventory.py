@@ -34,3 +34,61 @@ def test_live_inventory_reports_md_arrays_and_managed_shares(tmp_path: Path, mon
     assert result["pools"]["items"][0]["type"] == "Linux MD raid6"
     assert result["pools"]["items"][0]["status"] == "clean"
     assert [item["protocol"] for item in result["shares"]["items"]] == ["SMB", "NFS"]
+
+
+def test_snapraid_inventory_exposes_bounded_role_evidence(tmp_path: Path, monkeypatch) -> None:
+    config_root = tmp_path / "snapraid"
+    config_root.mkdir()
+    config = config_root / "media.conf"
+    config.write_text(
+        "\n".join(
+            (
+                "parity /srv/hoardarr/backends/parity/snapraid.parity",
+                "2-parity /srv/hoardarr/backends/parity2/snapraid.parity",
+                "content /var/lib/hoardarr/snapraid/media.content",
+                "content /srv/hoardarr/backends/data-a/snapraid.content",
+                "data movies_a /srv/hoardarr/backends/data-a",
+                "data movies_b /srv/hoardarr/backends/data-b",
+                "exclude *.tmp",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_command",
+        lambda name, _arguments: (
+            "SnapRAID array\nEverything is OK\n" if name == "snapraid" else None
+        ),
+    )
+
+    item = inventory._snapraid_arrays(config_root)[0]
+
+    assert item["id"] == "snapraid:media"
+    assert item["configuration"]["quality"] == "available"
+    assert item["configuration"]["data_disks"] == [
+        {"name": "movies_a", "path": "/srv/hoardarr/backends/data-a"},
+        {"name": "movies_b", "path": "/srv/hoardarr/backends/data-b"},
+    ]
+    assert [entry["level"] for entry in item["configuration"]["parity_disks"]] == [1, 2]
+    assert len(item["configuration"]["config_sha256"]) == 64
+    assert "*.tmp" not in str(item["configuration"])
+
+
+def test_snapraid_inventory_fails_closed_on_malformed_or_oversized_config(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "unsafe.conf"
+    config.write_text(
+        "parity relative/path\ndata duplicate /srv/a\ndata duplicate /srv/b\n",
+        encoding="utf-8",
+    )
+    parsed = inventory._snapraid_configuration(config)
+    assert parsed["quality"] == "temporarily_unavailable"
+    assert parsed["errors"]
+
+    config.write_bytes(b"x" * (1024 * 1024 + 1))
+    oversized = inventory._snapraid_configuration(config)
+    assert oversized["quality"] == "temporarily_unavailable"
+    assert oversized["config_sha256"] is None

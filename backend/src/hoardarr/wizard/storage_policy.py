@@ -147,6 +147,7 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
     supported_kinds = {
         "import_existing",
         "add_mergerfs_member",
+        "add_snapraid_parity",
         "add_download_tier",
         "new_storage_group",
         "new_zfs_mirror",
@@ -179,18 +180,26 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
             "instance_id": instance_id,
             "mountpoint": _mergerfs_mountpoint(raw_target.get("mountpoint")),
         }
-    if kind == "add_mergerfs_member" and target is None:
+    if kind in {"add_mergerfs_member", "add_snapraid_parity"} and target is None:
         _error("storage.expansion.target", "is required for an existing mergerFS expansion")
-    if kind != "add_mergerfs_member" and target is not None:
+    if kind not in {"add_mergerfs_member", "add_snapraid_parity"} and target is not None:
         _error("storage.expansion.target", "is only valid for an existing mergerFS expansion")
     configuration = _as_mapping(
         expansion.get("configuration", {}), field="storage.expansion.configuration"
     )
-    if set(configuration) - {"topology", "vdev_type", "vdev_width"}:
+    if set(configuration) - {
+        "topology",
+        "vdev_type",
+        "vdev_width",
+        "snapraid_role",
+        "snapraid_instance_id",
+        "snapraid_config_sha256",
+    }:
         _error("storage.expansion.configuration", "contains unsupported fields")
     expected_configuration: dict[str, Any] = {
         "import_existing": {"topology": "import"},
         "add_mergerfs_member": {"topology": "mergerfs"},
+        "add_snapraid_parity": {"topology": "mergerfs", "snapraid_role": "parity"},
         "add_download_tier": {"topology": "download-cache"},
         "new_storage_group": {"topology": "individual"},
         "new_zfs_mirror": {"topology": "zfs", "vdev_type": "mirror", "vdev_width": 2},
@@ -204,6 +213,32 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         configuration.get("vdev_type") != expected_configuration["vdev_type"]
     ):
         _error("storage.expansion.configuration.vdev_type", "does not match the candidate kind")
+    snapraid_role = configuration.get("snapraid_role")
+    if snapraid_role is not None:
+        if snapraid_role not in {"data", "parity"}:
+            _error("storage.expansion.configuration.snapraid_role", "must be data or parity")
+        if kind == "add_snapraid_parity" and snapraid_role != "parity":
+            _error("storage.expansion.configuration.snapraid_role", "must be parity")
+        if kind == "add_mergerfs_member" and snapraid_role != "data":
+            _error("storage.expansion.configuration.snapraid_role", "must be data")
+        instance_id = configuration.get("snapraid_instance_id")
+        digest = configuration.get("snapraid_config_sha256")
+        if (
+            not isinstance(instance_id, str)
+            or not instance_id.startswith("snapraid:")
+            or len(instance_id) > 256
+        ):
+            _error(
+                "storage.expansion.configuration.snapraid_instance_id",
+                "must identify the reviewed SnapRAID configuration",
+            )
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+            _error(
+                "storage.expansion.configuration.snapraid_config_sha256",
+                "must bind the reviewed SnapRAID configuration",
+            )
+    elif kind == "add_snapraid_parity":
+        _error("storage.expansion.configuration.snapraid_role", "is required")
     if str(kind).startswith("new_zfs_"):
         width = configuration.get("vdev_width")
         minimum = {"mirror": 2, "raidz1": 3, "raidz2": 4, "raidz3": 5}[
@@ -932,7 +967,8 @@ def normalize_storage_answers(
             target = normalized["expansion"]["target"]
             if (
                 target is None
-                or normalized["expansion"]["kind"] != "add_mergerfs_member"
+                or normalized["expansion"]["kind"]
+                not in {"add_mergerfs_member", "add_snapraid_parity"}
                 or
                 normalized["mergerfs"]["mode"] != "existing"
                 or normalized["mergerfs"]["instance_id"] != target["instance_id"]

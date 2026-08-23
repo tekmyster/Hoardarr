@@ -27,6 +27,7 @@ from hoardarr.storage.layouts import (
     mergerfs_expand_commands,
     sector_conversion_commands,
     snapraid_config,
+    snapraid_expand_config,
     wipe_commands,
 )
 from hoardarr.storage.maintenance import (
@@ -1942,42 +1943,159 @@ def _execute_actions(
                 raise ExecutorFailure(
                     "mergerfs_options_invalid", "Existing mergerFS options are unavailable."
                 )
-        new_branches = [os.fspath(item) for item in disk_mounts]
+        expansion = storage.get("expansion")
+        expansion_configuration = (
+            expansion.get("configuration") if isinstance(expansion, Mapping) else None
+        )
+        snapraid_role = (
+            expansion_configuration.get("snapraid_role")
+            if isinstance(expansion_configuration, Mapping)
+            else None
+        )
+        if snapraid_role not in {None, "data", "parity"}:
+            raise ExecutorFailure(
+                "snapraid_expansion_invalid", "The reviewed SnapRAID role is invalid."
+            )
+        new_member_mounts = [os.fspath(item) for item in disk_mounts]
+        if snapraid_role is not None and (
+            mergerfs.get("mode") != "existing" or len(new_member_mounts) != 1
+        ):
+            raise ExecutorFailure(
+                "snapraid_expansion_invalid",
+                "SnapRAID expansion requires one new disk and an existing mergerFS target.",
+            )
+        new_branches = [] if snapraid_role == "parity" else new_member_mounts
         if set(prior_branches).intersection(new_branches):
             raise ExecutorFailure(
                 "mergerfs_duplicate_branch",
                 "A drive is already a member of this mergerFS instance.",
             )
         branches = ":".join([*prior_branches, *new_branches])
-        if mergerfs.get("mode") == "existing":
-            try:
+        changed_runtime = False
+        snapraid_sync_started = False
+        snapraid_config_path: Path | None = None
+        snapraid_original: str | None = None
+        try:
+            if snapraid_role is not None:
+                instance_id = expansion_configuration.get("snapraid_instance_id")
+                expected_digest = expansion_configuration.get("snapraid_config_sha256")
+                match = (
+                    re.fullmatch(r"snapraid:([A-Za-z0-9_.-]{1,128})", str(instance_id))
+                    if isinstance(expected_digest, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                    else None
+                )
+                if match is None:
+                    raise ExecutorFailure(
+                        "snapraid_expansion_invalid",
+                        "The reviewed SnapRAID configuration identity is invalid.",
+                    )
+                snapraid_config_path = paths.snapraid_config_root / f"{match.group(1)}.conf"
+                if snapraid_config_path.parent != paths.snapraid_config_root:
+                    raise ExecutorFailure(
+                        "snapraid_config_invalid", "The SnapRAID configuration path is invalid."
+                    )
+                try:
+                    snapraid_original = snapraid_config_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise ExecutorFailure(
+                        "snapraid_config_unavailable",
+                        "The reviewed SnapRAID configuration is unavailable.",
+                    ) from exc
+                if hashlib.sha256(snapraid_original.encode()).hexdigest() != expected_digest:
+                    raise ExecutorFailure(
+                        "snapraid_config_changed",
+                        "The SnapRAID configuration changed after review.",
+                    )
+                updated = snapraid_expand_config(
+                    snapraid_original,
+                    role=snapraid_role,
+                    mountpoint=new_member_mounts[0],
+                )
+                atomic_text(snapraid_config_path, updated, mode=0o640)
+                _revalidate(document, inventory_provider, paths)
+                runner(
+                    [_tool("snapraid"), "-c", os.fspath(snapraid_config_path), "status"],
+                    300,
+                )
+            if mergerfs.get("mode") == "existing" and new_branches:
                 expand_commands = mergerfs_expand_commands(str(combined), new_branches)
-            except LayoutError as exc:
-                raise ExecutorFailure("mergerfs_options_invalid", str(exc)) from exc
-            changed_runtime = False
-            try:
                 for command in expand_commands:
                     runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
                     changed_runtime = True
-            except Exception:
-                if changed_runtime:
-                    runner(
-                        [
-                            _tool("setfattr"),
-                            "-n",
-                            "user.mergerfs.branches",
-                            "-v",
-                            ":".join(prior_branches),
-                            os.fspath(combined / ".mergerfs"),
-                        ],
-                        120,
-                    )
-                raise
-        else:
-            runner([_tool("mergerfs"), "-o", options, branches, os.fspath(combined)], 120)
-        if mergerfs.get("mode") == "existing" and matches[0].get("configured") is True:
+            elif mergerfs.get("mode") == "create":
+                runner([_tool("mergerfs"), "-o", options, branches, os.fspath(combined)], 120)
+            if snapraid_role is not None:
+                persistent_update = (
+                    (str(combined), [*prior_branches, *new_branches]) if new_branches else None
+                )
+                _append_fstab(
+                    paths,
+                    operation_id,
+                    fstab_lines,
+                    mergerfs_update=persistent_update,
+                )
+                fstab_lines.clear()
+                journal["phase"] = "Synchronizing SnapRAID protection"
+                journal["current_action"] = {
+                    "id": "snapraid-sync",
+                    "type": "snapraid.sync",
+                    "started_at": time.time(),
+                }
+                journal["updated_at"] = time.time()
+                atomic_json(_journal_path(paths, operation_id), journal)
+                _revalidate(document, inventory_provider, paths)
+                snapraid_sync_started = True
+                runner(
+                    [_tool("snapraid"), "-c", os.fspath(snapraid_config_path), "sync"],
+                    86_400,
+                )
+        except LayoutError as exc:
+            if snapraid_config_path is not None and snapraid_original is not None:
+                atomic_text(snapraid_config_path, snapraid_original, mode=0o640)
+            if changed_runtime:
+                runner(
+                    [
+                        _tool("setfattr"),
+                        "-n",
+                        "user.mergerfs.branches",
+                        "-v",
+                        ":".join(prior_branches),
+                        os.fspath(combined / ".mergerfs"),
+                    ],
+                    120,
+                )
+            raise ExecutorFailure("snapraid_expansion_invalid", str(exc)) from exc
+        except Exception as exc:
+            if snapraid_sync_started:
+                raise ExecutorFailure(
+                    "snapraid_sync_incomplete",
+                    "The expanded storage remains configured, but parity synchronization did "
+                    "not complete. New files may not yet be protected.",
+                    needs_attention=True,
+                ) from exc
+            if snapraid_config_path is not None and snapraid_original is not None:
+                atomic_text(snapraid_config_path, snapraid_original, mode=0o640)
+            if changed_runtime:
+                runner(
+                    [
+                        _tool("setfattr"),
+                        "-n",
+                        "user.mergerfs.branches",
+                        "-v",
+                        ":".join(prior_branches),
+                        os.fspath(combined / ".mergerfs"),
+                    ],
+                    120,
+                )
+            raise
+        if (
+            new_branches
+            and mergerfs.get("mode") == "existing"
+            and matches[0].get("configured") is True
+        ):
             mergerfs_fstab_update = (str(combined), [*prior_branches, *new_branches])
-        else:
+        elif mergerfs.get("mode") == "create":
             fstab_lines.append(f"{branches} {combined} fuse.mergerfs {options},nofail 0 0")
         if combined != presentation_root:
             runner(

@@ -7,6 +7,9 @@ trap 'rc=$?; printf "FAILED at line %s: %s (rc=%s)\n" "$LINENO" "$BASH_COMMAND" 
   exit 1
 }
 work="$(mktemp -d -t hoardarr-loop.XXXXXXXX)"
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+python="${HOARDARR_TEST_PYTHON:-$repo/backend/.venv/bin/python}"
+managed="/mnt/hoardarr/ci-$$"
 loops=()
 md_device=""
 zpool_name=""
@@ -18,6 +21,7 @@ cleanup() {
     findmnt -rn -S "$loop" -o TARGET | while IFS= read -r target; do umount -- "$target" 2>/dev/null || true; done
     losetup -d -- "$loop" 2>/dev/null || true
   done
+  [[ "$managed" == /mnt/hoardarr/ci-[0-9]* ]] && rm -rf -- "$managed"
   rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -100,23 +104,76 @@ snap_data="$created_loop"
 make_loop snap-parity 512M
 snap_parity="$created_loop"
 for member in "$snap_data" "$snap_parity"; do assert_test_loop "$member"; mkfs.ext4 -F -E nodiscard "$member"; done
-mkdir "$work/snap-data" "$work/snap-parity"
-mount "$snap_data" "$work/snap-data"
-mount "$snap_parity" "$work/snap-parity"
-printf 'test payload\n' >"$work/snap-data/file.txt"
+mkdir -p "$managed/data-1" "$managed/parity-1"
+mount "$snap_data" "$managed/data-1"
+mount "$snap_parity" "$managed/parity-1"
+printf 'test payload\n' >"$managed/data-1/file.txt"
 cat >"$work/snapraid.conf" <<EOF
-parity $work/snap-parity/snapraid.parity
-content $work/snap-data/snapraid.content
-content $work/snap-parity/snapraid.content
-data d1 $work/snap-data
+parity $managed/parity-1/snapraid.parity
+content $managed/data-1/snapraid.content
+content $managed/parity-1/snapraid.content
+data d1 $managed/data-1
 EOF
 snapraid -c "$work/snapraid.conf" sync
 snapraid -c "$work/snapraid.conf" status
 snapraid -c "$work/snapraid.conf" diff
 snapraid -c "$work/snapraid.conf" check
+
+make_loop snap-data-2 512M
+snap_data_2="$created_loop"
+assert_test_loop "$snap_data_2"
+mkfs.ext4 -F -E nodiscard "$snap_data_2"
+mkdir "$managed/data-2"
+mount "$snap_data_2" "$managed/data-2"
+printf 'second data member\n' >"$managed/data-2/file.txt"
+config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
+"$python" "$repo/tests/integration/snapraid_expand_config.py" \
+  --config "$work/snapraid.conf" \
+  --role data \
+  --mountpoint "$managed/data-2" \
+  --expected-sha256 "$config_sha"
+snapraid -c "$work/snapraid.conf" status
+snapraid -c "$work/snapraid.conf" sync
+snapraid -c "$work/snapraid.conf" check
+grep -Eq "^data h[0-9a-f]{12} $managed/data-2$" "$work/snapraid.conf"
+
+make_loop snap-parity-2 512M
+snap_parity_2="$created_loop"
+assert_test_loop "$snap_parity_2"
+mkfs.ext4 -F -E nodiscard "$snap_parity_2"
+mkdir "$managed/parity-2"
+mount "$snap_parity_2" "$managed/parity-2"
+config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
+"$python" "$repo/tests/integration/snapraid_expand_config.py" \
+  --config "$work/snapraid.conf" \
+  --role parity \
+  --mountpoint "$managed/parity-2" \
+  --expected-sha256 "$config_sha"
+snapraid -c "$work/snapraid.conf" status
+snapraid -c "$work/snapraid.conf" sync
+snapraid -c "$work/snapraid.conf" check
+grep -Fq "2-parity $managed/parity-2/snapraid.parity" "$work/snapraid.conf"
+mkdir -p "$repo/dist/validation"
+final_config_sha="$(sha256sum "$work/snapraid.conf" | awk '{print $1}')"
+cat >"$repo/dist/validation/snapraid-expansion.json" <<EOF
+{
+  "classification": "VERIFIED IN ISOLATION",
+  "source": "disposable Linux loop devices",
+  "data_member_added": true,
+  "second_parity_added": true,
+  "snapraid_sync_completed": true,
+  "snapraid_check_completed": true,
+  "configuration_sha256": "$final_config_sha",
+  "member_count": 2,
+  "parity_level_count": 2
+}
+EOF
 stat --format='%n size=%s blocks=%b' \
-  "$work/snap-data/snapraid.content" \
-  "$work/snap-parity/snapraid.content" \
-  "$work/snap-parity/snapraid.parity"
-umount "$work/snap-data"
-umount "$work/snap-parity"
+  "$managed/data-1/snapraid.content" \
+  "$managed/data-2/snapraid.content" \
+  "$managed/parity-1/snapraid.parity" \
+  "$managed/parity-2/snapraid.parity"
+umount "$managed/data-1"
+umount "$managed/data-2"
+umount "$managed/parity-1"
+umount "$managed/parity-2"

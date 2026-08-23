@@ -658,7 +658,14 @@ export interface StorageExpansionSelection {
   hardware_snapshot_sha256: string;
   disk_ids: string[];
   target: StorageExpansionTarget | null;
-  configuration: { topology?: string; vdev_type?: string; vdev_width?: number };
+  configuration: {
+    topology?: string;
+    vdev_type?: string;
+    vdev_width?: number;
+    snapraid_role?: "data" | "parity";
+    snapraid_instance_id?: string;
+    snapraid_config_sha256?: string;
+  };
 }
 
 export interface StorageExpansionAssessment {
@@ -723,7 +730,14 @@ export interface StorageExpansionAssessment {
     migration_work: string;
     restrictions: string[];
     target: StorageExpansionTarget | null;
-    configuration: { topology?: string; vdev_type?: string; vdev_width?: number };
+    configuration: {
+      topology?: string;
+      vdev_type?: string;
+      vdev_width?: number;
+      snapraid_role?: "data" | "parity";
+      snapraid_instance_id?: string;
+      snapraid_config_sha256?: string;
+    };
   }>;
   methodology: string;
 }

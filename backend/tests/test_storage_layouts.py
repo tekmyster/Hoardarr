@@ -11,6 +11,7 @@ from hoardarr.storage.layouts import (
     normalize_wipe,
     sector_conversion_commands,
     snapraid_config,
+    snapraid_expand_config,
     wipe_commands,
 )
 
@@ -254,6 +255,38 @@ def test_mergerfs_expansion_uses_runtime_xattr_and_verifies() -> None:
     )
     assert commands[0].argv[4] == "+>/mnt/hoardarr/disks/a:/mnt/hoardarr/disks/b"
     assert commands[1].argv[0] == "getfattr"
+
+
+def test_snapraid_expansion_adds_explicit_data_or_next_parity_role() -> None:
+    original = (
+        "parity /mnt/hoardarr/parity/snapraid.parity\n"
+        "content /mnt/hoardarr/data-a/snapraid.content\n"
+        "data d1 /mnt/hoardarr/data-a\n"
+    )
+    data = snapraid_expand_config(original, role="data", mountpoint="/mnt/hoardarr/data-b")
+    assert "content /mnt/hoardarr/data-b/snapraid.content" in data
+    assert "data h" in data
+    assert data.endswith(" /mnt/hoardarr/data-b\n")
+
+    parity = snapraid_expand_config(
+        original, role="parity", mountpoint="/mnt/hoardarr/parity-2"
+    )
+    assert parity.endswith("2-parity /mnt/hoardarr/parity-2/snapraid.parity\n")
+
+    with pytest.raises(LayoutError, match="already configured"):
+        snapraid_expand_config(original, role="data", mountpoint="/mnt/hoardarr/data-a")
+    with pytest.raises(LayoutError, match="unsafe data"):
+        snapraid_expand_config(
+            "data d1 ../../outside\n",
+            role="data",
+            mountpoint="/mnt/hoardarr/data-b",
+        )
+    with pytest.raises(LayoutError, match="too large"):
+        snapraid_expand_config(
+            "# filler\n" * 16_385,
+            role="parity",
+            mountpoint="/mnt/hoardarr/parity-2",
+        )
 
 
 def test_layout_rejects_duplicate_or_unassigned_drive_roles() -> None:

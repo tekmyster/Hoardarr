@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -578,6 +579,82 @@ def snapraid_config(options: Mapping[str, Any], disk_mounts: Mapping[str, str]) 
         lines.append(f"content {mount}/snapraid.content")
         lines.append(f"data d{index} {mount}")
     return "\n".join(lines) + "\n"
+
+
+def snapraid_expand_config(content: str, *, role: str, mountpoint: str) -> str:
+    """Append one reviewed data or parity member without reinterpreting other directives."""
+
+    mount = _path(mountpoint, "snapraid.expansion.mountpoint")
+    if role not in {"data", "parity"}:
+        raise LayoutError("snapraid.expansion.role", "must be data or parity")
+    lines = content.splitlines()
+    if len(lines) > 16_384 or len(content.encode("utf-8")) > 1024 * 1024:
+        raise LayoutError("snapraid.configuration", "is too large to update safely")
+    normalized_mount = str(PurePosixPath(mount))
+    existing_paths: set[str] = set()
+    data_names: set[str] = set()
+    parity_levels: set[int] = set()
+    for index, raw in enumerate(lines[:16_384], start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split(maxsplit=2)
+        if fields[0] == "data":
+            if len(fields) != 3:
+                raise LayoutError("snapraid.configuration", f"has invalid data line {index}")
+            if (
+                not fields[2].startswith("/")
+                or "\x00" in fields[2]
+                or ".." in PurePosixPath(fields[2]).parts
+            ):
+                raise LayoutError("snapraid.configuration", f"has unsafe data line {index}")
+            data_names.add(fields[1])
+            existing_paths.add(str(PurePosixPath(fields[2])))
+        elif fields[0] == "content" and len(fields) >= 2:
+            configured_path = line[len("content") :].strip()
+            if (
+                not configured_path.startswith("/")
+                or "\x00" in configured_path
+                or ".." in PurePosixPath(configured_path).parts
+            ):
+                raise LayoutError("snapraid.configuration", f"has unsafe content line {index}")
+            existing_paths.add(str(PurePosixPath(configured_path).parent))
+        else:
+            parity = re.fullmatch(r"(?:(\d+)-)?parity", fields[0])
+            if parity and len(fields) >= 2:
+                configured_path = line[len(fields[0]) :].strip()
+                if (
+                    not configured_path.startswith("/")
+                    or "\x00" in configured_path
+                    or ".." in PurePosixPath(configured_path).parts
+                ):
+                    raise LayoutError(
+                        "snapraid.configuration", f"has unsafe parity line {index}"
+                    )
+                parity_levels.add(int(parity.group(1) or "1"))
+                existing_paths.add(str(PurePosixPath(configured_path).parent))
+    if normalized_mount in existing_paths:
+        raise LayoutError("snapraid.expansion.mountpoint", "is already configured")
+    additions: list[str]
+    if role == "data":
+        name = f"h{hashlib.sha256(normalized_mount.encode()).hexdigest()[:12]}"
+        if name in data_names:
+            raise LayoutError("snapraid.expansion.data_name", "is already configured")
+        additions = [
+            f"content {normalized_mount}/snapraid.content",
+            f"data {name} {normalized_mount}",
+        ]
+    else:
+        level = 1
+        while level in parity_levels:
+            level += 1
+        if level > 6:
+            raise LayoutError("snapraid.expansion.parity", "supports at most six parity levels")
+        keyword = "parity" if level == 1 else f"{level}-parity"
+        additions = [f"{keyword} {normalized_mount}/snapraid.parity"]
+    prefix = content.rstrip("\n")
+    addition_text = "\n".join(additions)
+    return f"{prefix}\n{addition_text}\n" if prefix else f"{addition_text}\n"
 
 
 def normalize_wipe(value: Any) -> dict[str, Any]:

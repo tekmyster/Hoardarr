@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from contextlib import nullcontext
@@ -21,7 +22,7 @@ from hoardarr.storage.executor import (
     apply_storage_plan,
     storage_operation_status,
 )
-from hoardarr.storage.layouts import CommandSpec
+from hoardarr.storage.layouts import CommandSpec, snapraid_expand_config
 
 
 @pytest.mark.parametrize(
@@ -230,6 +231,185 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
     assert not any(command[0].startswith("mkfs") for command in commands)
     assert [command[0] for command in commands].count("setfattr") == 1
     assert result["mountpoint"] == str(combined)
+
+
+@pytest.mark.parametrize(
+    ("role", "fail_command"),
+    [("data", None), ("parity", None), ("data", "status"), ("data", "sync")],
+)
+def test_existing_mergerfs_snapraid_expansion_applies_explicit_role(
+    role: str,
+    fail_command: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    combined = tmp_path / "managed" / "data" / "media"
+    new_member = tmp_path / "mounts" / document_hash(DEVICE_ID)[:16]
+    config_root = tmp_path / "snapraid"
+    config_root.mkdir()
+    config_path = config_root / "media.conf"
+    original = (
+        "parity /mnt/parity/snapraid.parity\n"
+        "content /mnt/member-a/snapraid.content\n"
+        "data d1 /mnt/member-a\n"
+    )
+    config_path.write_text(original, encoding="utf-8")
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        fstab=tmp_path / "fstab",
+        mount_root=tmp_path / "mounts",
+        snapraid_config_root=config_root,
+    )
+    paths.fstab.write_text(
+        f"/mnt/member-a:/mnt/member-b {combined} fuse.mergerfs "
+        "category.create=mfs,category.search=ff,use_ino,nofail 0 0\n",
+        encoding="utf-8",
+    )
+    live = {
+        **_live_disk(),
+        "partitions": [
+            {
+                "kernel_path": "/dev/sdz1",
+                "filesystem": {"type": "ext4", "uuid": "member-uuid"},
+            }
+        ],
+    }
+    document = {
+        "presentation_root": "/data/media",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "mergerfs",
+            "selected_devices": [_selected_device()],
+            "actions": [
+                {
+                    "action_id": "storage-layout",
+                    "type": "storage.layout.ensure",
+                    "topology": "mergerfs",
+                    "device_ids": [DEVICE_ID],
+                    "purpose": "media",
+                    "destructive": False,
+                }
+            ],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "mergerfs": {
+                "mode": "existing",
+                "instance_id": "mergerfs:0123456789abcdef",
+                "name": "media",
+                "mountpoint": "/data/media",
+            },
+            "expansion": {
+                "kind": "add_snapraid_parity" if role == "parity" else "add_mergerfs_member",
+                "configuration": {
+                    "topology": "mergerfs",
+                    "snapraid_role": role,
+                    "snapraid_instance_id": "snapraid:media",
+                    "snapraid_config_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                },
+            },
+        },
+    }
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: live})
+    monkeypatch.setattr(
+        executor,
+        "_safe_mountpoint",
+        lambda value: tmp_path / "managed" / value.lstrip("/"),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_blkid_value",
+        lambda _partition, field: "ext4" if field == "TYPE" else "member-uuid",
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    monkeypatch.setattr(
+        executor,
+        "snapraid_expand_config",
+        lambda content, *, role, mountpoint: snapraid_expand_config(
+            content,
+            role=role,
+            mountpoint="/mnt/hoardarr/new-member",
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "mergerfs_expand_commands",
+        lambda _mountpoint, _branches: [
+            CommandSpec(("setfattr", "runtime"), 120, "expand")
+        ],
+    )
+    monkeypatch.setattr(
+        executor,
+        "discover_mergerfs",
+        lambda **_kwargs: {
+            "items": [
+                {
+                    "id": "mergerfs:0123456789abcdef",
+                    "mountpoint": str(combined),
+                    "branches": ["/mnt/member-a", "/mnt/member-b"],
+                    "options": ["category.create=mfs", "category.search=ff", "use_ino"],
+                    "active": True,
+                    "configured": True,
+                }
+            ]
+        },
+    )
+
+    def run(command: list[str], _timeout: int) -> None:
+        commands.append(command)
+        if fail_command and command[0] == "snapraid" and command[-1] == fail_command:
+            raise RuntimeError(f"injected SnapRAID {fail_command} failure")
+
+    if fail_command:
+        expected_error = executor.ExecutorFailure if fail_command == "sync" else RuntimeError
+        with pytest.raises(expected_error) as failure:
+            executor._execute_actions(
+                operation_id=operation_id,
+                document=document,
+                paths=paths,
+                inventory_provider=lambda: {"disks": [live]},
+                runner=run,
+                journal={"completed_steps": 0, "notices": []},
+            )
+        if fail_command == "sync":
+            assert failure.value.code == "snapraid_sync_incomplete"
+            assert failure.value.needs_attention is True
+            assert " /mnt/hoardarr/new-member" in config_path.read_text(encoding="utf-8")
+            assert [command[0] for command in commands].count("setfattr") == 1
+            assert str(new_member) in paths.fstab.read_text(encoding="utf-8")
+        else:
+            assert config_path.read_text(encoding="utf-8") == original
+            assert not any(command[0] == "setfattr" for command in commands)
+            assert str(new_member) not in paths.fstab.read_text(encoding="utf-8")
+        return
+
+    executor._execute_actions(
+        operation_id=operation_id,
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": [live]},
+        runner=run,
+        journal={"completed_steps": 0, "notices": []},
+    )
+
+    updated = config_path.read_text(encoding="utf-8")
+    assert [command[-1] for command in commands if command[0] == "snapraid"] == [
+        "status",
+        "sync",
+    ]
+    if role == "data":
+        assert " /mnt/hoardarr/new-member" in updated
+        assert any(command[0] == "setfattr" for command in commands)
+        assert str(new_member) in paths.fstab.read_text(encoding="utf-8")
+    else:
+        assert "2-parity /mnt/hoardarr/new-member/snapraid.parity" in updated
+        assert not any(command[0] == "setfattr" for command in commands)
+        mergerfs_line = next(
+            line
+            for line in paths.fstab.read_text(encoding="utf-8").splitlines()
+            if "fuse.mergerfs" in line
+        )
+        assert str(new_member) not in mergerfs_line
 
 
 DEVICE_ID = "serial:vendor:model:stable-serial"

@@ -68,7 +68,12 @@ const assessment: StorageExpansionAssessment = {
     migration_work: "Review, format, mount, and verify placement.",
     restrictions: ["Parity must be at least as large as the largest data disk."],
     target: { provider: "mergerfs", instance_id: "mergerfs:0123456789abcdef", mountpoint: "/srv/hoardarr/media" },
-    configuration: { topology: "mergerfs" },
+    configuration: {
+      topology: "mergerfs",
+      snapraid_role: "data",
+      snapraid_instance_id: "snapraid:media",
+      snapraid_config_sha256: "b".repeat(64),
+    },
   }],
   methodology: "Read-only analysis; no changes were made.",
 };
@@ -114,6 +119,39 @@ describe("StorageExpansionPanel", () => {
     });
     render(<StorageExpansionPanel onPlan={vi.fn()} snapshotId="snapshot-one" />);
     expect(await screen.findByText("No unassigned disks detected")).toBeInTheDocument();
+  });
+
+  it("keeps a reviewed SnapRAID parity disk out of usable-capacity claims", async () => {
+    const parityCandidate = {
+      ...assessment.candidates[0],
+      id: "candidate-parity",
+      kind: "add_snapraid_parity",
+      title: "Add another parity disk to Media",
+      summary: "Increase parity protection without adding this disk to the media folder.",
+      setup_mode: "advanced" as const,
+      capacity: {
+        ...assessment.candidates[0].capacity,
+        estimated_usable_delta_bytes: 0,
+      },
+      configuration: {
+        topology: "mergerfs",
+        snapraid_role: "parity" as const,
+        snapraid_instance_id: "snapraid:media",
+        snapraid_config_sha256: "b".repeat(64),
+      },
+    };
+    vi.spyOn(api, "storageExpansion").mockResolvedValue({
+      ...assessment,
+      candidates: [parityCandidate],
+    });
+    const onPlan = vi.fn();
+    const user = userEvent.setup();
+    render(<StorageExpansionPanel onPlan={onPlan} snapshotId="snapshot-one" />);
+
+    const card = await screen.findByLabelText("Add another parity disk to Media");
+    expect(within(card).getByText("0 B")).toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Customize this plan" }));
+    expect(onPlan.mock.calls[0][2].configuration.snapraid_role).toBe("parity");
   });
 
   it("reconciles choices automatically after a new hardware snapshot", async () => {
