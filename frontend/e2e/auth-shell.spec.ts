@@ -705,6 +705,15 @@ test.describe("production sign-in shell", () => {
       sha256: "a".repeat(64),
     };
     await page.route("**/api/v1/storage/transfers/preview", (route) => route.fulfill({ json: { plan, plan_sha256: "b".repeat(64) } }));
+    await page.route("**/api/v1/storage/transfers/summary", (route) => route.fulfill({ json: {
+      queue: {
+        queued_count: 0, queued_bytes: 0, running_count: 0, running_planned_bytes: 0,
+        retained_for_seeding_count: 0, retained_for_seeding_bytes: 0, failed_count: 0,
+        observed_bytes_per_second: null, rate_sample_count: 0, estimated_queued_seconds: null,
+        estimate_methodology: "Not reported until at least three measured copy or move transfers complete.",
+      },
+      tiers: [],
+    } }));
     await page.route("**/api/v1/storage/transfers", (route) => route.fulfill({ json: { operation: { id: "transfer-1", kind: "storage.transfer", status: "succeeded", result: { state: "retained" } } } }));
     await page.route("**/api/v1/storage/transfers/transfer-1/cleanup", (route) => route.fulfill({ json: { operation: { id: "cleanup-1", kind: "storage.transfer.cleanup", status: "queued" } } }));
 
