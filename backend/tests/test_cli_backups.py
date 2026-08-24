@@ -74,6 +74,7 @@ def test_console_encrypted_export_and_fresh_restore_use_stdin_passphrase(
         session.add(_target(source_secret_box))
 
     archive = tmp_path / "encrypted-control-plane.tar.gz"
+    monkeypatch.setattr(cli, "_is_root", lambda: True)
     monkeypatch.setattr(cli, "Settings", lambda: source)
     monkeypatch.setattr(sys, "stdin", io.StringIO("correct horse battery staple\n"))
     monkeypatch.setattr(

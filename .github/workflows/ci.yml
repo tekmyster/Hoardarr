@@ -224,6 +224,77 @@ jobs:
             exit 1
           }
           sudo /usr/local/bin/hoardarr --help
+      - name: Exercise installed encrypted export and fresh-appliance recovery
+        run: |
+          source_root=/tmp/hoardarr-recovery-source
+          target_root=/tmp/hoardarr-recovery-target
+          archive=/tmp/hoardarr-encrypted-control-plane.tar.gz
+          passphrase='installed appliance recovery passphrase'
+          sudo install -d -m 0700 "$source_root/config" "$target_root"
+          sudo sh -c "printf '%s\n' 'HOARDARR_BIND_HOST=127.0.0.1' 'HOARDARR_SETUP_TOKEN=must-not-transfer' >'$source_root/config/hoardarr.env'"
+          source_env=(
+            HOARDARR_ENVIRONMENT=test
+            "HOARDARR_DATABASE_URL=sqlite:////$source_root/hoardarr.db"
+            "HOARDARR_SECRET_KEY_FILE=$source_root/secret.key"
+            "HOARDARR_BACKUP_ARTIFACT_ROOT=$source_root/artifacts"
+            "HOARDARR_CONFIGURATION_ROOT=$source_root/config"
+            HOARDARR_SECURE_COOKIES=false
+          )
+          target_env=(
+            HOARDARR_ENVIRONMENT=test
+            "HOARDARR_DATABASE_URL=sqlite:////$target_root/hoardarr.db"
+            "HOARDARR_SECRET_KEY_FILE=$target_root/secret.key"
+            "HOARDARR_BACKUP_ARTIFACT_ROOT=$target_root/artifacts"
+            "HOARDARR_CONFIGURATION_ROOT=$target_root/config"
+            HOARDARR_SECURE_COOKIES=false
+          )
+          sudo env "${source_env[@]}" /usr/local/bin/hoardarr-migrate
+          printf '%s\n' 'source owner password' | sudo env "${source_env[@]}" \
+            /usr/local/bin/hoardarr setup --console --username source-owner \
+            --password-stdin --site-url http://127.0.0.1:7877
+          printf '%s\n' "$passphrase" | sudo env "${source_env[@]}" \
+            /usr/local/bin/hoardarr export-control-plane --output "$archive" \
+            --encrypt-secrets > /tmp/hoardarr-export-report.json
+          artifact_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
+          grep -F '"credential_mode": "encrypted_secret_key"' /tmp/hoardarr-export-report.json
+
+          services=(
+            hoardarr-api.service
+            hoardarr-worker.service
+            hoardarr-account-executor.service
+            hoardarr-storage-executor.service
+            hoardarr-storage-status.service
+          )
+          sudo systemctl stop "${services[@]}"
+          trap 'sudo systemctl start hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service hoardarr-worker.service hoardarr-api.service' EXIT
+          printf '%s\n' "$passphrase" | sudo env "${target_env[@]}" \
+            /usr/local/bin/hoardarr restore-control-plane --archive "$archive" \
+            --sha256 "$artifact_sha256" --passphrase-stdin --yes \
+            > /tmp/hoardarr-restore-report.json
+          grep -F '"credential_mode": "encrypted_secret_key"' /tmp/hoardarr-restore-report.json
+          sudo env "${target_env[@]}" /usr/local/bin/hoardarr-migrate
+          printf '%s\n' 'fresh owner password' | sudo env "${target_env[@]}" \
+            /usr/local/bin/hoardarr setup --console --username fresh-owner \
+            --password-stdin --site-url http://127.0.0.1:7877
+          sudo env "${target_env[@]}" /usr/lib/hoardarr/current/venv/bin/python - <<'PY'
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          database = Path(os.environ["HOARDARR_DATABASE_URL"].removeprefix("sqlite:///"))
+          with sqlite3.connect(database) as connection:
+              owners = connection.execute("SELECT username FROM users ORDER BY username").fetchall()
+          assert owners == [("fresh-owner",)], owners
+          environment = Path(os.environ["HOARDARR_CONFIGURATION_ROOT"]) / "hoardarr.env"
+          payload = environment.read_text(encoding="utf-8")
+          assert payload == "HOARDARR_BIND_HOST=127.0.0.1\n", payload
+          print("installed encrypted fresh-appliance recovery verified")
+          PY
+          sudo systemctl start "${services[@]}"
+          trap - EXIT
+          systemctl is-active --quiet "${services[@]}"
+          curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:7877/health/ready
       - name: Verify idempotent reapply of the identical signed bundle
         run: |
           release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"

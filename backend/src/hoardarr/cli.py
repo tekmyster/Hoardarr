@@ -84,6 +84,10 @@ def _read_password(password_stdin: bool) -> str:
     return password
 
 
+def _is_root() -> bool:
+    return not hasattr(os, "geteuid") or os.geteuid() == 0
+
+
 def _setup_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     browser_setup = args.browser or not (args.console or args.username or args.password_stdin)
     if browser_setup and (args.username or args.password_stdin):
@@ -118,7 +122,7 @@ def _setup_command(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
 def _restore_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if not args.yes:
         parser.error("fresh restore requires --yes")
-    if hasattr(os, "geteuid") and os.geteuid() != 0:
+    if not _is_root():
         parser.error("fresh restore must run as root")
     if os.name == "posix":
         active: list[str] = []
@@ -166,7 +170,7 @@ def _read_secret_export_passphrase() -> str:
 def _export_control_plane_command(
     args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
-    if hasattr(os, "geteuid") and os.geteuid() != 0:
+    if not _is_root():
         parser.error("control-plane export must run as root")
     output = Path(args.output).expanduser().resolve(strict=False)
     if output.exists():
