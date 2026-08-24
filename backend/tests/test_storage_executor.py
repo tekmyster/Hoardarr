@@ -1249,6 +1249,86 @@ def test_mixed_layout_executor_revalidates_and_builds_component_pools_before_mer
     assert "fuse.mergerfs" in paths.fstab.read_text(encoding="utf-8")
 
 
+def test_mergerfs_periodic_trim_never_installs_snapraid_timers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ids = ["serial:test:member-a", "serial:test:member-b"]
+    live = {
+        identifier: {
+            **_live_disk(f"/dev/sd{letter}"),
+            "id": identifier,
+            "partitions": [
+                {
+                    "kernel_path": f"/dev/sd{letter}1",
+                    "filesystem": {"type": "ext4", "uuid": f"uuid-{letter}"},
+                }
+            ],
+        }
+        for identifier, letter in zip(ids, ("y", "z"), strict=True)
+    }
+    document = {
+        "presentation_root": "/data",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "mergerfs",
+            "actions": [
+                {
+                    "action_id": f"identity:{identifier}",
+                    "type": "drive.identity.verify",
+                    "device_id": identifier,
+                    "destructive": False,
+                }
+                for identifier in ids
+            ],
+            "format": {
+                "filesystem": "ext4",
+                "mount_options": ["noatime"],
+                "trim": {"enabled": True, "mode": "periodic"},
+            },
+            "mergerfs": {
+                "mode": "create",
+                "mountpoint": "/data",
+                "create_policy": "mfs",
+                "search_policy": "ff",
+            },
+        },
+    }
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        fstab=tmp_path / "fstab",
+        mount_root=tmp_path / "mounts",
+        systemd_unit_root=tmp_path / "systemd",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: live)
+    monkeypatch.setattr(
+        executor,
+        "_safe_mountpoint",
+        lambda value: tmp_path / "managed" / value.lstrip("/"),
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    monkeypatch.setattr(executor, "_discard_supported", lambda _disk: True)
+    monkeypatch.setattr(
+        executor,
+        "_blkid_value",
+        lambda path, field: "ext4" if field == "TYPE" else f"uuid-{path.stem}",
+    )
+
+    result = executor._execute_actions(
+        operation_id="11111111-1111-4111-8111-111111111111",
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": list(live.values())},
+        runner=lambda command, _timeout: commands.append(command),
+        journal={"completed_steps": 0, "notices": []},
+    )
+
+    assert result["topology"] == "mergerfs"
+    assert any(command[0] == "mergerfs" for command in commands)
+    assert list(paths.systemd_unit_root.glob("hoardarr-fstrim-*.timer"))
+    assert not list(paths.systemd_unit_root.glob("hoardarr-snapraid-*.timer"))
+
+
 def test_plan_validation_accepts_bound_non_guest_smb_share() -> None:
     document = _document()
     document["storage"]["service_account"] = {"username": "media"}  # type: ignore[index]

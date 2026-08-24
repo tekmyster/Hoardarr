@@ -2714,6 +2714,21 @@ def _execute_actions(
             schedule=str(options["sync_schedule"]),
             runner=runner,
         )
+        _install_storage_timer(
+            paths,
+            unit_name=f"hoardarr-snapraid-scrub-{options['name']}",
+            description=f"Scrub SnapRAID {options['name']}",
+            command=[
+                _tool("snapraid"),
+                "-c",
+                os.fspath(config),
+                "-p",
+                str(options["scrub_percent"]),
+                "scrub",
+            ],
+            schedule=str(options["scrub_schedule"]),
+            runner=runner,
+        )
 
     if trim_enabled:
         if topology == "zfs":
@@ -2731,21 +2746,6 @@ def _execute_actions(
                     schedule="weekly",
                     runner=runner,
                 )
-        _install_storage_timer(
-            paths,
-            unit_name=f"hoardarr-snapraid-scrub-{options['name']}",
-            description=f"Scrub SnapRAID {options['name']}",
-            command=[
-                _tool("snapraid"),
-                "-c",
-                os.fspath(config),
-                "-p",
-                str(options["scrub_percent"]),
-                "scrub",
-            ],
-            schedule=str(options["scrub_schedule"]),
-            runner=runner,
-        )
 
     journal["completed_steps"] = int(journal["completed_steps"]) + 1
     journal["phase"] = "Creating media and download folders"
