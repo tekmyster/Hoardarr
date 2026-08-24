@@ -31,6 +31,28 @@ _SUPPORT_STATES = frozenset({"supported", "unsupported", "not_reported"})
 _AVAILABILITY_STATES = frozenset(
     {"available", "temporarily_unavailable", "unsupported", "not_reported"}
 )
+_CAPABILITY_LIMITATIONS: dict[tuple[str, str, str], str] = {
+    (
+        "zfs",
+        "dataset",
+        "qos",
+    ): "OpenZFS does not expose a provider-native per-dataset bandwidth or IOPS limit.",
+    (
+        "zfs",
+        "zvol",
+        "qos",
+    ): "OpenZFS does not expose a provider-native per-zvol bandwidth or IOPS limit.",
+    (
+        "lvm",
+        "logical_volume",
+        "qos",
+    ): "LVM does not expose a provider-native per-logical-volume bandwidth or IOPS limit.",
+    (
+        "linux_md",
+        "filesystem",
+        "qos",
+    ): "Linux MD does not expose a provider-native per-filesystem bandwidth or IOPS limit.",
+}
 
 
 def _supports(*names: str) -> dict[str, str]:
@@ -168,7 +190,10 @@ def volume_capabilities(
         observed = (observations or {}).get(capability)
         availability = "not_reported" if support != "unsupported" else "unsupported"
         source = "provider_baseline"
-        constraints: dict[str, object] = {}
+        limitation = _CAPABILITY_LIMITATIONS.get((provider, resource_type, capability))
+        constraints: dict[str, object] = (
+            {"reason": limitation, "scope": "provider_volume"} if limitation else {}
+        )
         if observed is not None:
             if not isinstance(observed, Mapping):
                 raise StorageVolumeError(

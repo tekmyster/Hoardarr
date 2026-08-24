@@ -52,6 +52,21 @@ remains unsupported rather than being simulated.
 Advanced creation for other provider geometries is tracked separately. The capability catalog is
 not permission to offer a decorative control for an unavailable provider.
 
+### IO limits and QoS
+
+Hoardarr exposes a volume QoS control only when the storage provider reports a real per-volume
+limit and the executor can read the effective value back. Current OpenZFS dataset/zvol, LVM, and
+Linux MD providers do not expose provider-native bandwidth or IOPS caps, so their capability is
+`unsupported` with a provider-volume limitation reason. Filesystem and external iSCSI capabilities
+remain `not_reported` until a specific runtime provider proves support.
+
+Linux cgroup v2 `io.max` is intentionally not presented as storage-volume QoS: it limits the I/O
+performed by a process cgroup against a block device, not all access to a dataset, filesystem, or
+LUN. Applying it as a volume property would be misleading when Plex, ARR applications, SMB/NFS
+clients, or other processes access the same storage outside that cgroup. A future managed-
+application QoS feature may use cgroups with an explicit process/unit scope and exact kernel
+readback; it must not silently become a volume limit.
+
 ZFS datasets and zvols expose provider-native lifecycle controls in **Manage** only when the live
 provider observation reports them available. Snapshot operations create immutable plans bound to
 the dataset/zvol GUID, execute as durable operations, and read the exact snapshot or clone back

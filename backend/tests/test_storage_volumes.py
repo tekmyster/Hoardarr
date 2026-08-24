@@ -182,3 +182,30 @@ def test_provider_capabilities_cannot_override_incompatible_backend_semantics() 
             {"snapshot": {"support": "supported", "availability": "available"}},
         )
     assert raised.value.code == "volume_capability_conflict"
+
+
+@pytest.mark.parametrize(
+    ("provider", "resource_type"),
+    [
+        ("zfs", "dataset"),
+        ("zfs", "zvol"),
+        ("lvm", "logical_volume"),
+        ("linux_md", "filesystem"),
+    ],
+)
+def test_qos_is_honestly_unsupported_when_provider_has_no_volume_limit(
+    provider: str, resource_type: str
+) -> None:
+    qos = volume_capabilities(provider, resource_type)["qos"]
+    assert qos["support"] == "unsupported"
+    assert qos["availability"] == "unsupported"
+    assert qos["constraints"]["scope"] == "provider_volume"
+    assert "does not expose" in str(qos["constraints"]["reason"])
+
+    with pytest.raises(StorageVolumeError) as raised:
+        volume_capabilities(
+            provider,
+            resource_type,
+            {"qos": {"support": "supported", "availability": "available"}},
+        )
+    assert raised.value.code == "volume_capability_conflict"
