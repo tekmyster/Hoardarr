@@ -5,6 +5,56 @@ checks were followed by repository-controlled Ubuntu 24.04/Python 3.12/systemd,
 loop-device and QEMU execution. Enterprise telemetry evidence is detailed in
 [telemetry-validation.md](telemetry-validation.md).
 
+## Current product classification
+
+- **CORE STORAGE LIFECYCLE: SOFTWARE-READY**
+- **FULL P1 PRODUCT SCOPE: IN PROGRESS**
+- **PHYSICAL HARDWARE CERTIFICATION: PENDING**
+
+The complete Storage Group and drain lifecycle remains accepted. The current
+increment advances the remaining P1 expansion, onboarding/replacement, SMART,
+and topology dependencies without representing fixture, disposable-loop, or
+beta-bench observation as physical controller or drive certification.
+
+## P1 dependency continuation — commit `66246ac27447`
+
+- The expansion planner now emits immutable, capability-aware independent disk,
+  mergerFS, SnapRAID, ZFS, download-tier, reserve/spare, and exact Linux MD
+  RAID1/5/6/10 candidates. Guided review explains capacity, protection, and
+  work in plain language; Advanced review binds the exact array level, member
+  count, target, disk identities, and hardware snapshot hash.
+- Browser execution proves a data-bearing disk follows the non-destructive
+  import path without partition/filesystem creation, and a degraded Linux MD
+  member follows the provider-aware replacement path with the exact array UUID,
+  stable replacement identity, destructive consent, and durable Activity result.
+- SMART short and extended self-tests are explicit Storage controls backed by
+  the existing immutable durable operation. Unsupported or unreported
+  passthrough disables execution rather than reporting a false failure; completed
+  results remain visible in Activity.
+- Sanitized SAS2308/SAS3008 and DS424IOM6/DS224IOM6 evidence now has an executed
+  browser regression for the full controller/PHY/expander/enclosure/bay/path/
+  drive/logical-storage chain. A real nested-grid clipping defect that hid deep
+  topology nodes was corrected.
+- GitHub Actions CI run `32718177066` passed all six jobs at the immutable commit:
+  542 backend tests, 162 frontend tests, 4 accessibility tests, 33 Chromium E2E
+  tests, 74 installer tests, and 19 release tests, plus Ruff, production builds,
+  wheel/sdist, release/systemd, installed-appliance, and live-MinIO validation.
+  Storage integration run `32718177058` passed the Storage Group drain lifecycle,
+  four-device mergerFS persistent telemetry, extended storage stacks, and
+  controller-redundancy lifecycle jobs.
+- Release archive
+  `hoardarr-0.3.11-66246ac27447-ubuntu24.04-amd64-cp312.tar.gz` has SHA-256
+  `7e764ecb5af30dc9947df40b19f12839df5ea1cd7f134e9f5424e8820dd27536`.
+  That exact artifact is installed at
+  `/usr/lib/hoardarr/releases/0.3.11-66246ac27447` on the beta bench. All five
+  actual Hoardarr services and both local/public readiness checks passed.
+- Live browser inspection at `http://10.81.200.250:5173/` confirmed the new
+  expansion and topology surfaces against the real persisted bench state: no
+  managed Storage Group or pool, four Cisco SSDs classified as existing-data
+  drives, honest Not reported health/bay/temperature values, idle real telemetry,
+  and disabled SMART execution because the provider reported no supported
+  passthrough. No saved draft was applied and no physical drive was mutated.
+
 ## Completed
 
 - All traceability rows that were `NOT IMPLEMENTED` now have production
@@ -214,6 +264,11 @@ are software/isolated evidence only. Production signing requires the release
 owner's public trust root and offline private key; no production private key is
 embedded. No public production release was created.
 
-Final classification: **SOFTWARE-READY; PHYSICAL HARDWARE CERTIFICATION
-PENDING**. If project policy makes the managed Deep Security Scan mandatory,
-that formal release gate remains pending separately.
+Current classification:
+
+- **CORE STORAGE LIFECYCLE: SOFTWARE-READY**
+- **FULL P1 PRODUCT SCOPE: IN PROGRESS**
+- **PHYSICAL HARDWARE CERTIFICATION: PENDING**
+
+If project policy makes the managed Deep Security Scan mandatory, that formal
+release gate remains pending separately.
