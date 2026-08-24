@@ -28,8 +28,13 @@ from hoardarr.automation.webhooks import (
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.models import (
     HardwareSnapshot,
+    MetricAlert,
+    MetricEntity,
     Operation,
     PhysicalDisk,
+    StorageController,
+    StorageEntity,
+    StoragePath,
     WebhookDelivery,
     WebhookEndpoint,
     new_id,
@@ -107,6 +112,36 @@ def home_assistant_summary(
     operations = list(session.scalars(query))
     health_counts = Counter(item.health_state for item in disks)
     operation_counts = Counter(item.status for item in operations)
+    storage_entities = list(
+        session.scalars(select(StorageEntity).order_by(StorageEntity.name).limit(128))
+    )
+    storage_paths = list(
+        session.scalars(select(StoragePath).order_by(StoragePath.storage_entity_id).limit(512))
+    )
+    controllers = list(
+        session.scalars(select(StorageController).order_by(StorageController.id).limit(128))
+    )
+    metric_alert_rows = session.execute(
+        select(MetricAlert, MetricEntity)
+        .join(MetricEntity, MetricEntity.id == MetricAlert.entity_id)
+        .where(MetricAlert.state == "active")
+        .order_by(MetricAlert.started_at.desc())
+        .limit(50)
+    )
+    metric_alerts = [
+        {
+            "kind": "metric",
+            "severity": alert.severity,
+            "entity_type": entity.entity_type,
+            "entity_id": entity.id,
+            "metric_id": alert.metric_id,
+            "state": "active",
+            "started_at": alert.started_at,
+            "acknowledged": alert.acknowledged_at is not None,
+            "suppressed_until": alert.suppressed_until,
+        }
+        for alert, entity in metric_alert_rows
+    ]
     critical = health_counts["critical"]
     warning = health_counts["warning"] + operation_counts["needs_attention"]
     overall = "critical" if critical else "warning" if warning else "healthy"
@@ -127,6 +162,7 @@ def home_assistant_summary(
             "failed_operations_in_recent_window": operation_counts["failed"],
         },
         "alerts": [
+            *metric_alerts,
             *[
                 {
                     "kind": "drive_health",
@@ -198,6 +234,54 @@ def home_assistant_summary(
             "active": bool(operation_counts["queued"] or operation_counts["running"]),
             "queued": operation_counts["queued"],
             "running": operation_counts["running"],
+        },
+        "topology": {
+            "logical_storage": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "stable_identity": item.stable_identity,
+                    "storage_kind": item.storage_kind,
+                    "mountpoint": item.mountpoint,
+                    "capacity_bytes": item.capacity_bytes,
+                    "topology_state": item.topology_state,
+                    "provider": item.provider,
+                    "path_count": sum(
+                        path.storage_entity_id == item.id for path in storage_paths
+                    ),
+                }
+                for item in storage_entities
+            ],
+            "controllers": [
+                {
+                    "id": item.id,
+                    "stable_identity": item.stable_identity,
+                    "provider": item.provider,
+                    "model": item.model,
+                    "health": item.state_json.get("health", "not_reported"),
+                    "last_seen_at": item.last_seen_at,
+                }
+                for item in controllers
+            ],
+            "paths": [
+                {
+                    "id": item.id,
+                    "storage_entity_id": item.storage_entity_id,
+                    "controller_id": item.controller_id,
+                    "stable_path_identity": item.stable_path_identity,
+                    "protocol": item.protocol,
+                    "state": item.state,
+                    "active": item.active,
+                    "optimized": item.optimized,
+                    "last_seen_at": item.last_seen_at,
+                }
+                for item in storage_paths
+            ],
+            "limits": {
+                "logical_storage": 128,
+                "controllers": 128,
+                "paths": 512,
+            },
         },
     }
 

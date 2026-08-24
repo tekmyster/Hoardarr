@@ -37,8 +37,10 @@ from hoardarr.db.models import (
     RemoteBackupRun,
     RemoteBackupTarget,
     StorageBackend,
+    StorageController,
     StorageEntity,
     StorageGroup,
+    StoragePath,
     User,
 )
 from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
@@ -2827,6 +2829,46 @@ def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: An
         assert api_key not in json.dumps(operation.request_json)
         assert api_key not in json.dumps(connection.state_json)
 
+    with app.state.session_factory() as session, session.begin():
+        controller = StorageController(
+            id="11111111-1111-4111-8111-111111111111",
+            stable_identity="pci:0000:03:00.0",
+            provider="sas",
+            model="Test HBA",
+            state_json={"health": "healthy", "api_key": "must-not-export"},
+        )
+        logical = StorageEntity(
+            id="22222222-2222-4222-8222-222222222222",
+            name="Media storage",
+            stable_identity="wwid:3600test",
+            storage_kind="block",
+            filesystem_uuid="33333333-3333-4333-8333-333333333333",
+            mountpoint="/media",
+            presentation_device="/dev/mapper/3600test",
+            capacity_bytes=1_000_000,
+            logical_sector_bytes=512,
+            physical_sector_bytes=4096,
+            topology_state="fully_redundant",
+            provider="multipath",
+            config_json={"secret": "must-not-export"},
+        )
+        session.add_all([controller, logical])
+        session.flush()
+        session.add(
+            StoragePath(
+                storage_entity_id=logical.id,
+                controller_id=controller.id,
+                stable_path_identity="scsi:1:0:0:1",
+                kernel_path="/dev/sdb",
+                logical_storage_identity=logical.stable_identity,
+                protocol="sas",
+                state="active",
+                optimized=True,
+                active=True,
+                metadata_json={"api_key": "must-not-export"},
+            )
+        )
+
     token_response = client.post(
         "/api/v1/auth/tokens",
         headers=_state_headers(csrf),
@@ -2855,8 +2897,17 @@ def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: An
     assert summary["schema_version"] == 1
     assert summary["source"] == "hoardarr_persisted_state"
     assert len(summary["jobs"]["recent"]) <= summary["jobs"]["limit"] == 25
+    assert summary["topology"]["limits"] == {
+        "logical_storage": 128,
+        "controllers": 128,
+        "paths": 512,
+    }
+    assert summary["topology"]["logical_storage"][0]["path_count"] == 1
+    assert summary["topology"]["controllers"][0]["health"] == "healthy"
+    assert summary["topology"]["paths"][0]["storage_entity_id"] == logical.id
     assert "servarr-api-key-that-must-never-leak" not in home_assistant.text
     assert "api_key" not in home_assistant.text
+    assert "must-not-export" not in home_assistant.text
     forbidden = client.post(
         "/api/v1/hardware/scans",
         headers={**pat_headers, "Idempotency-Key": "pat-hardware-0001"},
