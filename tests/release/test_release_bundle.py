@@ -115,6 +115,24 @@ class VersionConsistencyTests(unittest.TestCase):
                 self.assertIn("RuntimeDirectory=hoardarr", unit)
                 self.assertIn("RuntimeDirectoryPreserve=yes", unit)
 
+    def test_central_fleet_service_is_not_packaged_as_an_appliance_unit(self):
+        appliance_unit = (
+            ROOT / "packaging" / "systemd" / "hoardarr-fleet-ingestion.service"
+        )
+        central_unit = (
+            ROOT
+            / "packaging"
+            / "hoardarr-com"
+            / "systemd"
+            / "hoardarr-fleet-ingestion.service"
+        )
+
+        self.assertFalse(appliance_unit.exists())
+        self.assertTrue(central_unit.is_file())
+        text = central_unit.read_text(encoding="utf-8")
+        self.assertIn("User=hoardarr-fleet", text)
+        self.assertIn("ExecStart=/usr/lib/hoardarr-fleet/venv/bin/hoardarr-fleet-ingestion", text)
+
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_detects_tampering_and_extra_files(self):

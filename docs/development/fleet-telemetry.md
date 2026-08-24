@@ -34,6 +34,11 @@ acknowledges their IDs.
 
 ## Central service
 
+Central deployment assets live under `packaging/hoardarr-com/`; they are deliberately excluded
+from the home-appliance release bundle. The receiver has its own runtime, account, database and
+deployment lifecycle, so installing an appliance can never accidentally start the hoardarr.com
+ingestion service.
+
 Run the receiver behind the hoardarr.com TLS reverse proxy. Required environment variables are:
 
 - `HOARDARR_FLEET_DATABASE_URL` — central SQLAlchemy database URL; this is distinct from appliance
