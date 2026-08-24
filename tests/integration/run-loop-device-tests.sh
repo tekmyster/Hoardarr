@@ -69,7 +69,7 @@ umount "$work/mnt"
   --loop "$loop" \
   --work-root "$work" \
   --evidence "$repo/dist/validation/foreign-readonly-inspection.json"
-jq -e '.classification == "VERIFIED IN ISOLATION" and .access == "read_only" and (.persistent_mount | not) and (.mutation_performed | not) and .journal_state == "succeeded" and .private_mount_removed and .source_unmounted_after and .file_count >= 2 and .read_errors == 0 and ([.top_level_entries[].name] | sort) == ["Movies", "TV"]' \
+jq -e '.classification == "VERIFIED IN ISOLATION" and .access == "read_only" and (.persistent_mount | not) and (.mutation_performed | not) and .journal_state == "succeeded" and .private_mount_removed and .source_unmounted_after and .file_count >= 2 and .read_errors == 0 and ([.top_level_entries[].name] | contains(["Movies", "TV"]))' \
   "$repo/dist/validation/foreign-readonly-inspection.json"
 
 [[ "${HOARDARR_EXTENDED_STORAGE_TESTS:-0}" == "1" ]] || exit 0

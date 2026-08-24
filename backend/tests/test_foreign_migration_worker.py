@@ -18,7 +18,8 @@ from hoardarr.db.models import (
     utc_now,
 )
 from hoardarr.operations.service import document_hash, recover_stale_operations
-from hoardarr.storage.drain_worker import DrainPaused
+from hoardarr.storage import foreign_migration_worker
+from hoardarr.storage.drain_worker import DrainExecutionError, DrainPaused
 from hoardarr.storage.foreign_migration_worker import (
     ForeignMigrationError,
     _selected,
@@ -253,6 +254,48 @@ def test_foreign_migration_copies_only_reviewed_archive_selection(tmp_path: Path
     assert report["selection"]["mode"] == "selected_folders"
     assert (destination / "Movies" / "feature.mkv").is_file()
     assert not (destination / "metadata.xml").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative mover requires Linux")
+def test_foreign_migration_source_read_error_is_resumable_without_false_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_factory, operation_id, plan, source, destination = _seed(tmp_path)
+    original_copy = foreign_migration_worker._copy_entry
+    injected = False
+
+    def fail_first_copy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise DrainExecutionError(
+                "source_read_failed", "A source file could not be read safely."
+            )
+        return original_copy(*args, **kwargs)
+
+    monkeypatch.setattr(foreign_migration_worker, "_copy_entry", fail_first_copy)
+    with pytest.raises(ForeignMigrationError) as failure:
+        execute_foreign_migration(session_factory, operation_id, plan, source_root_override=source)
+
+    assert failure.value.code == "source_read_failed"
+    assert not any(path.is_file() for path in destination.rglob("*"))
+    assert (source / "metadata.xml").read_text(encoding="utf-8") == "<movie>safe</movie>"
+    with session_factory() as session:
+        job = session.get(ForeignMigrationJob, operation_id)
+        entries = list(
+            session.scalars(
+                select(ForeignMigrationEntry).where(ForeignMigrationEntry.job_id == operation_id)
+            )
+        )
+        assert job is not None and job.status != "succeeded"
+        assert {entry.status for entry in entries} == {"pending"}
+
+    monkeypatch.setattr(foreign_migration_worker, "_copy_entry", original_copy)
+    report = execute_foreign_migration(
+        session_factory, operation_id, plan, source_root_override=source
+    )
+    assert report["files_verified"] == 2
+    assert report["source_retained"] is True
 
 
 def test_interrupted_foreign_migration_requeues_durable_checkpoint(tmp_path: Path) -> None:

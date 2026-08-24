@@ -24,6 +24,7 @@ from hoardarr.storage.drain_worker import (
     BandwidthLimiter,
     DrainExecutionError,
     DrainPaused,
+    _copy_entry,
     _execution_deadline,
     _finalize,
     _job_control,
@@ -59,6 +60,55 @@ def _runtime(tmp_path: Path):
     engine = create_engine(f"sqlite:///{(tmp_path / 'drain.db').as_posix()}")
     Base.metadata.create_all(engine)
     return sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative mover requires Linux")
+def test_safe_copier_reports_source_read_failure_without_publishing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source-read-error"
+    destination = tmp_path / "destination-read-error"
+    source.mkdir()
+    destination.mkdir()
+    payload = source / "media.bin"
+    payload.write_bytes(b"read-error-fixture" * 4096)
+    facts = payload.stat()
+    entry = SimpleNamespace(
+        id=1,
+        job_id="read-error-operation",
+        relative_path="media.bin",
+        source_size=facts.st_size,
+        source_mtime_ns=facts.st_mtime_ns,
+    )
+    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    destination_fd = os.open(destination, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    real_read = os.read
+    failed = False
+
+    def fail_first_file_read(fd: int, count: int) -> bytes:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("injected source read error")
+        return real_read(fd, count)
+
+    monkeypatch.setattr(os, "read", fail_first_file_read)
+    try:
+        with pytest.raises(DrainExecutionError) as failure:
+            _copy_entry(
+                source_fd,
+                destination_fd,
+                entry,
+                control=lambda: None,
+                digest_algorithm="blake3",
+            )
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
+
+    assert failure.value.code == "source_read_failed"
+    assert payload.read_bytes() == b"read-error-fixture" * 4096
+    assert not (destination / "media.bin").exists()
 
 
 def _seed_job(session_factory, tmp_path: Path) -> tuple[str, dict[str, object], Path, Path]:

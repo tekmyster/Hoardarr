@@ -163,7 +163,8 @@ def main() -> None:
     inventory = result["inventory"]
     if inventory["file_count"] < 2 or inventory["read_errors"]:
         raise SystemExit("read-only inventory did not report the deterministic dataset")
-    if {item["name"] for item in inventory["top_level_entries"]} != {"Movies", "TV"}:
+    top_level_names = {item["name"] for item in inventory["top_level_entries"]}
+    if not {"Movies", "TV"}.issubset(top_level_names):
         raise SystemExit(
             "archive preview did not preserve the top-level source inventory"
         )

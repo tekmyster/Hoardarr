@@ -632,7 +632,16 @@ def _copy_entry(
         )
         digest = _new_digest(digest_algorithm)
         chunks = 0
-        while chunk := os.read(source_fd, COPY_CHUNK_BYTES):
+        while True:
+            try:
+                chunk = os.read(source_fd, COPY_CHUNK_BYTES)
+            except OSError as exc:
+                raise DrainExecutionError(
+                    "source_read_failed",
+                    "A source file could not be read safely.",
+                ) from exc
+            if not chunk:
+                break
             digest.update(chunk)
             _write_all(temporary_fd, chunk)
             if limiter is not None:
