@@ -8,7 +8,9 @@ param(
     [string]$FolderName = 'Hoardarr Development',
     [string]$ApplianceIso,
     [switch]$AttachDataDisks,
-    [switch]$PowerOn
+    [switch]$PowerOn,
+    [switch]$ReuseUploadedIso,
+    [switch]$RecreateOsDisk
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,6 +80,32 @@ function Ensure-LabNetwork {
     }
 }
 
+function Reset-VirtualOsDisk {
+    param(
+        [Parameter(Mandatory)]$Vm,
+        [Parameter(Mandatory)]$Datastore
+    )
+
+    $disks = @(Get-HardDisk -VM $Vm)
+    $expectedFilename = "[$($Datastore.Name)] $($Vm.Name)/$($Vm.Name).vmdk"
+    if (
+        $disks.Count -ne 1 `
+        -or [math]::Abs([double]$disks[0].CapacityGB - 24.0) -gt 0.01 `
+        -or [string]$disks[0].StorageFormat -ne 'Thin' `
+        -or [string]$disks[0].DiskType -ne 'Flat' `
+        -or [string]$disks[0].Filename -ne $expectedFilename
+    ) {
+        throw "$($Vm.Name) does not have the exact disposable one-disk lab OS topology."
+    }
+    if ($Vm.PowerState -ne 'PoweredOff') {
+        Stop-VM -VM $Vm -Kill -Confirm:$false | Out-Null
+        $Vm = Get-VM -Name $Vm.Name
+    }
+    Remove-HardDisk -HardDisk $disks[0] -DeletePermanently -Confirm:$false
+    New-HardDisk -VM $Vm -Datastore $Datastore -CapacityGB 24 `
+        -StorageFormat Thin -Confirm:$false | Out-Null
+}
+
 $credentials = Read-KeyValueFile -Path $CredentialEnvFile
 $connection = $null
 try {
@@ -101,10 +129,16 @@ try {
         $folder = New-Folder -Name $FolderName -Location $rootFolder
     }
 
-    $datastoreIso = $null
+    if ($RecreateOsDisk -and -not ($ApplianceIso -or $ReuseUploadedIso)) {
+        throw 'Recreating a lab OS disk requires the appliance ISO to be supplied or explicitly reused.'
+    }
+    $datastoreIso = if ($ApplianceIso -or $ReuseUploadedIso) {
+        "[$DatastoreName] hoardarr-lab/hoardarr-0.3.11-beta1.iso"
+    } else {
+        $null
+    }
     if ($ApplianceIso) {
         $resolvedIso = (Resolve-Path -LiteralPath $ApplianceIso).Path
-        $datastoreIso = "[$DatastoreName] hoardarr-lab/hoardarr-0.3.11-beta1.iso"
         if ($PSCmdlet.ShouldProcess($datastoreIso, 'Upload appliance ISO')) {
             New-PSDrive -Name HoardarrLabDatastore -PSProvider VimDatastore `
                 -Root '\' -Location $datastore | Out-Null
@@ -127,6 +161,10 @@ try {
                     'protected physical SSDs excluded'
                 ) -Confirm:$false
             Set-VM -VM $vm -MemoryHotAddEnabled $true -Confirm:$false | Out-Null
+        }
+        if ($RecreateOsDisk -and $vm -and $PSCmdlet.ShouldProcess($name, 'Recreate exact disposable virtual OS disk')) {
+            Reset-VirtualOsDisk -Vm $vm -Datastore $datastore
+            $vm = Get-VM -Name $name
         }
         if ($vm -and $PSCmdlet.ShouldProcess($name, 'Reconcile lab network adapter')) {
             Ensure-LabNetwork -Vm $vm -Portgroup $portgroup
@@ -158,6 +196,9 @@ try {
             power_state = [string]$vm.PowerState
             cpu_count = $vm.NumCpu
             memory_gib = $vm.MemoryGB
+            boot_time = if ($vm.ExtensionData.Runtime.BootTime) { $vm.ExtensionData.Runtime.BootTime.ToUniversalTime().ToString('o') } else { $null }
+            guest_state = [string]$vm.ExtensionData.Guest.GuestState
+            tools_status = [string]$vm.ExtensionData.Guest.ToolsRunningStatus
             guest_ips = @($vm.Guest.IPAddress | Where-Object { $_ })
             disks = @(Get-HardDisk -VM $vm | ForEach-Object {
                 [ordered]@{

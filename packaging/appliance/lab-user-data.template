@@ -13,7 +13,9 @@ autoinstall:
     hostname: hoardarr-lab
     realname: Hoardarr Lab Administrator
     username: hoardarr
-    password: "!"
+    # Unknown random password hash: keeps the account valid for public-key SSH
+    # while `allow-pw: false` prevents password authentication.
+    password: "$6$nnRsvDDPuvhKKFg5$lDQEqnK/HoSjC2rqadCpAxOqtlwqY9KQLRvGvLbbuBHnRfJoGnVXbe1.3iGi.5vTqKGPAp3Dfh3CFDKSyi8Uz1"
   ssh:
     install-server: true
     allow-pw: false
@@ -40,7 +42,7 @@ autoinstall:
   user-data:
     users:
       - name: hoardarr
-        lock_passwd: true
+        lock_passwd: false
         groups: [adm, sudo]
         sudo: ALL=(ALL) NOPASSWD:ALL
         shell: /bin/bash

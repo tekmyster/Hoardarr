@@ -52,7 +52,7 @@ class ApplianceAssetsTests(unittest.TestCase):
         )
         self.assertIn('"${checksum_map[@]}"', builder)
 
-    def test_lab_appliance_is_separate_locked_key_only_automation(self) -> None:
+    def test_lab_appliance_is_separate_key_only_automation(self) -> None:
         builder = (ROOT / "scripts" / "build-appliance.sh").read_text(encoding="utf-8")
         template = (ROOT / "packaging" / "appliance" / "lab-user-data.template").read_text(
             encoding="utf-8"
@@ -62,8 +62,9 @@ class ApplianceAssetsTests(unittest.TestCase):
         )
         self.assertIn("[USER_DATA]", builder)
         self.assertIn('user_data="$(realpath -- "${5:-packaging/appliance/user-data}")"', builder)
-        self.assertIn('password: "!"', template)
-        self.assertIn("lock_passwd: true", template)
+        self.assertRegex(template, r'password: "\$6\$[^"\s]+"')
+        self.assertNotIn('password: "!"', template)
+        self.assertIn("lock_passwd: false", template)
         self.assertIn("allow-pw: false", template)
         self.assertEqual(template.count("__SSH_PUBLIC_KEY__"), 2)
         self.assertIn("workflow_dispatch", workflow)
