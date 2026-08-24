@@ -710,6 +710,8 @@ apply_release() {
     # starts (or restarts) the executor.  In particular, Ubuntu does not provide
     # /data by default.
     install -d -o root -g root -m 0755 /data /mnt /srv
+    install -d -o root -g root -m 0755 \
+        /etc/samba /etc/snapraid /etc/multipath/conf.d /etc/systemd/system
 
     local expected_manifest previous_release
     expected_manifest="$(manifest_digest)"
