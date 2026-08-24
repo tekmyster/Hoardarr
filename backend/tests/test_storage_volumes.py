@@ -11,6 +11,7 @@ from hoardarr.storage.volumes import (
     StorageVolumeError,
     canonical_volume_identity,
     register_volume,
+    volume_capabilities,
     volume_documents,
 )
 
@@ -84,6 +85,16 @@ def test_volume_identity_is_provider_native_and_kernel_path_independent(volume_s
     assert updated.device_path == "/dev/zvol/new-kernel-path"
     assert updated.stable_identity == "zfs:dataset:tank/media"
     assert volume_documents(volume_session)[0]["allocated_bytes"] == 1_500_000_000
+    assert volume_documents(volume_session)[0]["capabilities"]["snapshot"] == {
+        "support": "supported",
+        "availability": "not_reported",
+        "source": "provider_baseline",
+        "constraints": {},
+    }
+    assert volume_documents(volume_session)[0]["capabilities"]["size"]["availability"] == (
+        "available"
+    )
+    assert volume_documents(volume_session)[0]["capabilities_detected_at"] is not None
 
 
 @pytest.mark.parametrize(
@@ -134,3 +145,40 @@ def test_volume_registration_rejects_unsupported_or_misleading_values(
 def test_canonical_volume_identity_rejects_control_characters() -> None:
     with pytest.raises(StorageVolumeError, match="identity"):
         canonical_volume_identity("filesystem", "filesystem", "uuid\nunsafe")
+
+
+def test_provider_capabilities_distinguish_support_from_runtime_availability() -> None:
+    capabilities = volume_capabilities(
+        "lvm",
+        "logical_volume",
+        {
+            "thin_provisioning": {
+                "support": "supported",
+                "availability": "available",
+                "constraints": {"pool": "vg0/thinpool", "maximum_bytes": 8_000_000_000},
+            },
+            "snapshot": {
+                "support": "supported",
+                "availability": "temporarily_unavailable",
+                "constraints": {"reason": "thin pool metadata is read-only"},
+            },
+        },
+    )
+    assert capabilities["thin_provisioning"]["availability"] == "available"
+    assert capabilities["snapshot"]["availability"] == "temporarily_unavailable"
+    assert capabilities["replication"] == {
+        "support": "unsupported",
+        "availability": "unsupported",
+        "source": "provider_baseline",
+        "constraints": {},
+    }
+
+
+def test_provider_capabilities_cannot_override_incompatible_backend_semantics() -> None:
+    with pytest.raises(StorageVolumeError) as raised:
+        volume_capabilities(
+            "filesystem",
+            "filesystem",
+            {"snapshot": {"support": "supported", "availability": "available"}},
+        )
+    assert raised.value.code == "volume_capability_conflict"

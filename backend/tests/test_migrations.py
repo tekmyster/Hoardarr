@@ -103,6 +103,9 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
     assert {"expectation_id", "fingerprint", "state", "resolved_at"} <= {
         column["name"] for column in inspect(engine).get_columns("topology_drift_events")
     }
+    assert {"capabilities_json", "capabilities_detected_at"} <= {
+        column["name"] for column in inspect(engine).get_columns("storage_volumes")
+    }
     engine.dispose()
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT username FROM users").fetchone() == ("owner",)

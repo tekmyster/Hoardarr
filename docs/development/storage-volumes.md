@@ -20,5 +20,12 @@ Supported initial resource classes are:
 
 `GET /api/v1/storage/volumes` returns the authenticated inventory. Registration is currently an
 internal provider boundary; provider discovery owns creation and reconciliation. The later
-capability task adds honest per-provider snapshot, quota, clone, thin-provisioning, QoS, and
-replication states. Unsupported behavior must remain unsupported rather than being simulated.
+create-operation tasks add provider mutation workflows.
+
+Each inventory item contains a normalized capability matrix for size, allocation, filesystem,
+file/block presentation, snapshots, quota, reservation, thin provisioning, clone, QoS, and
+replication. `support` describes provider semantics; `availability` describes the current observed
+runtime. A provider baseline never turns an unknown runtime into `available`, and a runtime probe
+cannot enable a capability that is incompatible with that resource class. Provider observations
+may include bounded constraints such as a maximum size or backing thin pool. Unsupported behavior
+remains unsupported rather than being simulated.

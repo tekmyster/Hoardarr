@@ -41,7 +41,6 @@ from hoardarr.db.models import (
     StorageEntity,
     StorageGroup,
     StoragePath,
-    StorageVolume,
     User,
 )
 from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
@@ -50,6 +49,7 @@ from hoardarr.operations.worker import refresh_media_libraries, run_once
 from hoardarr.storage.groups import register_disk
 from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.storage.tiering import plan_transfer
+from hoardarr.storage.volumes import register_volume
 from hoardarr.wizard.service import DEFAULT_LAYOUT
 
 
@@ -104,23 +104,23 @@ def test_storage_volume_inventory_requires_authentication_and_returns_provider_i
     _claim_owner(client, setup_token)
     factory = app.state.session_factory
     with factory() as session, session.begin():
-        session.add(
-            StorageVolume(
-                stable_identity="filesystem:filesystem:uuid-media",
-                provider="filesystem",
-                resource_type="filesystem",
-                provider_resource_id="uuid-media",
-                name="Media filesystem",
-                presentation="file",
-                mountpoint="/srv/media",
-                device_path="/dev/mapper/media",
-                filesystem_type="xfs",
-                filesystem_uuid="uuid-media",
-                size_bytes=8_000_000_000,
-                allocated_bytes=2_000_000_000,
-                lifecycle_state="active",
-                config_json={},
-            )
+        register_volume(
+            session,
+            {
+                "provider": "filesystem",
+                "resource_type": "filesystem",
+                "provider_resource_id": "uuid-media",
+                "name": "Media filesystem",
+                "presentation": "file",
+                "mountpoint": "/srv/media",
+                "device_path": "/dev/mapper/media",
+                "filesystem_type": "xfs",
+                "filesystem_uuid": "uuid-media",
+                "size_bytes": 8_000_000_000,
+                "allocated_bytes": 2_000_000_000,
+                "lifecycle_state": "active",
+                "config": {},
+            },
         )
 
     response = client.get("/api/v1/storage/volumes")
@@ -129,6 +129,8 @@ def test_storage_volume_inventory_requires_authentication_and_returns_provider_i
     assert item["stable_identity"] == "filesystem:filesystem:uuid-media"
     assert item["mountpoint"] == "/srv/media"
     assert item["presentation"] == "file"
+    assert item["capabilities"]["size"]["availability"] == "available"
+    assert item["capabilities"]["snapshot"]["support"] == "unsupported"
 
 
 def test_expected_topology_api_persists_drift_history_and_requires_csrf(api_runtime: Any) -> None:

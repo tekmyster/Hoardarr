@@ -456,6 +456,10 @@ class StorageVolume(Base):
         String(32), nullable=False, default="active", index=True
     )
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    capabilities_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    capabilities_detected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
