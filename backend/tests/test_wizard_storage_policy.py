@@ -573,6 +573,108 @@ def test_zfs_expansion_candidate_rejects_changed_geometry(session: Session) -> N
         )
 
 
+def test_linux_md_expansion_candidate_binds_exact_reviewed_geometry(
+    session: Session,
+) -> None:
+    payload = _direct_payload(drive_count=4)
+    snapshot = _snapshot(session, payload)
+    disk_ids = [str(item["id"]) for item in payload["disks"]]  # type: ignore[index]
+    expansion = {
+        "candidate_id": "e" * 24,
+        "kind": "new_linux_md_raid6",
+        "storage_group_id": None,
+        "hardware_snapshot_sha256": snapshot.sha256,
+        "disk_ids": disk_ids,
+        "target": None,
+        "configuration": {
+            "topology": "raid",
+            "md_level": "raid6",
+            "member_count": 4,
+        },
+    }
+    answers = _storage_answers(
+        selected_device_ids=disk_ids,
+        topology="raid",
+        portable_systems=["linux"],
+        expansion=expansion,
+        layout_options={
+            "name": "media-md",
+            "level": "raid6",
+            "device_ids": disk_ids,
+            "filesystem": "xfs",
+            "mountpoint": "/data",
+            "chunk_kib": 512,
+            "metadata": "1.2",
+        },
+    )
+    wizard = create_wizard(session, mode="advanced", hardware_snapshot_id=snapshot.id)
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=0,
+        step="storage",
+        answers=answers,
+    )
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=wizard.revision,
+        step="layout",
+        answers=DEFAULT_LAYOUT,
+    )
+    wizard = update_step(
+        session,
+        wizard_id=wizard.id,
+        expected_revision=wizard.revision,
+        step="applications",
+        answers={},
+    )
+    plan = create_plan(session, wizard_id=wizard.id, expected_revision=wizard.revision)
+    storage = plan.document_json["storage"]
+    assert storage["expansion"] == expansion
+    assert storage["layout_options"]["level"] == "raid6"
+    assert storage["layout_options"]["device_ids"] == disk_ids
+
+
+def test_linux_md_expansion_candidate_rejects_changed_level(session: Session) -> None:
+    payload = _direct_payload(drive_count=4)
+    snapshot = _snapshot(session, payload)
+    disk_ids = [str(item["id"]) for item in payload["disks"]]  # type: ignore[index]
+    wizard = create_wizard(session, mode="advanced", hardware_snapshot_id=snapshot.id)
+    with pytest.raises(WizardValidationError, match="geometry no longer matches"):
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=0,
+            step="storage",
+            answers=_storage_answers(
+                selected_device_ids=disk_ids,
+                topology="raid",
+                portable_systems=["linux"],
+                expansion={
+                    "candidate_id": "a" * 24,
+                    "kind": "new_linux_md_raid6",
+                    "storage_group_id": None,
+                    "hardware_snapshot_sha256": snapshot.sha256,
+                    "disk_ids": disk_ids,
+                    "target": None,
+                    "configuration": {
+                        "topology": "raid",
+                        "md_level": "raid6",
+                        "member_count": 4,
+                    },
+                },
+                layout_options={
+                    "name": "media-md",
+                    "level": "raid5",
+                    "device_ids": disk_ids,
+                    "filesystem": "xfs",
+                    "mountpoint": "/data",
+                },
+            ),
+        )
+
+
 def test_existing_zfs_vdev_expansion_binds_pool_identity_and_preserves_mount(
     session: Session,
 ) -> None:

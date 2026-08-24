@@ -1431,6 +1431,8 @@ export default function App() {
   }
 
   async function openDriveAction(action: DriveAction, driveId: string | string[], expansion?: StorageExpansionSelection): Promise<void> {
+    const requestedSmartTest = action === "smart_short" ? "short" : action === "smart_long" ? "long" : null;
+    const effectiveAction: DriveAction = requestedSmartTest ? "test" : action;
     const driveIds = Array.isArray(driveId) ? driveId : [driveId];
     if (driveIds.some((id) => activeReservedDriveIds.has(id))) {
       setError("This drive is already reserved by a queued or running storage operation. Open Activity to review it.");
@@ -1449,7 +1451,7 @@ export default function App() {
       setUsbOverrideAck("");
       setExpansionSelection(expansion ?? null);
 
-      if (action === "advanced") {
+      if (effectiveAction === "advanced") {
         setMode("advanced");
         setActiveStep(expansion ? 5 : 2);
         if (expansion?.configuration.topology === "zfs") {
@@ -1463,22 +1465,37 @@ export default function App() {
             setArrayName(expansion.target.instance_id.replace(/^zfs:/, ""));
           }
         }
+        if (expansion?.configuration.topology === "raid") {
+          const level = expansion.configuration.md_level;
+          if (level === "raid1" || level === "raid5" || level === "raid6" || level === "raid10") {
+            setMdLevel(level);
+          }
+        }
       } else {
         setMode("guided");
-        setActiveStep(action === "configure" ? 2 : action === "expand" ? 5 : 3);
+        setActiveStep(effectiveAction === "configure" ? 2 : effectiveAction === "expand" ? 5 : 3);
       }
-      if (action === "test") setStorageRole("test");
-      if (action === "import" || action === "test") setPreserveData(true);
-      if (action === "configure" || action === "cache" || action === "expand") setPreserveData(false);
-      if (action !== "test") {
+      if (effectiveAction === "test") {
+        setStorageRole("test");
+        if (requestedSmartTest) {
+          setTestIdentity(true);
+          setTestSurfaceRead(false);
+          setTestSmartShort(requestedSmartTest === "short");
+          setTestSmartExtended(requestedSmartTest === "long");
+          setTestDestructive(false);
+        }
+      }
+      if (effectiveAction === "import" || effectiveAction === "test") setPreserveData(true);
+      if (effectiveAction === "configure" || effectiveAction === "cache" || effectiveAction === "expand") setPreserveData(false);
+      if (effectiveAction !== "test") {
         const plannedTopology = expansion?.configuration.topology;
         setStorageRole(
           plannedTopology && isStorageRole(plannedTopology)
             ? plannedTopology
-            : action === "cache" ? "download-cache" : action === "import" ? "import" : action === "expand" ? "mergerfs" : "individual",
+            : effectiveAction === "cache" ? "download-cache" : effectiveAction === "import" ? "import" : effectiveAction === "expand" ? "mergerfs" : "individual",
         );
       }
-      if (action === "expand") {
+      if (effectiveAction === "expand") {
         const target = expansion?.target?.instance_id;
         if (expansion && !mergerFsInventory?.items.some((item) => item.id === target)) {
           throw new Error("The recommended combined-storage target is no longer detected. Refresh expansion choices.");
@@ -2311,6 +2328,8 @@ function expansionSelectionValue(value: unknown): StorageExpansionSelection | nu
       ...(typeof configuration.zfs_pool_guid === "string" ? { zfs_pool_guid: configuration.zfs_pool_guid } : {}),
       ...(typeof configuration.zfs_config_sha256 === "string" ? { zfs_config_sha256: configuration.zfs_config_sha256 } : {}),
       ...(typeof configuration.zfs_vdev_count === "number" ? { zfs_vdev_count: configuration.zfs_vdev_count } : {}),
+      ...(configuration.md_level === "raid1" || configuration.md_level === "raid5" || configuration.md_level === "raid6" || configuration.md_level === "raid10" ? { md_level: configuration.md_level } : {}),
+      ...(typeof configuration.member_count === "number" ? { member_count: configuration.member_count } : {}),
     },
   };
 }
@@ -2367,10 +2386,20 @@ export function BackendStoragePlan({ storage }: { storage: Record<string, unknow
   const folders = Array.isArray(storage.folders) ? storage.folders.map(String) : [];
   const warnings = Array.isArray(storage.warnings) ? storage.warnings.map(objectValue) : [];
   const intake = objectValue(storage.intake_tests);
+  const expansion = objectValue(storage.expansion);
+  const expansionTarget = objectValue(expansion.target);
+  const expansionConfiguration = objectValue(expansion.configuration);
   const selectedChecks = Object.entries(intake)
     .filter(([, enabled]) => enabled === true)
     .map(([name]) => name.replaceAll("_", " "));
   return <Card title="Backend-derived storage actions" description="These are the exact actions and paths in the immutable plan, not a browser-side estimate.">
+    {typeof expansion.candidate_id === "string" && <div className="advanced-panel" aria-label="Expansion plan binding">
+      <h3>Reviewed expansion choice</h3>
+      <div className="review-grid plan-storage-grid">
+        <div><ReviewLine label="Candidate" value={expansion.candidate_id} mono /><ReviewLine label="Change" value={String(expansion.kind ?? "Not specified")} /><ReviewLine label="Storage Group" value={String(expansion.storage_group_id ?? "New Storage Group")} /></div>
+        <div><ReviewLine label="Target" value={String(expansionTarget.mountpoint ?? "New storage")} mono /><ReviewLine label="Exact geometry" value={Object.entries(expansionConfiguration).map(([key, value]) => `${key}=${String(value)}`).join(" · ") || "Not specified"} /><ReviewLine label="Discovery SHA-256" value={String(expansion.hardware_snapshot_sha256 ?? "Not reported")} mono /></div>
+      </div>
+    </div>}
     <div className="review-grid plan-storage-grid"><div><h3>Layout</h3><ReviewLine label="Type" value={String(storage.topology ?? "Not specified")} /><ReviewLine label="Drive checks" value={selectedChecks.length ? selectedChecks.join(", ") : "None"} /><ReviewLine label="Snapshots" value={storage.snapshots === true ? "Enabled" : "Disabled"} /><ReviewLine label="Encryption" value={String(storage.encryption ?? "Not specified")} /></div><div><h3>Account</h3><ReviewLine label="Media identity" value={String(objectValue(storage.service_account).username ?? "Not specified")} /><ReviewLine label="Access model" value={String(objectValue(storage.file_access).acl_model ?? "Not specified")} /></div></div>
     <div className="review-grid plan-storage-grid"><div><h3>{createsFilesystem ? "Format" : "Filesystem handling"}</h3><ReviewLine label="Filesystem" value={createsFilesystem ? String(format.filesystem ?? "Not specified") : "Preserve existing"} /><ReviewLine label="Format method" value={createsFilesystem ? "Quick format" : "Not applicable"} /><ReviewLine label="Partition table" value={createsFilesystem ? String(format.partition_table ?? "None") : "No creation planned"} /><ReviewLine label="Alignment" value={createsFilesystem && format.alignment_bytes ? `${Number(format.alignment_bytes).toLocaleString()} bytes` : "Not applicable"} /><ReviewLine label="Allocation unit" value={createsFilesystem && format.allocation_unit_bytes ? `${Number(format.allocation_unit_bytes).toLocaleString()} bytes` : "Not applicable"} /></div><div><h3>Risk</h3><ReviewLine label="Destructive" value={risk.destructive === true ? "Yes" : risk.destructive === false ? "No" : "Not declared"} /><ReviewLine label="Approval required" value={risk.approval_required === true ? "Yes" : risk.approval_required === false ? "No" : "Not declared"} /><p>{String(risk.message ?? "No risk message was supplied.")}</p></div></div>
     <h3>Actions</h3><div className="table-scroll"><table className="data-table"><thead><tr><th>Action ID</th><th>Type</th><th>Device</th><th>Destructive</th></tr></thead><tbody>{actions.map((action, index) => <tr key={String(action.action_id ?? index)}><td><code>{String(action.action_id ?? "Unavailable")}</code></td><td>{String(action.type ?? "Unavailable")}</td><td><code>{String(action.device_id ?? "—")}</code></td><td>{actionDestructiveLabel(action, risk.destructive === true)}</td></tr>)}</tbody></table></div>

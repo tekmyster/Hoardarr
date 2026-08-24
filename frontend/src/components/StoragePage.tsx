@@ -17,7 +17,7 @@ import { TopologyPlanningPanel } from "./TopologyPlanningPanel";
 import { ForeignStoragePanel } from "./ForeignStoragePanel";
 
 export type StorageAction = "add" | "move" | "change";
-export type DriveAction = "configure" | "test" | "import" | "expand" | "cache" | "wipe" | "advanced";
+export type DriveAction = "configure" | "test" | "smart_short" | "smart_long" | "import" | "expand" | "cache" | "wipe" | "advanced";
 
 export interface SavedStorageDraft {
   id: string;
@@ -35,6 +35,8 @@ const EMPTY_DRIVE_IDS = new Set<string>();
 const DRIVE_ACTIONS: ReadonlyArray<{ id: DriveAction; label: string; detail: string }> = [
   { id: "configure", label: "Set up as storage", detail: "Choose its use, format, and sharing." },
   { id: "test", label: "Run drive checks", detail: "Review the recommended safe intake tests." },
+  { id: "smart_short", label: "Run Short Test", detail: "Run the drive-reported SMART short self-test and keep its result in Activity." },
+  { id: "smart_long", label: "Run Long Test", detail: "Run the drive-reported SMART extended self-test; this can take hours." },
   { id: "import", label: "Import existing data", detail: "Keep data while Hoardarr inspects the drive." },
   { id: "expand", label: "Expand combined storage", detail: "Add this drive to an existing mergerFS path." },
   { id: "cache", label: "Use for downloads/cache", detail: "Prepare fast working space for torrents or NZBs." },
@@ -268,8 +270,8 @@ export function StoragePage({
                   key={action.id}
                   type="button"
                   role="menuitem"
-                  disabled={!drive.selectable}
-                  title={!drive.selectable ? drive.selectionBlockers.join(" ") : undefined}
+                  disabled={!drive.selectable || ((action.id === "smart_short" || action.id === "smart_long") && drive.smartSelfTest?.status !== "available")}
+                  title={!drive.selectable ? drive.selectionBlockers.join(" ") : (action.id === "smart_short" || action.id === "smart_long") && drive.smartSelfTest?.status !== "available" ? "SMART self-test support was not reported by this drive and connection." : undefined}
                   onClick={(event) => {
                     event.currentTarget.closest("details")?.removeAttribute("open");
                     if (action.id === "wipe") {

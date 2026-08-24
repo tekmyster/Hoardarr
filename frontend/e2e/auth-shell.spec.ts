@@ -37,6 +37,15 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/storage/groups") || pathname.endsWith("/storage/disks")) return json({ items: [] });
     if (pathname.endsWith("/storage/expansion")) return json({ schema_version: 1, hardware_snapshot_id: "none", hardware_snapshot_sha256: "0".repeat(64), captured_at: new Date().toISOString(), storage_groups: [], available_disks: [], reserved_disks: [], detected_capabilities: { mergerfs: false, snapraid: false, zfs: false }, candidates: [], methodology: "Read-only test assessment." });
     if (pathname.endsWith("/storage/logical")) return json({ items: [] });
+    if (pathname.endsWith("/storage/foreign")) return json({
+      snapshot: { id: "none", captured_at: new Date().toISOString(), sha256: "0".repeat(64) },
+      policy: { default_access: "read_only", automatic_mount: false, automatic_assembly: false, mutation_performed: false },
+      unraid_evidence: null,
+      nas_evidence: null,
+      migration_destinations: [],
+      candidates: [],
+      unrecognized_device_count: 0,
+    });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations")) return json({ items: [] });
     if (pathname.endsWith("/backups/targets") || pathname.endsWith("/backups/runs")) return json({ items: [] });
@@ -68,7 +77,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
   });
 }
 
-async function storageWizardServer(page: Page): Promise<void> {
+async function storageWizardServer(page: Page, options: { firstDriveContainsData?: boolean } = {}): Promise<void> {
   await authenticatedEmptyServer(page);
   const now = new Date().toISOString();
   const drives = Array.from({ length: 8 }, (_, index) => ({
@@ -84,8 +93,8 @@ async function storageWizardServer(page: Page): Promise<void> {
     read_only: false,
     system_disk: false,
     connection: { transport: "sas", protocol: "sas", controller_address: "0000:01:00.0", enclosure_id: "test-shelf", slot: String(index + 1) },
-    partitions: [],
-    signatures: [],
+    partitions: options.firstDriveContainsData && index === 0 ? [{ kernel_path: "/dev/sdb1", number: 1, filesystem: { type: "ext4", uuid: "11111111-2222-3333-4444-555555555555", label: "media-archive" } }] : [],
+    signatures: options.firstDriveContainsData && index === 0 ? [{ type: "ext4", usage: "filesystem", offset: "0x438", uuid: "11111111-2222-3333-4444-555555555555", label: "media-archive" }] : [],
     signature_scan: { status: "complete", source: "wipefs", reason: null },
     discard: { granularity_bytes: 4096, max_bytes: 1_073_741_824 },
     maintenance_capabilities: {
@@ -108,7 +117,7 @@ async function storageWizardServer(page: Page): Promise<void> {
   let applied = false;
   let answers: Record<string, unknown> = {};
   const wizard = () => ({ id: "wizard-storage", revision, mode: "guided", status: applied ? "applied" : "review", current_step: "storage", hardware_snapshot_id: snapshot.id, answers, plan_id: "plan-storage", created_at: now, updated_at: now });
-  const plan = {
+  const planTemplate = {
     id: "plan-storage",
     revision: 4,
     sha256: "d".repeat(64),
@@ -133,6 +142,75 @@ async function storageWizardServer(page: Page): Promise<void> {
       },
     },
   };
+  const currentPlan = () => {
+    const storageAnswers = (answers.storage ?? {}) as Record<string, any>;
+    const selectedIds = Array.isArray(storageAnswers.selected_device_ids)
+      ? storageAnswers.selected_device_ids as string[]
+      : [drives[0].id];
+    const selectedDevices = selectedIds
+      .map((id) => drives.find((drive) => drive.id === id))
+      .filter((drive): drive is typeof drives[number] => drive !== undefined)
+      .map((drive) => ({
+        id: drive.id,
+        stable_identity: true,
+        vendor: drive.vendor,
+        model: drive.model,
+        serial: drive.identity.serial,
+        wwn: drive.identity.wwn,
+        capacity_bytes: drive.capacity_bytes,
+        logical_sector_bytes: drive.sector_sizes.logical_bytes,
+        physical_sector_bytes: drive.sector_sizes.physical_bytes,
+        partitions: drive.partitions,
+        signatures: drive.signatures,
+      }));
+    const expansion = storageAnswers.expansion;
+    const topology = storageAnswers.topology ?? planTemplate.document.storage.topology;
+    const preservesExistingData = storageAnswers.preserve_data === true;
+    const intakeTests = (storageAnswers.intake_tests ?? {}) as Record<string, boolean>;
+    const smartActions = [
+      ...(intakeTests.identity ? [{ action_id: `test:identity:${selectedIds[0]}`, type: "drive.identity.verify", device_id: selectedIds[0], destructive: false }] : []),
+      ...(intakeTests.smart_short ? [{ action_id: `test:smart_short:${selectedIds[0]}`, type: "drive.smart.short", device_id: selectedIds[0], destructive: false }] : []),
+      ...(intakeTests.smart_extended ? [{ action_id: `test:smart_extended:${selectedIds[0]}`, type: "drive.smart.extended", device_id: selectedIds[0], destructive: false }] : []),
+    ];
+    return {
+      ...planTemplate,
+      document: {
+        ...planTemplate.document,
+        storage: {
+          ...planTemplate.document.storage,
+          topology,
+          selected_devices: selectedDevices,
+          snapshot_binding: {
+            snapshot_id: snapshot.id,
+            snapshot_sha256: snapshot.sha256,
+            selected_device_ids: selectedIds,
+          },
+          ...(expansion ? { expansion } : {}),
+          ...(topology === "test" ? {
+            actions: smartActions,
+            intake_tests: intakeTests,
+            risk: { destructive: false, approval_required: false, required_phrase: null, message: "Drive checks do not format or repartition the drive." },
+            folders: [],
+          } : {}),
+          ...(topology !== "test" && preservesExistingData ? {
+            actions: [{ action_id: "storage-layout", type: "storage.layout.ensure", topology, device_ids: selectedIds, purpose: storageAnswers.purpose ?? "media", destructive: false }],
+            risk: { destructive: false, approval_required: false, required_phrase: null, message: "The detected filesystem and existing files are preserved." },
+          } : {}),
+        },
+      },
+    };
+  };
+  const operationResult = () => {
+    const storageAnswers = (answers.storage ?? {}) as Record<string, any>;
+    const tests = (storageAnswers.intake_tests ?? {}) as Record<string, boolean>;
+    const actionResults = [
+      ...(tests.smart_short ? [{ action_id: `test:smart_short:${drives[0].id}`, device_id: drives[0].id, outcome: "passed", code: "smart_self_test_passed", message: "The SMART short self-test completed without a reported error." }] : []),
+      ...(tests.smart_extended ? [{ action_id: `test:smart_extended:${drives[0].id}`, device_id: drives[0].id, outcome: "passed", code: "smart_self_test_passed", message: "The SMART extended self-test completed without a reported error." }] : []),
+    ];
+    return storageAnswers.topology === "test"
+      ? { topology: "test", selected_device_ids: [drives[0].id], mountpoint: null, action_results: actionResults, notices: [] }
+      : { mountpoint: "/data", namespace_reconciled: true };
+  };
 
   await page.route("**/api/v1/hardware/snapshots/latest", (route) => route.fulfill({ json: snapshot }));
   await page.route("**/api/v1/hardware/snapshots/snap-storage", (route) => route.fulfill({ json: snapshot }));
@@ -149,7 +227,10 @@ async function storageWizardServer(page: Page): Promise<void> {
       return route.fulfill({ status: 202, json: { operation: { id: "op-storage", kind: "storage.apply", status: "queued", resource: { type: "wizard_session", id: "wizard-storage" } } } });
     }
     if (pathname.endsWith("/complete")) return route.fulfill({ json: { ...wizard(), status: "completed" } });
-    if (pathname.endsWith("/plan")) return route.fulfill({ status: route.request().method() === "POST" ? 201 : 200, json: route.request().method() === "POST" ? { plan } : plan });
+    if (pathname.endsWith("/plan")) {
+      const plan = currentPlan();
+      return route.fulfill({ status: route.request().method() === "POST" ? 201 : 200, json: route.request().method() === "POST" ? { plan } : plan });
+    }
     if (pathname.includes("/steps/")) {
       const body = route.request().postDataJSON() as { answers: Record<string, unknown> };
       const step = pathname.split("/steps/")[1];
@@ -159,10 +240,23 @@ async function storageWizardServer(page: Page): Promise<void> {
     }
     return route.fulfill({ json: wizard() });
   });
-  await page.route("**/api/v1/operations", (route) => route.fulfill({ json: { items: applied ? [{ id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: { mountpoint: "/data" } }] : [] } }));
-  await page.route("**/api/v1/operations/op-storage", (route) => route.fulfill({ json: { id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: { mountpoint: "/data" } } }));
+  await page.route("**/api/v1/operations", (route) => route.fulfill({ json: { items: applied ? [{ id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: operationResult(), created_at: now, updated_at: now }] : [] } }));
+  await page.route("**/api/v1/operations/op-storage", (route) => route.fulfill({ json: { id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: operationResult(), created_at: now, updated_at: now } }));
   await page.route("**/api/v1/operations/op-storage/progress", (route) => route.fulfill({ json: { operation_id: "op-storage", state: "succeeded", phase: "Storage build completed", completed_steps: 6, total_steps: 6, percent: 100, completed_actions: ["format", "mount"], notices: [], current_action: null, estimate: null, updated_at: Date.now() / 1000 } }));
   await page.route("**/api/v1/operations/op-storage/events", (route) => route.fulfill({ json: { items: [{ sequence: 1, type: "operation.succeeded", message: "Storage build completed", data: {}, created_at: now }] } }));
+  await page.route("**/api/v1/storage/groups", (route) => route.fulfill({ json: { items: applied ? [{
+    id: "media",
+    name: "Media",
+    namespace_path: "/data/media",
+    purpose: "media",
+    state: "active",
+    policy: { placement: "most_free_space" },
+    backends: [
+      { id: "backend-1", stable_identity: "serial:SSD-1", physical_disk_id: drives[0].id, storage_entity_id: null, namespace_path: "/mnt/disk1", role: "data", lifecycle_state: "active" },
+      { id: "backend-2", stable_identity: "serial:SSD-2", physical_disk_id: drives[1].id, storage_entity_id: null, namespace_path: "/mnt/disk2", role: "data", lifecycle_state: "preferred_write" },
+    ],
+    events: [{ id: "event-expansion", event_type: "namespace_reconciled", message: "Media namespace reconciled after expansion", created_at: now }],
+  }] : [] } }));
   await page.route("**/api/v1/storage/maintenance/preview", async (route) => {
     const body = route.request().postDataJSON() as { device_id: string; method: string };
     const plan = {
@@ -449,6 +543,85 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByText("/dev/sdc", { exact: true })).toBeVisible();
   });
 
+  test("applies a reviewed mergerFS expansion and reconciles the stable namespace", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.route("**/api/v1/storage/mergerfs", (route) => route.fulfill({ json: {
+      available: true,
+      status: "configured",
+      items: [{ id: "mergerfs:0123456789abcdef", name: "media", mountpoint: "/data/media", source: "/mnt/disk1:/mnt/disk2", branches: ["/mnt/disk1", "/mnt/disk2"], options: ["category.create=mfs", "category.search=ff"], active: true, configured: true }],
+    } }));
+    const candidateId = "1123456789abcdef01234567";
+    await page.route("**/api/v1/storage/expansion", (route) => route.fulfill({ json: {
+      schema_version: 1,
+      hardware_snapshot_id: "snap-storage",
+      hardware_snapshot_sha256: "c".repeat(64),
+      captured_at: new Date().toISOString(),
+      storage_groups: [{
+        id: "media", name: "Media", namespace_path: "/data/media", purpose: "media", backend_count: 1,
+        raw_capacity_bytes: 1_000_000_000_000,
+        capacity: { total_bytes: 1_000_000_000_000, used_bytes: 250_000_000_000, free_bytes: 750_000_000_000, quality: "available", source: "statvfs Storage Group namespace" },
+        distribution: { reported_members: 1, minimum_utilization_percent: 25, maximum_utilization_percent: 25, spread_percentage_points: null, methodology: "Maximum minus minimum utilization." },
+        protection: { data_backends: 1, parity_backends: 0, summary: "No parity backend is configured in this Storage Group." },
+        growth_forecast: { status: "insufficient_history", reason: "Seven days are required.", metric_entity_id: null },
+        preferred_backend_id: "backend-1",
+      }],
+      available_disks: [1, 2].map((number) => ({
+        id: `serial:test:ssd-${number}`,
+        stable_identity: `serial:SSD-${number}`,
+        kernel_path: `/dev/sd${number === 1 ? "b" : "c"}`,
+        vendor: "TEST", model: "SSD-1TB", capacity_bytes: 1_000_000_000_000,
+        media_type: "ssd", health: "healthy",
+        existing_data: { state: "none_detected", detail: "Complete signature scan found no storage metadata." },
+        eligible: true, blockers: [], warnings: [],
+      })),
+      reserved_disks: [],
+      detected_capabilities: { mergerfs: true, snapraid: false, zfs: false, linux_md: true },
+      tool_availability: { mergerfs: true, snapraid: false, zfs: false, linux_md: true },
+      candidates: [{
+        id: candidateId,
+        kind: "add_mergerfs_member",
+        disk_ids: ["serial:test:ssd-1", "serial:test:ssd-2"],
+        storage_group_id: "media",
+        storage_group_name: "Media",
+        title: "Add capacity to Media",
+        summary: "Add two independently readable members without changing the media namespace.",
+        recommended: true,
+        setup_mode: "expand",
+        capacity: { raw_delta_bytes: 2_000_000_000_000, estimated_usable_delta_bytes: 2_000_000_000_000, methodology: "Sum of reviewed blank member capacities." },
+        protection_impact: "No parity is added; current media remains online through the same namespace.",
+        future_expansion: "Additional members can be added later.",
+        migration_work: "Format and mount only the two new blank disks, update mergerFS, then reconcile /data/media.",
+        restrictions: ["No existing member is reformatted."],
+        target: { provider: "mergerfs", instance_id: "mergerfs:0123456789abcdef", mountpoint: "/data/media" },
+        configuration: { topology: "mergerfs" },
+      }],
+      methodology: "Read-only assessment bound to the latest hardware snapshot.",
+    } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByRole("article", { name: "Add capacity to Media" }).getByRole("button", { name: "Customize this plan" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    for (let step = 0; step < 4; step += 1) await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByRole("heading", { name: "Review the exact plan" })).toBeVisible();
+    await expect(dialog.getByLabel("Expansion plan binding")).toContainText(candidateId);
+    await expect(dialog.getByLabel("Expansion plan binding")).toContainText("/data/media");
+    await expect(dialog.locator(".selected-drives article")).toHaveCount(2);
+    await dialog.getByRole("button", { name: "Continue to consent" }).click();
+    await dialog.getByLabel('Type “I AGREE”').fill("I AGREE");
+    await dialog.getByRole("button", { name: "Apply settings" }).click();
+    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100");
+    await page.reload();
+    const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
+    await recoveredDialog.getByRole("button", { name: "Create access credential" }).click();
+    await recoveredDialog.getByRole("button", { name: "Show generated password" }).click();
+    await recoveredDialog.getByRole("button", { name: "I saved this password" }).click();
+    await recoveredDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByText("Storage is ready at /data.")).toBeVisible();
+    await expect(page.getByText("Media", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("/data/media", { exact: true }).first()).toBeVisible();
+  });
+
   test("opens a reviewed RAIDZ2 expansion candidate with its exact geometry", async ({ page }) => {
     await storageWizardServer(page);
     const disks = [1, 2, 3, 4].map((number) => ({
@@ -507,6 +680,62 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.locator(".selected-drives article")).toHaveCount(4);
   });
 
+  test("opens a reviewed Linux MD expansion candidate with its exact geometry", async ({ page }) => {
+    await storageWizardServer(page);
+    const disks = [1, 2, 3, 4].map((number) => ({
+      id: `serial:test:ssd-${number}`,
+      stable_identity: `serial:SSD-${number}`,
+      kernel_path: `/dev/sd${String.fromCharCode(97 + number)}`,
+      vendor: "TEST",
+      model: "SSD-1TB",
+      capacity_bytes: 1_000_000_000_000,
+      media_type: "ssd",
+      health: "healthy",
+      existing_data: { state: "none_detected", detail: "Complete scan found no signatures." },
+      eligible: true,
+      blockers: [],
+      warnings: [],
+    }));
+    await page.route("**/api/v1/storage/expansion", (route) => route.fulfill({ json: {
+      schema_version: 1,
+      hardware_snapshot_id: "snap-storage",
+      hardware_snapshot_sha256: "c".repeat(64),
+      captured_at: new Date().toISOString(),
+      storage_groups: [],
+      available_disks: disks,
+      reserved_disks: [],
+      detected_capabilities: { mergerfs: false, snapraid: false, zfs: false, linux_md: false },
+      tool_availability: { mergerfs: false, snapraid: false, zfs: false, linux_md: true },
+      candidates: [{
+        id: "bcdef0123456789abcdef012",
+        kind: "new_linux_md_raid10",
+        disk_ids: disks.map((disk) => disk.id),
+        storage_group_id: null,
+        storage_group_name: null,
+        title: "Create a 4-drive Linux RAID10 array",
+        summary: "Create one Linux software RAID device from matched blank drives.",
+        recommended: false,
+        setup_mode: "advanced",
+        capacity: { raw_delta_bytes: 4_000_000_000_000, estimated_usable_delta_bytes: 2_000_000_000_000, methodology: "Smallest member multiplied by two data columns." },
+        protection_impact: "Can tolerate one member failure.",
+        future_expansion: "Future changes follow mdadm reshape rules.",
+        migration_work: "Create after immutable review and exact approval.",
+        restrictions: ["All four disks become dedicated array members."],
+        target: null,
+        configuration: { topology: "raid", md_level: "raid10", member_count: 4 },
+      }],
+      methodology: "Read-only assessment bound to the latest hardware snapshot.",
+    } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByRole("article", { name: "Create a 4-drive Linux RAID10 array" }).getByRole("button", { name: "Customize this plan" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.locator('input[name="storage-role"][value="raid"]')).toBeChecked();
+    await expect(dialog.getByLabel("RAID level")).toHaveValue("raid10");
+    await expect(dialog.locator(".selected-drives article")).toHaveCount(4);
+  });
+
   test("shows real SMART support and drive-reported durations before a drive check", async ({ page }) => {
     await storageWizardServer(page);
     await page.goto("/");
@@ -521,6 +750,129 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByText("Supported · drive-reported estimate 2 min")).toBeVisible();
     await expect(dialog.getByText("Supported · drive-reported estimate 381 min")).toBeVisible();
     await expect(dialog.getByText("smartctl -j -c")).toBeVisible();
+  });
+
+  test("runs a short SMART self-test from the drive action and preserves its result in Activity", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByLabel("Actions for /dev/sdb").click();
+    await expect(page.getByRole("menuitem", { name: /Run Long Test/ })).toBeEnabled();
+    await page.getByRole("menuitem", { name: /Run Short Test/ }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.getByRole("heading", { name: "Choose drive checks" })).toBeVisible();
+    await expect(dialog.getByRole("checkbox", { name: "SMART short self-test" })).toBeChecked();
+    await expect(dialog.getByRole("checkbox", { name: "SMART extended self-test" })).not.toBeChecked();
+    await expect(dialog.getByText("Supported · drive-reported estimate 2 min")).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByRole("heading", { name: "Review the exact plan" })).toBeVisible();
+    await expect(dialog.getByText("drive.smart.short", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("No destructive approval is required", { exact: true }).first()).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByLabel('Type “I AGREE”')).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Apply settings" }).click();
+    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100");
+
+    await page.reload();
+    const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
+    await recoveredDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByRole("button", { name: "Activity" }).click();
+    await expect(page.getByLabel("SMART self-test history")).toContainText("Short");
+    await expect(page.getByLabel("SMART self-test history")).toContainText("The SMART short self-test completed without a reported error.");
+  });
+
+  test("binds the drive-reported long SMART test into a durable non-destructive plan", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByLabel("Actions for /dev/sdb").click();
+    await page.getByRole("menuitem", { name: /Run Long Test/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.getByRole("checkbox", { name: "SMART extended self-test" })).toBeChecked();
+    await expect(dialog.getByRole("checkbox", { name: "SMART short self-test" })).not.toBeChecked();
+    await expect(dialog.getByText("Supported · drive-reported estimate 381 min")).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByText("drive.smart.extended", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("No destructive approval is required", { exact: true }).first()).toBeVisible();
+  });
+
+  test("replaces a degraded Linux MD member with elevated existing-data safeguards", async ({ page }) => {
+    await storageWizardServer(page);
+    await page.route("**/api/v1/storage/inventory", (route) => route.fulfill({ json: {
+      captured_from: "live_host",
+      topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] },
+      active_operations: [],
+      pools: { status: "configured", items: [{
+        id: "md:media", name: "media", type: "Linux MD", status: "degraded", mountpoint: "/data/media", members: 3, degraded: true,
+        configuration: { quality: "available", level: "raid5", member_paths: ["/dev/sdb1", "/dev/sdc1"], config_sha256: "a".repeat(64) },
+      }] },
+      shares: { status: "configured", items: [{ id: "smb:media", name: "Media", protocol: "SMB", path: "/data/media" }] },
+      controllers: { status: "Not reported", items: [], unavailable: [] }, enclosures: { status: "Not reported", items: [], unavailable: [] },
+    } }));
+    const replacementPlan = {
+      schema_version: 1, kind: "array_replacement", provider: "linux_md", target_id: "md:media", target_name: "media",
+      target_identity: "md-uuid:11111111:22222222:33333333:44444444", configuration_sha256: "a".repeat(64), level: "raid5", member_count: 3, degraded: true,
+      old_member_path: null, minimum_capacity_bytes: 1_000_000_000_000,
+      device: { id: "serial:test:ssd-1", stable_identity: true, vendor: "TEST", model: "SSD-1TB", serial: "SSD-1", wwn: "5000c50000000000", eui64: null, nguid: null, capacity_bytes: 1_000_000_000_000, logical_sector_bytes: 512, physical_sector_bytes: 4096 },
+      device_binding_sha256: "b".repeat(64), hardware_snapshot_sha256: "c".repeat(64),
+      existing_data: { detected: true, partition_count: 1, signature_types: ["ext4"], scan_status: "complete" }, destructive: true,
+    };
+    await page.route("**/api/v1/storage/arrays/replacements/preview", (route) => route.fulfill({ json: { plan: replacementPlan, plan_sha256: "d".repeat(64) } }));
+    await page.route("**/api/v1/storage/arrays/replacements", (route) => route.fulfill({ status: 202, json: { operation: { id: "op-replacement", kind: "storage.array.replace", status: "queued", resource: { type: "linux_md", id: "md:media" } }, replayed: false } }));
+    await page.route("**/api/v1/operations/op-replacement", (route) => route.fulfill({ json: { id: "op-replacement", kind: "storage.array.replace", status: "succeeded", resource: { type: "linux_md", id: "md:media" }, result: { target_identity: replacementPlan.target_identity, replacement_device_id: replacementPlan.device.id } } }));
+    await page.route("**/api/v1/operations/op-replacement/progress", (route) => route.fulfill({ json: { operation_id: "op-replacement", state: "succeeded", phase: "Linux MD recovery verified", completed_steps: 4, total_steps: 4, percent: 100, completed_actions: ["identity", "add", "rebuild", "verify"], notices: [], current_action: null, estimate: null, updated_at: Date.now() / 1000 } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    const panel = page.locator("section.card").filter({ has: page.getByRole("heading", { name: "Replace a ZFS or Linux MD disk" }) });
+    await panel.getByLabel("Array replacement drive").selectOption("serial:test:ssd-1");
+    await panel.getByRole("button", { name: "Review array replacement" }).click();
+    await expect(panel.getByText("Existing data detected on the replacement")).toBeVisible();
+    await expect(panel.getByText(/1 partition and ext4 signatures/)).toBeVisible();
+    await expect(panel.getByText("md-uuid:11111111:22222222:33333333:44444444")).toBeVisible();
+    await panel.getByLabel("Array replacement confirmation").fill("I AGREE");
+    await panel.getByRole("button", { name: "Start durable array replacement" }).click();
+    await expect(panel.getByRole("progressbar", { name: "Array replacement progress" })).toHaveAttribute("aria-valuenow", "100");
+    await expect(panel.getByText("Array replacement completed")).toBeVisible();
+  });
+
+  test("onboards a data-bearing disk without formatting and reconciles its stable namespace", async ({ page }) => {
+    await storageWizardServer(page, { firstDriveContainsData: true });
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+
+    await expect(page.getByRole("row", { name: /\/dev\/sdb Stable identity/ })).toContainText("1 partition; 1 recognized signature");
+    await expect(page.getByRole("row", { name: /\/dev\/sdb Stable identity/ })).toContainText("signatures: ext4");
+    await page.getByLabel("Actions for /dev/sdb").click();
+    await page.getByRole("menuitem", { name: /Import existing data/i }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.getByRole("heading", { name: "Check drive condition" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByRole("heading", { name: "Tell us how the drives will be used" })).toBeVisible();
+    await expect(dialog.locator('input[name="preserve"][value="yes"]')).toBeChecked();
+
+    for (let step = 0; step < 5; step += 1) await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByRole("heading", { name: "Review the exact plan" })).toBeVisible();
+    await expect(dialog.getByText("Preserve ext4", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Preserve/import", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("disk.partition_table.create", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText("filesystem.create", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText("storage.layout.ensure", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("No destructive approval is required", { exact: true }).first()).toBeVisible();
+
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByLabel('Type “I AGREE”')).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Apply settings" }).click();
+    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100");
+    await page.reload();
+    const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
+    await recoveredDialog.getByRole("button", { name: "Create access credential" }).click();
+    await recoveredDialog.getByRole("button", { name: "Show generated password" }).click();
+    await recoveredDialog.getByRole("button", { name: "I saved this password" }).click();
+    await recoveredDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByText("Storage is ready at /data.")).toBeVisible();
+    await expect(page.getByText("/data/media", { exact: true }).first()).toBeVisible();
   });
 
   test("reviews and applies only a hardware-reported SCSI sanitization method", async ({ page }) => {
@@ -663,6 +1015,68 @@ test.describe("production sign-in shell", () => {
     await page.getByRole("button", { name: "Add to plan" }).click();
     await expect(page.getByText("20 TB planned", { exact: true })).toBeVisible();
     await testInfo.attach("planned-topology", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+  });
+
+  test("renders the sanitized LSI and NetApp physical topology with honest bay confidence", async ({ page }, testInfo) => {
+    await storageWizardServer(page);
+    const node = (id: string, kind: string, label: string, extra: Record<string, unknown> = {}) => ({ id, kind, label, status: "healthy", ...extra });
+    const links: Array<Record<string, unknown>> = [];
+    const link = (source: string, target: string, negotiated = 6, capable = 12, protocol = "SAS") => links.push({ id: `${source}->${target}`, source, target, protocol, negotiated_speed_gbps: negotiated, capable_speed_gbps: capable });
+    const nodes = [
+      node("controller:2308", "controller", "LSI SAS2308", { address: "0000:18:00.0", driver: "mpt2sas", protocol: "SAS", negotiated_speed_gbps: 6, capable_speed_gbps: 6 }),
+      node("host:6", "sas_host", "SAS host 6", { address: "host6", protocol: "SAS" }),
+      node("port:6", "port", "HBA port 6:0", { address: "port-6:0", protocol: "SAS" }),
+      node("phy:6", "phy", "PHY 3", { address: "phy-6:3", protocol: "SAS", sas_address: "0x500605b000000003", phy_identifier: "3", minimum_speed_gbps: 1.5, negotiated_speed_gbps: 3, capable_speed_gbps: 6, invalid_dwords: 14, disparity_errors: 3, loss_of_sync: 1, reset_problems: 1 }),
+      node("expander:424", "expander", "DS424IOM6 expander", { address: "500a098000000424", protocol: "SAS", sas_address: "500a098000000424", smp_quality: "available", smp_source: "smp_discover --summary --dsn", smp_phy_count: 24, smp_attached_phy_count: 2 }),
+      node("enclosure:424", "enclosure", "NETAPP DS424IOM6", { address: "500a098000000424", protocol: "SAS" }),
+      node("path:sata", "path", "SATA path through IOM6", { protocol: "SATA", target_port_identifier: "5000c50000000001", target_port_identifier_type: "naa" }),
+      node("drive:sata", "drive", "SEAGATE archive disk", { serial: "SAN-SATA-0001", stable_identity: "wwn:5000c50000000001", path: "/dev/sdb", slot: "03", mapping_source: "SES slot SAS address ↔ device SAS address", mapping_confidence: "high", mapping_last_confirmed_at: "2026-08-23T12:00:00Z", controller_id: "controller:2308", enclosure_id: "enclosure:424", protocol: "SATA", capacity_bytes: 8_000_000_000_000, health_status: "healthy", negotiated_speed_gbps: 3, capable_speed_gbps: 6, temperature_c: 34, identity_evidence_quality: "available", identity_evidence_source: "sysfs vpd_pg83" }),
+      node("controller:3008", "controller", "LSI SAS3008", { address: "0000:81:00.0", driver: "mpt3sas", protocol: "SAS", negotiated_speed_gbps: 6, capable_speed_gbps: 12 }),
+      node("host:12", "sas_host", "SAS host 12", { address: "host12", protocol: "SAS" }),
+      node("port:12", "port", "HBA port 12:0", { address: "port-12:0", protocol: "SAS" }),
+      node("phy:12", "phy", "PHY 1", { address: "phy-12:1", protocol: "SAS", sas_address: "0x500605b000000012", phy_identifier: "1", negotiated_speed_gbps: 6, capable_speed_gbps: 12, invalid_dwords: 0, disparity_errors: 0, loss_of_sync: 0, reset_problems: 0 }),
+      node("expander:224", "expander", "DS224IOM6 expander", { address: "500a098000000224", protocol: "SAS", sas_address: "500a098000000224", smp_quality: "temporarily_unavailable", smp_source: "smp_discover" }),
+      node("enclosure:224", "enclosure", "NETAPP DS224IOM6", { address: "500a098000000224", protocol: "SAS" }),
+      node("path:sas", "path", "SAS path with inferred slot", { protocol: "SAS", target_port_identifier: "5000c50000000002", target_port_identifier_type: "naa" }),
+      node("drive:sas", "drive", "SEAGATE media disk", { serial: "SAN-SAS-0002", stable_identity: "wwn:5000c50000000002", path: "/dev/sdc", slot: "04", mapping_source: "stable H:C:T:L topology", mapping_confidence: "medium", mapping_last_confirmed_at: "2026-08-23T12:00:00Z", controller_id: "controller:3008", enclosure_id: "enclosure:224", protocol: "SAS", capacity_bytes: 4_000_000_000_000, health_status: "healthy", negotiated_speed_gbps: 6, capable_speed_gbps: 12, temperature_c: null, identity_evidence_quality: "available", identity_evidence_source: "SCSI VPD page 83" }),
+      node("path:unknown", "path", "SAS path without trusted slot", { protocol: "SAS" }),
+      node("drive:unknown", "drive", "SAS disk with unknown bay", { serial: "SAN-SAS-0004", stable_identity: "wwn:5000c50000000004", path: "/dev/sdd", slot: null, mapping_source: null, mapping_confidence: "unknown", mapping_last_confirmed_at: null, controller_id: "controller:3008", enclosure_id: "enclosure:224", protocol: "SAS", capacity_bytes: 2_000_000_000_000, health_status: "unknown", negotiated_speed_gbps: 6, capable_speed_gbps: 12, temperature_c: null, identity_evidence_quality: "available", identity_evidence_source: "SCSI VPD page 83" }),
+      node("pool:media", "pool", "MediaPool", { path: "/data/media", protocol: "Logical", pool_type: "mergerFS" }),
+      node("filesystem:media", "filesystem", "Media filesystem", { path: "/data/media", protocol: "Logical", filesystem_type: "ext4" }),
+      node("share:media", "share", "Media", { path: "/data/media", protocol: "Logical" }),
+    ];
+    link("controller:2308", "host:6", 6, 6); link("host:6", "port:6", 6, 6); link("port:6", "phy:6", 3, 6); link("phy:6", "expander:424", 3, 6); link("expander:424", "enclosure:424", 6, 6); link("enclosure:424", "path:sata", 3, 6, "SATA"); link("path:sata", "drive:sata", 3, 6, "SATA");
+    link("controller:3008", "host:12", 6, 12); link("host:12", "port:12", 6, 12); link("port:12", "phy:12", 6, 12); link("phy:12", "expander:224", 6, 12); link("expander:224", "enclosure:224", 6, 12); link("enclosure:224", "path:sas", 6, 12); link("path:sas", "drive:sas", 6, 12); link("enclosure:224", "path:unknown", 6, 12); link("path:unknown", "drive:unknown", 6, 12); link("drive:sas", "pool:media", 6, 12, "Logical"); link("pool:media", "filesystem:media", 6, 12, "Logical"); link("filesystem:media", "share:media", 6, 12, "Logical");
+    await page.route("**/api/v1/storage/inventory", (route) => route.fulfill({ json: {
+      captured_from: "sanitized_lsi_netapp_fixture",
+      topology: {
+        status: "available", nodes, links, direct_attached_drive_ids: [],
+        enclosures: [
+          { id: "enclosure:424", label: "NETAPP DS424IOM6", vendor: "NETAPP", model: "DS424IOM6", address: "500a098000000424", status: "healthy", protocols: ["SAS", "SATA"], controller_ids: ["controller:2308"], bays: [{ slot: "03", drive_id: "drive:sata", status: "OK", locate: false, fault: false, mapping_source: "SES slot SAS address ↔ device SAS address", mapping_confidence: "high", mapping_last_confirmed_at: "2026-08-23T12:00:00Z" }] },
+          { id: "enclosure:224", label: "NETAPP DS224IOM6", vendor: "NETAPP", model: "DS224IOM6", address: "500a098000000224", status: "healthy", protocols: ["SAS"], controller_ids: ["controller:3008"], bays: [{ slot: "04", drive_id: "drive:sas", status: "OK", locate: false, fault: false, mapping_source: "stable H:C:T:L topology", mapping_confidence: "medium", mapping_last_confirmed_at: "2026-08-23T12:00:00Z" }, { slot: null, drive_id: "drive:unknown", status: "OK", locate: null, fault: null, mapping_source: null, mapping_confidence: "unknown", mapping_last_confirmed_at: null }] },
+        ],
+      },
+      active_operations: [], pools: { status: "configured", items: [] }, shares: { status: "configured", items: [] }, controllers: { status: "available", items: [], unavailable: [] }, enclosures: { status: "available", items: [], unavailable: [] },
+    } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await expect(page.getByText("LSI SAS2308", { exact: true })).toBeVisible();
+    await expect(page.getByText("LSI SAS3008", { exact: true })).toBeVisible();
+    await expect(page.getByText("NETAPP DS424IOM6", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Bay 03 · Confirmed")).toBeVisible();
+    await expect(page.getByText("Bay 04 · Inferred")).toBeVisible();
+    await expect(page.getByText("Bay — · Not reported")).toBeVisible();
+    const slowLink = page.locator(".inline-notice.warning:visible").filter({ hasText: "This link is operating at 3 Gb/s" }).first();
+    await slowLink.scrollIntoViewIfNeeded();
+    await expect(slowLink).toBeVisible();
+    const phyCounters = page.locator("dt:visible").filter({ hasText: "Invalid DWORDs" }).first();
+    await phyCounters.scrollIntoViewIfNeeded();
+    await expect(phyCounters).toBeVisible();
+    await expect(page.getByText("14", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("MediaPool", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Media filesystem", { exact: true }).first()).toBeVisible();
+    await testInfo.attach("sanitized-lsi-netapp-live-topology", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
   });
 
   test("guides a Plex user from four drives to protected media and download folders", async ({ page }) => {

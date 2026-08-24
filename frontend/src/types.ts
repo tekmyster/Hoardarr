@@ -1160,6 +1160,8 @@ export interface StorageExpansionSelection {
     zfs_pool_guid?: string;
     zfs_config_sha256?: string;
     zfs_vdev_count?: number;
+    md_level?: "raid1" | "raid5" | "raid6" | "raid10";
+    member_count?: number;
   };
 }
 
@@ -1204,8 +1206,8 @@ export interface StorageExpansionAssessment {
   }>;
   available_disks: StorageExpansionDisk[];
   reserved_disks: StorageExpansionDisk[];
-  detected_capabilities: { mergerfs: boolean; snapraid: boolean; zfs: boolean };
-  tool_availability?: { mergerfs: boolean; snapraid: boolean; zfs: boolean };
+  detected_capabilities: { mergerfs: boolean; snapraid: boolean; zfs: boolean; linux_md?: boolean };
+  tool_availability?: { mergerfs: boolean; snapraid: boolean; zfs: boolean; linux_md?: boolean };
   candidates: Array<{
     id: string;
     kind: string;
@@ -1233,6 +1235,8 @@ export interface StorageExpansionAssessment {
       snapraid_role?: "data" | "parity";
       snapraid_instance_id?: string;
       snapraid_config_sha256?: string;
+      md_level?: "raid1" | "raid5" | "raid6" | "raid10";
+      member_count?: number;
     };
   }>;
   methodology: string;

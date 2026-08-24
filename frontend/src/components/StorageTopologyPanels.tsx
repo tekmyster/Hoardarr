@@ -212,15 +212,22 @@ function TopologyBranch({ link, target, linksBySource, nodes, actionableDriveIds
   if (visited.has(target.id)) return null;
   const nextVisited = new Set(visited).add(target.id);
   const childLinks = linksBySource.get(target.id) ?? [];
+  const children = childLinks.map((child) => {
+    const childNode = nodes.get(child.target);
+    return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null;
+  });
   return <div className="topology-branch">
     <LinkRail link={link} />
-    {target.kind === "drive" ? <><DriveNode node={target} actionable={Boolean(target.stable_identity && actionableDriveIds.has(target.stable_identity))} managed={Boolean(target.stable_identity && managedDriveIds.has(target.stable_identity))} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} />{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null; })}</> : target.kind !== "enclosure" ? <>{["sas_host", "port", "phy", "expander", "path"].includes(target.kind) ? <PhysicalNode node={target} /> : <LogicalNode node={target} />}{childLinks.map((child) => { const childNode = nodes.get(child.target); return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null; })}</> : <article className="topology-enclosure-node">
-      <header><div><strong>{target.label}</strong><code>{target.address}</code></div><StatusBadge status={target.status ?? "detected"} /></header>
-      <div className="topology-enclosure-drives">{childLinks.map((child) => {
-        const childNode = nodes.get(child.target);
-        return childNode ? <TopologyBranch key={child.id} link={child} target={childNode} linksBySource={linksBySource} nodes={nodes} actionableDriveIds={actionableDriveIds} managedDriveIds={managedDriveIds} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} visited={nextVisited} /> : null;
-      })}</div>
-    </article>}
+    <div className="topology-branch-content">
+      {target.kind === "drive"
+        ? <DriveNode node={target} actionable={Boolean(target.stable_identity && actionableDriveIds.has(target.stable_identity))} managed={Boolean(target.stable_identity && managedDriveIds.has(target.stable_identity))} onDriveAction={onDriveAction} onManageLifecycle={onManageLifecycle} />
+        : target.kind === "enclosure"
+          ? <article className="topology-enclosure-node"><header><div><strong>{target.label}</strong><code>{target.address}</code></div><StatusBadge status={target.status ?? "detected"} /></header></article>
+          : ["sas_host", "port", "phy", "expander", "path"].includes(target.kind)
+            ? <PhysicalNode node={target} />
+            : <LogicalNode node={target} />}
+      {children.length > 0 && <div className={target.kind === "enclosure" ? "topology-enclosure-drives" : "topology-branch-children"}>{children}</div>}
+    </div>
   </div>;
 }
 

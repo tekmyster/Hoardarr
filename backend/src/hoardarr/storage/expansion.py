@@ -289,6 +289,7 @@ def build_expansion_assessment(
         "mergerfs": tool_probe("mergerfs"),
         "snapraid": tool_probe("snapraid"),
         "zfs": tool_probe("zpool") and tool_probe("zfs"),
+        "linux_md": tool_probe("mdadm"),
     }
     assigned_ids = {
         value
@@ -318,6 +319,7 @@ def build_expansion_assessment(
     has_mergerfs = any("mergerfs" in value for value in pool_types)
     has_snapraid = any("snapraid" in value for value in pool_types)
     has_zfs = any("zfs" in value for value in pool_types)
+    has_linux_md = any(value in {"md", "linux md", "linux_md"} for value in pool_types)
     mergerfs_pools = [
         item
         for item in pool_items
@@ -821,6 +823,79 @@ def build_expansion_assessment(
                     )
                 )
 
+    # Linux MD creation is already supported by the immutable storage planner
+    # and executor. Offer only complete, close-capacity geometries here; online
+    # reshape of an existing array is deliberately not inferred from discovery.
+    # That operation has level-specific restrictions and remains a separate
+    # advanced workflow rather than an unsafe generic "add disk" suggestion.
+    md_matched = (
+        sorted(usable_blank, key=lambda item: int(item["capacity_bytes"] or 0), reverse=True)
+        if tool_availability["linux_md"]
+        else []
+    )
+    for level, minimum, maximum, data_columns in (
+        ("raid1", 2, 2, lambda width: 1),
+        ("raid5", 3, None, lambda width: width - 1),
+        ("raid6", 4, None, lambda width: width - 2),
+        ("raid10", 4, None, lambda width: width // 2),
+    ):
+        selected = _best_matched_disks(
+            md_matched,
+            minimum=minimum,
+            maximum=maximum if maximum is not None else 64,
+        )
+        if selected is None:
+            continue
+        if level == "raid10" and len(selected) % 2:
+            selected = selected[:-1]
+        if len(selected) < minimum:
+            continue
+        capacities = [int(item["capacity_bytes"] or 0) for item in selected]
+        width = len(selected)
+        smallest = min(capacities)
+        candidates.append(
+            _candidate(
+                kind=f"new_linux_md_{level}",
+                disk_ids=[item["id"] for item in selected],
+                title=f"Create a {width}-drive Linux {level.upper()} array",
+                summary=(
+                    "Create one Linux software RAID device from matched blank drives, then "
+                    "place the filesystem above the array."
+                ),
+                group=None,
+                raw_delta=sum(capacities),
+                usable_delta=smallest * data_columns(width),
+                protection=(
+                    "Can tolerate one member failure."
+                    if level in {"raid1", "raid5", "raid10"}
+                    else "Can tolerate two member failures."
+                ),
+                expansion=(
+                    "Future changes are constrained by mdadm reshape rules for this exact level; "
+                    "Hoardarr does not promise a generic one-disk expansion."
+                ),
+                migration=(
+                    "Create a new MD array and filesystem after stable-identity revalidation and "
+                    "exact destructive approval."
+                ),
+                recommended=False,
+                mode="advanced",
+                restrictions=[
+                    "All selected disks become dedicated members of the array.",
+                    "Existing MD arrays are not reshaped by this candidate.",
+                ],
+                methodology=(
+                    "Estimated usable capacity is the smallest member multiplied by the data "
+                    f"columns defined by {level.upper()}, before MD and filesystem overhead."
+                ),
+                configuration={
+                    "topology": "raid",
+                    "md_level": level,
+                    "member_count": width,
+                },
+            )
+        )
+
     group_documents = []
     for group in groups:
         backends = list(
@@ -919,6 +994,7 @@ def build_expansion_assessment(
             "mergerfs": has_mergerfs,
             "snapraid": has_snapraid,
             "zfs": has_zfs,
+            "linux_md": has_linux_md,
         },
         "tool_availability": tool_availability,
         "candidates": sorted(

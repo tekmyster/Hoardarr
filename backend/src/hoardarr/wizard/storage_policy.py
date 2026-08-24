@@ -156,6 +156,10 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "new_zfs_raidz1",
         "new_zfs_raidz2",
         "new_zfs_raidz3",
+        "new_linux_md_raid1",
+        "new_linux_md_raid5",
+        "new_linux_md_raid6",
+        "new_linux_md_raid10",
     }
     if kind not in supported_kinds:
         _error("storage.expansion.kind", "is invalid")
@@ -213,6 +217,8 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "zfs_pool_guid",
         "zfs_config_sha256",
         "zfs_vdev_count",
+        "md_level",
+        "member_count",
     }:
         _error("storage.expansion.configuration", "contains unsupported fields")
     expected_configuration: dict[str, Any] = {
@@ -226,6 +232,10 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "new_zfs_raidz1": {"topology": "zfs", "vdev_type": "raidz1"},
         "new_zfs_raidz2": {"topology": "zfs", "vdev_type": "raidz2"},
         "new_zfs_raidz3": {"topology": "zfs", "vdev_type": "raidz3"},
+        "new_linux_md_raid1": {"topology": "raid", "md_level": "raid1"},
+        "new_linux_md_raid5": {"topology": "raid", "md_level": "raid5"},
+        "new_linux_md_raid6": {"topology": "raid", "md_level": "raid6"},
+        "new_linux_md_raid10": {"topology": "raid", "md_level": "raid10"},
     }[str(kind)]
     if configuration.get("topology") != expected_configuration["topology"]:
         _error("storage.expansion.configuration.topology", "does not match the candidate kind")
@@ -233,6 +243,25 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         configuration.get("vdev_type") != expected_configuration["vdev_type"]
     ):
         _error("storage.expansion.configuration.vdev_type", "does not match the candidate kind")
+    if "md_level" in expected_configuration and (
+        configuration.get("md_level") != expected_configuration["md_level"]
+    ):
+        _error("storage.expansion.configuration.md_level", "does not match the candidate kind")
+    if str(kind).startswith("new_linux_md_"):
+        member_count = configuration.get("member_count")
+        minimum = {"raid1": 2, "raid5": 3, "raid6": 4, "raid10": 4}[
+            str(configuration.get("md_level"))
+        ]
+        if (
+            not isinstance(member_count, int)
+            or member_count != len(disk_ids)
+            or not minimum <= member_count <= 64
+            or (configuration.get("md_level") == "raid10" and member_count % 2)
+        ):
+            _error(
+                "storage.expansion.configuration.member_count",
+                "must match a valid reviewed Linux MD geometry",
+            )
     snapraid_role = configuration.get("snapraid_role")
     if snapraid_role is not None:
         if snapraid_role not in {"data", "parity"}:
@@ -1060,6 +1089,16 @@ def normalize_storage_answers(
                         "storage.layout_options",
                         "must preserve the reviewed existing ZFS pool name and mountpoint",
                     )
+        if topology == "raid" and configuration.get("md_level") is not None:
+            layout_options = normalized.get("layout_options", {})
+            if (
+                layout_options.get("level") != configuration.get("md_level")
+                or len(layout_options.get("device_ids", [])) != configuration.get("member_count")
+            ):
+                _error(
+                    "storage.expansion.configuration",
+                    "the Linux MD geometry no longer matches the reviewed expansion choice",
+                )
     if storage.get("format_options") is not None:
         normalized["format_options"] = {
             "filesystem": format_decision["filesystem"],

@@ -451,6 +451,7 @@ def test_unavailable_zfs_tools_suppress_non_executable_candidates() -> None:
             "mergerfs": False,
             "snapraid": False,
             "zfs": False,
+            "linux_md": False,
         }
         assert not any(
             str(item["kind"]).startswith("new_zfs_") for item in result["candidates"]
@@ -645,6 +646,54 @@ def test_five_matched_blank_disks_offer_source_backed_raidz_geometry_math() -> N
             "vdev_type": "raidz2",
             "vdev_width": 5,
         }
+
+
+def test_matched_blank_disks_offer_executable_linux_md_geometries() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        observations = []
+        for index in range(4):
+            identity = f"wwn:md-{index}"
+            register_disk(
+                session,
+                {
+                    "stable_identity": identity,
+                    "kernel_path": f"/dev/mdtest{index}",
+                    "capacity_bytes": 10_000_000_000,
+                    "media_type": "hdd",
+                    "health_state": "healthy",
+                },
+            )
+            observations.append(_observation(identity))
+
+        result = build_expansion_assessment(
+            session,
+            snapshot=_snapshot(session, observations),
+            tool_probe=lambda name: name == "mdadm",
+        )
+        candidates = {item["kind"]: item for item in result["candidates"]}
+
+        assert result["tool_availability"]["linux_md"] is True
+        assert candidates["new_linux_md_raid1"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 10_000_000_000
+        assert candidates["new_linux_md_raid5"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 30_000_000_000
+        assert candidates["new_linux_md_raid6"]["capacity"][
+            "estimated_usable_delta_bytes"
+        ] == 20_000_000_000
+        assert candidates["new_linux_md_raid10"]["configuration"] == {
+            "topology": "raid",
+            "md_level": "raid10",
+            "member_count": 4,
+        }
+        assert all(
+            not item["recommended"]
+            for key, item in candidates.items()
+            if key.startswith("new_linux_md_")
+        )
 
 
 def test_system_disk_is_visible_as_protected_but_never_becomes_a_candidate() -> None:
