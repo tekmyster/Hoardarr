@@ -533,10 +533,10 @@ def layout_commands(
     raise LayoutError("topology", "is not executable")
 
 
-def mergerfs_expand_commands(mountpoint: str, new_branches: Sequence[str]) -> list[CommandSpec]:
+def mergerfs_expand_commands(mountpoint: str, branches: Sequence[str]) -> list[CommandSpec]:
     target = _path(mountpoint, "mergerfs.mountpoint")
     branches = [
-        _path(item, f"mergerfs.new_branches[{index}]") for index, item in enumerate(new_branches)
+        _path(item, f"mergerfs.branches[{index}]") for index, item in enumerate(branches)
     ]
     if not branches or len(branches) != len(set(branches)):
         raise LayoutError("mergerfs.new_branches", "requires unique new branch paths")
@@ -548,11 +548,11 @@ def mergerfs_expand_commands(mountpoint: str, new_branches: Sequence[str]) -> li
                 "-n",
                 "user.mergerfs.branches",
                 "-v",
-                f"+>{':'.join(branches)}",
+                ":".join(branches),
                 runtime,
             ),
             120,
-            "Adding mergerFS branches",
+            "Activating reviewed mergerFS branches",
             False,
         ),
         CommandSpec(

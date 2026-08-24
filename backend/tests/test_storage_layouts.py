@@ -254,7 +254,7 @@ def test_mergerfs_expansion_uses_runtime_xattr_and_verifies() -> None:
         "user.mergerfs.branches",
         "-v",
     )
-    assert commands[0].argv[4] == "+>/mnt/hoardarr/disks/a:/mnt/hoardarr/disks/b"
+    assert commands[0].argv[4] == "/mnt/hoardarr/disks/a:/mnt/hoardarr/disks/b"
     assert commands[1].argv[0] == "getfattr"
 
 

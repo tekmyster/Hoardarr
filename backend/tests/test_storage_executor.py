@@ -553,6 +553,25 @@ def test_mergerfs_fstab_update_is_atomic_and_replaces_the_existing_mount(
     assert replayed.count("UUID=new-member") == 1
 
 
+def test_runtime_mergerfs_member_names_require_exact_persistent_paths() -> None:
+    assert executor._normalize_runtime_mergerfs_branches(
+        ["member-a", "member-b"],
+        [
+            "/mnt/hoardarr/disks/member-a",
+            "/mnt/hoardarr/disks/member-b",
+            "/mnt/hoardarr/disks/new-member",
+        ],
+    ) == [
+        "/mnt/hoardarr/disks/member-a",
+        "/mnt/hoardarr/disks/member-b",
+    ]
+    with pytest.raises(ExecutorFailure, match="could not be tied"):
+        executor._normalize_runtime_mergerfs_branches(
+            ["member-a"],
+            ["/one/member-a", "/two/member-a"],
+        )
+
+
 def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2096,6 +2096,35 @@ def _replace_mergerfs_source(content: str, mountpoint: str, branches: list[str])
     return "\n".join(rows) + ("\n" if content.endswith("\n") else "")
 
 
+def _normalize_runtime_mergerfs_branches(
+    runtime_branches: list[str], configured_branches: list[str]
+) -> list[str]:
+    configured_by_name: dict[str, list[str]] = {}
+    for branch in configured_branches:
+        if not branch.startswith("/"):
+            raise ExecutorFailure(
+                "mergerfs_instance_invalid", "The persistent mergerFS branch list is invalid."
+            )
+        configured_by_name.setdefault(Path(branch).name, []).append(branch)
+    normalized: list[str] = []
+    for branch in runtime_branches:
+        if branch.startswith("/"):
+            normalized.append(branch)
+            continue
+        matches = configured_by_name.get(branch, [])
+        if len(matches) != 1:
+            raise ExecutorFailure(
+                "mergerfs_instance_invalid",
+                "A runtime mergerFS branch could not be tied to one persistent member.",
+            )
+        normalized.append(matches[0])
+    if not normalized or len(normalized) != len(set(normalized)):
+        raise ExecutorFailure(
+            "mergerfs_instance_invalid", "The existing branch list is invalid."
+        )
+    return normalized
+
+
 def _ensure_mergerfs_allow_other(fstab_path: Path, mountpoint: str) -> bool:
     """Persist the libfuse access option for one exact reviewed mergerFS mount."""
 
@@ -2619,6 +2648,7 @@ def _execute_actions(
             )
         combined = _safe_mountpoint(str(mergerfs.get("mountpoint")))
         runtime_combined = combined
+        configured_branch_list: list[str] = []
         combined.mkdir(parents=True, exist_ok=True, mode=0o750)
         if mergerfs.get("mode") == "create":
             create_policy = mergerfs.get("create_policy")
@@ -2676,20 +2706,18 @@ def _execute_actions(
                     "persistent mergerFS configuration.",
                 )
             configured_branches = configured_instance.get("configured_branches")
-            branch_source = (
-                configured_branches
-                if isinstance(configured_branches, list) and configured_branches
-                else selected_instance.get("branches", [])
+            configured_branch_list = (
+                [str(item) for item in configured_branches]
+                if isinstance(configured_branches, list)
+                else []
             )
-            prior_branches = [str(item) for item in branch_source]
-            if (
-                len(prior_branches) != len(set(prior_branches))
-                or any(not item.startswith("/") for item in prior_branches)
-            ):
-                raise ExecutorFailure(
-                    "mergerfs_instance_invalid",
-                    "The persistent mergerFS branch list is invalid.",
-                )
+            runtime_branch_list = [
+                str(item) for item in selected_instance.get("branches", [])
+            ]
+            prior_branches = _normalize_runtime_mergerfs_branches(
+                runtime_branch_list,
+                configured_branch_list or runtime_branch_list,
+            )
             options = ",".join(
                 item
                 for item in configured_instance.get("options", [])
@@ -2725,6 +2753,15 @@ def _execute_actions(
             raise ExecutorFailure(
                 "mergerfs_duplicate_branch",
                 "A drive is already a member of this mergerFS instance.",
+            )
+        if configured_branch_list and configured_branch_list not in (
+            prior_branches,
+            [*prior_branches, *new_branches],
+        ):
+            raise ExecutorFailure(
+                "mergerfs_fstab_drift",
+                "The persistent mergerFS member list changed after review.",
+                needs_attention=True,
             )
         branches = ":".join([*prior_branches, *new_branches])
         changed_runtime = False
@@ -2775,7 +2812,14 @@ def _execute_actions(
                     300,
                 )
             if mergerfs.get("mode") == "existing" and new_branches:
-                expand_commands = mergerfs_expand_commands(str(runtime_combined), new_branches)
+                # Set the complete reviewed list instead of appending. The mergerFS
+                # runtime interface is not durable, so a recovered operation may
+                # revisit this phase after the branch was already activated. Exact
+                # replacement makes recovery idempotent and also removes duplicate
+                # entries left by an interrupted older executor.
+                expand_commands = mergerfs_expand_commands(
+                    str(runtime_combined), [*prior_branches, *new_branches]
+                )
                 for command in expand_commands:
                     runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
                     changed_runtime = True
