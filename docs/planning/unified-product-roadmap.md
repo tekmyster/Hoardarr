@@ -358,7 +358,7 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| LAB-01 | P1 | Persistent Hoardarr-A and Hoardarr-B nodes | Maintain two owner-auditable Ubuntu 24.04/Python 3.12/systemd nodes separately from disposable CI. | NOT STARTED |
+| LAB-01 | P1 | Persistent Hoardarr-A and Hoardarr-B nodes | Maintain two owner-auditable Ubuntu 24.04/Python 3.12/systemd nodes separately from disposable CI. | IN PROGRESS — persistent 2-vCPU/2-GiB Hoardarr-A and Hoardarr-B VM shells with thin virtual OS disks now exist in the VMware `Hoardarr Development` folder on `Data Vlan 200`; protected physical SSDs are excluded. Corrected appliance installation, virtual data-disk attachment and beta exposure remain. |
 | LAB-02 | P1 | Protected physical-disk boundary | Positively exclude the four Cisco SSDs and use only purpose-created virtual storage unless separately authorized. | VERIFIED — beta inventory is read-only and no saved plan has been applied |
 | LAB-03 | P1 | Real virtual managed storage | Create actual mergerFS/SnapRAID, ZFS, Linux MD, landing-tier, and shared multipath constructs through Hoardarr-supported paths. | NOT STARTED |
 | LAB-04 | P1 | Visible beta/lab state | Show real groups, pools, tiers, jobs, topology, graphs, peers, and failover history for owner inspection without frontend fixtures. | NOT STARTED |
