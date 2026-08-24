@@ -411,7 +411,7 @@ class InstallerPlanTests(unittest.TestCase):
                 "versions.env",
             ):
                 (bundle / "packages" / package_manifest).write_text(
-                    "lldpd\nmergerfs\nsamba\n"
+                    "attr\nlldpd\nmergerfs\nsamba\n"
                     if package_manifest == "appliance-core.txt"
                     else "placeholder\n",
                     encoding="utf-8",
