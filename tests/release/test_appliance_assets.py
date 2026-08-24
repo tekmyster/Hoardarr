@@ -16,6 +16,9 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("grub_maps", script)
         self.assertIn('"$release/scripts/install.sh" "$release"', user_data)
         self.assertIn("interactive-sections", user_data)
+        self.assertRegex(user_data, r"interactive-sections:\s*\n\s*- identity\s*\n\s*- storage")
+        self.assertNotIn('password: "!"', user_data)
+        self.assertNotIn("username: hoardarr-setup", user_data)
         self.assertNotIn("size: largest", user_data)
         self.assertNotIn("curl |", script)
 

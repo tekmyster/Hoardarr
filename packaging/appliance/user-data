@@ -4,17 +4,16 @@ autoinstall:
   # Installation-disk selection is always interactive. Hoardarr never guesses
   # that the largest disk is the operating-system target.
   interactive-sections:
+    - identity
     - storage
   refresh-installer:
     update: false
   locale: en_US.UTF-8
   keyboard:
     layout: us
-  identity:
-    hostname: hoardarr
-    username: hoardarr-setup
-    # Disabled password; the console prompts for owner setup after installation.
-    password: "!"
+  # Identity is deliberately interactive. The installer must obtain a real
+  # administrator login before it can finish; a locked placeholder account
+  # would leave a newly installed appliance with no way to run `hoardarr setup`.
   ssh:
     install-server: true
     allow-pw: false
@@ -37,4 +36,4 @@ autoinstall:
     - curtin in-target --target=/target -- systemctl enable hoardarr-api.service hoardarr-worker.service
   user-data:
     runcmd:
-      - [sh, -c, 'echo "Run sudo hoardarr setup to create the owner account." >/etc/motd.d/hoardarr']
+      - [sh, -c, 'printf "%s\n" "Run sudo hoardarr setup to create the Hoardarr owner account." "The Linux account selected during installation is only for appliance administration." >/etc/motd.d/hoardarr']
