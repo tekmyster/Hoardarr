@@ -125,6 +125,30 @@ bounded journaled retry, and restores the existing mapper mount if the map
 cannot be released. Focused tests exercise retry and rollback; final run
 `32589920257` passed the complete lifecycle after that correction.
 
+The control-plane recovery increment at immutable commit `aea2063d4cb7` passed
+both clean attempts of CI run `32691347484`. Each attempt completed all six
+jobs: 539 backend tests, 162 frontend tests, 4 accessibility tests, 26 Chromium
+E2E tests, 74 bootstrap tests and 19 release tests, plus Ruff, the bounded
+telemetry soak, real read-only Linux telemetry collection, wheel and release
+bundle construction, systemd verification, and live disposable MinIO. The
+installed-appliance job created a source owner, produced an encrypted console
+export, stopped all Hoardarr services, restored to a separate fresh root, ran
+migrations, proved that the source owner and setup token did not transfer,
+created a fresh owner, restarted services and passed readiness. A defect found
+by the first pre-final attempt (`sqlite3.OperationalError: invalid uri
+authority: tmp`) was corrected by canonical absolute/encoded read-only SQLite
+URIs and a valid POSIX database URL; focused recovery tests then passed 17/17.
+
+Release archive
+`hoardarr-0.3.11-aea2063d4cb7-ubuntu24.04-amd64-cp312.tar.gz` has SHA-256
+`29ddc0cfd4cea76d4d4aa3c187e57846bf60e8da49d9e3629059138adb01ce30`.
+That exact artifact is installed at
+`/usr/lib/hoardarr/releases/0.3.11-aea2063d4cb7` on the visible beta bench. All
+five Hoardarr services and readiness passed. Browser inspection confirmed the
+new recovery guidance, no managed Storage Groups or pools, four Cisco SSDs with
+honest Not reported health, idle real telemetry, and an unapplied saved draft;
+no physical storage was mutated.
+
 Two-node graph-stress run `32599605672` booted two Ubuntu 24.04 QEMU nodes,
 installed Hoardarr 0.3.11 as systemd services, attached two local virtual SSDs
 to each node and presented one shared LUN over two controller paths to both.
