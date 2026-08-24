@@ -59,7 +59,7 @@ jobs:
           if not re.fullmatch(r"(?:ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [A-Za-z0-9_.@-]+)?", key):
               raise SystemExit("ssh_public_key is not a bounded OpenSSH public key")
           template = Path("packaging/appliance/lab-user-data.template").read_text()
-          if template.count("__SSH_PUBLIC_KEY__") != 3:
+          if template.count("__SSH_PUBLIC_KEY__") != 4:
               raise SystemExit("lab seed placeholder count changed")
           Path("lab-user-data").write_text(template.replace("__SSH_PUBLIC_KEY__", key))
           PY
