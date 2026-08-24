@@ -39,6 +39,10 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/storage/logical")) return json({ items: [] });
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations")) return json({ items: [] });
+    if (pathname.endsWith("/backups/targets") || pathname.endsWith("/backups/runs")) return json({ items: [] });
+    if (pathname.endsWith("/auth/tokens")) return json({ items: [] });
+    if (pathname.endsWith("/addons")) return json({ items: [] });
+    if (pathname.endsWith("/updates/status")) return json({ current_version: "0.3.11", latest_version: null, channel: "stable", metadata_sha256: null, last_checked_at: null, last_error: null, operation: null });
     if (pathname.endsWith("/wizards") || pathname.endsWith("/operations")) return json({ items: [] });
     if (pathname.endsWith("/system/overview")) return json({
       captured_at: new Date().toISOString(), source: "live",
@@ -734,6 +738,63 @@ test.describe("production sign-in shell", () => {
     await expect(page.getByText("Linux block counters", { exact: true }).first()).toBeVisible();
     await page.getByLabel("Graph").selectOption("bars");
     await expect(page.locator(".graph-bars rect")).toHaveCount(1);
+  });
+
+  test("creates and verifies a real remote-backup target workflow", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    let savedTarget: Record<string, unknown> | null = null;
+    await page.route("**/api/v1/backups/targets", async (route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({ json: { items: savedTarget ? [savedTarget] : [] } });
+      }
+      const input = route.request().postDataJSON() as Record<string, unknown>;
+      savedTarget = {
+        id: "target-browser",
+        name: input.name,
+        provider: input.provider,
+        endpoint_url: input.endpoint_url,
+        region: input.region,
+        bucket: input.bucket,
+        prefix: input.prefix,
+        force_path_style: true,
+        verify_tls: true,
+        allow_private_network: false,
+        allow_insecure_http: false,
+        bandwidth_limit_mib: null,
+        schedule: { enabled: false },
+        credential_fingerprint: "redacted-fingerprint",
+        status: "untested",
+        last_tested_at: null,
+        last_success_at: null,
+        error: null,
+        enabled: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      return route.fulfill({ status: 201, json: savedTarget });
+    });
+    await page.route("**/api/v1/backups/targets/target-browser/test", (route) => {
+      savedTarget = { ...savedTarget, status: "available", last_tested_at: new Date().toISOString() };
+      return route.fulfill({ status: 202, json: { operation: { id: "backup-test-browser", kind: "backup.target.test", status: "succeeded" }, replayed: false } });
+    });
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Settings" }).click();
+    await expect(page.getByRole("heading", { name: "Remote backups" })).toBeVisible();
+    await page.getByRole("button", { name: "Add backup target" }).click();
+    const backups = page.locator("section").filter({ has: page.getByRole("heading", { name: "Remote backups" }) });
+    await backups.getByLabel("Name", { exact: true }).fill("Home MinIO");
+    await backups.getByLabel("Endpoint", { exact: true }).fill("https://minio.example:9000");
+    await backups.getByLabel("Bucket").fill("hoardarr-backups");
+    await backups.getByLabel("Access key").fill("access-key");
+    await backups.getByLabel("Secret key").fill("secret-value");
+    await backups.getByRole("button", { name: "Save target" }).click();
+    await expect(backups.getByText("Home MinIO")).toBeVisible();
+    await expect(backups.getByRole("button", { name: "Back up now" })).toBeDisabled();
+    await backups.getByRole("button", { name: "Test connection" }).click();
+    await expect(backups.getByText(/Status: available/)).toBeVisible();
+    await expect(backups.getByRole("button", { name: "Back up now" })).toBeEnabled();
+    await expect(backups.locator('input[value="secret-value"]')).toHaveCount(0);
   });
 
   test("shows durable ARR write activity used by storage lifecycle coordination", async ({ page }) => {

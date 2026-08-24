@@ -20,6 +20,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from hoardarr.backups.scheduler import queue_due_control_plane_backups
+from hoardarr.backups.service import (
+    BackupError,
+    execute_control_plane_backup,
+    target_fingerprint,
+    test_target_connection,
+    validate_remote_archive,
+)
 from hoardarr.connectivity.executor import ExecutorFailure as ConnectivityExecutorFailure
 from hoardarr.connectivity.executor import apply as apply_connectivity
 from hoardarr.connectivity.executor import remove as remove_connectivity
@@ -33,6 +41,8 @@ from hoardarr.db.models import (
     Operation,
     Plan,
     PlanApproval,
+    RemoteBackupRun,
+    RemoteBackupTarget,
     StorageDrainJob,
     StorageGroup,
     UpdateState,
@@ -135,6 +145,9 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "connectivity.apply",
         "connectivity.remove",
         "update.apply",
+        "backup.target.test",
+        "backup.control_plane",
+        "backup.restore.validate",
     }
 )
 INTEGRATION_AAD_RECORD_TYPE = "integration_connection"
@@ -1655,6 +1668,67 @@ def _execute_work(
         )
     if item.kind == "update.apply":
         return _execute_update(item, settings)
+    if item.kind in {"backup.target.test", "backup.control_plane", "backup.restore.validate"}:
+        target_id = item.request.get("target_id")
+        expected_fingerprint = item.request.get("target_fingerprint")
+        if not isinstance(target_id, str) or item.resource_id not in {
+            target_id,
+            item.request.get("source_run_id"),
+        }:
+            raise WorkFailure("backup_request_invalid", "The backup request is invalid")
+        with session_factory() as session:
+            target = session.get(RemoteBackupTarget, target_id)
+            if (
+                target is None
+                or not target.enabled
+                or not isinstance(expected_fingerprint, str)
+                or target_fingerprint(target) != expected_fingerprint
+            ):
+                raise WorkFailure(
+                    "backup_target_changed",
+                    "The backup target changed after the operation was queued",
+                )
+        try:
+            if item.kind == "backup.target.test":
+                result = test_target_connection(target, secret_box)
+                with session_factory() as session, session.begin():
+                    current = session.get(RemoteBackupTarget, target_id)
+                    if current is None or target_fingerprint(current) != expected_fingerprint:
+                        raise BackupError(
+                            "backup_target_changed",
+                            "The backup target changed during its connection test.",
+                        )
+                    current.status = "available"
+                    current.last_tested_at = utc_now()
+                    current.last_error_json = None
+                    current.updated_at = utc_now()
+                return MaintenanceExecution(result=result)
+            if item.kind == "backup.control_plane":
+                return MaintenanceExecution(
+                    result=execute_control_plane_backup(
+                        session_factory,
+                        settings,
+                        secret_box,
+                        item.operation_id,
+                    )
+                )
+            object_key = item.request.get("object_key")
+            artifact_sha256 = item.request.get("artifact_sha256")
+            if not isinstance(object_key, str) or not isinstance(artifact_sha256, str):
+                raise BackupError(
+                    "backup_restore_request_invalid",
+                    "The restore validation request is incomplete.",
+                )
+            return MaintenanceExecution(
+                result=validate_remote_archive(
+                    target,
+                    secret_box,
+                    object_key=object_key,
+                    expected_sha256=artifact_sha256,
+                )
+            )
+        except BackupError as exc:
+            raise WorkFailure(exc.code, exc.safe_message) from exc
     raise WorkFailure(
         "unsupported_operation",
         "This worker does not support the requested operation kind",
@@ -2019,6 +2093,31 @@ def _finalize_failure(
                     "error": {"code": failure.code, "message": failure.safe_message},
                 }
                 migration_job.updated_at = utc_now()
+        elif item.kind in {
+            "backup.target.test",
+            "backup.control_plane",
+            "backup.restore.validate",
+        }:
+            target_id = item.request.get("target_id")
+            target = (
+                session.get(RemoteBackupTarget, target_id) if isinstance(target_id, str) else None
+            )
+            if target is not None:
+                target.status = "degraded" if target.last_success_at else "error"
+                target.last_tested_at = utc_now()
+                target.last_error_json = {
+                    "code": failure.code,
+                    "message": failure.safe_message,
+                }
+                target.updated_at = utc_now()
+            run = session.get(RemoteBackupRun, operation.id)
+            if run is not None:
+                run.status = "needs_attention" if failure.needs_attention else "failed"
+                run.report_json = {
+                    **run.report_json,
+                    "error": {"code": failure.code, "message": failure.safe_message},
+                }
+                run.updated_at = utc_now()
         fail_operation(
             session,
             operation,
@@ -2274,6 +2373,7 @@ def recover_abandoned_operations(
                 "storage.redundancy.apply": storage_max_age,
                 "connectivity.apply": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "connectivity.remove": int(settings.connectivity_executor_timeout_seconds) + 120,
+                "backup.control_plane": 900,
             },
         )
 
@@ -2301,6 +2401,7 @@ def run_forever(
         next_recovery = time.monotonic() + recovery_interval
         next_servarr_activity = time.monotonic()
         next_media_refresh = time.monotonic()
+        next_backup_schedule = time.monotonic()
         while stop_event is None or not stop_event.is_set():
             try:
                 collect_for_worker(session_factory, settings, telemetry_service)
@@ -2337,6 +2438,13 @@ def run_forever(
                 next_media_refresh = (
                     time.monotonic() + settings.integration_activity_interval_seconds
                 )
+            if time.monotonic() >= next_backup_schedule:
+                try:
+                    with session_factory() as session, session.begin():
+                        queue_due_control_plane_backups(session)
+                except Exception as exc:
+                    LOGGER.warning("Remote backup scheduling failed (%s)", type(exc).__name__)
+                next_backup_schedule = time.monotonic() + 60.0
             if time.monotonic() >= next_recovery:
                 recover_abandoned_operations(session_factory=session_factory, settings=settings)
                 next_recovery = time.monotonic() + recovery_interval

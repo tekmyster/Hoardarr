@@ -40,6 +40,9 @@ import type {
   OverviewDocument,
   PlanDocument,
   PhysicalDiskDocument,
+  RemoteBackupProvider,
+  RemoteBackupRunDocument,
+  RemoteBackupTargetDocument,
   ResourceUsageDocument,
   SetupStatus,
   SnapraidReplacementPlan,
@@ -1217,6 +1220,79 @@ class HoardarrApi {
 
   async operation(operationId: string): Promise<OperationDocument> {
     return this.request<OperationDocument>(`/operations/${encodeURIComponent(operationId)}`);
+  }
+
+  async backupTargets(): Promise<RemoteBackupTargetDocument[]> {
+    const result = await this.request<{ items: RemoteBackupTargetDocument[] }>("/backups/targets");
+    return result.items;
+  }
+
+  async createBackupTarget(input: {
+    name: string;
+    provider: RemoteBackupProvider;
+    endpoint_url?: string;
+    region: string;
+    bucket: string;
+    prefix: string;
+    access_key_id: string;
+    secret_access_key: string;
+    force_path_style: boolean;
+    verify_tls: boolean;
+    allow_private_network: boolean;
+    allow_insecure_http: boolean;
+    bandwidth_limit_mib?: number;
+  }): Promise<RemoteBackupTargetDocument> {
+    return this.request<RemoteBackupTargetDocument>("/backups/targets", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async testBackupTarget(targetId: string): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      `/backups/targets/${encodeURIComponent(targetId)}/test`,
+      { method: "POST", headers: { "Idempotency-Key": createIdempotencyKey() } },
+    );
+    return result.operation;
+  }
+
+  async updateBackupSchedule(
+    targetId: string,
+    input: { enabled: boolean; interval_hours: number },
+  ): Promise<RemoteBackupTargetDocument> {
+    return this.request<RemoteBackupTargetDocument>(
+      `/backups/targets/${encodeURIComponent(targetId)}/schedule`,
+      { method: "PUT", body: JSON.stringify(input) },
+    );
+  }
+
+  async startControlPlaneBackup(targetId: string): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      `/backups/targets/${encodeURIComponent(targetId)}/runs`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({ confirmation: "BACK UP HOARDARR" }),
+      },
+    );
+    return result.operation;
+  }
+
+  async backupRuns(): Promise<RemoteBackupRunDocument[]> {
+    const result = await this.request<{ items: RemoteBackupRunDocument[] }>("/backups/runs");
+    return result.items;
+  }
+
+  async validateBackupRestore(runId: string): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      `/backups/runs/${encodeURIComponent(runId)}/validate`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({ confirmation: "VALIDATE RESTORE" }),
+      },
+    );
+    return result.operation;
   }
 
   async listOperations(): Promise<OperationDocument[]> {

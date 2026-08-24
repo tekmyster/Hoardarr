@@ -785,6 +785,76 @@ class UpdateState(Base):
     )
 
 
+class RemoteBackupTarget(Base):
+    __tablename__ = "remote_backup_targets"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_remote_backup_target_name"),
+        Index("ix_remote_backup_targets_enabled_updated", "enabled", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    endpoint_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    region: Mapped[str] = mapped_column(String(64), nullable=False, default="us-east-1")
+    bucket: Mapped[str] = mapped_column(String(255), nullable=False)
+    prefix: Mapped[str] = mapped_column(String(1024), nullable=False, default="hoardarr")
+    force_path_style: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verify_tls: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allow_private_network: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    allow_insecure_http: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bandwidth_limit_mib: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schedule_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    credential_fingerprint: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_tested")
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class RemoteBackupRun(Base):
+    __tablename__ = "remote_backup_runs"
+    __table_args__ = (
+        Index("ix_remote_backup_runs_target_created", "target_id", "created_at"),
+        Index("ix_remote_backup_runs_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("operations.id", ondelete="CASCADE"), primary_key=True
+    )
+    target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("remote_backup_targets.id", ondelete="RESTRICT"), nullable=False
+    )
+    backup_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    object_key: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    upload_id: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    completed_parts_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    phase: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    report_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

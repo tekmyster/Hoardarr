@@ -34,6 +34,8 @@ from hoardarr.db.models import (
     MetricSample,
     Operation,
     PhysicalDisk,
+    RemoteBackupRun,
+    RemoteBackupTarget,
     StorageBackend,
     StorageEntity,
     StorageGroup,
@@ -2552,6 +2554,124 @@ def test_nas_source_evidence_requires_matching_platform_marker_and_is_audited(
         "storage.foreign.nas_evidence.save",
         "storage.foreign.nas_evidence.remove",
     }
+
+
+def test_remote_backup_target_api_encrypts_credentials_and_queues_durable_runs(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    endpoint = "/api/v1/backups/targets"
+    document = {
+        "name": "Home MinIO",
+        "provider": "minio",
+        "endpoint_url": "https://127.0.0.1:9000",
+        "region": "us-east-1",
+        "bucket": "hoardarr-backups",
+        "prefix": "server-a",
+        "access_key_id": "backup-access-key",
+        "secret_access_key": "backup-secret-value",
+        "force_path_style": True,
+        "allow_private_network": True,
+    }
+    assert client.post(endpoint, json=document).status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    created = client.post(endpoint, headers=_state_headers(csrf), json=document)
+    assert created.status_code == 201, created.text
+    target = created.json()
+    target_id = target["id"]
+    assert target["status"] == "not_tested"
+    assert "access_key" not in json.dumps(target).casefold()
+    assert "secret" not in json.dumps(target).casefold()
+    with app.state.session_factory() as session:
+        stored = session.get(RemoteBackupTarget, target_id)
+        assert stored is not None
+        assert b"backup-secret-value" not in stored.secret_ciphertext
+        assert stored.credential_fingerprint != "backup-access-key"
+
+    tested = client.post(
+        f"{endpoint}/{target_id}/test",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "backup-test-0001"}),
+    )
+    assert tested.status_code == 202, tested.text
+    assert tested.json()["operation"]["kind"] == "backup.target.test"
+    replay = client.post(
+        f"{endpoint}/{target_id}/test",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "backup-test-0001"}),
+    )
+    assert replay.status_code == 202 and replay.json()["replayed"] is True
+
+    schedule_blocked = client.put(
+        f"{endpoint}/{target_id}/schedule",
+        headers=_state_headers(csrf),
+        json={"enabled": True, "interval_hours": 24},
+    )
+    assert schedule_blocked.status_code == 409
+
+    blocked = client.post(
+        f"{endpoint}/{target_id}/runs",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "backup-run-0001"}),
+        json={"confirmation": "BACK UP HOARDARR"},
+    )
+    assert blocked.status_code == 409
+    with app.state.session_factory() as session, session.begin():
+        stored = session.get(RemoteBackupTarget, target_id)
+        assert stored is not None
+        stored.status = "available"
+    scheduled = client.put(
+        f"{endpoint}/{target_id}/schedule",
+        headers=_state_headers(csrf),
+        json={"enabled": True, "interval_hours": 24},
+    )
+    assert scheduled.status_code == 200, scheduled.text
+    assert scheduled.json()["schedule"] == {"enabled": True, "interval_hours": 24}
+    queued = client.post(
+        f"{endpoint}/{target_id}/runs",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "backup-run-0001"}),
+        json={"confirmation": "BACK UP HOARDARR"},
+    )
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["run"]["backup_kind"] == "control_plane"
+    operation_id = queued.json()["operation"]["id"]
+    with app.state.session_factory() as session:
+        assert session.get(RemoteBackupRun, operation_id) is not None
+        audit_details = [
+            event.details_json
+            for event in session.scalars(
+                select(AuditEvent).where(AuditEvent.action.like("backup.%"))
+            )
+        ]
+        assert "backup-secret-value" not in json.dumps(audit_details)
+
+
+def test_remote_backup_target_rejects_unapproved_private_or_insecure_endpoints(
+    api_runtime: Any,
+) -> None:
+    client, _app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    base = {
+        "name": "Unsafe target",
+        "provider": "generic_s3",
+        "endpoint_url": "https://127.0.0.1:9000",
+        "bucket": "hoardarr-backups",
+        "access_key_id": "backup-access-key",
+        "secret_access_key": "backup-secret-value",
+    }
+    private = client.post(
+        "/api/v1/backups/targets",
+        headers=_state_headers(csrf),
+        json=base,
+    )
+    assert private.status_code == 422
+    insecure = client.post(
+        "/api/v1/backups/targets",
+        headers=_state_headers(csrf),
+        json={
+            **base,
+            "endpoint_url": "http://127.0.0.1:9000",
+            "allow_private_network": True,
+        },
+    )
+    assert insecure.status_code == 422
 
 
 def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: Any) -> None:

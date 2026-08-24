@@ -1749,6 +1749,55 @@ export interface AddonDocument {
   last_error: { code: string; message: string } | null;
 }
 
+export type RemoteBackupProvider =
+  | "aws_s3"
+  | "minio"
+  | "cloudflare_r2"
+  | "wasabi"
+  | "backblaze_b2"
+  | "generic_s3";
+
+export interface RemoteBackupTargetDocument {
+  id: string;
+  name: string;
+  provider: RemoteBackupProvider;
+  endpoint_url: string | null;
+  region: string;
+  bucket: string;
+  prefix: string;
+  force_path_style: boolean;
+  verify_tls: boolean;
+  allow_private_network: boolean;
+  allow_insecure_http: boolean;
+  bandwidth_limit_mib: number | null;
+  schedule: { enabled: boolean; [key: string]: unknown };
+  credential_fingerprint: string;
+  status: string;
+  last_tested_at: string | null;
+  last_success_at: string | null;
+  error: { code?: string; message?: string; [key: string]: unknown } | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RemoteBackupRunDocument {
+  id: string;
+  target_id: string;
+  backup_kind: "control_plane";
+  object_key: string | null;
+  artifact_sha256: string | null;
+  artifact_size_bytes: number | null;
+  status: string;
+  phase: string;
+  report: Record<string, unknown>;
+  error: { code?: string; message?: string; detail?: string; [key: string]: unknown } | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type IntegrationProduct = "sonarr" | "radarr" | "lidarr" | "readarr" | "whisparr" | "prowlarr" | "plex" | "jellyfin" | "emby";
 
 export interface IntegrationDocument {

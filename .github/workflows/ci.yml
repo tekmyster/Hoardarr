@@ -11,7 +11,7 @@ jobs:
         with:
           version: 0.11.28
       - run: uv sync --project backend --locked --all-groups
-      - run: uv run --project backend --locked ruff check backend/src backend/tests scripts/benchmark-telemetry.py scripts/soak-telemetry.py tests/integration/mergerfs_persistent_telemetry.py tests/integration/unraid_classification.py
+      - run: uv run --project backend --locked ruff check backend/src backend/tests scripts/benchmark-telemetry.py scripts/soak-telemetry.py tests/integration/mergerfs_persistent_telemetry.py tests/integration/unraid_classification.py tests/integration/minio_control_plane_backup.py
       - run: uv run --project backend --locked pytest backend/tests -q
       - name: Run bounded-memory telemetry soak
         run: uv run --project backend --locked python scripts/soak-telemetry.py --drives 60 --cycles 100
@@ -20,6 +20,46 @@ jobs:
       - run: uv build --project backend
       - run: python -m unittest discover -s tests/bootstrap -p 'test_*.py'
       - run: python -m unittest discover -s tests/release -p 'test_*.py'
+  minio-control-plane-backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      MINIO_ROOT_USER: hoardarr-integration
+      MINIO_ROOT_PASSWORD: hoardarr-integration-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.8
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - run: uv sync --project backend --locked --all-groups
+      - name: Build the final MinIO Community release from its official signed tag
+        run: go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+      - name: Start disposable MinIO and exercise backup, checksum, and restore validation
+        run: |
+          mkdir -p /tmp/hoardarr-minio-data dist/validation
+          "$(go env GOPATH)/bin/minio" server /tmp/hoardarr-minio-data \
+            --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 \
+            >/tmp/hoardarr-minio.log 2>&1 &
+          minio_pid=$!
+          trap 'kill "$minio_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null
+          uv run --project backend --locked python tests/integration/minio_control_plane_backup.py
+          cp /tmp/hoardarr-minio.log dist/validation/minio.log
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: minio-control-plane-backup-evidence
+          path: |
+            dist/validation/minio-backup.json
+            dist/validation/minio.log
+          if-no-files-found: warn
   frontend:
     runs-on: ubuntu-24.04
     steps:

@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     )
     update_trust_file: Path = Path("/etc/hoardarr/update-trust.json")
     update_artifact_root: Path = Path("/var/lib/hoardarr/update-artifacts")
+    backup_artifact_root: Path = Path("/var/lib/hoardarr/backup-artifacts")
+    configuration_root: Path = Path("/etc/hoardarr")
     addon_inbox: Path = Path("/var/lib/hoardarr/addon-inbox")
     addon_root: Path = Path("/usr/lib/hoardarr/addons")
     addon_trust_file: Path = Path("/etc/hoardarr/addon-trust.json")

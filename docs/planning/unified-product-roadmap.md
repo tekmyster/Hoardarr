@@ -283,15 +283,15 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| BACKUP-01 | P2 | Remote backup target model | Persist provider, endpoint, bucket/prefix, schedule, limits, status, and history without readable secrets. | QUEUED |
-| BACKUP-02 | P2 | Backup credential handling | Encrypt credentials, redact APIs/logs, support rotation, and constrain endpoint/path inputs. | QUEUED |
-| BACKUP-03 | P2 | S3-compatible providers | Support MinIO, AWS S3, R2, Wasabi, B2 S3, and generic compatible endpoints through one tested contract. | QUEUED |
-| BACKUP-04 | P2 | Multipart/resumable upload and checksums | Resume safely and verify with provider-appropriate checksums rather than assuming multipart ETag equals MD5. | QUEUED |
-| BACKUP-05 | P2 | Scheduling, retry, bandwidth, and history | Provide durable jobs, backoff, limits, status, cancellation boundaries, and reports. | QUEUED |
-| BACKUP-06 | P2 | Remote restore validation | List, download, verify, and restore into disposable destinations before claiming recoverability. | QUEUED |
-| BACKUP-07 | P2 | Control-plane export | Export database, configuration, preferences, topology declarations, integrations, and plugin configuration. | QUEUED |
-| BACKUP-08 | P2 | Encrypted secrets and fresh-appliance restore | Exclude secrets by default; optionally encrypt; restore and reconcile disks by stable identity. | QUEUED |
-| BACKUP-09 | P2 | Backup UI/API/E2E | Provide target/setup/history/restore surfaces and test outage, resume, corruption, insufficient space, and fresh restore. | QUEUED |
+| BACKUP-01 | P2 | Remote backup target model | Persist provider, endpoint, bucket/prefix, schedule, limits, status, and history without readable secrets. | SOFTWARE VERIFIED — migration 0017, normalized model/API, bounded history list and focused backend tests pass; hosted live-MinIO execution is tracked by VALID-04 |
+| BACKUP-02 | P2 | Backup credential handling | Encrypt credentials, redact APIs/logs, support rotation, and constrain endpoint/path inputs. | IN PROGRESS — credentials are encrypted and redacted, endpoint resolution fails closed, and unsafe private/HTTP use requires explicit approval; rotation lifecycle remains |
+| BACKUP-03 | P2 | S3-compatible providers | Support MinIO, AWS S3, R2, Wasabi, B2 S3, and generic compatible endpoints through one tested contract. | IN PROGRESS — one production boto3 contract and provider-specific endpoint policy exist; disposable live MinIO CI is implemented but hosted result is pending, and external-provider credentials are not available |
+| BACKUP-04 | P2 | Multipart/resumable upload and checksums | Resume safely and verify with provider-appropriate checksums rather than assuming multipart ETag equals MD5. | SOFTWARE VERIFIED — durable upload ID/part checkpoints, provider part reconciliation, bounded part memory and full remote SHA-256 verification pass deterministic tests; no ETag/MD5 assumption |
+| BACKUP-05 | P2 | Scheduling, retry, bandwidth, and history | Provide durable jobs, backoff, limits, status, cancellation boundaries, and reports. | IN PROGRESS — durable recovery, bounded SDK retries, 1–720 hour idempotent scheduling, MiB/s pacing, history and reports are implemented; hosted outage/recovery execution remains VALID-04 |
+| BACKUP-06 | P2 | Remote restore validation | List, download, verify, and restore into disposable destinations before claiming recoverability. | IN PROGRESS — remote download, safe extraction, manifest/hash and SQLite integrity validation are implemented without mutating the appliance; fresh-appliance apply remains BACKUP-08 |
+| BACKUP-07 | P2 | Control-plane export | Export database, configuration, preferences, topology declarations, integrations, and plugin configuration. | SOFTWARE VERIFIED — consistent database export includes persisted preferences/topology/integrations/add-ons plus bounded non-secret configuration files and a checksummed manifest |
+| BACKUP-08 | P2 | Encrypted secrets and fresh-appliance restore | Exclude secrets by default; optionally encrypt; restore and reconcile disks by stable identity. | IN PROGRESS — secret-like files, symlinks, credentials and secret-store keys are excluded by default; optional encrypted-secret export and offline fresh-appliance apply/reconciliation remain |
+| BACKUP-09 | P2 | Backup UI/API/E2E | Provide target/setup/history/restore surfaces and test outage, resume, corruption, insufficient space, and fresh restore. | IN PROGRESS — Settings target/setup/test/schedule/run/history/validation UI, Activity linkage, component tests and browser E2E pass locally; outage, insufficient-space and fresh-restore acceptance remain |
 
 ### AUTO — Automation, alerting, and runbooks
 

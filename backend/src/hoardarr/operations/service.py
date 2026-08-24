@@ -16,6 +16,8 @@ from hoardarr.db.models import (
     IntegrationConnection,
     Operation,
     OperationEvent,
+    RemoteBackupRun,
+    RemoteBackupTarget,
     StorageDrainJob,
     utc_now,
 )
@@ -43,6 +45,7 @@ NON_CANCELLABLE_AFTER_START = frozenset(
         "hardware.locate",
         "connectivity.apply",
         "connectivity.remove",
+        "backup.control_plane",
     }
 )
 
@@ -226,6 +229,12 @@ def request_cancellation(session: Session, operation: Operation) -> None:
 
 
 def mark_cancelled_resource(session: Session, operation: Operation) -> None:
+    if operation.kind == "backup.control_plane":
+        run = session.get(RemoteBackupRun, operation.id)
+        if run is not None:
+            run.status = "cancelled"
+            run.updated_at = utc_now()
+        return
     if operation.kind == "storage.foreign.migrate":
         job = session.get(ForeignMigrationJob, operation.id)
         if job is not None:
@@ -262,6 +271,24 @@ def mark_cancelled_resource(session: Session, operation: Operation) -> None:
 
 
 def mark_failed_resource(session: Session, operation: Operation, code: str) -> None:
+    if operation.kind in {"backup.target.test", "backup.control_plane", "backup.restore.validate"}:
+        target_id = operation.request_json.get("target_id")
+        target = session.get(RemoteBackupTarget, target_id) if isinstance(target_id, str) else None
+        now = utc_now()
+        if target is not None:
+            target.status = "degraded" if target.last_success_at is not None else "error"
+            target.last_error_json = {"code": code}
+            target.updated_at = now
+            if operation.kind == "backup.target.test":
+                target.last_tested_at = now
+        if operation.kind == "backup.control_plane":
+            run = session.get(RemoteBackupRun, operation.id)
+            if run is not None:
+                run.status = "failed"
+                run.phase = "failed"
+                run.completed_at = now
+                run.updated_at = now
+        return
     if operation.resource_type == "connectivity_service" and operation.resource_id:
         service = session.get(ConnectivityService, operation.resource_id)
         if service is not None:
@@ -324,15 +351,24 @@ def recover_stale_operations(
             - timedelta(seconds=max_age_by_kind.get(operation.kind, max_age_seconds))
         ]
     for operation in stale:
-        if operation.kind in {"storage.drain", "storage.foreign.migrate"}:
+        if operation.kind in {
+            "storage.drain",
+            "storage.foreign.migrate",
+            "backup.control_plane",
+        }:
             job = (
                 session.get(StorageDrainJob, operation.id)
                 if operation.kind == "storage.drain"
-                else session.get(ForeignMigrationJob, operation.id)
+                else (
+                    session.get(ForeignMigrationJob, operation.id)
+                    if operation.kind == "storage.foreign.migrate"
+                    else session.get(RemoteBackupRun, operation.id)
+                )
             )
             if job is not None and job.status != "succeeded":
                 job.status = "queued"
-                job.pause_requested = False
+                if hasattr(job, "pause_requested"):
+                    job.pause_requested = False
                 job.updated_at = utc_now()
                 operation.status = "queued"
                 operation.lease_owner = None
