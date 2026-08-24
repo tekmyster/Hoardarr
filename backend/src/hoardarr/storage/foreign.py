@@ -197,11 +197,98 @@ def clear_unraid_evidence(session: Session) -> int:
     return cleared
 
 
+NAS_PLATFORM_NAMES = {
+    "synology": "Synology DSM",
+    "qnap": "QNAP QTS / QuTS",
+    "generic_linux_nas": "Generic Linux NAS",
+}
+
+
+def persist_nas_evidence(
+    session: Session,
+    *,
+    document: dict[str, Any],
+    created_by: str,
+) -> ForeignImportEvidence:
+    """Persist a bounded source-NAS manifest without opening any current source disk."""
+
+    normalized_members = [
+        {
+            "member": str(item["member"]),
+            "serial": str(item["serial"]).strip(),
+            "wwn": _text(item.get("wwn"), limit=256),
+            "eui64": _text(item.get("eui64"), limit=256),
+            "nguid": _text(item.get("nguid"), limit=256),
+            "capacity_bytes": item.get("capacity_bytes"),
+        }
+        for item in document["members"]
+    ]
+    normalized = {
+        "schema_version": 1,
+        "source": "nas_runtime_state",
+        "captured_at": str(document["captured_at"]),
+        "platform": str(document["platform"]),
+        "platform_marker": str(document["platform_marker"]),
+        "product_version": _text(document.get("product_version"), limit=64),
+        "members": sorted(normalized_members, key=lambda item: str(item["member"])),
+    }
+    digest = document_hash(normalized)
+    for previous in session.scalars(
+        select(ForeignImportEvidence).where(
+            ForeignImportEvidence.source_type == "nas_runtime_state",
+            ForeignImportEvidence.active.is_(True),
+        )
+    ):
+        previous.active = False
+    evidence = session.scalar(
+        select(ForeignImportEvidence).where(ForeignImportEvidence.document_sha256 == digest)
+    )
+    if evidence is None:
+        evidence = ForeignImportEvidence(
+            source_type="nas_runtime_state",
+            document_sha256=digest,
+            evidence_json=normalized,
+            active=True,
+            created_by=created_by,
+        )
+        session.add(evidence)
+    else:
+        evidence.active = True
+    session.flush()
+    return evidence
+
+
+def clear_nas_evidence(session: Session) -> int:
+    cleared = 0
+    for evidence in session.scalars(
+        select(ForeignImportEvidence).where(
+            ForeignImportEvidence.source_type == "nas_runtime_state",
+            ForeignImportEvidence.active.is_(True),
+        )
+    ):
+        evidence.active = False
+        cleared += 1
+    session.flush()
+    return cleared
+
+
 def _active_unraid_evidence(session: Session) -> ForeignImportEvidence | None:
     return session.scalar(
         select(ForeignImportEvidence)
         .where(
             ForeignImportEvidence.source_type == "unraid_runtime_state",
+            ForeignImportEvidence.active.is_(True),
+        )
+        .order_by(ForeignImportEvidence.created_at.desc())
+        .limit(1)
+    )
+
+
+def _active_nas_evidence(session: Session) -> ForeignImportEvidence | None:
+    return session.scalar(
+        select(ForeignImportEvidence)
+        .where(
+            ForeignImportEvidence.source_type == "nas_runtime_state",
             ForeignImportEvidence.active.is_(True),
         )
         .order_by(ForeignImportEvidence.created_at.desc())
@@ -390,6 +477,60 @@ def _unraid_classification(
             "ambiguous_slots": sorted(ambiguous_assignments),
         }
     return classifications, summary
+
+
+def _nas_classification(
+    session: Session,
+    members: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    evidence = _active_nas_evidence(session)
+    classifications: dict[str, dict[str, Any]] = {}
+    if evidence is None:
+        return classifications, None
+    matched_members: set[str] = set()
+    ambiguous_members: list[str] = []
+    assignments = evidence.evidence_json.get("members", [])
+    for assignment in assignments[:256] if isinstance(assignments, list) else []:
+        if not isinstance(assignment, dict):
+            continue
+        matches = [item for item in members if _assignment_matches(item, assignment)]
+        member_name = str(assignment.get("member") or "unknown")
+        if len(matches) != 1:
+            if len(matches) > 1:
+                ambiguous_members.append(member_name)
+            continue
+        member = matches[0]
+        matched_members.add(member_name)
+        classifications[member["device_id"]] = {
+            "platform": evidence.evidence_json["platform"],
+            "platform_name": NAS_PLATFORM_NAMES[evidence.evidence_json["platform"]],
+            "member": member_name,
+            "classification": "identified",
+            "reason": (
+                f"Stable identity matches member {member_name} in the source NAS runtime export."
+            ),
+            "evidence_sha256": evidence.document_sha256,
+        }
+    return classifications, {
+        "id": evidence.id,
+        "source": evidence.source_type,
+        "document_sha256": evidence.document_sha256,
+        "captured_at": evidence.evidence_json.get("captured_at"),
+        "platform": evidence.evidence_json.get("platform"),
+        "platform_name": NAS_PLATFORM_NAMES[evidence.evidence_json["platform"]],
+        "platform_marker": evidence.evidence_json.get("platform_marker"),
+        "product_version": evidence.evidence_json.get("product_version"),
+        "member_count": len(assignments) if isinstance(assignments, list) else 0,
+        "matched_member_count": len(matched_members),
+        "unmatched_members": sorted(
+            str(item.get("member"))
+            for item in assignments
+            if isinstance(item, dict) and str(item.get("member")) not in matched_members
+        )
+        if isinstance(assignments, list)
+        else [],
+        "ambiguous_members": sorted(ambiguous_members),
+    }
 
 
 def _signature_documents(disk: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1311,6 +1452,56 @@ def validate_migration_plan(value: object) -> dict[str, Any]:
     return value
 
 
+def _apply_candidate_nas_origin(
+    candidate: dict[str, Any], candidate_members: list[dict[str, Any]]
+) -> None:
+    matched = [item["nas_origin"] for item in candidate_members if item.get("nas_origin")]
+    identified_unraid = isinstance(candidate.get("unraid"), dict) and candidate["unraid"].get(
+        "classification"
+    ) == "identified"
+    if not matched:
+        candidate["nas_origin"] = None
+        return
+    if len(matched) != len(candidate_members) or len({item["platform"] for item in matched}) != 1:
+        candidate["nas_origin"] = None
+        candidate["warnings"].append(
+            "The source NAS export matches only part of this storage candidate. Vendor origin "
+            "remains Not reported until every member has one unambiguous stable-identity match."
+        )
+        return
+    platform_name = matched[0]["platform_name"]
+    candidate["nas_origin"] = {
+        "platform": matched[0]["platform"],
+        "platform_name": platform_name,
+        "classification": "identified",
+        "members": [item["member"] for item in matched],
+        "evidence_sha256": matched[0]["evidence_sha256"],
+        "reason": (
+            f"Every member matches the {platform_name} runtime export by stable identity."
+        ),
+    }
+    if identified_unraid:
+        candidate["origin"] = {
+            "name": "Not reported",
+            "confidence": "unknown",
+            "reason": "Loaded source manifests make conflicting origin claims for this disk.",
+        }
+        candidate["warnings"].append(
+            "Unraid and NAS runtime evidence both match this disk. Hoardarr will not choose an "
+            "origin until the incorrect source manifest is removed."
+        )
+        return
+    candidate["origin"] = {
+        "name": platform_name,
+        "confidence": "high",
+        "reason": candidate["nas_origin"]["reason"],
+    }
+    if candidate["profile"] == "standalone_filesystem":
+        candidate["profile_name"] = f"Identified {platform_name} data filesystem"
+    elif candidate["profile"] in {"linux_md", "lvm", "zfs"}:
+        candidate["profile_name"] = f"Identified {platform_name} {candidate['profile_name']} stack"
+
+
 def assess_foreign_storage(
     session: Session,
     *,
@@ -1325,8 +1516,10 @@ def assess_foreign_storage(
     )
     members = [_member(item) for item in disks]
     unraid_classifications, unraid_evidence = _unraid_classification(session, members)
+    nas_classifications, nas_evidence = _nas_classification(session, members)
     for member in members:
         member["unraid"] = unraid_classifications.get(member["device_id"])
+        member["nas_origin"] = nas_classifications.get(member["device_id"])
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for member in members:
@@ -1391,21 +1584,22 @@ def assess_foreign_storage(
                     else "Possible Unraid data disk"
                 )
                 candidate["warnings"].append(classification["reason"])
+            _apply_candidate_nas_origin(candidate, candidate_members)
             candidates.append(candidate)
             continue
         signature_type = next(
             item for item, details in STACK_SIGNATURES.items() if details[0] == profile
         )
         _stack, name, tool = STACK_SIGNATURES[signature_type]
-        candidates.append(
-            _candidate_document(
-                profile=profile,
-                name=name,
-                members=candidate_members,
-                managed_identities=managed_identities,
-                tool=tool,
-            )
+        candidate = _candidate_document(
+            profile=profile,
+            name=name,
+            members=candidate_members,
+            managed_identities=managed_identities,
+            tool=tool,
         )
+        _apply_candidate_nas_origin(candidate, candidate_members)
+        candidates.append(candidate)
 
     inspection_reports = _latest_inspection_reports(
         session, [str(candidate["id"]) for candidate in candidates]
@@ -1433,6 +1627,7 @@ def assess_foreign_storage(
             "mutation_performed": False,
         },
         "unraid_evidence": unraid_evidence,
+        "nas_evidence": nas_evidence,
         "migration_destinations": migration_destinations(session),
         "candidates": candidates,
         "unrecognized_device_count": sum(

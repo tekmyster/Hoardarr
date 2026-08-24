@@ -893,6 +893,7 @@ export interface ForeignStorageAssessment {
     mutation_performed: false;
   };
   unraid_evidence: UnraidEvidenceSummary | null;
+  nas_evidence: NASEvidenceSummary | null;
   migration_destinations: ForeignMigrationDestination[];
   candidates: Array<{
     id: string;
@@ -924,6 +925,7 @@ export interface ForeignStorageAssessment {
         source: string;
       }>;
       unraid: UnraidRoleClassification | null;
+      nas_origin?: NASOriginClassification | null;
     }>;
     filesystems: string[];
     signature_types: string[];
@@ -938,6 +940,7 @@ export interface ForeignStorageAssessment {
     blockers: string[];
     modes: Array<{ id: string; available: boolean; reason: string }>;
     unraid?: UnraidRoleClassification | null;
+    nas_origin?: NASOriginClassification | null;
     latest_inventory: ForeignInventoryReport | null;
     mutation_performed: false;
   }>;
@@ -1050,6 +1053,47 @@ export interface UnraidEvidenceInput {
     nguid?: string | null;
     capacity_bytes?: number | null;
     filesystem_type?: string | null;
+  }>;
+}
+
+export interface NASOriginClassification {
+  platform: "synology" | "qnap" | "generic_linux_nas";
+  platform_name: string;
+  classification: "identified";
+  members: string[];
+  evidence_sha256: string;
+  reason: string;
+}
+
+export interface NASEvidenceSummary {
+  id: string;
+  source: "nas_runtime_state";
+  document_sha256: string;
+  captured_at: string;
+  platform: "synology" | "qnap" | "generic_linux_nas";
+  platform_name: string;
+  platform_marker: "synology_runtime" | "qnap_runtime" | "linux_runtime";
+  product_version: string | null;
+  member_count: number;
+  matched_member_count: number;
+  unmatched_members: string[];
+  ambiguous_members: string[];
+}
+
+export interface NASEvidenceInput {
+  schema_version: 1;
+  source: "nas_runtime_state";
+  captured_at: string;
+  platform: "synology" | "qnap" | "generic_linux_nas";
+  platform_marker: "synology_runtime" | "qnap_runtime" | "linux_runtime";
+  product_version?: string | null;
+  members: Array<{
+    member: string;
+    serial: string;
+    wwn?: string | null;
+    eui64?: string | null;
+    nguid?: string | null;
+    capacity_bytes?: number | null;
   }>;
 }
 

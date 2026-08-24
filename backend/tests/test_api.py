@@ -2441,6 +2441,119 @@ def test_unraid_assignment_evidence_is_persisted_audited_and_identity_bound(
     }
 
 
+def test_nas_source_evidence_requires_matching_platform_marker_and_is_audited(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    endpoint = "/api/v1/storage/foreign/nas/evidence"
+    manifest = {
+        "schema_version": 1,
+        "source": "nas_runtime_state",
+        "captured_at": "2026-08-23T20:00:00Z",
+        "platform": "qnap",
+        "platform_marker": "qnap_runtime",
+        "product_version": "5.2.8",
+        "members": [
+            {
+                "member": "disk1",
+                "serial": "QNAP-DATA-1",
+                "wwn": "5000000000000101",
+                "capacity_bytes": 8_000_000_000,
+            }
+        ],
+    }
+    assert client.post(endpoint, json=manifest).status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    invalid = {**manifest, "platform_marker": "synology_runtime"}
+    assert client.post(endpoint, headers=_state_headers(csrf), json=invalid).status_code == 422
+    invalid_hardware_text = {
+        **manifest,
+        "members": [{**manifest["members"][0], "serial": "QNAP-DATA-1\nforged"}],
+    }
+    assert (
+        client.post(
+            endpoint,
+            headers=_state_headers(csrf),
+            json=invalid_hardware_text,
+        ).status_code
+        == 422
+    )
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        hardware = {
+            "schema_version": 1,
+            "source": {"kind": "sysfs"},
+            "disks": [
+                {
+                    "id": "wwn:qnap-data",
+                    "stable_identity": True,
+                    "kernel_path": "/dev/sdz",
+                    "identity": {
+                        "serial": "QNAP-DATA-1",
+                        "wwn": "5000000000000101",
+                        "eui64": None,
+                        "nguid": None,
+                    },
+                    "vendor": "TEST",
+                    "model": "QNAP source",
+                    "capacity_bytes": 8_000_000_000,
+                    "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+                    "system_disk": False,
+                    "read_only": False,
+                    "mountpoints": [],
+                    "partitions": [],
+                    "signatures": [
+                        {
+                            "type": "ext4",
+                            "usage": "filesystem",
+                            "uuid": "qnap-data-fs",
+                            "source": "wipefs",
+                        }
+                    ],
+                    "signature_scan": {"status": "complete", "source": "wipefs"},
+                }
+            ],
+        }
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="sysfs",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+
+    saved = client.post(endpoint, headers=_state_headers(csrf), json=manifest)
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["item"]["matched_member_count"] == 1
+    assessment = client.get("/api/v1/storage/foreign").json()
+    assert assessment["candidates"][0]["origin"]["name"] == "QNAP QTS / QuTS"
+    removed = client.delete(endpoint, headers=_state_headers(csrf))
+    assert removed.status_code == 200 and removed.json()["cleared"] == 1
+    with app.state.session_factory() as session:
+        actions = set(
+            session.scalars(
+                select(AuditEvent.action).where(
+                    AuditEvent.action.like("storage.foreign.nas_evidence.%")
+                )
+            )
+        )
+    assert actions == {
+        "storage.foreign.nas_evidence.save",
+        "storage.foreign.nas_evidence.remove",
+    }
+
+
 def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: Any) -> None:
     client, app, setup_token, secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

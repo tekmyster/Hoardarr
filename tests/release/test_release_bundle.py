@@ -191,6 +191,7 @@ class BuildPlanTests(unittest.TestCase):
             self.assertIn(plan.release_id, plan.bundle_name)
             self.assertIn("requirements/runtime.lock", plan.copied_paths)
             self.assertIn("scripts/bootstrap.py", plan.copied_paths)
+            self.assertIn("scripts/export-nas-source-evidence.py", plan.copied_paths)
             self.assertIn("packages/", plan.copied_paths)
             self.assertIn("frontend/", plan.copied_paths)
             self.assertFalse(output.exists())

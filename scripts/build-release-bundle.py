@@ -225,6 +225,7 @@ def create_plan(root: Path, output_dir: Path) -> ReleasePlan:
         "scripts/install.sh",
         "scripts/bootstrap.py",
         "scripts/detect-hardware.py",
+        "scripts/export-nas-source-evidence.py",
         "hardware/",
         "packages/",
         "systemd/",
@@ -318,6 +319,9 @@ def _copy_release_assets(root: Path, staging: Path) -> None:
         root / "scripts" / "install-release-bundle.sh": staging / "scripts" / "install.sh",
         root / "scripts" / "bootstrap.py": staging / "scripts" / "bootstrap.py",
         root / "scripts" / "detect-hardware.py": staging / "scripts" / "detect-hardware.py",
+        root / "scripts" / "export-nas-source-evidence.py": staging
+        / "scripts"
+        / "export-nas-source-evidence.py",
         root / "packaging" / "config" / "hoardarr.env": staging / "config" / "hoardarr.env",
     }
     for source, destination in individual.items():
@@ -328,6 +332,7 @@ def _copy_release_assets(root: Path, staging: Path) -> None:
     os.chmod(staging / "scripts" / "install.sh", 0o755)
     os.chmod(staging / "scripts" / "bootstrap.py", 0o555)
     os.chmod(staging / "scripts" / "detect-hardware.py", 0o555)
+    os.chmod(staging / "scripts" / "export-nas-source-evidence.py", 0o555)
 
     _copy_tree(root / "packaging" / "hardware", staging / "hardware")
     _copy_tree(root / "packaging" / "packages", staging / "packages")
@@ -340,6 +345,7 @@ def _copy_release_assets(root: Path, staging: Path) -> None:
         "hardware-support.md",
         "updates.md",
         "release-bundles.md",
+        "Import.md",
     )
     for name in docs:
         source = root / "docs" / "development" / name

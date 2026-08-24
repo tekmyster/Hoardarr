@@ -12,6 +12,7 @@ from hoardarr.storage.foreign import (
     build_inspection_plan,
     build_migration_plan,
     normalize_archive_selection,
+    persist_nas_evidence,
     persist_unraid_evidence,
     validate_inspection_plan,
     validate_migration_plan,
@@ -473,6 +474,85 @@ def test_linux_md_members_group_by_reported_uuid_without_assembly(
     assert candidate["origin"]["confidence"] == "unknown"
     assert any("no array" in item.lower() for item in candidate["warnings"])
     assert candidate["blockers"] == []
+
+
+def test_source_nas_runtime_evidence_identifies_complete_md_candidate() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        disks = [
+            _disk("wwn:syno-a", "linux_raid_member", signature_uuid="md-data"),
+            _disk("wwn:syno-b", "linux_raid_member", signature_uuid="md-data"),
+        ]
+        snapshot = _snapshot(session, disks)
+        persist_nas_evidence(
+            session,
+            created_by="owner",
+            document={
+                "schema_version": 1,
+                "source": "nas_runtime_state",
+                "captured_at": "2026-08-23T20:00:00Z",
+                "platform": "synology",
+                "platform_marker": "synology_runtime",
+                "product_version": "7.2.2",
+                "members": [
+                    {
+                        "member": "drive1",
+                        "serial": "SERIAL-syno-a",
+                        "wwn": "syno-a",
+                        "capacity_bytes": 8_000_000_000,
+                    },
+                    {
+                        "member": "drive2",
+                        "serial": "SERIAL-syno-b",
+                        "wwn": "syno-b",
+                        "capacity_bytes": 8_000_000_000,
+                    },
+                ],
+            },
+        )
+        document = assess_foreign_storage(session, snapshot=snapshot)
+
+    candidate = document["candidates"][0]
+    assert candidate["origin"]["name"] == "Synology DSM"
+    assert candidate["origin"]["confidence"] == "high"
+    assert candidate["nas_origin"]["members"] == ["drive1", "drive2"]
+    assert candidate["profile_name"] == "Identified Synology DSM Linux MD stack"
+    assert document["nas_evidence"]["matched_member_count"] == 2
+
+
+def test_partial_nas_identity_evidence_does_not_manufacture_vendor_origin() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        snapshot = _snapshot(
+            session,
+            [
+                _disk("wwn:qnap-a", "linux_raid_member", signature_uuid="md-data"),
+                _disk("wwn:qnap-b", "linux_raid_member", signature_uuid="md-data"),
+            ],
+        )
+        persist_nas_evidence(
+            session,
+            created_by="owner",
+            document={
+                "schema_version": 1,
+                "source": "nas_runtime_state",
+                "captured_at": "2026-08-23T20:00:00Z",
+                "platform": "qnap",
+                "platform_marker": "qnap_runtime",
+                "product_version": None,
+                "members": [
+                    {"member": "disk1", "serial": "SERIAL-qnap-a", "wwn": "qnap-a"}
+                ],
+            },
+        )
+        document = assess_foreign_storage(session, snapshot=snapshot)
+
+    candidate = document["candidates"][0]
+    assert candidate["origin"]["name"] == "Not reported"
+    assert candidate["nas_origin"] is None
+    assert any("only part" in warning for warning in candidate["warnings"])
 
 
 def test_unrecognized_media_remains_unknown_instead_of_being_called_empty() -> None:

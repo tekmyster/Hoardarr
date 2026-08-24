@@ -14,6 +14,7 @@ const assessment: ForeignStorageAssessment = {
     mutation_performed: false,
   },
   unraid_evidence: null,
+  nas_evidence: null,
   migration_destinations: [],
   candidates: [{
     id: "foreign:one",
@@ -348,6 +349,54 @@ describe("ForeignStoragePanel", () => {
     expect(await screen.findByText("Identified Unraid parity disk")).toBeInTheDocument();
     expect(screen.getByText(/Identified: parity/)).toBeInTheDocument();
     expect(screen.getByText("assignment evidence loaded")).toBeInTheDocument();
+  });
+
+  it("loads source NAS evidence and shows only stable-identity-bound origin", async () => {
+    const user = userEvent.setup();
+    const identified: ForeignStorageAssessment = {
+      ...assessment,
+      nas_evidence: {
+        id: "nas-evidence-1",
+        source: "nas_runtime_state",
+        document_sha256: "e".repeat(64),
+        captured_at: "2026-08-23T20:00:00Z",
+        platform: "synology",
+        platform_name: "Synology DSM",
+        platform_marker: "synology_runtime",
+        product_version: "7.2.2",
+        member_count: 1,
+        matched_member_count: 1,
+        unmatched_members: [],
+        ambiguous_members: [],
+      },
+      candidates: [{
+        ...assessment.candidates[0],
+        profile_name: "Identified Synology DSM data filesystem",
+        origin: {
+          name: "Synology DSM",
+          confidence: "high",
+          reason: "Every member matches the source runtime export by stable identity.",
+        },
+        nas_origin: {
+          platform: "synology",
+          platform_name: "Synology DSM",
+          classification: "identified",
+          members: ["drive1"],
+          evidence_sha256: "e".repeat(64),
+          reason: "Every member matches the source runtime export by stable identity.",
+        },
+      }],
+    };
+    vi.spyOn(api, "foreignStorage").mockResolvedValueOnce(assessment).mockResolvedValue(identified);
+    const save = vi.spyOn(api, "saveNASEvidence").mockResolvedValue(identified.nas_evidence!);
+    render(<ForeignStoragePanel />);
+
+    const input = await screen.findByLabelText("Load source NAS export");
+    await user.upload(input, new File([JSON.stringify({ schema_version: 1 })], "nas.json", { type: "application/json" }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(await screen.findByText("Identified Synology DSM data filesystem")).toBeInTheDocument();
+    expect(screen.getByText("source evidence loaded")).toBeInTheDocument();
+    expect(screen.getByText("drive1")).toBeInTheDocument();
   });
 
   it("previews inactive Linux MD metadata without claiming assembly or health", async () => {

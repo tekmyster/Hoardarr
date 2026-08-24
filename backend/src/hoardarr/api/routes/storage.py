@@ -26,6 +26,7 @@ from hoardarr.api.schemas import (
     ForeignMigrationApplyRequest,
     ForeignMigrationPreviewRequest,
     ForeignStackPreviewRequest,
+    NASEvidenceRequest,
     PhysicalDiskReconcileRequest,
     PhysicalDiskReservationRequest,
     SnapraidReplacementApplyRequest,
@@ -66,7 +67,9 @@ from hoardarr.storage.foreign import (
     build_inspection_plan,
     build_migration_plan,
     build_stack_preview_plan,
+    clear_nas_evidence,
     clear_unraid_evidence,
+    persist_nas_evidence,
     persist_unraid_evidence,
     validate_inspection_plan,
     validate_migration_plan,
@@ -240,6 +243,59 @@ def remove_unraid_assignment_evidence(
         session,
         principal=principal,
         action="storage.foreign.unraid_evidence.remove",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="foreign_import_evidence",
+        details={"cleared_count": cleared},
+    )
+    return {"cleared": cleared}
+
+
+@router.post("/foreign/nas/evidence", status_code=201)
+def save_nas_source_evidence(
+    payload: NASEvidenceRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Persist a source-NAS runtime export; current disks remain unopened and unchanged."""
+
+    evidence = persist_nas_evidence(
+        session,
+        document=payload.model_dump(mode="json"),
+        created_by=principal.user_id,
+    )
+    assessment = assess_foreign_storage(session, snapshot=_latest_hardware(session))
+    summary = assessment["nas_evidence"]
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.foreign.nas_evidence.save",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="foreign_import_evidence",
+        target_id=evidence.id,
+        details={
+            "document_sha256": evidence.document_sha256,
+            "platform": summary["platform"] if summary else None,
+            "member_count": summary["member_count"] if summary else 0,
+            "matched_member_count": summary["matched_member_count"] if summary else 0,
+        },
+    )
+    return {"item": summary}
+
+
+@router.delete("/foreign/nas/evidence")
+def remove_nas_source_evidence(
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    cleared = clear_nas_evidence(session)
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.foreign.nas_evidence.remove",
         outcome="succeeded",
         correlation_id=request.state.request_id,
         target_type="foreign_import_evidence",

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
 import { api } from "../api/client";
 import { humanCapacity } from "../policy";
-import type { ForeignInspectionPlan, ForeignMigrationPlan, ForeignStackPreviewResult, ForeignStorageAssessment, OperationDocument, StorageOperationProgress, UnraidEvidenceInput } from "../types";
+import type { ForeignInspectionPlan, ForeignMigrationPlan, ForeignStackPreviewResult, ForeignStorageAssessment, NASEvidenceInput, OperationDocument, StorageOperationProgress, UnraidEvidenceInput } from "../types";
 import { Card, Notice, Spinner, StatusBadge } from "./ui";
 
 function errorText(error: unknown): string {
@@ -16,7 +16,7 @@ function confidenceLabel(value: string): string {
 function readFileText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("The assignment export could not be read."));
+    reader.onerror = () => reject(new Error("The source evidence export could not be read."));
     reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
     reader.readAsText(file);
   });
@@ -233,6 +233,40 @@ export function ForeignStoragePanel() {
     }
   };
 
+  const importNASEvidence = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError(null);
+    if (file.size > 524_288) {
+      setError("The source NAS export exceeds the 512 KiB safety limit.");
+      return;
+    }
+    setEvidenceBusy(true);
+    try {
+      const parsed = JSON.parse(await readFileText(file)) as NASEvidenceInput;
+      await api.saveNASEvidence(parsed);
+      refresh();
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setEvidenceBusy(false);
+    }
+  };
+
+  const removeNASEvidence = async () => {
+    setEvidenceBusy(true);
+    setError(null);
+    try {
+      await api.removeNASEvidence();
+      refresh();
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setEvidenceBusy(false);
+    }
+  };
+
   const inventory = operation?.status === "succeeded" && operation.result && typeof operation.result.inventory === "object"
     ? operation.result.inventory as Record<string, unknown>
     : null;
@@ -259,6 +293,16 @@ export function ForeignStoragePanel() {
           </> : <Notice tone="info" title="No Unraid assignment export loaded">A readable XFS/Btrfs/ext4 disk may be compatible with Unraid, but the filesystem alone cannot prove where it came from. A disk without a filesystem is never treated as confirmed parity.</Notice>}
           <div className="panel-actions"><label className="button button-secondary">{evidenceBusy ? "Loading…" : assessment.unraid_evidence ? "Replace assignment export" : "Load assignment export"}<input className="visually-hidden" type="file" accept="application/json,.json" disabled={evidenceBusy} aria-label="Load Unraid assignment export" onChange={(event) => void importUnraidEvidence(event)} /></label>{assessment.unraid_evidence && <button type="button" className="button button-secondary" disabled={evidenceBusy} onClick={() => void removeUnraidEvidence()}>Forget assignment evidence</button>}</div>
         </section>
+        <section className="foreign-evidence-panel" aria-labelledby="nas-evidence-heading">
+          <div className="section-heading"><div><p className="eyebrow">OPTIONAL SOURCE EVIDENCE</p><h3 id="nas-evidence-heading">Synology, QNAP, or Linux NAS source</h3></div>{assessment.nas_evidence && <StatusBadge status="source evidence loaded" />}</div>
+          <p>Load a bounded runtime export from the original NAS to bind its reported platform to current disks by stable serial, WWN, EUI, or NGUID. Generic MD, LVM, and ZFS metadata remains inspectable without this file, but it does not prove a vendor.</p>
+          {assessment.nas_evidence ? <>
+            <dl className="review-list"><div><dt>Source platform</dt><dd>{assessment.nas_evidence.platform_name}<small>{assessment.nas_evidence.product_version ?? "Version Not reported"}</small></dd></div><div><dt>Members matched</dt><dd>{assessment.nas_evidence.matched_member_count} of {assessment.nas_evidence.member_count}</dd></div><div><dt>Captured</dt><dd>{new Date(assessment.nas_evidence.captured_at).toLocaleString()}</dd></div><div><dt>Runtime marker</dt><dd><code>{assessment.nas_evidence.platform_marker}</code></dd></div><div><dt>Evidence SHA-256</dt><dd><code>{assessment.nas_evidence.document_sha256}</code></dd></div></dl>
+            {assessment.nas_evidence.unmatched_members.length > 0 && <Notice tone="warning" title="Some source members are not attached">Unmatched source members: {assessment.nas_evidence.unmatched_members.join(", ")}. Same-size disks are not substituted.</Notice>}
+            {assessment.nas_evidence.ambiguous_members.length > 0 && <Notice tone="danger" title="Ambiguous stable identity">These source members matched multiple current devices and cannot establish origin: {assessment.nas_evidence.ambiguous_members.join(", ")}.</Notice>}
+          </> : <Notice tone="info" title="Vendor origin is not inferred from RAID metadata">Synology and QNAP both use layered storage technologies also found on ordinary Linux systems. Hoardarr reports a generic Linux stack until a source runtime export matches every member.</Notice>}
+          <div className="panel-actions"><label className="button button-secondary">{evidenceBusy ? "Loading…" : assessment.nas_evidence ? "Replace source export" : "Load source NAS export"}<input className="visually-hidden" type="file" accept="application/json,.json" disabled={evidenceBusy} aria-label="Load source NAS export" onChange={(event) => void importNASEvidence(event)} /></label>{assessment.nas_evidence && <button type="button" className="button button-secondary" disabled={evidenceBusy} onClick={() => void removeNASEvidence()}>Forget source evidence</button>}</div>
+        </section>
         {!assessment.candidates.length ? <div className="empty-state compact-empty"><h3>No recognized foreign storage</h3><p>{assessment.unrecognized_device_count > 0 ? `${assessment.unrecognized_device_count} non-system device${assessment.unrecognized_device_count === 1 ? " has" : "s have"} insufficient signature evidence. Hoardarr does not call them empty.` : "The latest persisted scan did not report an unassigned supported filesystem or storage stack."}</p></div> : <div className="foreign-candidate-list">{assessment.candidates.map((candidate) => {
           const inspectionMode = candidate.modes.find((item) => item.id === "inspect_read_only");
           const stackMode = candidate.modes.find((item) => item.id === "preview_stack");
@@ -269,6 +313,7 @@ export function ForeignStoragePanel() {
           {candidate.archive_intake?.state === "discovered_external" && <Notice tone="info" title="Archive intake source detected">{candidate.archive_intake.reason} Formatting and automatic mounting remain disabled.</Notice>}
           <dl className="settings-list">
             <div><dt>Source system</dt><dd>{candidate.origin.name}<small>{candidate.origin.reason}</small></dd></div>
+            {candidate.nas_origin && <div><dt>Matched source members</dt><dd>{candidate.nas_origin.members.join(", ")}<small>Bound by stable identity · evidence {candidate.nas_origin.evidence_sha256.slice(0, 12)}</small></dd></div>}
             <div><dt>Evidence</dt><dd>{confidenceLabel(candidate.confidence)}</dd></div>
             {candidate.unraid && <div><dt>Unraid role</dt><dd>{candidate.unraid.classification === "identified" ? "Identified" : candidate.unraid.classification === "suspected" ? "Suspected only" : "Unknown"}: {candidate.unraid.role}<small>{candidate.unraid.slot ? `Original slot: ${candidate.unraid.slot}. ` : ""}{candidate.unraid.reason}</small></dd></div>}
             <div><dt>Members</dt><dd>{candidate.members.length}</dd></div>

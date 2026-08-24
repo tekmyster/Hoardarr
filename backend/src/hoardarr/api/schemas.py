@@ -419,6 +419,72 @@ class UnraidEvidenceRequest(StrictModel):
         return self
 
 
+class NASSourceMemberEvidence(StrictModel):
+    member: str = Field(min_length=1, max_length=128)
+    serial: str = Field(min_length=1, max_length=256)
+    wwn: str | None = Field(default=None, min_length=1, max_length=256)
+    eui64: str | None = Field(default=None, min_length=1, max_length=256)
+    nguid: str | None = Field(default=None, min_length=1, max_length=256)
+    capacity_bytes: int | None = Field(default=None, ge=1)
+
+    @field_validator("member", "serial", "wwn", "eui64", "nguid")
+    @classmethod
+    def validate_source_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("source NAS identity fields cannot be blank")
+        if any(ord(character) < 32 or ord(character) == 127 for character in cleaned):
+            raise ValueError("source NAS identity fields cannot contain control characters")
+        return cleaned
+
+
+class NASEvidenceRequest(StrictModel):
+    schema_version: Literal[1]
+    source: Literal["nas_runtime_state"]
+    captured_at: datetime
+    platform: Literal["synology", "qnap", "generic_linux_nas"]
+    platform_marker: Literal["synology_runtime", "qnap_runtime", "linux_runtime"]
+    product_version: str | None = Field(default=None, min_length=1, max_length=64)
+    members: list[NASSourceMemberEvidence] = Field(min_length=1, max_length=256)
+
+    @field_validator("product_version")
+    @classmethod
+    def validate_product_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("product version cannot be blank")
+        if any(ord(character) < 32 or ord(character) == 127 for character in cleaned):
+            raise ValueError("product version cannot contain control characters")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> NASEvidenceRequest:
+        expected_markers = {
+            "synology": "synology_runtime",
+            "qnap": "qnap_runtime",
+            "generic_linux_nas": "linux_runtime",
+        }
+        if self.platform_marker != expected_markers[self.platform]:
+            raise ValueError("platform marker does not match the reported source platform")
+        member_names = [item.member.casefold() for item in self.members]
+        identities = [
+            (item.wwn or "").strip().casefold()
+            or (item.eui64 or "").strip().casefold()
+            or (item.nguid or "").strip().casefold()
+            or item.serial.strip().casefold()
+            for item in self.members
+        ]
+        if len(member_names) != len(set(member_names)):
+            raise ValueError("source NAS member names must be unique")
+        if len(identities) != len(set(identities)):
+            raise ValueError("source NAS member identities must be unique")
+        return self
+
+
 class ForeignInspectionApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

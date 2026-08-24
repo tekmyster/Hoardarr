@@ -45,6 +45,37 @@ volume metadata alone never assigns a Synology, QNAP, or other product origin.
 Unraid is identified only when a persisted assignment export matches current
 stable serial/WWN identity; otherwise origin remains **Not reported**.
 
+### Synology, QNAP, and generic Linux NAS evidence
+
+Linux MD, LVM, and ZFS are storage technologies, not vendor identifiers.
+Hoardarr therefore keeps a discovered stack's source system as **Not reported**
+until a bounded runtime export from the original NAS matches every candidate
+member by stable serial, WWN, EUI, or NGUID. Matching only some members never
+upgrades an inference into a fact.
+
+The release bundle includes `scripts/export-nas-source-evidence.py`. Run it on
+the original NAS without changing storage:
+
+```text
+python3 export-nas-source-evidence.py --output nas-source.json
+```
+
+The exporter recognizes the Synology or QNAP runtime marker, reads only bounded
+version text and whole-device sysfs identity/capacity fields, excludes
+partitions and virtual devices, and emits no hostname or credential. On an
+intentionally selected ordinary Linux NAS, the operator must explicitly add
+`--allow-generic-linux`; absence of a vendor marker is never silently treated
+as a NAS identity.
+
+The Storage UI loads the JSON through
+`POST /api/v1/storage/foreign/nas/evidence`. The authenticated `operate`
+endpoint validates that the platform and runtime marker agree, refuses
+duplicate member names or identities, stores a SHA-256 provenance record, and
+audits save/removal. Synology DSM, QNAP QTS/QuTS, or Generic Linux NAS appears
+as the source only when every member of that candidate has one unambiguous
+stable-identity match. Conflicting Unraid and NAS manifests return the origin
+to **Not reported** until the incorrect evidence is removed.
+
 ### Unraid assignment evidence
 
 Hoardarr includes `scripts/export-unraid-assignments.php`, a read-only exporter
@@ -182,6 +213,14 @@ Initial adapters should prioritize common media-hoarding sources:
 
 - standalone ext4, XFS, Btrfs, NTFS, and exFAT disks;
 - Unraid data disks and pools;
+- generic Linux MD/LVM/ZFS NAS stacks, with Synology/QNAP origin only when a
+  source runtime export binds all current members;
+- ZFS pools from TrueNAS or another Linux/Unix host;
+- Linux MD RAID and LVM stacks used by common NAS distributions;
+- Synology and QNAP layouts where the complete stack can be identified safely;
+  and
+- unknown Linux or foreign media that can only be imaged or inspected
+  manually.
 
 ## Verified file migration into managed storage
 
@@ -224,12 +263,6 @@ verifies it still matches the reviewed count and bytes, creates checkpoints
 only for matching regular files, then proves the exact selected bytes plus the
 reserve fit before copying begins. An empty selection fails safely. The final
 report records the immutable selection alongside the verified manifest totals.
-- ZFS pools from TrueNAS or another Linux/Unix host;
-- Linux MD RAID and LVM stacks used by common NAS distributions;
-- Synology and QNAP layouts where the complete stack can be identified safely;
-  and
-- unknown Linux or foreign media that can only be imaged or inspected
-  manually.
 
 An adapter defines its signature rules, member grouping, safe inspection
 procedure, supported degraded states, mount behavior, blockers, and adoption

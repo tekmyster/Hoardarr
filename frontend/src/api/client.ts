@@ -16,6 +16,8 @@ import type {
   ForeignInspectionPlan,
   ForeignMigrationPlan,
   ForeignStackPreviewResult,
+  NASEvidenceInput,
+  NASEvidenceSummary,
   UnraidEvidenceInput,
   UnraidEvidenceSummary,
   HardwareSnapshot,
@@ -457,6 +459,22 @@ class HoardarrApi {
   async removeUnraidEvidence(): Promise<number> {
     const result = await this.request<{ cleared: number }>(
       "/storage/foreign/unraid/evidence",
+      { method: "DELETE" },
+    );
+    return result.cleared;
+  }
+
+  async saveNASEvidence(document: NASEvidenceInput): Promise<NASEvidenceSummary> {
+    const result = await this.request<{ item: NASEvidenceSummary }>(
+      "/storage/foreign/nas/evidence",
+      { method: "POST", body: JSON.stringify(document) },
+    );
+    return result.item;
+  }
+
+  async removeNASEvidence(): Promise<number> {
+    const result = await this.request<{ cleared: number }>(
+      "/storage/foreign/nas/evidence",
       { method: "DELETE" },
     );
     return result.cleared;

@@ -18,6 +18,7 @@ async function storageLifecycleServer(page: Page) {
   let foreignInspectionStarted = false;
   let foreignMigrationStarted = false;
   let unraidEvidenceLoaded = false;
+  let nasEvidenceLoaded = false;
   const group = () => ({
     id: groupId,
     name: "Media",
@@ -168,16 +169,32 @@ async function storageLifecycleServer(page: Page) {
       unraidEvidenceLoaded = false;
       return json({ removed: true });
     }
+    if (pathname.endsWith("/storage/foreign/nas/evidence") && request.method() === "POST") {
+      const body = request.postDataJSON() as { platform: string; platform_marker: string; members: Array<{ serial: string; wwn: string }> };
+      expect(body.platform).toBe("synology");
+      expect(body.platform_marker).toBe("synology_runtime");
+      expect(body.members).toEqual(expect.arrayContaining([
+        expect.objectContaining({ serial: "ARCHIVE-DATA", wwn: "archive" }),
+      ]));
+      nasEvidenceLoaded = true;
+      return json({ item: { id: "nas-evidence", document_sha256: "2".repeat(64) } }, 201);
+    }
+    if (pathname.endsWith("/storage/foreign/nas/evidence") && request.method() === "DELETE") {
+      nasEvidenceLoaded = false;
+      return json({ cleared: 1 });
+    }
     if (pathname.endsWith("/storage/foreign")) return json({
       snapshot: { id: "snapshot-foreign", captured_at: now, sha256: "d".repeat(64) },
       policy: { default_access: "read_only", automatic_mount: false, automatic_assembly: false, mutation_performed: false },
       unraid_evidence: unraidEvidenceLoaded ? { id: "unraid-evidence", source: "unraid_runtime_state", document_sha256: "1".repeat(64), captured_at: now, unraid_version: "7.1.4", assignment_count: 1, matched_assignment_count: 1, unmatched_slots: [], ambiguous_slots: [] } : null,
+      nas_evidence: nasEvidenceLoaded ? { id: "nas-evidence", source: "nas_runtime_state", document_sha256: "2".repeat(64), captured_at: now, platform: "synology", platform_name: "Synology DSM", platform_marker: "synology_runtime", product_version: "7.2.2", member_count: 1, matched_member_count: 1, unmatched_members: [], ambiguous_members: [] } : null,
       migration_destinations: [{ id: destinationId, storage_group_id: groupId, name: "Media", path: "/srv/hoardarr/backends/destination", stable_identity: "disk:wwn:destination", lifecycle_state: "preferred_write", device_number: 202, free_bytes: 900_000_000_000 }],
       candidates: [{
         id: "foreign:archive",
         profile: "standalone_filesystem",
-        profile_name: "Standalone filesystem",
-        origin: { name: "Not reported", confidence: "unknown", reason: "Filesystem metadata cannot identify the previous system." },
+        profile_name: nasEvidenceLoaded ? "Identified Synology DSM data filesystem" : "Standalone filesystem",
+        origin: nasEvidenceLoaded ? { name: "Synology DSM", confidence: "high", reason: "Every member matches the source runtime export by stable identity." } : { name: "Not reported", confidence: "unknown", reason: "Filesystem metadata cannot identify the previous system." },
+        nas_origin: nasEvidenceLoaded ? { platform: "synology", platform_name: "Synology DSM", classification: "identified", members: ["drive1"], evidence_sha256: "2".repeat(64), reason: "Every member matches the source runtime export by stable identity." } : null,
         confidence: "high",
         state: "ready",
         members: [{ device_id: "wwn:archive", kernel_path: "/dev/loop9", model: "Disposable archive disk", serial: "ARCHIVE-DATA", wwn: "archive", capacity_bytes: 8_000_000_000, stable_identity: true, system_device: false, read_only: false, removable: true, connection: { transport: "usb", protocol: "uas" }, external: true, mounted: false, mountpoints: [], signature_scan: { status: "complete", source: "wipefs", reason: null }, confidence: "high", signatures: [{ type: "xfs", usage: "filesystem", uuid: "archive-fs", label: "Archive", source: "wipefs" }], unraid: unraidEvidenceLoaded ? { role: "data", classification: "identified", slot: "disk1", reason: "The loaded assignment export matches this device by serial and WWN.", evidence_sha256: "1".repeat(64), parity_reuse_supported: false } : null }],
@@ -323,6 +340,7 @@ async function storageLifecycleServer(page: Page) {
     foreignInspectionStarted: () => foreignInspectionStarted,
     foreignMigrationStarted: () => foreignMigrationStarted,
     unraidEvidenceLoaded: () => unraidEvidenceLoaded,
+    nasEvidenceLoaded: () => nasEvidenceLoaded,
   };
 }
 
@@ -456,4 +474,32 @@ test("loads stable Unraid assignment evidence and identifies a data disk in the 
   await expect(page.getByText(/Identified: data/)).toBeVisible();
   await expect(page.getByText(/Original slot: disk1/)).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("foreign-unraid-identified-data.png"), fullPage: true });
+});
+
+test("loads source NAS evidence without inferring a vendor from generic RAID metadata", async ({ page }, testInfo) => {
+  const observed = await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await page.getByText("Inspect storage from another system").click();
+  await expect(page.getByText("Vendor origin is not inferred from RAID metadata")).toBeVisible();
+
+  await page.getByLabel("Load source NAS export").setInputFiles({
+    name: "nas-source.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      schema_version: 1,
+      source: "nas_runtime_state",
+      captured_at: "2026-08-23T16:00:00Z",
+      platform: "synology",
+      platform_marker: "synology_runtime",
+      product_version: "7.2.2",
+      members: [{ member: "drive1", serial: "ARCHIVE-DATA", wwn: "archive", capacity_bytes: 8_000_000_000 }],
+    })),
+  });
+
+  await expect.poll(observed.nasEvidenceLoaded).toBe(true);
+  await expect(page.getByText("source evidence loaded")).toBeVisible();
+  await expect(page.getByText("Identified Synology DSM data filesystem")).toBeVisible();
+  await expect(page.getByText("drive1")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("foreign-synology-source-evidence.png"), fullPage: true });
 });
