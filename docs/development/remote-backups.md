@@ -28,7 +28,7 @@ Files whose names indicate credentials, passwords, private keys, secrets, or tok
 
 Small archives use one bounded upload payload. Larger archives use S3 multipart upload with one part in memory at a time. The upload ID and completed part list are durable, so a recovered worker resumes from provider-reported completed parts instead of assuming local checkpoint state is authoritative. The optional MiB/s limit paces actual payload bytes.
 
-The AWS SDK standard retry mode performs three bounded attempts for transient provider failures. Worker interruption returns a control-plane backup to the durable queue; completed multipart state is retained. A stale target fingerprint fails closed if configuration or credentials changed after queueing.
+The AWS SDK standard retry mode performs three bounded attempts for transient provider failures. A retryable failure then returns the same durable operation to its queue for at most three delayed attempts (5, 30, then 120 seconds), retaining its upload ID and provider-confirmed multipart parts. Worker interruption uses the same durable run and completed multipart state. A stale target fingerprint fails closed if configuration or credentials changed after queueing.
 
 Hoardarr does not treat an ETag as a content checksum. It verifies object length and its independently recorded SHA-256 metadata, downloads the finished object, and recomputes the entire SHA-256 digest.
 
@@ -44,7 +44,7 @@ Settings → Remote backups provides honest empty/loading/failure states, target
 
 ## Validation
 
-- `backend/tests/test_backups.py` covers endpoint policy, secret exclusion, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, and failed-run reconciliation.
+- `backend/tests/test_backups.py` covers endpoint policy, secret exclusion, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, transient-outage delayed resume, and failed-run reconciliation.
 - backup-focused API tests cover authentication, scopes, redaction, credential rotation, idempotency, readiness gates, schedule persistence, and durable run creation.
 - `frontend/src/components/RemoteBackupsPanel.test.tsx` covers empty states, secret removal from the DOM after creation and rotation, readiness gating, scheduling, and validation actions.
 - the Playwright production-shell scenario exercises the visible create → prove connection → enable backup workflow.

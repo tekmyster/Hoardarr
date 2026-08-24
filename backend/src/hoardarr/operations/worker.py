@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from threading import Event
 from typing import Any, Protocol
@@ -310,12 +310,14 @@ class WorkFailure(RuntimeError):
         *,
         connection: ServarrConnectionData | None = None,
         needs_attention: bool = False,
+        retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.safe_message = message
         self.connection = connection
         self.needs_attention = needs_attention
+        self.retryable = retryable
 
 
 _SERVARR_FAILURE_MESSAGES = {
@@ -1728,7 +1730,7 @@ def _execute_work(
                 )
             )
         except BackupError as exc:
-            raise WorkFailure(exc.code, exc.safe_message) from exc
+            raise WorkFailure(exc.code, exc.safe_message, retryable=exc.retryable) from exc
     raise WorkFailure(
         "unsupported_operation",
         "This worker does not support the requested operation kind",
@@ -2043,6 +2045,65 @@ def _finalize_failure(
         elif operation.cancel_requested:
             _cancel_claimed_operation(session, operation)
             return
+        if failure.retryable and item.kind in {
+            "backup.target.test",
+            "backup.control_plane",
+            "backup.restore.validate",
+        }:
+            previous = operation.error_json if isinstance(operation.error_json, dict) else {}
+            retry_attempt = int(previous.get("retry_attempt", 0)) + 1
+            if retry_attempt <= 3:
+                delay_seconds = (5, 30, 120)[retry_attempt - 1]
+                retry_at = utc_now() + timedelta(seconds=delay_seconds)
+                operation.status = "queued"
+                operation.lease_owner = None
+                operation.leased_at = None
+                operation.heartbeat_at = utc_now()
+                operation.not_before = retry_at
+                operation.error_json = {
+                    "code": failure.code,
+                    "message": failure.safe_message,
+                    "retry_attempt": retry_attempt,
+                    "retry_at": retry_at.isoformat(),
+                }
+                operation.updated_at = utc_now()
+                target_id = item.request.get("target_id")
+                target = (
+                    session.get(RemoteBackupTarget, target_id)
+                    if isinstance(target_id, str)
+                    else None
+                )
+                if target is not None:
+                    target.status = "degraded" if target.last_success_at else "error"
+                    target.last_error_json = {
+                        "code": failure.code,
+                        "message": failure.safe_message,
+                    }
+                    target.updated_at = utc_now()
+                run = session.get(RemoteBackupRun, operation.id)
+                if run is not None:
+                    run.status = "queued"
+                    run.report_json = {
+                        **run.report_json,
+                        "retry": {
+                            "attempt": retry_attempt,
+                            "at": retry_at.isoformat(),
+                            "code": failure.code,
+                        },
+                    }
+                    run.updated_at = utc_now()
+                append_event(
+                    session,
+                    operation,
+                    "retry_scheduled",
+                    "Remote backup will retry after a temporary provider failure",
+                    {
+                        "attempt": retry_attempt,
+                        "delay_seconds": delay_seconds,
+                        "code": failure.code,
+                    },
+                )
+                return
         if failure.connection is not None:
             connection = _connection_is_current(session, failure.connection)
             if connection is None:

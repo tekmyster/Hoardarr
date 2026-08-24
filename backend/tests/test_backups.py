@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select
 
 import hoardarr.backups.service as backup_service
+import hoardarr.operations.worker as worker_service
 from hoardarr.auth.service import Principal
 from hoardarr.backups.scheduler import queue_due_control_plane_backups
 from hoardarr.backups.service import (
@@ -20,6 +21,7 @@ from hoardarr.backups.service import (
     build_control_plane_artifact,
     encrypt_credentials,
     execute_control_plane_backup,
+    target_fingerprint,
     validate_endpoint,
     validate_remote_archive,
 )
@@ -345,3 +347,87 @@ def test_scheduler_queues_one_due_backup_and_never_duplicates_active_work(tmp_pa
         operation = session.get(Operation, runs[0].id)
         assert operation is not None
         assert operation.request_json["scheduled"] is True
+
+
+def test_worker_retries_a_temporary_provider_outage_then_resumes_same_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    settings.configuration_root.mkdir()
+    (settings.configuration_root / "hoardarr.env").write_text(
+        "HOARDARR_ENVIRONMENT=test\n", encoding="utf-8"
+    )
+    secret_box = SecretBox.from_file(settings.secret_key_file, create=True)
+    factory = create_session_factory(create_database_engine(settings.database_url))
+    principal = Principal(
+        user_id="owner",
+        username="owner",
+        is_admin=True,
+        auth_type="session",
+        scopes=frozenset({"read", "operate", "admin"}),
+        session_id="browser",
+    )
+    with factory() as session, session.begin():
+        target = _target(secret_box)
+        session.add(target)
+        session.flush()
+        operation, _created = create_operation(
+            session,
+            kind="backup.control_plane",
+            principal=principal,
+            request={
+                "target_id": target.id,
+                "target_fingerprint": target_fingerprint(target),
+                "backup_kind": "control_plane",
+                "secrets_included": False,
+            },
+            idempotency_key="provider-outage",
+            resource_type="remote_backup_target",
+            resource_id=target.id,
+        )
+        session.add(
+            RemoteBackupRun(id=operation.id, target_id=target.id, backup_kind="control_plane")
+        )
+        operation_id = operation.id
+    fake = FakeS3()
+    calls = 0
+
+    def flaky_backup(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise BackupError(
+                "backup_provider_unavailable",
+                "The S3 service is temporarily unavailable.",
+                retryable=True,
+            )
+        return execute_control_plane_backup(*args, client_factory=lambda *_args: fake)
+
+    monkeypatch.setattr(worker_service, "execute_control_plane_backup", flaky_backup)
+    assert worker_service.run_once(
+        session_factory=factory,
+        settings=settings,
+        secret_box=secret_box,
+        worker_id="backup-outage-worker",
+    )
+    with factory() as session, session.begin():
+        operation = session.get(Operation, operation_id)
+        run = session.get(RemoteBackupRun, operation_id)
+        assert operation is not None and run is not None
+        assert operation.status == "queued"
+        assert operation.error_json["retry_attempt"] == 1
+        assert run.status == "queued"
+        operation.not_before = datetime.now(UTC) - timedelta(seconds=1)
+    assert worker_service.run_once(
+        session_factory=factory,
+        settings=settings,
+        secret_box=secret_box,
+        worker_id="backup-outage-worker",
+    )
+    with factory() as session:
+        operation = session.get(Operation, operation_id)
+        run = session.get(RemoteBackupRun, operation_id)
+        assert operation is not None and operation.status == "succeeded"
+        assert run is not None and run.status == "succeeded"
+        assert run.artifact_sha256
+        assert calls == 2
