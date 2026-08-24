@@ -12,6 +12,9 @@ _NAME = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 _PURPOSES = frozenset({"media", "downloads", "archive", "backup", "general", "vm"})
 _MINIMUM_ZVOL_BYTES = 1024 * 1024 * 1024
 _CAPACITY_RESERVE_BYTES = 1024 * 1024 * 1024
+_COMPRESSIONS = frozenset({"off", "lz4", "zstd", "zstd-1", "zstd-3", "zstd-6"})
+_RECORDSIZES = frozenset({"16K", "32K", "64K", "128K", "256K", "512K", "1M"})
+_VOLBLOCKSIZES = frozenset({"4K", "8K", "16K", "32K", "64K", "128K"})
 
 
 class VolumePlanError(ValueError):
@@ -40,6 +43,14 @@ def build_guided_volume_plan(
     purpose: str,
     pool_id: str | None = None,
     size_bytes: int | None = None,
+    advanced: bool = False,
+    resource_type: str | None = None,
+    compression: str | None = None,
+    recordsize: str | None = None,
+    atime: str | None = None,
+    mountpoint: str | None = None,
+    volblocksize: str | None = None,
+    sparse: bool | None = None,
 ) -> dict[str, Any]:
     name = name.strip().lower()
     purpose = purpose.strip().lower()
@@ -54,6 +65,35 @@ def build_guided_volume_plan(
         not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes <= 0
     ):
         raise VolumePlanError("volume_size_invalid", "Volume size must be a positive byte count.")
+    overrides = {compression, recordsize, atime, mountpoint, volblocksize, sparse, resource_type}
+    if not advanced and any(value is not None for value in overrides):
+        raise VolumePlanError(
+            "volume_advanced_settings_disabled",
+            "Provider settings require Advanced customization.",
+        )
+    if resource_type is not None and resource_type not in {"dataset", "zvol"}:
+        raise VolumePlanError("volume_resource_type_invalid", "The ZFS resource type is invalid.")
+    if compression is not None and compression not in _COMPRESSIONS:
+        raise VolumePlanError(
+            "volume_compression_invalid", "The ZFS compression setting is invalid."
+        )
+    if recordsize is not None and recordsize not in _RECORDSIZES:
+        raise VolumePlanError("volume_recordsize_invalid", "The ZFS record size is invalid.")
+    if atime is not None and atime not in {"on", "off"}:
+        raise VolumePlanError("volume_atime_invalid", "The ZFS access-time setting is invalid.")
+    if volblocksize is not None and volblocksize not in _VOLBLOCKSIZES:
+        raise VolumePlanError(
+            "volume_volblocksize_invalid", "The ZFS volume block size is invalid."
+        )
+    if mountpoint is not None and (
+        not mountpoint.startswith(("/srv/", "/mnt/", "/media/"))
+        or ".." in mountpoint.split("/")
+        or any(ord(char) < 33 for char in mountpoint)
+    ):
+        raise VolumePlanError(
+            "volume_mountpoint_invalid",
+            "Use an absolute storage path below /srv, /mnt, or /media without traversal.",
+        )
 
     candidates = _zfs_candidates(pools)
     if pool_id is not None:
@@ -81,7 +121,9 @@ def build_guided_volume_plan(
             }
         )
 
-    is_block = purpose == "vm"
+    is_block = (
+        resource_type == "zvol" if advanced and resource_type is not None else purpose == "vm"
+    )
     if is_block and (size_bytes is None or size_bytes < _MINIMUM_ZVOL_BYTES):
         blockers.append(
             {
@@ -96,23 +138,37 @@ def build_guided_volume_plan(
                 "message": "The requested size would consume the pool's safety reserve.",
             }
         )
+    if not is_block and size_bytes is not None:
+        blockers.append(
+            {
+                "code": "volume_size_not_applicable",
+                "message": (
+                    "A dataset grows from its pool; an explicit size applies only to block storage."
+                ),
+            }
+        )
 
     resource_type = "zvol" if is_block else "dataset"
     provider_resource_id = f"{pool['name']}/{name}"
     properties: dict[str, object]
     if is_block:
-        properties = {"compression": "zstd", "volblocksize": "16K", "sparse": True}
+        properties = {
+            "compression": compression or "zstd",
+            "volblocksize": volblocksize or "16K",
+            "sparse": True if sparse is None else sparse,
+        }
     else:
         properties = {
-            "compression": "zstd",
-            "recordsize": "1M" if purpose in {"media", "archive", "backup"} else "128K",
-            "atime": "off",
-            "mountpoint": f"/srv/hoardarr/volumes/{name}",
+            "compression": compression or "zstd",
+            "recordsize": recordsize
+            or ("1M" if purpose in {"media", "archive", "backup"} else "128K"),
+            "atime": atime or "off",
+            "mountpoint": mountpoint or f"/srv/hoardarr/volumes/{name}",
         }
     plan = {
         "schema_version": 1,
         "kind": "storage.volume.create",
-        "mode": "guided",
+        "mode": "advanced" if advanced else "guided",
         "name": name,
         "purpose": purpose,
         "provider": "zfs",
@@ -158,6 +214,20 @@ def validate_guided_volume_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         purpose=str(raw.get("purpose", "")),
         pool_id=str(parent.get("pool_id", "")),
         size_bytes=raw.get("size_bytes"),
+        advanced=raw.get("mode") == "advanced",
+        resource_type=str(raw.get("resource_type", "")) if raw.get("mode") == "advanced" else None,
+        **(
+            {
+                "compression": raw.get("properties", {}).get("compression"),
+                "recordsize": raw.get("properties", {}).get("recordsize"),
+                "atime": raw.get("properties", {}).get("atime"),
+                "mountpoint": raw.get("properties", {}).get("mountpoint"),
+                "volblocksize": raw.get("properties", {}).get("volblocksize"),
+                "sparse": raw.get("properties", {}).get("sparse"),
+            }
+            if raw.get("mode") == "advanced" and isinstance(raw.get("properties"), Mapping)
+            else {}
+        ),
     )
     if rebuilt != dict(plan):
         raise VolumePlanError("volume_plan_changed", "The volume plan changed after review.")

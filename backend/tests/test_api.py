@@ -173,6 +173,28 @@ def test_guided_volume_preview_uses_live_pool_identity_and_requires_operate_scop
     assert plan["provider_resource_id"] == "tank/movies"
     assert plan["ready"] is True
 
+    advanced = client.post(
+        "/api/v1/storage/volumes/preview",
+        headers=_state_headers(csrf),
+        json={
+            "name": "vm-fast",
+            "purpose": "vm",
+            "size_bytes": 30_000_000_000,
+            "advanced": True,
+            "resource_type": "zvol",
+            "compression": "zstd-3",
+            "volblocksize": "8K",
+            "sparse": False,
+        },
+    )
+    assert advanced.status_code == 200
+    assert advanced.json()["plan"]["mode"] == "advanced"
+    assert advanced.json()["plan"]["properties"] == {
+        "compression": "zstd-3",
+        "volblocksize": "8K",
+        "sparse": False,
+    }
+
     headers = _state_headers(csrf, **{"Idempotency-Key": "create-guided-volume"})
     created = client.post(
         "/api/v1/storage/volumes",

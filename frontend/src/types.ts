@@ -788,7 +788,7 @@ export interface StorageVolumeDocument {
 export interface StorageVolumePlan {
   schema_version: 1;
   kind: "storage.volume.create";
-  mode: "guided";
+  mode: "guided" | "advanced";
   name: string;
   purpose: "media" | "downloads" | "archive" | "backup" | "general" | "vm";
   provider: "zfs";

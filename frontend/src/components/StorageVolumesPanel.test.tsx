@@ -62,4 +62,27 @@ describe("StorageVolumesPanel", () => {
     expect(screen.getByText("No compatible pool detected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Review plan" })).toBeDisabled();
   });
+
+  it("sends exact Advanced ZFS geometry to the production preview boundary", async () => {
+    const user = userEvent.setup();
+    render(<StorageVolumesPanel pools={pools} />);
+    await screen.findByText("No provider-backed storage areas registered");
+    await user.click(screen.getByRole("button", { name: "Add storage area" }));
+    await user.click(screen.getByRole("checkbox", { name: /Customize ZFS settings/ }));
+    await user.selectOptions(screen.getByLabelText("Resource type"), "zvol");
+    await user.selectOptions(screen.getByLabelText("Compression"), "lz4");
+    await user.selectOptions(screen.getByLabelText("Volume block size"), "8K");
+    await user.click(screen.getByRole("checkbox", { name: /Thin\/sparse allocation/ }));
+    await user.clear(screen.getByLabelText("Size (GiB)"));
+    await user.type(screen.getByLabelText("Size (GiB)"), "40");
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await waitFor(() => expect(api.previewStorageVolume).toHaveBeenCalledWith(expect.objectContaining({
+      advanced: true,
+      resource_type: "zvol",
+      compression: "lz4",
+      volblocksize: "8K",
+      sparse: false,
+      size_bytes: 40 * 1024 ** 3,
+    })));
+  });
 });

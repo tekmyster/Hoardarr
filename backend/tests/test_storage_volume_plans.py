@@ -6,6 +6,7 @@ from hoardarr.storage.volume_plans import (
     VolumePlanError,
     build_guided_volume_plan,
     validate_guided_volume_plan,
+    volume_create_command,
 )
 
 
@@ -35,7 +36,6 @@ def test_guided_media_plan_uses_plain_safe_defaults_and_is_immutable() -> None:
     }
     assert plan["ready"] is True
     assert validate_guided_volume_plan(plan) == plan
-
     changed = {**plan, "name": "tv"}
     with pytest.raises(VolumePlanError) as raised:
         validate_guided_volume_plan(changed)
@@ -74,3 +74,86 @@ def test_guided_plan_rejects_unproven_or_unhealthy_backend_identity() -> None:
     )
     assert degraded["ready"] is False
     assert degraded["blockers"][0]["code"] == "volume_pool_not_healthy"
+
+
+def test_advanced_dataset_plan_applies_only_supported_exact_zfs_properties() -> None:
+    plan = build_guided_volume_plan(
+        [pool()],
+        name="metadata",
+        purpose="general",
+        advanced=True,
+        resource_type="dataset",
+        compression="lz4",
+        recordsize="32K",
+        atime="on",
+        mountpoint="/mnt/tank/metadata",
+    )
+    assert plan["mode"] == "advanced"
+    assert plan["properties"] == {
+        "compression": "lz4",
+        "recordsize": "32K",
+        "atime": "on",
+        "mountpoint": "/mnt/tank/metadata",
+    }
+    assert validate_guided_volume_plan(plan) == plan
+    assert volume_create_command(plan) == [
+        "zfs",
+        "create",
+        "-o",
+        "atime=on",
+        "-o",
+        "compression=lz4",
+        "-o",
+        "mountpoint=/mnt/tank/metadata",
+        "-o",
+        "recordsize=32K",
+        "tank/metadata",
+    ]
+
+    with pytest.raises(VolumePlanError) as raised:
+        build_guided_volume_plan(
+            [pool()],
+            name="unsafe",
+            purpose="general",
+            advanced=True,
+            resource_type="dataset",
+            mountpoint="/etc/hoardarr-overwrite",
+        )
+    assert raised.value.code == "volume_mountpoint_invalid"
+
+
+def test_advanced_zvol_plan_preserves_exact_geometry_and_requires_size() -> None:
+    plan = build_guided_volume_plan(
+        [pool()],
+        name="vm-fast",
+        purpose="vm",
+        size_bytes=30_000_000_000,
+        advanced=True,
+        resource_type="zvol",
+        compression="zstd-3",
+        volblocksize="8K",
+        sparse=False,
+    )
+    assert plan["properties"] == {
+        "compression": "zstd-3",
+        "volblocksize": "8K",
+        "sparse": False,
+    }
+    assert validate_guided_volume_plan(plan) == plan
+    assert volume_create_command(plan) == [
+        "zfs",
+        "create",
+        "-V",
+        "30000000000",
+        "-o",
+        "compression=zstd-3",
+        "-o",
+        "sparse=off",
+        "-o",
+        "volblocksize=8K",
+        "tank/vm-fast",
+    ]
+
+    with pytest.raises(VolumePlanError) as raised:
+        build_guided_volume_plan([pool()], name="vm-fast", purpose="vm", compression="lz4")
+    assert raised.value.code == "volume_advanced_settings_disabled"

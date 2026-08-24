@@ -47,3 +47,10 @@ remains unsupported rather than being simulated.
 
 Advanced creation for other provider geometries is tracked separately. The capability catalog is
 not permission to offer a decorative control for an unavailable provider.
+
+Advanced ZFS creation is exposed behind **Customize ZFS settings**. It changes the immutable
+provider plan and resulting command, rather than merely saving UI preferences. Experts may choose
+dataset versus zvol, a bounded ZFS compression algorithm, dataset record size and access-time
+behavior, a safe storage mount path, or zvol block size and sparse allocation. The UI does not
+offer LVM LV or iSCSI LUN creation yet because Hoardarr does not yet have those mutation providers;
+their honest capability inventory is not treated as implementation.

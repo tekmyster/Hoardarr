@@ -455,6 +455,14 @@ class HoardarrApi {
     purpose: StorageVolumePlan["purpose"];
     pool_id?: string;
     size_bytes?: number;
+    advanced?: boolean;
+    resource_type?: "dataset" | "zvol";
+    compression?: "off" | "lz4" | "zstd" | "zstd-1" | "zstd-3" | "zstd-6";
+    recordsize?: "16K" | "32K" | "64K" | "128K" | "256K" | "512K" | "1M";
+    atime?: "on" | "off";
+    mountpoint?: string;
+    volblocksize?: "4K" | "8K" | "16K" | "32K" | "64K" | "128K";
+    sparse?: boolean;
   }): Promise<StorageVolumePlan> {
     const result = await this.request<{ plan: StorageVolumePlan }>("/storage/volumes/preview", {
       method: "POST",

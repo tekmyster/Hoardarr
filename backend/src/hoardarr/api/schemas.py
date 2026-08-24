@@ -551,6 +551,14 @@ class StorageVolumePreviewRequest(StrictModel):
     purpose: Literal["media", "downloads", "archive", "backup", "general", "vm"]
     pool_id: str | None = Field(default=None, min_length=5, max_length=320)
     size_bytes: int | None = Field(default=None, ge=1, le=10**18)
+    advanced: bool = False
+    resource_type: Literal["dataset", "zvol"] | None = None
+    compression: Literal["off", "lz4", "zstd", "zstd-1", "zstd-3", "zstd-6"] | None = None
+    recordsize: Literal["16K", "32K", "64K", "128K", "256K", "512K", "1M"] | None = None
+    atime: Literal["on", "off"] | None = None
+    mountpoint: str | None = Field(default=None, min_length=2, max_length=4096)
+    volblocksize: Literal["4K", "8K", "16K", "32K", "64K", "128K"] | None = None
+    sparse: bool | None = None
 
 
 class StorageVolumeApplyRequest(StrictModel):

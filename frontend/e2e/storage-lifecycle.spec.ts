@@ -20,6 +20,7 @@ async function storageLifecycleServer(page: Page) {
   let unraidEvidenceLoaded = false;
   let nasEvidenceLoaded = false;
   let guidedVolumeCreated = false;
+  let advancedVolumePreviewed = false;
   const volumeOperationId = "88888888-8888-4888-8888-888888888888";
   const volumePlan = {
     schema_version: 1, kind: "storage.volume.create", mode: "guided", name: "media-library",
@@ -340,7 +341,13 @@ async function storageLifecycleServer(page: Page) {
     if (pathname.endsWith("/hardware/topology/plan-templates")) return json({ items: [] });
     if (pathname.endsWith("/hardware/topology/plans")) return json({ items: [] });
     if (pathname.endsWith("/storage/volumes/preview")) {
-      const body = request.postDataJSON() as { name: string; purpose: string };
+      const body = request.postDataJSON() as { name: string; purpose: string; advanced?: boolean; resource_type?: string; compression?: string; recordsize?: string; atime?: string; mountpoint?: string };
+      if (body.advanced) {
+        expect(body).toMatchObject({ name: "expert-data", purpose: "media", resource_type: "dataset", compression: "lz4", recordsize: "32K", atime: "on", mountpoint: "/mnt/tank/expert-data" });
+        advancedVolumePreviewed = true;
+        const advancedPlan = { ...volumePlan, mode: "advanced", name: "expert-data", provider_resource_id: "tank/expert-data", properties: { compression: "lz4", recordsize: "32K", atime: "on", mountpoint: "/mnt/tank/expert-data" }, plan_sha256: "f".repeat(64) };
+        return json({ plan: advancedPlan, plan_sha256: advancedPlan.plan_sha256 });
+      }
       expect(body).toMatchObject({ name: "media-library", purpose: "media" });
       return json({ plan: volumePlan, plan_sha256: volumePlan.plan_sha256 });
     }
@@ -377,6 +384,7 @@ async function storageLifecycleServer(page: Page) {
     unraidEvidenceLoaded: () => unraidEvidenceLoaded,
     nasEvidenceLoaded: () => nasEvidenceLoaded,
     guidedVolumeCreated: () => guidedVolumeCreated,
+    advancedVolumePreviewed: () => advancedVolumePreviewed,
   };
 }
 
@@ -443,6 +451,27 @@ test("creates a real provider-backed media area through the Guided Storage UI", 
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(page.getByText("zfs:dataset:tank/media-library")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("guided-storage-volume-created.png"), fullPage: true });
+});
+
+test("changes real ZFS geometry through Advanced Storage controls", async ({ page }, testInfo) => {
+  const observed = await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await page.getByRole("button", { name: "Add storage area" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a storage area" });
+  await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("expert-data");
+  await dialog.getByRole("checkbox", { name: /Customize ZFS settings/ }).check();
+  await dialog.getByLabel("Compression").selectOption("lz4");
+  await dialog.getByLabel("Record size").selectOption("32K");
+  await dialog.getByLabel("Access-time updates").selectOption("on");
+  await dialog.getByLabel("Mount path (optional)").fill("/mnt/tank/expert-data");
+  await dialog.getByRole("button", { name: "Review plan" }).click();
+  await expect(dialog.getByText("Recommended plan")).toBeVisible();
+  await expect(dialog.getByText("/mnt/tank/expert-data", { exact: true })).toBeVisible();
+  await dialog.getByText("Advanced provider settings").click();
+  await expect(dialog.getByText(/"recordsize": "32K"/)).toBeVisible();
+  expect(observed.advancedVolumePreviewed()).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("advanced-zfs-volume-review.png"), fullPage: true });
 });
 
 test("reviews and completes a bounded read-only foreign inventory in the real Storage UI", async ({ page }, testInfo) => {
