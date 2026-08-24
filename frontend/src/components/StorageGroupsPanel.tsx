@@ -32,7 +32,10 @@ export function StorageGroupsPanel() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
+  // Creating the first stable namespace is the primary empty-state action. Keep
+  // the form visible by default so it remains usable immediately after a
+  // completed storage wizard or browser focus transition is dismissed.
+  const [createOpen, setCreateOpen] = useState(true);
   const [name, setName] = useState("");
   const [namespacePath, setNamespacePath] = useState("/srv/hoardarr/media");
   const [purpose, setPurpose] = useState<Purpose>("media");

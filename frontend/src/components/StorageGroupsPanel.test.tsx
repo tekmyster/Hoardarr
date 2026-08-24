@@ -95,8 +95,12 @@ describe("StorageGroupsPanel", () => {
     render(<StorageGroupsPanel />);
 
     expect(await screen.findByText("No Storage Groups yet")).toBeInTheDocument();
-    const createToggle = screen.getByRole("button", { name: "Create Storage Group" });
+    const createToggle = screen.getByRole("button", { name: "Close Storage Group form" });
+    expect(createToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+    await user.click(createToggle);
     expect(createToggle).toHaveAttribute("aria-expanded", "false");
+    expect(createToggle).toHaveAccessibleName("Create Storage Group");
     await user.click(createToggle);
     expect(createToggle).toHaveAttribute("aria-expanded", "true");
     await user.type(screen.getByLabelText("Name"), "Media");
