@@ -440,6 +440,19 @@ test.describe("production sign-in shell", () => {
     await dark.close();
   });
 
+  test("keeps local storage controls available when fleet telemetry is offline", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    await page.route("**/api/v1/fleet-telemetry/settings", (route) => route.fulfill({
+      status: 503,
+      contentType: "application/problem+json",
+      body: JSON.stringify({ title: "Fleet service unavailable", status: 503 }),
+    }));
+    await page.goto("/");
+
+    await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+    await expect(page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first()).toBeVisible();
+  });
+
   test("navigates the ARR shell and opens Guided storage with ordinary questions", async ({ page }) => {
     await authenticatedEmptyServer(page);
     await page.goto("/");

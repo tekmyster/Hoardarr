@@ -361,7 +361,10 @@ export default function App() {
         api.listWizards(),
         api.listOperations(),
         api.integrations(),
-        api.fleetTelemetrySettings(),
+        // Fleet telemetry is operationally independent from local storage.
+        // A central-service outage or an older backend must never prevent the
+        // appliance shell, Health, or storage controls from loading.
+        api.fleetTelemetrySettings().catch(() => null),
     ]);
     const defaults = uiDefaultsFromOnboarding(onboarding);
     setMode((current) => current === "advanced" ? current : defaults.experience);
@@ -450,9 +453,11 @@ export default function App() {
     setMergerFsInventory(foundMergerFs);
     setStorageInventory(foundStorage);
     setIntegrations(foundIntegrations);
-    setFleetSettings(foundFleetSettings);
-    setFleetCountry(foundFleetSettings.country_code ?? "");
-    setFleetHardwareEnabled(foundFleetSettings.hardware_enabled);
+    if (foundFleetSettings) {
+      setFleetSettings(foundFleetSettings);
+      setFleetCountry(foundFleetSettings.country_code ?? "");
+      setFleetHardwareEnabled(foundFleetSettings.hardware_enabled);
+    }
     const recoverableStorage = foundOperations.find((item) => {
       if (item.kind !== "storage.apply" || !["queued", "running", "succeeded"].includes(item.status)) return false;
       const related = foundWizards.find((candidate) => candidate.id === item.resource?.id);

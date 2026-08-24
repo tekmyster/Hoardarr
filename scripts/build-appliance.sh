@@ -34,9 +34,12 @@ grub_maps=()
 for config in boot/grub/grub.cfg boot/grub/loopback.cfg; do
     destination="$work/$(basename -- "$config")"
     xorriso -osirrox on -indev "$base_iso" -extract "/$config" "$destination" >/dev/null 2>&1 || continue
-    # Preserve serial diagnostics for headless CI, but make tty0 the primary
-    # interactive console for ordinary VMware and physical installations.
-    sed -i -E '/^[[:space:]]*linux[[:space:]]/ s/[[:space:]]---/ autoinstall ds=nocloud\\;s=\/cdrom\/nocloud\/ console=ttyS0,115200n8 console=tty0 ---/' "$destination"
+    # Keep the interactive installer on the virtual/physical display.  When a
+    # serial console is also listed, Subiquity selects it as its controlling
+    # terminal and VMware users receive a black console even if tty0 is listed
+    # last.  Headless CI validates the VGA framebuffer directly instead.
+    sed -i -E 's/[[:space:]]+autoinstall ds=nocloud\\;s=\/cdrom\/nocloud\///g; s/[[:space:]]+console=ttyS0,115200n8([[:space:]]+console=tty0)?//g' "$destination"
+    sed -i -E '/^[[:space:]]*linux[[:space:]]/ s/[[:space:]]---/ autoinstall ds=nocloud\\;s=\/cdrom\/nocloud\/ console=tty0 ---/' "$destination"
     grep -q 'autoinstall ds=nocloud' "$destination" || {
         echo "could not enable NoCloud autoinstall in /$config" >&2
         exit 1
