@@ -30,6 +30,7 @@ POLICY_PATHS = (
 MANAGED_UDEV_RULE = Path("/etc/udev/rules.d/98-hoardarr-managed-storage.rules")
 MANAGED_STORAGE_STATE = Path("/var/lib/hoardarr/storage-executor/managed-storage.json")
 FSTAB_PATH = Path("/etc/fstab")
+MANAGED_MEMBER_ROOT = Path("/mnt/hoardarr/disks")
 _FILESYSTEM_UUID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _BLOCK_NAME_RE = re.compile(r"^[A-Za-z0-9._!+:-]{1,128}$")
 _MANAGED_BEGIN_RE = re.compile(
@@ -438,6 +439,27 @@ def _managed_fstab_entries(content: str) -> tuple[list[str], list[str]]:
 
 def _with_mergerfs_dependencies(content: str) -> str:
     """Bind managed mergerFS units to their member mounts at boot."""
+    managed_targets: dict[str, str] = {}
+    target_operation: str | None = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        begin = _MANAGED_BEGIN_RE.fullmatch(line)
+        if begin is not None:
+            target_operation = begin.group(1)
+            continue
+        if target_operation is not None and line == f"# END HOARDARR {target_operation}":
+            target_operation = None
+            continue
+        if target_operation is None or not line or line.startswith("#"):
+            continue
+        fields = raw_line.split()
+        if len(fields) != 6 or not fields[0].startswith("UUID="):
+            continue
+        target = Path(fields[1].replace("\\040", " "))
+        if target.parent != MANAGED_MEMBER_ROOT or target.name in managed_targets:
+            continue
+        managed_targets[target.name] = target.as_posix()
+
     output: list[str] = []
     operation_id: str | None = None
     for raw_line in content.splitlines():
@@ -457,10 +479,22 @@ def _with_mergerfs_dependencies(content: str) -> str:
         fields = raw_line.split()
         if len(fields) == 6 and fields[2] == "fuse.mergerfs":
             branches = [item.replace("\\040", " ") for item in fields[0].split(":")]
-            if not branches or any(not item.startswith("/") for item in branches):
+            normalized_branches: list[str] = []
+            for branch in branches:
+                if branch.startswith("/"):
+                    normalized_branches.append(branch)
+                    continue
+                if Path(branch).name != branch or branch not in managed_targets:
+                    raise QuarantineError(
+                        "managed_fstab_invalid", "A managed mergerFS branch is invalid."
+                    )
+                normalized_branches.append(managed_targets[branch])
+            branches = normalized_branches
+            if not branches or len(branches) != len(set(branches)):
                 raise QuarantineError(
                     "managed_fstab_invalid", "A managed mergerFS branch is invalid."
                 )
+            fields[0] = ":".join(item.replace(" ", "\\040") for item in branches)
             options = [item for item in fields[3].split(",") if item]
             options = [item for item in options if not item.startswith("x-systemd.requires=")]
             options.extend(f"x-systemd.requires={branch}" for branch in branches)

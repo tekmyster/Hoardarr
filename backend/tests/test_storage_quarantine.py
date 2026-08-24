@@ -91,6 +91,43 @@ def test_managed_mergerfs_fstab_adds_member_dependencies() -> None:
     assert quarantine._with_mergerfs_dependencies(normalized) == normalized
 
 
+def test_managed_mergerfs_fstab_repairs_exact_legacy_member_names() -> None:
+    first = "11111111-1111-4111-8111-111111111111"
+    second = "22222222-2222-4222-8222-222222222222"
+    content = (
+        f"# BEGIN HOARDARR {first}\n"
+        "UUID=member-a /mnt/hoardarr/disks/member-a ext4 noatime 0 2\n"
+        "UUID=member-b /mnt/hoardarr/disks/member-b ext4 noatime 0 2\n"
+        "member-a:member-b /data fuse.mergerfs category.create=mfs,nofail 0 0\n"
+        f"# END HOARDARR {first}\n"
+        f"# BEGIN HOARDARR {second}\n"
+        "UUID=member-c /mnt/hoardarr/disks/member-c ext4 noatime 0 2\n"
+        f"# END HOARDARR {second}\n"
+    )
+
+    normalized = quarantine._with_mergerfs_dependencies(content)
+
+    assert (
+        "/mnt/hoardarr/disks/member-a:/mnt/hoardarr/disks/member-b /data "
+        in normalized
+    )
+    assert "x-systemd.requires=/mnt/hoardarr/disks/member-a" in normalized
+    assert quarantine._with_mergerfs_dependencies(normalized) == normalized
+
+
+def test_managed_mergerfs_fstab_rejects_unproven_relative_member() -> None:
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    content = (
+        f"# BEGIN HOARDARR {operation_id}\n"
+        "UUID=member-a /mnt/hoardarr/disks/member-a ext4 noatime 0 2\n"
+        "member-a:unknown-member /data fuse.mergerfs category.create=mfs,nofail 0 0\n"
+        f"# END HOARDARR {operation_id}\n"
+    )
+
+    with pytest.raises(quarantine.QuarantineError, match="branch is invalid"):
+        quarantine._with_mergerfs_dependencies(content)
+
+
 def test_managed_identity_state_is_bounded_to_valid_exact_udev_fields(tmp_path: Path) -> None:
     state = tmp_path / "state" / "managed-storage.json"
     rule = tmp_path / "udev" / "98-hoardarr-managed-storage.rules"

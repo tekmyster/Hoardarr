@@ -2144,6 +2144,10 @@ def _append_fstab(
     current = paths.fstab.read_text(encoding="utf-8") if paths.fstab.exists() else ""
     marker = f"# BEGIN HOARDARR {operation_id}"
     if marker in current:
+        if mergerfs_update is not None:
+            updated = _replace_mergerfs_source(current, *mergerfs_update)
+            if updated != current:
+                atomic_text(paths.fstab, updated, mode=0o644)
         return
     if mergerfs_update is not None:
         current = _replace_mergerfs_source(current, *mergerfs_update)
@@ -2645,11 +2649,6 @@ def _execute_actions(
                     "The existing combined-storage instance changed or is not active.",
                 )
             selected_instance = matches[0]
-            prior_branches = [str(item) for item in selected_instance.get("branches", [])]
-            if len(prior_branches) != len(set(prior_branches)):
-                raise ExecutorFailure(
-                    "mergerfs_instance_invalid", "The existing branch list is invalid."
-                )
             configured_instances = [
                 item
                 for item in discovery["items"]
@@ -2675,6 +2674,21 @@ def _execute_actions(
                     "mergerfs_configuration_ambiguous",
                     "The reviewed combined storage alias could not be tied to one active "
                     "persistent mergerFS configuration.",
+                )
+            configured_branches = configured_instance.get("configured_branches")
+            branch_source = (
+                configured_branches
+                if isinstance(configured_branches, list) and configured_branches
+                else selected_instance.get("branches", [])
+            )
+            prior_branches = [str(item) for item in branch_source]
+            if (
+                len(prior_branches) != len(set(prior_branches))
+                or any(not item.startswith("/") for item in prior_branches)
+            ):
+                raise ExecutorFailure(
+                    "mergerfs_instance_invalid",
+                    "The persistent mergerFS branch list is invalid.",
                 )
             options = ",".join(
                 item

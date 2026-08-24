@@ -539,6 +539,19 @@ def test_mergerfs_fstab_update_is_atomic_and_replaces_the_existing_mount(
     assert "/mnt/disk\\040one:/mnt/disk2:/mnt/new-member /data/media" in content
     assert "UUID=new-member /mnt/new-member ext4 defaults 0 2" in content
 
+    executor._append_fstab(
+        paths,
+        "11111111-1111-4111-8111-111111111111",
+        ["UUID=new-member /mnt/new-member ext4 defaults 0 2"],
+        mergerfs_update=(
+            "/data/media",
+            ["/mnt/disk one", "/mnt/disk2", "/mnt/new-member", "/mnt/reconciled"],
+        ),
+    )
+    replayed = paths.fstab.read_text(encoding="utf-8")
+    assert "/mnt/new-member:/mnt/reconciled /data/media" in replayed
+    assert replayed.count("UUID=new-member") == 1
+
 
 def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

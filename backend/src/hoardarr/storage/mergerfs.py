@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import shlex
 import shutil
 from pathlib import Path
 from typing import Any
@@ -60,10 +59,9 @@ def _fstab_instances(path: Path) -> list[dict[str, Any]]:
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        try:
-            fields = shlex.split(stripped, comments=True)
-        except ValueError:
-            continue
+        # fstab uses octal escapes for whitespace. Shell parsing would consume
+        # the backslash before the fstab decoder can interpret it.
+        fields = stripped.split()
         if len(fields) < 4 or fields[2] not in MERGERFS_TYPES:
             continue
         source = _unescape(fields[0])
@@ -72,6 +70,8 @@ def _fstab_instances(path: Path) -> list[dict[str, Any]]:
                 "mountpoint": _unescape(fields[1]),
                 "source": source,
                 "branches": _branches(source),
+                "configured_source": source,
+                "configured_branches": _branches(source),
                 "options": sorted(set(fields[3].split(","))),
                 "active": False,
                 "configured": True,
@@ -95,6 +95,9 @@ def discover_mergerfs(
             continue
         current["active"] = bool(current["active"] or candidate["active"])
         current["configured"] = bool(current["configured"] or candidate["configured"])
+        if candidate["configured"]:
+            current["configured_source"] = candidate.get("configured_source")
+            current["configured_branches"] = candidate.get("configured_branches")
         if candidate["active"]:
             current["source"] = candidate["source"]
             current["branches"] = candidate["branches"]
