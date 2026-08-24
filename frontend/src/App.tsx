@@ -459,7 +459,7 @@ export default function App() {
       setFleetHardwareEnabled(foundFleetSettings.hardware_enabled);
     }
     const recoverableStorage = foundOperations.find((item) => {
-      if (item.kind !== "storage.apply" || !["queued", "running", "succeeded"].includes(item.status)) return false;
+      if (item.kind !== "storage.apply" || !["queued", "running", "succeeded", "needs_attention"].includes(item.status)) return false;
       const related = foundWizards.find((candidate) => candidate.id === item.resource?.id);
       return related !== undefined && related.status !== "completed" && related.status !== "cancelled";
     });
@@ -489,10 +489,14 @@ export default function App() {
         setServiceUsername(stringValue(recoveredAccount.username, "media"));
         setServiceCredentialMode(recoveredAccount.credential_mode === "provide_separately" ? "provide" : "generate");
         setStorageOperation(recoverableStorage);
-        setStorageProgress({
+        const fallbackProgress: StorageOperationProgress = {
           operation_id: recoverableStorage.id,
           state: recoverableStorage.status,
-          phase: recoverableStorage.status === "succeeded" ? "Storage build completed" : "Reconnecting to storage activity",
+          phase: recoverableStorage.status === "succeeded"
+            ? "Storage build completed"
+            : recoverableStorage.status === "needs_attention"
+              ? "Storage build stopped at a durable checkpoint"
+              : "Reconnecting to storage activity",
           completed_steps: recoverableStorage.status === "succeeded" ? 1 : 0,
           total_steps: 1,
           percent: recoverableStorage.status === "succeeded" ? 100 : 0,
@@ -501,12 +505,27 @@ export default function App() {
           current_action: null,
           estimate: null,
           updated_at: null,
-        });
+        };
+        const [recoveredProgress, recoveredEvents] = await Promise.all([
+          api.storageOperationProgress(recoverableStorage.id).catch(() => fallbackProgress),
+          api.operationEvents(recoverableStorage.id).catch(() => [] as OperationEvent[]),
+        ]);
+        setStorageProgress(recoveredProgress);
+        setStorageEvents(recoveredEvents);
         setActivePage("Storage");
-        setStatus(recoverableStorage.status === "succeeded" ? "Storage completed. Finish the file-access credential to close setup." : "Reconnected to the running storage setup.");
+        setStatus(
+          recoverableStorage.status === "succeeded"
+            ? "Storage completed. Finish the file-access credential to close setup."
+            : recoverableStorage.status === "needs_attention"
+              ? "Storage stopped safely. Resume it from the last verified checkpoint after correcting the reported problem."
+              : "Reconnected to the running storage setup.",
+        );
       }
     }
-    const mutableWizards = foundWizards.filter((item) => item.status === "draft" || item.status === "review");
+    const mutableWizards = foundWizards.filter((item) =>
+      (item.status === "draft" || item.status === "review")
+      && item.id !== recoverableStorage?.resource?.id
+    );
     const explicitlySaved = mutableWizards.filter((item) => Object.hasOwn(item.answers, "draft_ui"));
     const latestReview = mutableWizards.find((item) => Object.hasOwn(item.answers, "storage") && !Object.hasOwn(item.answers, "draft_ui"));
     setSavedWizards(latestReview ? [...explicitlySaved, latestReview] : explicitlySaved);

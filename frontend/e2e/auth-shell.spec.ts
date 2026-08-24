@@ -717,7 +717,7 @@ test.describe("production sign-in shell", () => {
     await dialog.getByLabel('Type “I AGREE”').fill("I AGREE");
     await dialog.getByRole("button", { name: "Apply settings" }).click();
     await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100", { timeout: 15_000 });
-    await page.reload();
+    await page.goto("/?recovery=1");
     const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
     await expect(recoveredDialog.getByRole("button", { name: "Create access credential" })).toBeVisible();
     await recoveredDialog.getByRole("button", { name: "Close storage change" }).click();
@@ -1263,11 +1263,16 @@ test.describe("production sign-in shell", () => {
     await dialog.getByRole("button", { name: "Apply settings" }).click();
 
     await expect(dialog.getByText("A required storage tool is unavailable: setfattr.").first()).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "Resume from safe checkpoint" }).first()).toBeVisible();
-    await dialog.getByRole("button", { name: "Resume from safe checkpoint" }).first().click();
-    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100", { timeout: 15_000 });
-    await expect(dialog.getByText("Storage build completed", { exact: true }).first()).toBeVisible();
-    await expect(dialog.getByText("Storage execution resumed from its durable checkpoint.")).toBeVisible();
+    await page.reload();
+    const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(recoveredDialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "66");
+    await recoveredDialog.getByText("Operation details").click();
+    await expect(recoveredDialog.getByText("setfattr was unavailable")).toBeVisible();
+    await expect(recoveredDialog.getByRole("button", { name: "Resume from safe checkpoint" }).first()).toBeVisible();
+    await recoveredDialog.getByRole("button", { name: "Resume from safe checkpoint" }).first().click();
+    await expect(recoveredDialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100", { timeout: 15_000 });
+    await expect(recoveredDialog.getByText("Storage build completed", { exact: true }).first()).toBeVisible();
+    await expect(recoveredDialog.getByText("Storage execution resumed from its durable checkpoint.")).toBeVisible();
   });
 
   test("renders live storage analytics and explains the metric source", async ({ page }) => {
