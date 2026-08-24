@@ -188,6 +188,11 @@ def _disk_document(disk: PhysicalDisk, observation: dict[str, Any] | None) -> di
         warnings.append("Existing data has not been ruled out.")
     return {
         "id": disk.id,
+        "device_id": (
+            str(observation.get("id"))
+            if isinstance(observation, dict) and isinstance(observation.get("id"), str)
+            else disk.stable_identity
+        ),
         "stable_identity": disk.stable_identity,
         "kernel_path": disk.kernel_path,
         "vendor": disk.vendor,
@@ -401,7 +406,7 @@ def build_expansion_assessment(
             candidates.append(
                 _candidate(
                     kind="import_existing",
-                    disk_ids=[disk["id"]],
+                    disk_ids=[disk["device_id"]],
                     title="Review and import existing storage",
                     summary=(
                         "Inspect this disk read-only before deciding whether to copy or reuse its "
@@ -449,7 +454,7 @@ def build_expansion_assessment(
                 candidates.append(
                     _candidate(
                         kind="add_mergerfs_member",
-                        disk_ids=[disk["id"]],
+                        disk_ids=[disk["device_id"]],
                         title=f"Add capacity to {group.name}",
                         summary=(
                             "Add another independently readable member to the combined media "
@@ -524,7 +529,7 @@ def build_expansion_assessment(
                         candidates.append(
                             _candidate(
                                 kind="add_snapraid_parity",
-                                disk_ids=[disk["id"]],
+                                disk_ids=[disk["device_id"]],
                                 title=f"Add another parity disk to {group.name}",
                                 summary=(
                                     "Increase parity protection without adding this disk to the "
@@ -569,7 +574,7 @@ def build_expansion_assessment(
                 candidates.append(
                     _candidate(
                         kind="add_download_tier",
-                        disk_ids=[disk["id"]],
+                        disk_ids=[disk["device_id"]],
                         title=f"Use as fast downloads for {group.name}",
                         summary=(
                             "Keep torrent/Usenet temporary work on fast storage and import "
@@ -600,7 +605,7 @@ def build_expansion_assessment(
         candidates.append(
             _candidate(
                 kind="new_storage_group",
-                disk_ids=[disk["id"]],
+                disk_ids=[disk["device_id"]],
                 title="Create a separate storage location",
                 summary="Keep this disk independent with its own stable Hoardarr path.",
                 group=None,
@@ -670,7 +675,7 @@ def build_expansion_assessment(
         candidates.append(
             _candidate(
                 kind="add_zfs_vdev",
-                disk_ids=[item["id"] for item in selected],
+                disk_ids=[item["device_id"] for item in selected],
                 title=f"Add another protected vdev to {group.name}",
                 summary=(
                     f"Add one complete {str(vdev_type).upper()} group to the existing ZFS pool "
@@ -734,7 +739,7 @@ def build_expansion_assessment(
         candidates.append(
             _candidate(
                 kind="new_zfs_mirror",
-                disk_ids=[first["id"], second["id"]],
+                disk_ids=[first["device_id"], second["device_id"]],
                 title="Create a protected two-drive pool",
                 summary=(
                     "Store one copy on each selected disk so one drive can fail without losing "
@@ -779,7 +784,7 @@ def build_expansion_assessment(
                 candidates.append(
                     _candidate(
                         kind=f"new_zfs_{vdev_type}",
-                        disk_ids=[item["id"] for item in selected],
+                        disk_ids=[item["device_id"] for item in selected],
                         title=f"Create a {width}-drive protected ZFS pool",
                         summary=(
                             f"Use {vdev_type.upper()} so the pool tolerates {parity_count} "
@@ -856,7 +861,7 @@ def build_expansion_assessment(
         candidates.append(
             _candidate(
                 kind=f"new_linux_md_{level}",
-                disk_ids=[item["id"] for item in selected],
+                disk_ids=[item["device_id"] for item in selected],
                 title=f"Create a {width}-drive Linux {level.upper()} array",
                 summary=(
                     "Create one Linux software RAID device from matched blank drives, then "

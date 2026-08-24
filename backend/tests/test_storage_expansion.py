@@ -90,6 +90,7 @@ def test_existing_data_is_import_first_and_never_given_fake_usable_capacity() ->
         )
         result = build_expansion_assessment(session, snapshot=snapshot)
         assert result["available_disks"][0]["id"] == disk.id
+        assert result["available_disks"][0]["device_id"] == "wwn:archive"
         assert result["available_disks"][0]["existing_data"]["state"] == "detected"
         assert [item["kind"] for item in result["candidates"]] == ["import_existing"]
         assert result["candidates"][0]["capacity"]["estimated_usable_delta_bytes"] is None
@@ -416,10 +417,10 @@ def test_unmatched_larger_disk_does_not_hide_valid_mirror_or_raidz_set() -> None
             session, snapshot=_snapshot(session, observations), tool_probe=_all_tools
         )
         candidates = {item["kind"]: item for item in result["candidates"]}
-        matched_ids = {registered[f"matched-{suffix}"] for suffix in "abcd"}
+        matched_ids = {f"wwn:matched-{suffix}" for suffix in "abcd"}
         assert set(candidates["new_zfs_mirror"]["disk_ids"]).issubset(matched_ids)
         assert set(candidates["new_zfs_raidz2"]["disk_ids"]) == matched_ids
-        assert registered["outlier"] not in candidates["new_zfs_raidz2"]["disk_ids"]
+        assert "wwn:outlier" not in candidates["new_zfs_raidz2"]["disk_ids"]
         assert candidates["new_zfs_raidz2"]["capacity"][
             "estimated_usable_delta_bytes"
         ] == 19_800_000_000
@@ -495,8 +496,8 @@ def test_critical_health_blocks_expansion_but_unknown_health_remains_explicit() 
         candidate_disk_ids = {
             disk_id for item in result["candidates"] for disk_id in item["disk_ids"]
         }
-        assert ids["critical"] not in candidate_disk_ids
-        assert ids["unknown"] in candidate_disk_ids
+        assert "wwn:critical" not in candidate_disk_ids
+        assert "wwn:unknown" in candidate_disk_ids
 
 
 def test_existing_zfs_pool_gets_exact_matching_vdev_candidate() -> None:
@@ -592,7 +593,7 @@ def test_existing_zfs_pool_gets_exact_matching_vdev_candidate() -> None:
         )
         candidate = next(item for item in result["candidates"] if item["kind"] == "add_zfs_vdev")
 
-        assert candidate["disk_ids"] == new_ids[1:]
+        assert candidate["disk_ids"] == ["wwn:new-a", "wwn:new-b"]
         assert candidate["target"] == {
             "provider": "zfs",
             "instance_id": "zfs:media",

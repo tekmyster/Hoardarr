@@ -1036,6 +1036,7 @@ export interface StorageDrainPlan {
 
 export interface StorageExpansionDisk {
   id: string;
+  device_id?: string;
   stable_identity: string;
   kernel_path: string | null;
   vendor: string | null;
