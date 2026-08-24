@@ -849,7 +849,7 @@ export default function App() {
       setStorageInventory(foundStorage);
       const selectableDrives = foundDrives.filter((drive) => drive.selectable);
       setSelectedDriveIds(selectableDrives.length === 1 ? [selectableDrives[0].id] : []);
-      if (wizard) {
+      if (wizard && (wizard.status === "draft" || wizard.status === "review")) {
         await api.cancelWizard(wizard);
         setWizard(null);
       }
@@ -1446,12 +1446,33 @@ export default function App() {
     }
   }
 
-  function openStorageAction(action: StorageAction): void {
+  async function releaseWizardForNewStorageWork(): Promise<void> {
+    if (!wizard) return;
+    if (wizard.status === "draft" || wizard.status === "review") {
+      await api.cancelWizard(wizard);
+      return;
+    }
+    if (storageOperation?.status === "succeeded") {
+      await api.completeWizard(wizard.id);
+      return;
+    }
+    throw new Error("The current storage operation must finish or be reviewed in Activity before another storage change can start.");
+  }
+
+  async function openStorageAction(action: StorageAction): Promise<void> {
+    setBusy(true);
     setError(null);
     setStatus(null);
     setConsentRecorded(false);
-    if (!wizard) setActiveStep(2);
-    setStorageAction(action);
+    try {
+      await releaseWizardForNewStorageWork();
+      resetStorageDraftState();
+      setStorageAction(action);
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function openDriveAction(action: DriveAction, driveId: string | string[], expansion?: StorageExpansionSelection): Promise<void> {
@@ -1466,8 +1487,8 @@ export default function App() {
     setError(null);
     setStatus(null);
     try {
-      if (wizard) await api.cancelWizard(wizard);
-      setWizard(null);
+      await releaseWizardForNewStorageWork();
+      resetStorageDraftState();
       setPlan(null);
       setConsentPhrase("");
       setConsentRecorded(false);
@@ -2252,7 +2273,7 @@ export default function App() {
         status={storageAction ? null : status}
         error={storageAction ? null : error}
         onScan={() => void refreshHardware()}
-        onAction={openStorageAction}
+        onAction={(action) => void openStorageAction(action)}
         onDriveAction={(action, driveId, selection) => void openDriveAction(action, driveId, selection)}
         savedDrafts={savedStorageDrafts}
         onResumeDraft={(draftId) => void resumeStorageDraft(draftId)}
@@ -2270,7 +2291,7 @@ export default function App() {
         onModeChange={(next) => void changeMode(next)}
         onCancelChanges={() => void handleCancel()}
         onSaveForLater={() => void saveStorageDraftForLater()}
-        onClose={storageOperation ? minimizeStorageActivity : () => void saveStorageDraftForLater()}
+        onClose={storageOperation?.status === "succeeded" ? () => void closeCompletedStorageAction() : storageOperation ? minimizeStorageActivity : () => void saveStorageDraftForLater()}
         closeSavesDraft={!storageOperation}
         firstRun={firstRunSetup}
       >
