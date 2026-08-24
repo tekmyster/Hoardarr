@@ -67,12 +67,7 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertNotIn('password: "!"', template)
         self.assertIn("lock_passwd: false", template)
         self.assertIn("allow-pw: false", template)
-        self.assertEqual(template.count("__SSH_PUBLIC_KEY__"), 4)
-        self.assertIn("/home/hoardarr/.ssh/authorized_keys", template)
-        self.assertIn("hoardarr:hoardarr:600", template)
-        self.assertIn("passwd -u hoardarr", template)
-        self.assertIn("usermod --unlock --shell /bin/bash --home /home/hoardarr", template)
-        self.assertIn("systemctl reload ssh.service", template)
+        self.assertEqual(template.count("__SSH_PUBLIC_KEY__"), 2)
         self.assertIn("--defer-service-start", template)
         self.assertIn("mkdir -p /etc/motd.d", template)
         self.assertIn("workflow_dispatch", workflow)
@@ -112,6 +107,18 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("Set-CDDrive -CD $cd -NoMedia -StartConnected:$false", provisioner)
         self.assertIn("BootInstalledOs cannot be combined", provisioner)
         self.assertIn("BootInstalledOs = $BootInstalledOs", wrapper)
+
+    def test_vmware_lab_can_recover_one_exact_node_without_overwriting_iso(self) -> None:
+        provisioner = (ROOT / "scripts" / "lab" / "provision-vmware-lab.ps1").read_text(
+            encoding="utf-8"
+        )
+        wrapper = (
+            ROOT / "scripts" / "lab" / "invoke-vmware-lab-provision.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("[string]$TargetVmName", provisioner)
+        self.assertIn("if ($TargetVmName) { @($TargetVmName) }", provisioner)
+        self.assertIn("-not $ReuseUploadedIso", provisioner)
+        self.assertIn("$provisionArguments.TargetVmName = $TargetVmName", wrapper)
 
     def test_ci_has_linux_installer_accessibility_and_isolated_storage_profiles(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

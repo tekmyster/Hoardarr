@@ -313,8 +313,12 @@ validate_host() {
     [[ "${host_python}" == "${TARGET_PYTHON}" ]] || \
         die "bundle requires Python ${TARGET_PYTHON}; host reports ${host_python}"
     python3 -c 'import venv' >/dev/null 2>&1 || die "Python venv support is unavailable"
-    [[ "$(ps -p 1 -o comm= | tr -d '[:space:]')" == "systemd" ]] || \
-        die "systemd must be PID 1"
+    if [[ "${DEFER_SERVICE_START}" == "true" ]]; then
+        log "Validating an offline appliance target; runtime PID 1 checks are deferred to first boot."
+    else
+        [[ "$(ps -p 1 -o comm= | tr -d '[:space:]')" == "systemd" ]] || \
+            die "systemd must be PID 1"
+    fi
 }
 
 validate_destination_paths() {

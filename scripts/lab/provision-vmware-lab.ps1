@@ -12,6 +12,8 @@ param(
     [switch]$ReuseUploadedIso,
     [switch]$RecreateOsDisk,
     [switch]$BootInstalledOs,
+    [ValidateSet('Hoardarr-A', 'Hoardarr-B')]
+    [string]$TargetVmName,
     [string]$ConsoleScreenshotDirectory
 )
 
@@ -187,7 +189,7 @@ try {
         $isoDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedIso).Hash.ToLowerInvariant()
         $isoLeaf = "hoardarr-0.3.11-beta1-$($isoDigest.Substring(0, 12)).iso"
         $datastoreIso = "[$DatastoreName] hoardarr-lab/$isoLeaf"
-        if ($PSCmdlet.ShouldProcess($datastoreIso, 'Upload appliance ISO')) {
+        if (-not $ReuseUploadedIso -and $PSCmdlet.ShouldProcess($datastoreIso, 'Upload appliance ISO')) {
             New-PSDrive -Name HoardarrLabDatastore -PSProvider VimDatastore `
                 -Root '\' -Location $datastore | Out-Null
             if (-not (Test-Path 'HoardarrLabDatastore:\hoardarr-lab')) {
@@ -199,7 +201,8 @@ try {
         }
     }
 
-    foreach ($name in @('Hoardarr-A', 'Hoardarr-B')) {
+    $targetNames = if ($TargetVmName) { @($TargetVmName) } else { @('Hoardarr-A', 'Hoardarr-B') }
+    foreach ($name in $targetNames) {
         $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
         if (-not $vm -and $PSCmdlet.ShouldProcess($name, 'Create persistent lab VM')) {
             $vm = New-VM -Name $name -VMHost $vmHost -Datastore $datastore -DiskGB 24 `

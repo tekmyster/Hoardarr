@@ -12,6 +12,9 @@ param(
 
     [switch]$BootInstalledOs,
 
+    [ValidateSet('Hoardarr-A', 'Hoardarr-B')]
+    [string]$TargetVmName,
+
     [string]$ConsoleScreenshotDirectory,
 
     [string]$CredentialRoot = 'C:\Users\dmessana\Desktop\all servers',
@@ -97,6 +100,9 @@ try {
     }
     if ($ApplianceIso) {
         $provisionArguments.ApplianceIso = $ApplianceIso
+    }
+    if ($TargetVmName) {
+        $provisionArguments.TargetVmName = $TargetVmName
     }
     & $provisioner @provisionArguments
 } finally {

@@ -302,6 +302,10 @@ class BuildPlanTests(unittest.TestCase):
             installer,
         )
         self.assertIn(
+            'Validating an offline appliance target; runtime PID 1 checks are deferred to first boot.',
+            installer,
+        )
+        self.assertIn(
             '[[ "${PRESERVE_EXISTING_LOGIN_ACCOUNT}" == "true" ]]', installer
         )
         self.assertIn(
