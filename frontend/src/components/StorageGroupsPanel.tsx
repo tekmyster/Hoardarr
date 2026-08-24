@@ -32,6 +32,7 @@ export function StorageGroupsPanel() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [namespacePath, setNamespacePath] = useState("/srv/hoardarr/media");
   const [purpose, setPurpose] = useState<Purpose>("media");
@@ -142,6 +143,7 @@ export function StorageGroupsPanel() {
     try {
       await api.createStorageGroup({ name, namespace_path: namespacePath, purpose });
       setName("");
+      setCreateOpen(false);
       await load();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "The Storage Group could not be created.");
@@ -308,15 +310,24 @@ export function StorageGroupsPanel() {
     description="Keep one stable media path while disks are added, preferred for new files, drained, or retired."
   >
     {error && <Notice tone="danger" title="Storage Group needs attention">{error}</Notice>}
-    <details className="storage-group-create">
-      <summary className="button button-secondary">Create Storage Group</summary>
-      <div className="form-grid storage-group-form">
+    <section className="storage-group-create" aria-labelledby="storage-group-create-heading">
+      <button
+        id="storage-group-create-heading"
+        type="button"
+        className="button button-secondary"
+        aria-expanded={createOpen}
+        aria-controls="storage-group-create-form"
+        onClick={() => setCreateOpen((current) => !current)}
+      >
+        {createOpen ? "Close Storage Group form" : "Create Storage Group"}
+      </button>
+      {createOpen && <div id="storage-group-create-form" className="form-grid storage-group-form">
         <label>Name<input value={name} maxLength={128} onChange={(event) => setName(event.target.value)} placeholder="Media" /></label>
         <label>Stable media path<input value={namespacePath} maxLength={4096} onChange={(event) => setNamespacePath(event.target.value)} /></label>
         <label>Used for<select value={purpose} onChange={(event) => setPurpose(event.target.value as Purpose)}><option value="media">Movies, TV, and music</option><option value="downloads">Downloads and temporary work</option><option value="archive">Archive</option><option value="backup">Backup</option><option value="general">General files</option></select></label>
         <button type="button" className="button button-primary" disabled={busy || !name.trim()} onClick={() => void create()}>Create group</button>
-      </div>
-    </details>
+      </div>}
+    </section>
     <details className="storage-group-create">
       <summary className="button button-secondary">Drain scheduling and limits</summary>
       <div className="form-grid storage-group-form">
