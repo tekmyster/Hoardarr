@@ -567,6 +567,33 @@ class StorageVolumeApplyRequest(StrictModel):
     confirmation: Literal["CREATE"]
 
 
+class HAConfigurationRequest(StrictModel):
+    local_node_id: str = Field(min_length=1, max_length=128)
+    local_name: str = Field(min_length=1, max_length=128)
+    local_fqdn: str = Field(min_length=1, max_length=253)
+    local_ip: str = Field(min_length=2, max_length=64)
+    local_role: Literal["active", "passive"]
+    peer_node_id: str = Field(min_length=1, max_length=128)
+    peer_name: str = Field(min_length=1, max_length=128)
+    peer_fqdn: str = Field(min_length=1, max_length=253)
+    peer_ip: str = Field(min_length=2, max_length=64)
+    peer_role: Literal["active", "passive"]
+    service_ip: str | None = Field(default=None, max_length=64)
+
+
+class HAPeerHeartbeatRequest(StrictModel):
+    node_id: str = Field(min_length=1, max_length=128)
+    fqdn: str = Field(min_length=1, max_length=253)
+    ip: str = Field(min_length=2, max_length=64)
+    role: Literal["active", "passive"]
+    current_owner_node_id: str | None = Field(default=None, max_length=128)
+    synchronization_state: Literal[
+        "not_configured", "in_sync", "synchronizing", "stale", "unavailable"
+    ]
+    failover_readiness: Literal["ready", "not_ready", "unknown"]
+    storage_ownership: Literal["serving", "standby", "unavailable", "not_reported"]
+
+
 class StorageGroupCreateRequest(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     namespace_path: str = Field(min_length=2, max_length=4096)

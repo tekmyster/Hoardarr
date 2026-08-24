@@ -38,6 +38,13 @@ describe("SettingsPage updates and add-ons", () => {
       field_groups: {},
       items: [],
     });
+    vi.spyOn(api, "haStatus").mockResolvedValue({
+      configured: false,
+      maturity_level: "HA-2",
+      mode: null,
+      peer: null,
+      events: [],
+    });
   });
 
   afterEach(() => {
@@ -143,5 +150,26 @@ describe("SettingsPage updates and add-ons", () => {
     expect(password).toHaveAttribute("type", "text");
     await userEvent.click(screen.getByRole("button", { name: "I saved this password" }));
     expect(screen.queryByDisplayValue("one-time-password")).not.toBeInTheDocument();
+  });
+
+  it("configures persistent two-node awareness without claiming automatic failover", async () => {
+    vi.spyOn(api, "apiKeys").mockResolvedValue([]);
+    vi.spyOn(api, "addons").mockResolvedValue([]);
+    vi.spyOn(api, "updateStatus").mockResolvedValue({ current_version: "0.3.11", latest_version: null, channel: "stable", metadata_sha256: null, last_checked_at: null, last_error: null, operation: null });
+    vi.spyOn(api, "saveHAConfiguration").mockResolvedValue({
+      configured: true, maturity_level: "HA-3", mode: "controlled_single_writer",
+      local: { node_id: "hoardarr-a", name: "Hoardarr-A", fqdn: "hoardarr-a.local", ip: "10.81.200.251", role: "active" },
+      peer: { node_id: "hoardarr-b", name: "Hoardarr-B", fqdn: "hoardarr-b.local", ip: "10.81.200.252", role: "passive", reachable: false, state: "unavailable", last_seen_at: null },
+      service_ip: "10.81.200.253", current_owner_node_id: "hoardarr-a", synchronization_state: "unavailable", failover_readiness: "unknown", storage_ownership: "not_reported", automatic_failover: false, fencing_configured: false, updated_at: "2026-08-24T15:00:00Z", events: [],
+    });
+    render(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Configure two nodes" }));
+    await userEvent.type(screen.getByLabelText("IP address", { exact: true }), "10.81.200.251");
+    await userEvent.type(screen.getByLabelText("Peer IP address"), "10.81.200.252");
+    await userEvent.type(screen.getByLabelText("Floating/service IP (optional)"), "10.81.200.253");
+    await userEvent.click(screen.getByRole("button", { name: "Save node settings" }));
+    await waitFor(() => expect(api.saveHAConfiguration).toHaveBeenCalledWith(expect.objectContaining({ local_node_id: "hoardarr-a", peer_node_id: "hoardarr-b", local_ip: "10.81.200.251", peer_ip: "10.81.200.252" })));
+    expect(await screen.findByText("HA-3 · Persistent peer awareness")).toBeInTheDocument();
+    expect(screen.getByText("Automatic failover is not configured")).toBeInTheDocument();
   });
 });

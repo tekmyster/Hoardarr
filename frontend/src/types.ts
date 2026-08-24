@@ -331,6 +331,47 @@ export interface OperationDocument {
   updated_at?: string;
 }
 
+export interface HAEventDocument {
+  id: string;
+  event_type: string;
+  cause: string | null;
+  previous_owner_node_id: string | null;
+  resulting_owner_node_id: string | null;
+  detail: Record<string, unknown>;
+  occurred_at: string;
+}
+
+export interface HAStatusDocument {
+  configured: boolean;
+  maturity_level: "HA-2" | "HA-3";
+  mode: "controlled_single_writer" | null;
+  local?: { node_id: string; name: string; fqdn: string; ip: string; role: "active" | "passive" };
+  peer: { node_id: string; name: string; fqdn: string; ip: string; role: "active" | "passive"; reachable: boolean; state: "healthy" | "stale" | "unavailable"; last_seen_at: string | null } | null;
+  service_ip?: string | null;
+  current_owner_node_id?: string | null;
+  synchronization_state?: "not_configured" | "in_sync" | "synchronizing" | "stale" | "unavailable";
+  failover_readiness?: "ready" | "not_ready" | "unknown";
+  storage_ownership?: "serving" | "standby" | "unavailable" | "not_reported";
+  automatic_failover?: boolean;
+  fencing_configured?: boolean;
+  updated_at?: string;
+  events: HAEventDocument[];
+}
+
+export interface HAConfigurationInput {
+  local_node_id: string;
+  local_name: string;
+  local_fqdn: string;
+  local_ip: string;
+  local_role: "active" | "passive";
+  peer_node_id: string;
+  peer_name: string;
+  peer_fqdn: string;
+  peer_ip: string;
+  peer_role: "active" | "passive";
+  service_ip?: string | null;
+}
+
 export type ConnectivityProtocol = "smb" | "nfs" | "iscsi" | "fcoe";
 
 export interface ConnectivityCapabilities {

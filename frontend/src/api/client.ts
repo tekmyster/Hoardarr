@@ -23,6 +23,8 @@ import type {
   UnraidEvidenceInput,
   UnraidEvidenceSummary,
   HardwareSnapshot,
+  HAConfigurationInput,
+  HAStatusDocument,
   MergerFsInventory,
   MetricAlertDocument,
   MetricCatalogDocument,
@@ -448,6 +450,17 @@ class HoardarrApi {
       signal,
     });
     return result.items;
+  }
+
+  async haStatus(signal?: AbortSignal): Promise<HAStatusDocument> {
+    return this.request<HAStatusDocument>("/ha", { signal });
+  }
+
+  async saveHAConfiguration(configuration: HAConfigurationInput): Promise<HAStatusDocument> {
+    return this.request<HAStatusDocument>("/ha/configuration", {
+      method: "PUT",
+      body: JSON.stringify(configuration),
+    });
   }
 
   async previewStorageVolume(input: {

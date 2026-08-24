@@ -1121,3 +1121,28 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.ha-node-grid,
+.activity-timeline {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  margin: 1rem 0;
+}
+
+.ha-node-grid article,
+.activity-timeline article {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem;
+}
+
+.ha-node-grid span,
+.ha-node-grid small,
+.activity-timeline span,
+.activity-timeline small {
+  color: var(--muted);
+}

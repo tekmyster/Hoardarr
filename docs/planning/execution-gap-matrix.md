@@ -7,9 +7,9 @@ The CSV is authoritative for per-task execution fields; the roadmap remains auth
 
 - Total tasks: 253
 - IN PROGRESS: 2
-- NOT STARTED: 109
+- NOT STARTED: 107
 - PHYSICAL VALIDATION PENDING: 1
-- VERIFIED: 84
+- VERIFIED: 86
 - VERIFIED IN ISOLATION: 57
 
 ## Active selection rule

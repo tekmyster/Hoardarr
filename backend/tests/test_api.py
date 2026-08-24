@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from hoardarr.db.models import (
     AuthSession,
     ConnectivityService,
     ForeignMigrationJob,
+    HAConfiguration,
     HardwareSnapshot,
     IntegrationConnection,
     MetricEntity,
@@ -210,6 +211,89 @@ def test_guided_volume_preview_uses_live_pool_identity_and_requires_operate_scop
     )
     assert replay.status_code == 202
     assert replay.json()["replayed"] is True
+
+
+def test_ha_peer_configuration_and_heartbeat_are_persistent_and_identity_bound(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    assert client.get("/api/v1/ha").status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    empty = client.get("/api/v1/ha")
+    assert empty.status_code == 200
+    assert empty.json()["configured"] is False
+
+    configuration = {
+        "local_node_id": "hoardarr-a",
+        "local_name": "Hoardarr-A",
+        "local_fqdn": "hoardarr-a.lab.example",
+        "local_ip": "10.81.200.251",
+        "local_role": "active",
+        "peer_node_id": "hoardarr-b",
+        "peer_name": "Hoardarr-B",
+        "peer_fqdn": "hoardarr-b.lab.example",
+        "peer_ip": "10.81.200.252",
+        "peer_role": "passive",
+        "service_ip": "10.81.200.253",
+    }
+    assert client.put("/api/v1/ha/configuration", json=configuration).status_code == 403
+    configured = client.put(
+        "/api/v1/ha/configuration", headers=_state_headers(csrf), json=configuration
+    )
+    assert configured.status_code == 200, configured.text
+    assert configured.json()["maturity_level"] == "HA-3"
+    assert configured.json()["peer"]["state"] == "unavailable"
+    assert configured.json()["automatic_failover"] is False
+    assert configured.json()["fencing_configured"] is False
+
+    mismatch = client.post(
+        "/api/v1/ha/heartbeat",
+        headers=_state_headers(csrf),
+        json={
+            "node_id": "unknown-peer",
+            "fqdn": "hoardarr-b.lab.example",
+            "ip": "10.81.200.252",
+            "role": "passive",
+            "current_owner_node_id": "hoardarr-a",
+            "synchronization_state": "in_sync",
+            "failover_readiness": "ready",
+            "storage_ownership": "standby",
+        },
+    )
+    assert mismatch.status_code == 409
+    assert mismatch.json()["code"] == "ha_peer_identity_mismatch"
+
+    heartbeat = client.post(
+        "/api/v1/ha/heartbeat",
+        headers=_state_headers(csrf),
+        json={
+            "node_id": "hoardarr-b",
+            "fqdn": "hoardarr-b.lab.example",
+            "ip": "10.81.200.252",
+            "role": "passive",
+            "current_owner_node_id": "hoardarr-a",
+            "synchronization_state": "in_sync",
+            "failover_readiness": "ready",
+            "storage_ownership": "standby",
+        },
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+    assert heartbeat.json()["peer"]["reachable"] is True
+    assert heartbeat.json()["synchronization_state"] == "in_sync"
+    persisted = client.get("/api/v1/ha").json()
+    assert persisted["current_owner_node_id"] == "hoardarr-a"
+    assert {event["event_type"] for event in persisted["events"]} >= {
+        "ha_configured",
+        "peer_reachable",
+    }
+    with app.state.session_factory() as session, session.begin():
+        item = session.scalar(select(HAConfiguration))
+        assert item is not None
+        item.peer_last_seen_at = datetime.now(UTC) - timedelta(minutes=2)
+    stale = client.get("/api/v1/ha").json()
+    assert stale["peer"]["reachable"] is False
+    assert stale["peer"]["state"] == "stale"
+    assert stale["failover_readiness"] == "unknown"
 
 
 def test_expected_topology_api_persists_drift_history_and_requires_csrf(api_runtime: Any) -> None:

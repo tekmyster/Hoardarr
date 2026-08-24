@@ -468,6 +468,58 @@ class StorageVolume(Base):
     )
 
 
+class HAConfiguration(Base):
+    """Persistent two-node peer awareness; it does not authorize automatic ownership changes."""
+
+    __tablename__ = "ha_configurations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mode: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="controlled_single_writer"
+    )
+    local_node_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    local_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    local_fqdn: Mapped[str] = mapped_column(String(253), nullable=False)
+    local_ip: Mapped[str] = mapped_column(String(64), nullable=False)
+    local_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    peer_node_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    peer_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    peer_fqdn: Mapped[str] = mapped_column(String(253), nullable=False)
+    peer_ip: Mapped[str] = mapped_column(String(64), nullable=False)
+    peer_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    service_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_owner_node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    peer_reachable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    peer_last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    peer_report_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class HAEvent(Base):
+    __tablename__ = "ha_events"
+    __table_args__ = (Index("ix_ha_events_time", "occurred_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    configuration_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ha_configurations.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    cause: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    previous_owner_node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resulting_owner_node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    detail_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class StorageGroup(Base):
     """A user-facing stable namespace composed from one or more storage backends."""
 

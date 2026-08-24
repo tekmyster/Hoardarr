@@ -6,6 +6,7 @@ import { OneTimePassword } from "./OneTimePassword";
 import { RemoteBackupsPanel } from "./RemoteBackupsPanel";
 import { WebhooksPanel } from "./WebhooksPanel";
 import { FleetTelemetryPanel } from "./FleetTelemetryPanel";
+import { HASettingsPanel } from "./HASettingsPanel";
 import { Card, Field, Notice, Spinner } from "./ui";
 
 type AccessLevel = "read" | "operate" | "admin";
@@ -264,6 +265,7 @@ export function SettingsPage() {
       <RemoteBackupsPanel />
       <FleetTelemetryPanel />
       <WebhooksPanel />
+      <HASettingsPanel />
       <Card title="Updates" description="Signed direct-to-latest Hoardarr releases.">
         {!updateStatus ? <Spinner label="Loading update status" /> : (
           <div className="settings-summary-list">

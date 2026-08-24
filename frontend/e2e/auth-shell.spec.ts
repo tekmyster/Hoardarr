@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 async function configuredButSignedOut(page: Page): Promise<void> {
   await page.route("**/setup/status", (route) => route.fulfill({ json: { configured: true, claim_available: false } }));
@@ -451,6 +451,39 @@ test.describe("production sign-in shell", () => {
 
     await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
     await expect(page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first()).toBeVisible();
+  });
+
+  test("configures visible HA-3 peer awareness without claiming automatic failover", async ({ page }, testInfo) => {
+    await authenticatedEmptyServer(page);
+    let saved = false;
+    const handleHA = async (route: Route) => {
+      const request = route.request();
+      if (request.method() === "PUT") {
+        const body = request.postDataJSON() as { local_node_id: string; peer_node_id: string; local_ip: string; peer_ip: string };
+        expect(body).toMatchObject({ local_node_id: "hoardarr-a", peer_node_id: "hoardarr-b", local_ip: "10.81.200.251", peer_ip: "10.81.200.252" });
+        saved = true;
+      }
+      return route.fulfill({ json: saved ? {
+        configured: true, maturity_level: "HA-3", mode: "controlled_single_writer",
+        local: { node_id: "hoardarr-a", name: "Hoardarr-A", fqdn: "hoardarr-a.local", ip: "10.81.200.251", role: "active" },
+        peer: { node_id: "hoardarr-b", name: "Hoardarr-B", fqdn: "hoardarr-b.local", ip: "10.81.200.252", role: "passive", reachable: false, state: "unavailable", last_seen_at: null },
+        service_ip: "10.81.200.253", current_owner_node_id: "hoardarr-a", synchronization_state: "unavailable", failover_readiness: "unknown", storage_ownership: "not_reported", automatic_failover: false, fencing_configured: false, updated_at: "2026-08-24T15:00:00Z",
+        events: [{ id: "ha-event-1", event_type: "ha_configured", cause: null, previous_owner_node_id: null, resulting_owner_node_id: "hoardarr-a", detail: {}, occurred_at: "2026-08-24T15:00:00Z" }],
+      } : { configured: false, maturity_level: "HA-2", mode: null, peer: null, events: [] } });
+    };
+    await page.route("**/api/v1/ha", handleHA);
+    await page.route("**/api/v1/ha/configuration", handleHA);
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Settings" }).click();
+    await page.getByRole("button", { name: "Configure two nodes" }).click();
+    await page.getByLabel("IP address", { exact: true }).fill("10.81.200.251");
+    await page.getByLabel("Peer IP address").fill("10.81.200.252");
+    await page.getByLabel("Floating/service IP (optional)").fill("10.81.200.253");
+    await page.getByRole("button", { name: "Save node settings" }).click();
+    await expect(page.getByText("HA-3 · Persistent peer awareness")).toBeVisible();
+    await expect(page.getByText("Automatic failover is not configured")).toBeVisible();
+    await expect(page.getByText("Hoardarr-B", { exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("ha-peer-awareness.png"), fullPage: true });
   });
 
   test("navigates the ARR shell and opens Guided storage with ordinary questions", async ({ page }) => {
