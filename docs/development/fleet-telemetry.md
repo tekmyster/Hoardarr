@@ -88,3 +88,10 @@ systemd unit executes `hoardarr-fleet-ingestion migrate` before `serve`. The rec
 start against an empty or stale schema, so a deployment cannot silently create a partial schema
 from whichever model definitions happen to be installed. Migration execution must remain a
 single deployment step; concurrent service instances may start only after it completes.
+
+Production central deployments use PostgreSQL through the `fleet-central` package extra. The
+example environment and fail-closed installer live under `packaging/hoardarr-com/`. The installer
+rejects SQLite URLs and unchanged credential placeholders, installs into an isolated central venv,
+and runs the versioned migration before systemd starts the receiver. Appliance releases do not
+install this extra or service. CI applies the central schema to a real disposable PostgreSQL server,
+starts the receiver, registers an installation and queries its authenticated aggregate summary.

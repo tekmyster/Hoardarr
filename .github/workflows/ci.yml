@@ -2,6 +2,9 @@ name: CI
 on:
   push:
   pull_request:
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   backend:
     runs-on: ubuntu-24.04
@@ -69,6 +72,32 @@ jobs:
             dist/validation/minio-backup.json
             dist/validation/minio.log
           if-no-files-found: warn
+  central-fleet-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: hoardarr_fleet
+          POSTGRES_USER: hoardarr_fleet
+          POSTGRES_PASSWORD: hoardarr-fleet-ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hoardarr_fleet -d hoardarr_fleet"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      HOARDARR_TEST_FLEET_POSTGRES_URL: postgresql+psycopg://hoardarr_fleet:hoardarr-fleet-ci-password@127.0.0.1:5432/hoardarr_fleet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - run: uv sync --project backend --locked --all-groups --extra fleet-central
+      - run: uv run --project backend --locked --extra fleet-central python tests/integration/fleet_central_postgres.py
   frontend:
     runs-on: ubuntu-24.04
     steps:

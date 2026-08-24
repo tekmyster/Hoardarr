@@ -24,6 +24,9 @@ on:
         required: false
         default: false
         type: boolean
+concurrency:
+  group: storage-integration-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   storage-group-drain-lifecycle:
     runs-on: ubuntu-24.04

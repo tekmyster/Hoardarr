@@ -139,6 +139,20 @@ class VersionConsistencyTests(unittest.TestCase):
             "ExecStart=/usr/lib/hoardarr-fleet/venv/bin/hoardarr-fleet-ingestion serve",
             text,
         )
+        installer = (
+            ROOT / "packaging" / "hoardarr-com" / "install-fleet-ingestion.sh"
+        ).read_text(encoding="utf-8")
+        example = (
+            ROOT / "packaging" / "hoardarr-com" / "fleet-ingestion.env.example"
+        ).read_text(encoding="utf-8")
+        self.assertIn("postgresql+psycopg://", example)
+        self.assertIn("${wheel}[fleet-central]", installer)
+        self.assertIn("replace every change-me placeholder", installer)
+        self.assertIn("systemctl is-active", installer)
+        self.assertIn('release_id="$(sha256sum', installer)
+        self.assertIn("/usr/lib/hoardarr-fleet/releases", installer)
+        self.assertIn(".ready", installer)
+        self.assertIn(".venv.rollback", installer)
 
 
 class ManifestTests(unittest.TestCase):

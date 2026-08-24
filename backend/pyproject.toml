@@ -38,6 +38,11 @@ hoardarr-storage-quarantine = "hoardarr.storage.quarantine:main"
 hoardarr-zfs-snapshot = "hoardarr.storage.zfs:main"
 hoardarr-fleet-ingestion = "hoardarr.fleet.central_cli:central_main"
 
+[project.optional-dependencies]
+fleet-central = [
+    "psycopg[binary]==3.3.4",
+]
+
 [dependency-groups]
 dev = [
   "pytest==9.1.1",
