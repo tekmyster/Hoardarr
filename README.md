@@ -180,6 +180,7 @@ the release documentation for the complete trust and installation boundary.
 - [Versioned release bundles](docs/development/release-bundles.md)
 - [Direct-to-latest updates and migrations](docs/development/updates.md)
 - [Remote and control-plane backups](docs/development/remote-backups.md)
+- [Home Assistant and read-only automation](docs/development/home-assistant.md)
 - [Telemetry, analytics, retention, and entitlements](docs/development/telemetry.md)
 - [Machine-readable metric catalog](docs/telemetry/metric-catalog.json)
 

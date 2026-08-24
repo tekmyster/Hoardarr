@@ -38,6 +38,7 @@ describe("SettingsPage updates and add-ons", () => {
     });
 
     render(<SettingsPage />);
+    expect(await screen.findByText(/Home Assistant summary/)).toBeInTheDocument();
     await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
     expect(await screen.findByText("Storage work is currently active")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Install update" })).not.toBeInTheDocument();

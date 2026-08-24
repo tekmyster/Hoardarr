@@ -21,6 +21,7 @@ from hoardarr.api.routes import (
     accounts,
     addons,
     auth,
+    automation,
     backups,
     connectivity,
     hardware,
@@ -198,6 +199,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.setup_router, prefix=prefix)
     app.include_router(auth.router, prefix=prefix)
     app.include_router(accounts.router, prefix=prefix)
+    app.include_router(automation.router, prefix=prefix)
     app.include_router(addons.router, prefix=prefix)
     app.include_router(backups.router, prefix=prefix)
     app.include_router(system.router, prefix=prefix)

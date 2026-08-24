@@ -297,8 +297,8 @@ These task families extend—rather than replace—the original 120 rows. Status
 
 | ID | Priority | Task | Acceptance | Status |
 |---|---|---|---|---|
-| AUTO-01 | P2 | Stable machine API and read-only tokens | Expose bounded health, group, drive, job, capacity, topology, controller, path, alert, and maintenance state. | QUEUED |
-| AUTO-02 | P2 | Home Assistant summary | Add a stable read-only summary endpoint consistent with the current API without making HA the control plane. | QUEUED |
+| AUTO-01 | P2 | Stable machine API and read-only tokens | Expose bounded health, group, drive, job, capacity, topology, controller, path, alert, and maintenance state. | IN PROGRESS — existing Monitor only tokens now authorize one schema-versioned bounded summary for health, groups, drives, jobs, alerts and maintenance; detailed topology/controller/path contract reconciliation remains |
+| AUTO-02 | P2 | Home Assistant summary | Add a stable read-only summary endpoint consistent with the current API without making HA the control plane. | SOFTWARE VERIFIED — `/api/v1/integrations/home-assistant/summary` accepts Monitor only tokens, caps drives/jobs/alerts, excludes requests and secrets, reports persisted-source timestamps, is documented in Settings/OpenAPI, and passes auth/schema/redaction tests |
 | AUTO-03 | P2 | Webhooks | Deliver signed/bounded events with retry, deduplication, redaction, and test delivery. | QUEUED |
 | AUTO-04 | P2 | Prometheus integration | Preserve stable metric names, bounded labels, authentication policy, and no secrets. | QUEUED |
 | AUTO-05 | P2 | Alert lifecycle | Implement Critical/Warning/Info with active, acknowledged, suppressed, and cleared states. | QUEUED |

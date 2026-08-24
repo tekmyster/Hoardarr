@@ -2847,6 +2847,16 @@ def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: An
     assert normalized_expiry.hour == 7
     pat_headers = {"Authorization": f"Bearer {pat}"}
     assert client.get("/api/v1/integrations", headers=pat_headers).status_code == 200
+    home_assistant = client.get(
+        "/api/v1/integrations/home-assistant/summary", headers=pat_headers
+    )
+    assert home_assistant.status_code == 200, home_assistant.text
+    summary = home_assistant.json()
+    assert summary["schema_version"] == 1
+    assert summary["source"] == "hoardarr_persisted_state"
+    assert len(summary["jobs"]["recent"]) <= summary["jobs"]["limit"] == 25
+    assert "servarr-api-key-that-must-never-leak" not in home_assistant.text
+    assert "api_key" not in home_assistant.text
     forbidden = client.post(
         "/api/v1/hardware/scans",
         headers={**pat_headers, "Idempotency-Key": "pat-hardware-0001"},

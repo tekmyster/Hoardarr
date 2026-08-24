@@ -225,6 +225,7 @@ export function SettingsPage() {
         </form>}
       </Card>
       <Card title="API Keys" description="Create a key for an app, script, or monitoring system that needs to connect to Hoardarr.">
+        <p className="settings-help">A Monitor only key can read the bounded Home Assistant summary at <code>/api/v1/integrations/home-assistant/summary</code>. It cannot start storage work.</p>
         {error && <Notice tone="danger" title="Settings request failed">{error}</Notice>}
         {secret && (
           <Notice tone="success" title="Save this API key now">
