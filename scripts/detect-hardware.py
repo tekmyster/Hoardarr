@@ -377,6 +377,18 @@ def _canonical_identifier(value: str | None) -> str | None:
     return text or None
 
 
+def _canonical_scsi_logical_unit(value: str | None) -> str | None:
+    """Normalize equivalent textual and binary SCSI logical-unit designators."""
+
+    text = _canonical_identifier(value)
+    if text is None:
+        return None
+    for prefix in ("naa.", "naa:", "eui.", "eui:"):
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    return text
+
+
 def _normalize_vpd_evidence(raw: Any, field: str) -> dict[str, Any]:
     if raw is None:
         raw = {}
@@ -1643,10 +1655,10 @@ def _discover_scsi_identity(
     page_83 = _parse_vpd_page_83(_read_binary(block_path / "device" / "vpd_pg83"))
     page_80 = _parse_vpd_page_80(_read_binary(block_path / "device" / "vpd_pg80"))
 
-    logical_unit = _canonical_identifier(page_83.get("logical_unit_identifier"))
+    logical_unit = _canonical_scsi_logical_unit(page_83.get("logical_unit_identifier"))
     logical_unit_type = page_83.get("logical_unit_identifier_type")
     if logical_unit and logical_unit_type in {"naa", "eui"}:
-        current = _canonical_identifier(identity.get("wwn"))
+        current = _canonical_scsi_logical_unit(identity.get("wwn"))
         if current is None:
             identity["wwn"] = logical_unit
         elif current != logical_unit:

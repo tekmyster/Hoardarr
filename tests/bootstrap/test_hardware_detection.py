@@ -550,6 +550,42 @@ class LiveSysfsTests(unittest.TestCase):
             discovered["connection"]["target_port_identifier"], "5000c50087654321"
         )
 
+    def test_prefixed_sysfs_wwid_matches_binary_vpd_naa_designator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            disk = root / "class/block/sda"
+            write_sysfs_value(root, "class/block/sda/dev", "8:0")
+            write_sysfs_value(root, "class/block/sda/size", "2048")
+            write_sysfs_value(root, "class/block/sda/device/type", "0")
+            write_sysfs_value(root, "class/block/sda/device/vendor", "VMware")
+            write_sysfs_value(root, "class/block/sda/device/model", "Virtual disk")
+            write_sysfs_value(
+                root,
+                "class/block/sda/device/wwid",
+                "naa.6000c29019336c157c2f94e3aae65c53",
+            )
+            page_83 = vpd_page(
+                0x83,
+                vpd_designator(
+                    bytes.fromhex("6000c29019336c157c2f94e3aae65c53"),
+                    association=0,
+                    designator_type=3,
+                ),
+            )
+            (disk / "device/vpd_pg83").write_bytes(page_83)
+
+            result = invoke_detector(sysfs_root=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            discovered = json.loads(result.stdout)["disks"][0]
+
+        self.assertFalse(
+            discovered["identity_evidence"]["scsi_vpd_page_83"]["identity_conflict"]
+        )
+        self.assertEqual(
+            discovered["identity"]["wwn"],
+            "naa.6000c29019336c157c2f94e3aae65c53",
+        )
+
     def test_malformed_or_conflicting_scsi_vpd_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

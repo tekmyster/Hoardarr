@@ -181,6 +181,16 @@ def _smart_state(path: str) -> tuple[str, dict[str, object]]:
         return path, {}
     if not isinstance(document, dict):
         return path, {}
+    smart_support = _mapping(document.get("smart_support")).get("available")
+    if smart_support is False:
+        # Several virtual and bridged devices emit placeholder zero temperatures
+        # while explicitly reporting that SMART is unavailable. Zero is not a
+        # trustworthy hardware observation in that case.
+        return path, {
+            "health_status": "unknown",
+            "smart_available": False,
+            "temperature_c": None,
+        }
     temperature = _number(_mapping(document.get("temperature")).get("current"))
     if temperature is None:
         temperature = _number(

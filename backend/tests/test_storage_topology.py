@@ -1,9 +1,41 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
+from hoardarr.storage import topology
 from hoardarr.storage.topology import add_logical_topology, build_storage_topology
+
+
+def test_explicitly_unsupported_smart_does_not_report_placeholder_temperature(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(topology.shutil, "which", lambda *_args, **_kwargs: "/usr/sbin/smartctl")
+    monkeypatch.setattr(
+        topology.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=4,
+            stdout=json.dumps(
+                {
+                    "smart_support": {"available": False},
+                    "temperature": {"current": 0},
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    path, state = topology._smart_state("/dev/test")
+
+    assert path == "/dev/test"
+    assert state == {
+        "health_status": "unknown",
+        "smart_available": False,
+        "temperature_c": None,
+    }
 
 
 def test_sas_shelf_topology_keeps_bays_speeds_and_drive_identity() -> None:

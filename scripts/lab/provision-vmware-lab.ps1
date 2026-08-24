@@ -46,15 +46,64 @@ function Ensure-VirtualDataDisks {
 
     # These are ordinary thin VMDKs. This helper deliberately has no RDM/device-path option.
     # SCSI 0:0 is the appliance OS disk; lab data starts on a separate controller.
+    $desired = @(12, 12, 12, 8)
     $controller = Get-ScsiController -VM $Vm | Where-Object { $_.ExtensionData.BusNumber -eq 1 }
     if (-not $controller) {
-        $controller = New-ScsiController -VM $Vm -Type ParaVirtual -BusSharingMode NoSharing
+        $expectedOsFilename = "[$($Datastore.Name)] $($Vm.Name)/$($Vm.Name).vmdk"
+        $unexpectedDisks = @(
+            Get-HardDisk -VM $Vm | Where-Object { [string]$_.Filename -ne $expectedOsFilename }
+        )
+        if ($unexpectedDisks.Count -ne 0) {
+            throw "$($Vm.Name) has data disks without the dedicated lab SCSI controller."
+        }
+
+        # Current PowerCLI creates a controller from an existing disk rather than
+        # accepting -VM. Create the first bounded thin VMDK on the default controller,
+        # then atomically move that disk onto a new PVSCSI controller while powered off.
+        $firstDisk = New-HardDisk -VM $Vm -Datastore $Datastore `
+            -CapacityGB $desired[0] -StorageFormat Thin -Confirm:$false
+        $controller = New-ScsiController -HardDisk $firstDisk -Type ParaVirtual `
+            -BusSharingMode NoSharing -Confirm:$false
     }
-    $desired = @(12, 12, 12, 8)
     $existing = @(Get-HardDisk -VM $Vm | Where-Object { $_.ExtensionData.ControllerKey -eq $controller.ExtensionData.Key })
+    if ($existing.Count -gt $desired.Count) {
+        throw "$($Vm.Name) has more data disks than the bounded lab topology permits."
+    }
+    $existing = @($existing | Sort-Object { $_.ExtensionData.UnitNumber })
+    for ($index = 0; $index -lt $existing.Count; $index++) {
+        if (
+            [math]::Abs([double]$existing[$index].CapacityGB - $desired[$index]) -gt 0.01 `
+            -or [string]$existing[$index].StorageFormat -ne 'Thin' `
+            -or [string]$existing[$index].DiskType -ne 'Flat'
+        ) {
+            throw "$($Vm.Name) data disk $index does not match the bounded thin-VMDK topology."
+        }
+    }
     for ($index = $existing.Count; $index -lt $desired.Count; $index++) {
         New-HardDisk -VM $Vm -Datastore $Datastore -Controller $controller `
             -CapacityGB $desired[$index] -StorageFormat Thin -Confirm:$false | Out-Null
+    }
+}
+
+function Ensure-VirtualDiskIdentity {
+    param([Parameter(Mandatory)]$Vm)
+
+    # VMware only exposes VMDK UUIDs to the Linux guest when disk.EnableUUID is
+    # enabled. Hoardarr must never manage lab storage by /dev/sdX alone.
+    $setting = Get-AdvancedSetting -Entity $Vm -Name 'disk.EnableUUID' `
+        -ErrorAction SilentlyContinue
+    if ($setting -and [string]$setting.Value -eq 'TRUE') {
+        return
+    }
+    if ($Vm.PowerState -ne 'PoweredOff') {
+        throw "$($Vm.Name) must be powered off before enabling stable virtual-disk identity."
+    }
+    if ($setting) {
+        Set-AdvancedSetting -AdvancedSetting $setting -Value 'TRUE' `
+            -Confirm:$false | Out-Null
+    } else {
+        New-AdvancedSetting -Entity $Vm -Name 'disk.EnableUUID' -Value 'TRUE' `
+            -Confirm:$false | Out-Null
     }
 }
 
@@ -231,6 +280,9 @@ try {
         }
         if ($vm -and $PSCmdlet.ShouldProcess($name, 'Reconcile lab network adapter')) {
             Ensure-LabNetwork -Vm $vm -Portgroup $portgroup
+        }
+        if ($vm -and $PSCmdlet.ShouldProcess($name, 'Enable stable virtual-disk identity')) {
+            Ensure-VirtualDiskIdentity -Vm $vm
         }
         if ($datastoreIso -and $vm -and $PSCmdlet.ShouldProcess($name, 'Attach appliance ISO')) {
             $cd = Get-CDDrive -VM $vm -ErrorAction SilentlyContinue
