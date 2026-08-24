@@ -1750,7 +1750,7 @@ def _service_account_group_id(username: str) -> int:
     return int(account.pw_gid)
 
 
-def _apply_directory_mode(path: Path, group_id: int) -> None:
+def _apply_directory_mode(path: Path, group_id: int, *, mode: int = 0o770) -> None:
     """Set exact access through a no-follow descriptor, independent of service umask."""
 
     flags = os.O_RDONLY
@@ -1771,7 +1771,7 @@ def _apply_directory_mode(path: Path, group_id: int) -> None:
                 "A planned storage folder is not a directory.",
             )
         os.fchown(descriptor, 0, group_id)
-        os.fchmod(descriptor, 0o770)
+        os.fchmod(descriptor, mode)
     except ExecutorFailure:
         raise
     except OSError as exc:
@@ -1827,6 +1827,26 @@ def _ensure_storage_directory_access(
         _assert_no_symlink_components(directory)
         _apply_directory_mode(directory, group_id)
         applied.append(os.fspath(directory))
+    return applied
+
+
+def _ensure_mergerfs_branch_traversal(mount_root: Path, username: str) -> list[str]:
+    """Allow only the managed account group to traverse mergerFS branch parents."""
+
+    group_id = _service_account_group_id(username)
+    roots = (mount_root.parent, mount_root)
+    applied: list[str] = []
+    for path in roots:
+        try:
+            path.mkdir(parents=True, exist_ok=True, mode=0o710)
+        except OSError as exc:
+            raise ExecutorFailure(
+                "storage_branch_root_unavailable",
+                "The managed storage branch root could not be prepared.",
+            ) from exc
+        _assert_no_symlink_components(path)
+        _apply_directory_mode(path, group_id, mode=0o710)
+        applied.append(os.fspath(path))
     return applied
 
 
@@ -2921,6 +2941,10 @@ def _execute_actions(
         document.get("actions", {}).get("directories", []),
         str(account.get("username")),
     )
+    if topology in {"mergerfs", "snapraid", "mixed"} and document.get("actions", {}).get(
+        "directories"
+    ):
+        _ensure_mergerfs_branch_traversal(paths.mount_root, str(account.get("username")))
     journal["completed_steps"] = int(journal["completed_steps"]) + 1
     journal["phase"] = "Saving automatic mount configuration"
     journal["current_action"] = {"id": "fstab", "type": "mount.configuration.save"}
@@ -3070,11 +3094,15 @@ def reconcile_storage_access(
         mount_configuration_updated = _ensure_mergerfs_allow_other(
             paths.fstab, mergerfs_mountpoint
         )
+        branch_roots_reconciled = _ensure_mergerfs_branch_traversal(paths.mount_root, username)
+    else:
+        branch_roots_reconciled = []
     return {
         "operation_id": operation_id,
         "mountpoint": os.fspath(presentation_root),
         "username": username,
         "directories_reconciled": applied,
+        "branch_roots_reconciled": branch_roots_reconciled,
         "mount_configuration_updated": mount_configuration_updated,
         "activation": "next_mount" if mount_configuration_updated else "active",
         "replayed": False,

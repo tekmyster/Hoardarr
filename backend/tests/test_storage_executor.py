@@ -1429,6 +1429,27 @@ def test_directory_access_includes_intermediate_folders_and_ignores_umask(
     assert applied == [(Path(path), 1234) for path in result]
 
 
+def test_mergerfs_branch_traversal_is_group_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mount_root = tmp_path / "hoardarr" / "disks"
+    applied: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(executor, "_service_account_group_id", lambda username: 1234)
+    monkeypatch.setattr(
+        executor,
+        "_apply_directory_mode",
+        lambda path, group_id, *, mode=0o770: applied.append((path, group_id, mode)),
+    )
+
+    result = executor._ensure_mergerfs_branch_traversal(mount_root, "media")
+
+    assert result == [str(mount_root.parent), str(mount_root)]
+    assert applied == [
+        (mount_root.parent, 1234, 0o710),
+        (mount_root, 1234, 0o710),
+    ]
+
+
 def test_access_reconciliation_is_bound_to_hashed_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1459,6 +1480,11 @@ def test_access_reconciliation_is_bound_to_hashed_plan(
         "_ensure_storage_directory_access",
         lambda root, actions, username: [f"{root}/media", f"{root}/media/Movies"],
     )
+    monkeypatch.setattr(
+        executor,
+        "_ensure_mergerfs_branch_traversal",
+        lambda root, username: [str(root.parent), str(root)],
+    )
     fstab = tmp_path / "fstab"
     fstab.write_text(
         f"/mnt/a:/mnt/b {presentation} fuse.mergerfs category.create=mfs,nofail 0 0\n",
@@ -1474,6 +1500,10 @@ def test_access_reconciliation_is_bound_to_hashed_plan(
     ]
     assert result["mount_configuration_updated"] is True
     assert result["activation"] == "next_mount"
+    assert result["branch_roots_reconciled"] == [
+        str(Paths().mount_root.parent),
+        str(Paths().mount_root),
+    ]
     assert "allow_other" in fstab.read_text(encoding="utf-8")
 
     changed = deepcopy(request)
