@@ -24,6 +24,7 @@ readonly INSTALL_LOCK_PATH="${RUNTIME_ROOT}/release.lock"
 ACTION="plan"
 CONFIRMED="false"
 PRESERVE_EXISTING_LOGIN_ACCOUNT="false"
+DEFER_SERVICE_START="false"
 STAGE_DIR=""
 INSTALL_LOCK_FD=""
 
@@ -40,13 +41,15 @@ usage() {
     cat <<EOF
 Usage:
   ${PROGRAM_NAME} plan
-  sudo ${PROGRAM_NAME} apply --yes [--preserve-existing-login-account]
+  sudo ${PROGRAM_NAME} apply --yes [--preserve-existing-login-account] [--defer-service-start]
 
 The default and "plan" modes are read-only.  "apply" requires root and the
 explicit --yes confirmation. Apply installs the mandatory storage and connectivity
 host packages when they are missing. It does not issue an owner setup token or change
 the loopback-only default listener. The account-preservation option is intended only
 for legacy development hosts where "hoardarr" is already the administrator login.
+The service-deferral option is only for a first appliance installation performed
+inside an offline installer target. Units are enabled and start normally on boot.
 EOF
 }
 
@@ -75,6 +78,9 @@ parse_args() {
                     --yes) CONFIRMED="true" ;;
                     --preserve-existing-login-account)
                         PRESERVE_EXISTING_LOGIN_ACCOUNT="true"
+                        ;;
+                    --defer-service-start)
+                        DEFER_SERVICE_START="true"
                         ;;
                     *) die "unknown apply option: $1" ;;
                 esac
@@ -706,13 +712,20 @@ apply_release() {
         [[ -d "${LIB_ROOT}/${previous_release}" && ! -L "${LIB_ROOT}/${previous_release}" ]] || \
             die "current release link does not name an installed release"
     fi
+    if [[ "${DEFER_SERVICE_START}" == "true" && -n "${previous_release}" ]]; then
+        die "--defer-service-start is only allowed for a first appliance installation"
+    fi
 
     # Staging happens while the old release remains active.  The service outage
     # begins only after the new environment has installed and imported cleanly.
     install_config_units_docs
     systemctl daemon-reload
-    systemctl enable --now lldpd.service
-    stop_runtime_services
+    if [[ "${DEFER_SERVICE_START}" == "true" ]]; then
+        systemctl enable lldpd.service
+    else
+        systemctl enable --now lldpd.service
+        stop_runtime_services
+    fi
     atomic_symlink "releases/${RELEASE_ID}" "${LIB_ROOT}/current"
     atomic_symlink "current/venv" "${LIB_ROOT}/venv"
     atomic_symlink "current/scripts" "${LIB_ROOT}/scripts"
@@ -723,6 +736,12 @@ apply_release() {
     install_runtime_wrapper "${CLI_LINK}" cli
     install_runtime_wrapper "${QUARANTINE_CLI_LINK}" storage-quarantine
     systemctl enable hoardarr-migrate.service hoardarr-api.service hoardarr-worker.service hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service
+
+    if [[ "${DEFER_SERVICE_START}" == "true" ]]; then
+        log "Installed Hoardarr ${RELEASE_VERSION} (${RELEASE_ID}) for first-boot activation."
+        log "Database migration and runtime readiness will be enforced by systemd on boot."
+        return
+    fi
 
     if ! systemctl restart hoardarr-migrate.service; then
         restore_previous_release "${previous_release}" || true

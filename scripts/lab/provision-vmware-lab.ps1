@@ -10,7 +10,9 @@ param(
     [switch]$AttachDataDisks,
     [switch]$PowerOn,
     [switch]$ReuseUploadedIso,
-    [switch]$RecreateOsDisk
+    [switch]$RecreateOsDisk,
+    [switch]$BootInstalledOs,
+    [string]$ConsoleScreenshotDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,6 +108,46 @@ function Reset-VirtualOsDisk {
         -StorageFormat Thin -Confirm:$false | Out-Null
 }
 
+function Assert-ExactLabOsTopology {
+    param(
+        [Parameter(Mandatory)]$Vm,
+        [Parameter(Mandatory)]$Datastore
+    )
+
+    $disks = @(Get-HardDisk -VM $Vm)
+    $expectedFilename = "[$($Datastore.Name)] $($Vm.Name)/$($Vm.Name).vmdk"
+    if (
+        $disks.Count -ne 1 `
+        -or [math]::Abs([double]$disks[0].CapacityGB - 24.0) -gt 0.01 `
+        -or [string]$disks[0].StorageFormat -ne 'Thin' `
+        -or [string]$disks[0].DiskType -ne 'Flat' `
+        -or [string]$disks[0].Filename -ne $expectedFilename
+    ) {
+        throw "$($Vm.Name) does not have the exact disposable one-disk lab OS topology."
+    }
+}
+
+function Wait-VimTaskResult {
+    param(
+        [Parameter(Mandatory)]$TaskReference,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $task = Get-View -Id $TaskReference
+    while ([string]$task.Info.State -in @('queued', 'running')) {
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw 'VMware console screenshot timed out.'
+        }
+        Start-Sleep -Milliseconds 500
+        $task.UpdateViewData('Info.State', 'Info.Error', 'Info.Result')
+    }
+    if ([string]$task.Info.State -ne 'success') {
+        throw "VMware console screenshot failed: $($task.Info.Error.LocalizedMessage)"
+    }
+    return $task.Info.Result
+}
+
 $credentials = Read-KeyValueFile -Path $CredentialEnvFile
 $connection = $null
 try {
@@ -132,13 +174,19 @@ try {
     if ($RecreateOsDisk -and -not ($ApplianceIso -or $ReuseUploadedIso)) {
         throw 'Recreating a lab OS disk requires the appliance ISO to be supplied or explicitly reused.'
     }
-    $datastoreIso = if ($ApplianceIso -or $ReuseUploadedIso) {
+    if ($BootInstalledOs -and ($RecreateOsDisk -or $ApplianceIso -or $ReuseUploadedIso)) {
+        throw 'BootInstalledOs cannot be combined with ISO attachment or OS-disk recreation.'
+    }
+    $datastoreIso = if ($ReuseUploadedIso) {
         "[$DatastoreName] hoardarr-lab/hoardarr-0.3.11-beta1.iso"
     } else {
         $null
     }
     if ($ApplianceIso) {
         $resolvedIso = (Resolve-Path -LiteralPath $ApplianceIso).Path
+        $isoDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedIso).Hash.ToLowerInvariant()
+        $isoLeaf = "hoardarr-0.3.11-beta1-$($isoDigest.Substring(0, 12)).iso"
+        $datastoreIso = "[$DatastoreName] hoardarr-lab/$isoLeaf"
         if ($PSCmdlet.ShouldProcess($datastoreIso, 'Upload appliance ISO')) {
             New-PSDrive -Name HoardarrLabDatastore -PSProvider VimDatastore `
                 -Root '\' -Location $datastore | Out-Null
@@ -146,7 +194,7 @@ try {
                 New-Item -ItemType Directory -Path 'HoardarrLabDatastore:\hoardarr-lab' | Out-Null
             }
             Copy-DatastoreItem -Item $resolvedIso `
-                -Destination 'HoardarrLabDatastore:\hoardarr-lab\hoardarr-0.3.11-beta1.iso' `
+                -Destination "HoardarrLabDatastore:\hoardarr-lab\$isoLeaf" `
                 -Force -Confirm:$false
         }
     }
@@ -164,6 +212,18 @@ try {
         }
         if ($RecreateOsDisk -and $vm -and $PSCmdlet.ShouldProcess($name, 'Recreate exact disposable virtual OS disk')) {
             Reset-VirtualOsDisk -Vm $vm -Datastore $datastore
+            $vm = Get-VM -Name $name
+        }
+        if ($BootInstalledOs -and $vm -and $PSCmdlet.ShouldProcess($name, 'Detach installer media and boot exact virtual OS disk')) {
+            Assert-ExactLabOsTopology -Vm $vm -Datastore $datastore
+            if ($vm.PowerState -ne 'PoweredOff') {
+                Stop-VM -VM $vm -Kill -Confirm:$false | Out-Null
+                $vm = Get-VM -Name $name
+            }
+            foreach ($cd in @(Get-CDDrive -VM $vm -ErrorAction SilentlyContinue)) {
+                Set-CDDrive -CD $cd -NoMedia -StartConnected:$false -Confirm:$false | Out-Null
+            }
+            Start-VM -VM $vm -Confirm:$false | Out-Null
             $vm = Get-VM -Name $name
         }
         if ($vm -and $PSCmdlet.ShouldProcess($name, 'Reconcile lab network adapter')) {
@@ -187,6 +247,24 @@ try {
         }
         if ($PowerOn -and $vm -and $vm.PowerState -ne 'PoweredOn' -and $PSCmdlet.ShouldProcess($name, 'Power on persistent lab VM')) {
             Start-VM -VM $vm -Confirm:$false | Out-Null
+        }
+        if ($ConsoleScreenshotDirectory -and $vm -and $PSCmdlet.ShouldProcess($name, 'Capture bounded console screenshot')) {
+            $localDirectory = [IO.Path]::GetFullPath($ConsoleScreenshotDirectory)
+            [IO.Directory]::CreateDirectory($localDirectory) | Out-Null
+            $remoteScreenshot = [string](Wait-VimTaskResult -TaskReference $vm.ExtensionData.CreateScreenshot_Task())
+            $expectedPrefix = "[$DatastoreName] $name/"
+            if (-not $remoteScreenshot.StartsWith($expectedPrefix, [StringComparison]::Ordinal)) {
+                throw "$name returned an unexpected console screenshot path."
+            }
+            if (-not (Get-PSDrive -Name HoardarrLabDatastore -ErrorAction SilentlyContinue)) {
+                New-PSDrive -Name HoardarrLabDatastore -PSProvider VimDatastore `
+                    -Root '\' -Location $datastore | Out-Null
+            }
+            $relativeScreenshot = $remoteScreenshot.Substring("[$DatastoreName] ".Length)
+            $remoteProviderPath = "HoardarrLabDatastore:\$relativeScreenshot"
+            Copy-DatastoreItem -Item $remoteProviderPath `
+                -Destination (Join-Path $localDirectory "$name-console.png") -Force -Confirm:$false
+            Remove-Item -LiteralPath $remoteProviderPath -Force -WhatIf:$false
         }
     }
 

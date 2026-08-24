@@ -292,6 +292,15 @@ class BuildPlanTests(unittest.TestCase):
         self.assertIn('((uid > 0)) || die "existing hoardarr account must not use UID 0"', installer)
         self.assertIn('((gid > 0)) || die "existing hoardarr account must not use GID 0"', installer)
         self.assertIn('--preserve-existing-login-account', installer)
+        self.assertIn('--defer-service-start', installer)
+        self.assertIn(
+            '--defer-service-start is only allowed for a first appliance installation',
+            installer,
+        )
+        self.assertIn(
+            'Database migration and runtime readiness will be enforced by systemd on boot.',
+            installer,
+        )
         self.assertIn(
             '[[ "${PRESERVE_EXISTING_LOGIN_ACCOUNT}" == "true" ]]', installer
         )

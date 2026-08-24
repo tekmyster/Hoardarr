@@ -10,6 +10,10 @@ param(
 
     [switch]$RecreateOsDisk,
 
+    [switch]$BootInstalledOs,
+
+    [string]$ConsoleScreenshotDirectory,
+
     [string]$CredentialRoot = 'C:\Users\dmessana\Desktop\all servers',
 
     [string]$VCenterHost = 'cptnyc-vcsa01.vcenter.cptnyc.com'
@@ -86,6 +90,8 @@ try {
         PowerOn = $PowerOn
         ReuseUploadedIso = $ReuseUploadedIso
         RecreateOsDisk = $RecreateOsDisk
+        BootInstalledOs = $BootInstalledOs
+        ConsoleScreenshotDirectory = $ConsoleScreenshotDirectory
         Confirm = $false
         WhatIf = $WhatIfPreference
     }

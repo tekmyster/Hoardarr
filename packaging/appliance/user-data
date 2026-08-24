@@ -32,8 +32,8 @@ autoinstall:
     - curtin in-target --target=/target -- mkdir -p /opt/hoardarr-install
     - cp /cdrom/hoardarr/hoardarr-release.tar.gz /target/opt/hoardarr-install/release.tar.gz
     - curtin in-target --target=/target -- tar -xzf /opt/hoardarr-install/release.tar.gz -C /opt/hoardarr-install
-    - curtin in-target --target=/target -- sh -c 'release="$(find /opt/hoardarr-install -mindepth 1 -maxdepth 1 -type d -name "hoardarr-*" -print -quit)"; test -n "$release"; exec bash "$release/scripts/install.sh" apply --yes --preserve-existing-login-account'
+    - curtin in-target --target=/target -- sh -c 'release="$(find /opt/hoardarr-install -mindepth 1 -maxdepth 1 -type d -name "hoardarr-*" -print -quit)"; test -n "$release"; exec bash "$release/scripts/install.sh" apply --yes --preserve-existing-login-account --defer-service-start'
     - curtin in-target --target=/target -- systemctl enable hoardarr-api.service hoardarr-worker.service
   user-data:
     runcmd:
-      - [sh, -c, 'printf "%s\n" "Run sudo hoardarr setup to create the Hoardarr owner account." "The Linux account selected during installation is only for appliance administration." >/etc/motd.d/hoardarr']
+      - [sh, -c, 'mkdir -p /etc/motd.d && printf "%s\n" "Run sudo hoardarr setup to create the Hoardarr owner account." "The Linux account selected during installation is only for appliance administration." >/etc/motd.d/hoardarr']

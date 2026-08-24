@@ -17,9 +17,10 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertNotIn("console=ttyS0,115200n8 console=tty0 ---", script)
         self.assertIn("grub_maps", script)
         self.assertIn(
-            '"$release/scripts/install.sh" apply --yes --preserve-existing-login-account',
+            '"$release/scripts/install.sh" apply --yes --preserve-existing-login-account --defer-service-start',
             user_data,
         )
+        self.assertIn("mkdir -p /etc/motd.d", user_data)
         self.assertIn("interactive-sections", user_data)
         self.assertRegex(user_data, r"interactive-sections:\s*\n\s*- identity\s*\n\s*- storage")
         self.assertNotIn('password: "!"', user_data)
@@ -67,11 +68,45 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("lock_passwd: false", template)
         self.assertIn("allow-pw: false", template)
         self.assertEqual(template.count("__SSH_PUBLIC_KEY__"), 2)
+        self.assertIn("--defer-service-start", template)
+        self.assertIn("mkdir -p /etc/motd.d", template)
         self.assertIn("workflow_dispatch", workflow)
         self.assertIn("rc/0.3.11-validation", workflow)
         self.assertIn("LAB_SSH_PUBLIC_KEY", workflow)
         self.assertIn("placeholder count changed", workflow)
         self.assertNotIn("PRIVATE KEY", template + workflow)
+
+    def test_vmware_lab_reinstall_is_virtual_only_and_checksum_addressed(self) -> None:
+        provisioner = (ROOT / "scripts" / "lab" / "provision-vmware-lab.ps1").read_text(
+            encoding="utf-8"
+        )
+        wrapper = (
+            ROOT / "scripts" / "lab" / "invoke-vmware-lab-provision.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DiskType -ne 'Flat'", provisioner)
+        self.assertIn("CapacityGB - 24.0", provisioner)
+        self.assertIn("does not have the exact disposable one-disk lab OS topology", provisioner)
+        self.assertIn("Remove-HardDisk -HardDisk $disks[0] -DeletePermanently", provisioner)
+        self.assertIn("Get-FileHash -Algorithm SHA256", provisioner)
+        self.assertIn("$isoDigest.Substring(0, 12)", provisioner)
+        self.assertNotIn("RawDevice", provisioner)
+        self.assertNotIn("ScsiLun", provisioner)
+        self.assertIn("returned an unexpected console screenshot path", provisioner)
+        self.assertIn("^hoardarr-vcenter-[0-9a-f-]{36}$", wrapper)
+        self.assertIn("-WhatIf:$false", wrapper)
+
+    def test_vmware_lab_installed_os_boot_is_bounded_to_exact_virtual_disk(self) -> None:
+        provisioner = (ROOT / "scripts" / "lab" / "provision-vmware-lab.ps1").read_text(
+            encoding="utf-8"
+        )
+        wrapper = (
+            ROOT / "scripts" / "lab" / "invoke-vmware-lab-provision.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("[switch]$BootInstalledOs", provisioner)
+        self.assertIn("Assert-ExactLabOsTopology -Vm $vm -Datastore $datastore", provisioner)
+        self.assertIn("Set-CDDrive -CD $cd -NoMedia -StartConnected:$false", provisioner)
+        self.assertIn("BootInstalledOs cannot be combined", provisioner)
+        self.assertIn("BootInstalledOs = $BootInstalledOs", wrapper)
 
     def test_ci_has_linux_installer_accessibility_and_isolated_storage_profiles(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
