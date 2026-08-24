@@ -3154,7 +3154,7 @@ def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, A
                 "foreign_provider_invalid", "Linux MD did not report an array UUID."
             )
         expected_devices = fields.get("MD_DEVICES")
-        role = fields.get("MD_DEVICE_ROLE")
+        device_uuid = fields.get("MD_DEV_UUID")
         members.append(
             {
                 "source": os.fspath(source),
@@ -3164,7 +3164,7 @@ def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, A
                 "expected_devices": int(expected_devices)
                 if expected_devices and expected_devices.isdigit()
                 else None,
-                "role": int(role) if role and role.isdigit() else role[:64] if role else None,
+                "device_uuid": device_uuid[:256] if device_uuid else None,
                 "events": int(fields["MD_EVENTS"])
                 if fields.get("MD_EVENTS", "").isdigit()
                 else None,
@@ -3179,8 +3179,14 @@ def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, A
     if len(uuids) != 1 or len(levels) != 1 or len(expected) > 1:
         raise ExecutorFailure("foreign_provider_conflict", "Linux MD member metadata conflicts.")
     expected_count = next(iter(expected), None)
-    numeric_roles = {item["role"] for item in members if isinstance(item["role"], int)}
-    complete = expected_count is not None and len(numeric_roles) == expected_count
+    device_uuids = {
+        item["device_uuid"] for item in members if isinstance(item["device_uuid"], str)
+    }
+    complete = (
+        expected_count is not None
+        and len(members) == expected_count
+        and len(device_uuids) == expected_count
+    )
     return {
         "provider": "linux_md",
         "identity": next(iter(uuids)),
@@ -3195,8 +3201,8 @@ def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, A
             if expected_count is not None
             else "not_reported",
             "expected_members": expected_count,
-            "observed_roles": len(numeric_roles),
-            "missing_members": max(0, expected_count - len(numeric_roles))
+            "observed_members": len(device_uuids),
+            "missing_members": max(0, expected_count - len(device_uuids))
             if expected_count is not None
             else None,
         },
@@ -3208,9 +3214,9 @@ def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, A
         "mountability": {
             "quality": "derived" if complete else "temporarily_unavailable",
             "state": "read_only_assembly_candidate" if complete else "not_ready",
-            "reason": "All expected member roles were observed."
+            "reason": "All expected unique member identities were observed."
             if complete
-            else "All expected MD member roles were not observed.",
+            else "All expected unique MD member identities were not observed.",
         },
     }
 
@@ -3324,7 +3330,7 @@ def _foreign_lvm_preview(sources: list[Path], probe: CommandProbe) -> dict[str, 
             if expected is not None and missing is not None
             else "not_reported",
             "expected_members": expected,
-            "observed_roles": len(pv_rows),
+            "observed_members": len(pv_rows),
             "missing_members": missing,
         },
         "health": {
@@ -3383,7 +3389,7 @@ def _foreign_zfs_preview(sources: list[Path], probe: CommandProbe) -> dict[str, 
             "quality": "not_reported",
             "state": "not_reported",
             "expected_members": None,
-            "observed_roles": len(members),
+            "observed_members": len(members),
             "missing_members": None,
         },
         "health": {

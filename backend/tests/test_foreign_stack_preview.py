@@ -112,9 +112,9 @@ def test_md_preview_proves_membership_without_assembling(
         commands.append(command)
         if command[0] == "wipefs":
             return json.dumps({"signatures": [{"type": "linux_raid_member", "uuid": "array-1"}]})
-        role = "0" if command[-1].endswith("0") else "1"
+        device_uuid = "member-0" if command[-1].endswith("0") else "member-1"
         return (
-            f"MD_UUID=array-1\nMD_LEVEL=raid1\nMD_DEVICES=2\nMD_DEVICE_ROLE={role}\nMD_EVENTS=42\n"
+            f"MD_UUID=array-1\nMD_LEVEL=raid1\nMD_DEVICES=2\nMD_DEV_UUID={device_uuid}\nMD_EVENTS=42\n"
         )
 
     result = preview_foreign_stack(

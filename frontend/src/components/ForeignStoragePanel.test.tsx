@@ -166,7 +166,7 @@ describe("ForeignStoragePanel", () => {
       name: "media:0",
       layout: "raid6",
       members: [{ source: "/dev/sdb", role: 0 }, { source: "/dev/sdc", role: 1 }],
-      completeness: { quality: "available", state: "incomplete", expected_members: 4, observed_roles: 2, missing_members: 2 },
+      completeness: { quality: "available", state: "incomplete", expected_members: 4, observed_members: 2, missing_members: 2 },
       health: { quality: "not_reported", state: null, reason: "Inactive metadata cannot prove health." },
       mountability: { quality: "temporarily_unavailable", state: "not_ready", reason: "Two members are missing." },
       activation_performed: false,

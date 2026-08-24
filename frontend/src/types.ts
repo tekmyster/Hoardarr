@@ -968,7 +968,7 @@ export interface ForeignStackPreviewResult {
     quality: "available" | "not_reported";
     state: "complete" | "incomplete" | "not_reported";
     expected_members: number | null;
-    observed_roles: number;
+    observed_members: number;
     missing_members: number | null;
   };
   health: { quality: string; state: string | null; reason: string };

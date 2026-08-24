@@ -121,9 +121,9 @@ async function storageLifecycleServer(page: Page) {
       name: "media:0",
       layout: "raid6",
       members: [{ source: "/dev/loop11", role: 0 }, { source: "/dev/loop12", role: 1 }],
-      completeness: { quality: "available", state: "incomplete", expected_members: 4, observed_roles: 2, missing_members: 2 },
+      completeness: { quality: "available", state: "incomplete", expected_members: 4, observed_members: 2, missing_members: 2 },
       health: { quality: "not_reported", state: null, reason: "Inactive MD member metadata does not prove current array health." },
-      mountability: { quality: "temporarily_unavailable", state: "not_ready", reason: "All expected MD member roles were not observed." },
+      mountability: { quality: "temporarily_unavailable", state: "not_ready", reason: "All expected unique MD member identities were not observed." },
       activation_performed: false,
       mutation_performed: false,
     } });
