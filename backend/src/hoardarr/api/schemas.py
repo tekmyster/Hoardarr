@@ -567,6 +567,26 @@ class StorageVolumeApplyRequest(StrictModel):
     confirmation: Literal["CREATE"]
 
 
+class StorageVolumeSnapshotPreviewRequest(StrictModel):
+    action: Literal["create", "delete", "restore", "clone"]
+    snapshot_name: str | None = Field(default=None, min_length=1, max_length=96)
+    snapshot_id: str | None = Field(default=None, min_length=36, max_length=36)
+    clone_name: str | None = Field(default=None, min_length=1, max_length=63)
+
+
+class StorageVolumeSnapshotApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: str = Field(min_length=1, max_length=32)
+
+
+class StorageVolumeSnapshotScheduleRequest(StrictModel):
+    enabled: bool
+    interval_hours: int = Field(ge=1, le=8760)
+    retention_count: int = Field(ge=1, le=1024)
+    prefix: str = Field(min_length=1, max_length=32)
+
+
 class HAConfigurationRequest(StrictModel):
     local_node_id: str = Field(min_length=1, max_length=128)
     local_name: str = Field(min_length=1, max_length=128)

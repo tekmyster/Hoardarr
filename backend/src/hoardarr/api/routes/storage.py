@@ -42,6 +42,9 @@ from hoardarr.api.schemas import (
     StorageRedundancyPreviewRequest,
     StorageVolumeApplyRequest,
     StorageVolumePreviewRequest,
+    StorageVolumeSnapshotApplyRequest,
+    StorageVolumeSnapshotPreviewRequest,
+    StorageVolumeSnapshotScheduleRequest,
     TierTransferApplyRequest,
     TierTransferCleanupRequest,
     TierTransferPreviewRequest,
@@ -59,6 +62,8 @@ from hoardarr.db.models import (
     StorageDrainJob,
     StorageGroup,
     StorageVolume,
+    StorageVolumeSnapshot,
+    StorageVolumeSnapshotSchedule,
 )
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 from hoardarr.storage.client import StorageExecutorError, preview_foreign_stack
@@ -111,6 +116,20 @@ from hoardarr.storage.snapraid import (
     SnapraidReplacementError,
     build_replacement_plan,
     validate_replacement_plan,
+)
+from hoardarr.storage.snapshot_plans import (
+    SnapshotPlanError,
+    build_snapshot_plan,
+    validate_snapshot_plan,
+)
+from hoardarr.storage.snapshots import (
+    SnapshotLifecycleError,
+    configure_schedule,
+    provider_guid,
+    require_snapshot_capability,
+    schedule_document,
+    snapshot_document,
+    snapshot_documents,
 )
 from hoardarr.storage.telemetry import storage_telemetry
 from hoardarr.storage.tiering import TieringError, plan_transfer, transfer_queue_summary
@@ -1045,6 +1064,193 @@ def storage_volume_detail(
         "item": volume_document(volume),
         "operations": [operation_document(item) for item in operations],
     }
+
+
+@router.get("/volumes/{volume_id}/snapshots")
+def storage_volume_snapshots(
+    volume_id: str,
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    schedule = session.scalar(
+        select(StorageVolumeSnapshotSchedule).where(
+            StorageVolumeSnapshotSchedule.volume_id == volume.id
+        )
+    )
+    return {
+        "items": snapshot_documents(session, volume.id),
+        "schedule": schedule_document(schedule),
+        "source": "durable_provider_operations",
+    }
+
+
+@router.post("/volumes/{volume_id}/snapshots/preview")
+def preview_storage_volume_snapshot(
+    volume_id: str,
+    payload: StorageVolumeSnapshotPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    snapshot = None
+    if payload.action != "create":
+        if payload.snapshot_id is None:
+            raise Problem(
+                422,
+                "snapshot_required",
+                "Snapshot required",
+                "Select the exact provider snapshot before continuing.",
+            )
+        selected = session.get(StorageVolumeSnapshot, payload.snapshot_id)
+        if selected is None or selected.volume_id != volume.id or selected.state != "available":
+            raise Problem(
+                404, "snapshot_not_found", "Snapshot not found", "The snapshot is unavailable."
+            )
+        snapshot = snapshot_document(selected)
+    try:
+        require_snapshot_capability(volume)
+        plan = build_snapshot_plan(
+            volume=volume_document(volume),
+            provider_guid=provider_guid(volume),
+            action=payload.action,
+            snapshot_name=payload.snapshot_name,
+            snapshot=snapshot,
+            clone_name=payload.clone_name,
+        )
+    except (SnapshotLifecycleError, SnapshotPlanError) as exc:
+        raise Problem(409, exc.code, "Snapshot plan rejected", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": plan["plan_sha256"]}
+
+
+@router.post("/volumes/{volume_id}/snapshots", status_code=202)
+def apply_storage_volume_snapshot_plan(
+    volume_id: str,
+    payload: StorageVolumeSnapshotApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    try:
+        plan = validate_snapshot_plan(payload.plan)
+        require_snapshot_capability(volume)
+        if (
+            payload.plan_sha256 != plan["plan_sha256"]
+            or plan["volume"]["id"] != volume.id
+            or plan["volume"]["stable_identity"] != volume.stable_identity
+            or plan["volume"]["provider_guid"] != provider_guid(volume)
+        ):
+            raise SnapshotPlanError(
+                "snapshot_plan_changed", "The volume identity changed after review."
+            )
+        if plan["action"] != "create":
+            selected_plan = plan["snapshot"]
+            selected = session.get(StorageVolumeSnapshot, selected_plan["id"])
+            if (
+                selected is None
+                or selected.volume_id != volume.id
+                or selected.state != "available"
+                or selected.provider_snapshot_id != selected_plan["provider_snapshot_id"]
+                or selected.provider_guid != selected_plan["provider_guid"]
+            ):
+                raise SnapshotPlanError(
+                    "snapshot_identity_changed",
+                    "The selected provider snapshot changed after review.",
+                )
+        if payload.confirmation != plan["confirmation"]:
+            raise SnapshotPlanError(
+                "snapshot_confirmation_missing", "Enter the exact snapshot confirmation."
+            )
+    except (SnapshotLifecycleError, SnapshotPlanError) as exc:
+        raise Problem(409, exc.code, "Snapshot request rejected", str(exc)) from exc
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.volume.snapshot",
+            principal=principal,
+            request={
+                "plan": plan,
+                "plan_sha256": plan["plan_sha256"],
+                "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
+            },
+            idempotency_key=key,
+            resource_type="storage_volume",
+            resource_id=volume.stable_identity,
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        record_audit(
+            session,
+            principal=principal,
+            action=f"storage.volume.snapshot.{plan['action']}",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="storage_volume",
+            target_id=volume.stable_identity,
+            details={"plan_sha256": plan["plan_sha256"]},
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.put("/volumes/{volume_id}/snapshot-schedule")
+def update_storage_volume_snapshot_schedule(
+    volume_id: str,
+    payload: StorageVolumeSnapshotScheduleRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    try:
+        schedule = configure_schedule(session, volume, **payload.model_dump())
+    except SnapshotLifecycleError as exc:
+        raise Problem(409, exc.code, "Snapshot schedule rejected", str(exc)) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.volume.snapshot.schedule",
+        outcome="updated",
+        correlation_id=request.state.request_id,
+        target_type="storage_volume",
+        target_id=volume.stable_identity,
+        details={
+            "enabled": schedule.enabled,
+            "interval_hours": schedule.interval_hours,
+            "retention_count": schedule.retention_count,
+        },
+    )
+    return {"schedule": schedule_document(schedule)}
 
 
 @router.post("/redundancy/preview")

@@ -20,8 +20,11 @@ async function storageLifecycleServer(page: Page) {
   let unraidEvidenceLoaded = false;
   let nasEvidenceLoaded = false;
   let guidedVolumeCreated = false;
+  let snapshotCreated = false;
+  let snapshotScheduleSaved = false;
   let advancedVolumePreviewed = false;
   const volumeOperationId = "88888888-8888-4888-8888-888888888888";
+  const snapshotOperationId = "99999999-9999-4999-8999-999999999999";
   const volumePlan = {
     schema_version: 1, kind: "storage.volume.create", mode: "guided", name: "media-library",
     purpose: "media", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library",
@@ -334,6 +337,10 @@ async function storageLifecycleServer(page: Page) {
       resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" },
       result: { volume_id: "volume-media-library" }, error: null, created_at: now, updated_at: now,
     });
+    if (pathname.endsWith(`/operations/${snapshotOperationId}`)) {
+      snapshotCreated = true;
+      return json({ id: snapshotOperationId, kind: "storage.volume.snapshot", status: "succeeded", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: { snapshot_id: "snapshot-manual" }, error: null, created_at: now, updated_at: now });
+    }
     if (pathname.endsWith("/operations")) return json({ items: operationStatus ? [operation()] : [] });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
     if (pathname.endsWith("/storage/transfers/summary")) return json({ active: 0, pending: 0, failed: 0, completed: 0, bytes_moved: 0, current_throughput_bytes_per_second: 0, estimated_drain_seconds: null, hardlink_rate: null, copy_rate: null, seeding_retained_bytes: 0, recoverable_bytes: 0 });
@@ -350,6 +357,31 @@ async function storageLifecycleServer(page: Page) {
       }
       expect(body).toMatchObject({ name: "media-library", purpose: "media" });
       return json({ plan: volumePlan, plan_sha256: volumePlan.plan_sha256 });
+    }
+    if (pathname.endsWith("/storage/volumes/volume-media-library/snapshots/preview")) {
+      const body = request.postDataJSON() as { action: string; snapshot_name?: string };
+      expect(body).toEqual({ action: "create", snapshot_name: "manual" });
+      const snapshotPlan = {
+        schema_version: 1, kind: "storage.volume.snapshot", action: "create", scheduled: false,
+        volume: { id: "volume-media-library", stable_identity: "zfs:dataset:tank/media-library", name: "media-library", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library", provider_guid: "123456789", presentation: "file" },
+        snapshot: { id: null, provider_snapshot_id: "tank/media-library@manual", snapshot_name: "manual", provider_guid: null },
+        target_resource_id: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "a".repeat(64),
+      };
+      return json({ plan: snapshotPlan, plan_sha256: snapshotPlan.plan_sha256 });
+    }
+    if (pathname.endsWith("/storage/volumes/volume-media-library/snapshots") && request.method() === "POST") {
+      const body = request.postDataJSON() as { confirmation: string };
+      expect(body.confirmation).toBe("CREATE SNAPSHOT");
+      return json({ operation: { id: snapshotOperationId, kind: "storage.volume.snapshot", status: "queued", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: null, error: null, created_at: now, updated_at: now }, replayed: false }, 202);
+    }
+    if (pathname.endsWith("/storage/volumes/volume-media-library/snapshots")) return json({
+      items: snapshotCreated ? [{ id: "snapshot-manual", volume_id: "volume-media-library", provider_snapshot_id: "tank/media-library@manual", snapshot_name: "manual", provider_guid: "987654321", state: "available", detail: { used: "0" }, restored_at: null, deleted_at: null, created_at: now, updated_at: now }] : [],
+      schedule: { enabled: snapshotScheduleSaved, interval_hours: 24, retention_count: 12, prefix: "hoardarr-auto", next_run_at: snapshotScheduleSaved ? "2026-08-24T16:00:00Z" : null, last_run_at: null },
+      source: "durable_provider_operations",
+    });
+    if (pathname.endsWith("/storage/volumes/volume-media-library/snapshot-schedule") && request.method() === "PUT") {
+      snapshotScheduleSaved = true;
+      return json({ schedule: { enabled: true, interval_hours: 24, retention_count: 12, prefix: "hoardarr-auto", next_run_at: "2026-08-24T16:00:00Z", last_run_at: null } });
     }
     if (pathname.endsWith("/storage/volumes") && request.method() === "POST") {
       const body = request.postDataJSON() as { plan: typeof volumePlan; plan_sha256: string; confirmation: string };
@@ -405,6 +437,8 @@ async function storageLifecycleServer(page: Page) {
     nasEvidenceLoaded: () => nasEvidenceLoaded,
     guidedVolumeCreated: () => guidedVolumeCreated,
     advancedVolumePreviewed: () => advancedVolumePreviewed,
+    snapshotCreated: () => snapshotCreated,
+    snapshotScheduleSaved: () => snapshotScheduleSaved,
   };
 }
 
@@ -475,6 +509,16 @@ test("creates a real provider-backed media area through the Guided Storage UI", 
   await expect(detail.getByText("Provider capabilities")).toBeVisible();
   await expect(detail.getByRole("cell", { name: "snapshot" })).toBeVisible();
   await expect(detail.getByText("storage volume create")).toBeVisible();
+  await expect(detail.getByText("No provider snapshots")).toBeVisible();
+  await detail.getByRole("button", { name: "Review snapshot" }).click();
+  await expect(detail.getByText("Review create")).toBeVisible();
+  await detail.getByRole("button", { name: "CREATE SNAPSHOT" }).click();
+  await expect(detail.getByText("Snapshot operation succeeded")).toBeVisible();
+  expect(observed.snapshotCreated()).toBe(true);
+  await expect(detail.getByText("tank/media-library@manual")).toBeVisible();
+  await detail.getByRole("checkbox", { name: /Keep automatic recovery points/ }).check();
+  await detail.getByRole("button", { name: "Save snapshot schedule" }).click();
+  await expect.poll(observed.snapshotScheduleSaved).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("guided-storage-volume-created.png"), fullPage: true });
 });
 

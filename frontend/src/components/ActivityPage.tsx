@@ -11,6 +11,7 @@ const STORAGE_PROGRESS_KINDS = new Set([
   "storage.foreign.inspect",
   "storage.snapraid.replace",
   "storage.volume.create",
+  "storage.volume.snapshot",
 ]);
 
 function formatDate(value: string | undefined): string {

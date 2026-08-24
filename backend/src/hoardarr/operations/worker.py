@@ -98,6 +98,7 @@ from hoardarr.storage.client import (
     apply_storage_plan,
     apply_storage_redundancy,
     apply_storage_volume,
+    apply_storage_volume_snapshot,
     storage_operation_status,
 )
 from hoardarr.storage.drain_worker import (
@@ -118,6 +119,12 @@ from hoardarr.storage.redundancy import (
     register_completed_storage,
     stable_path_identity,
     validate_redundancy_plan,
+)
+from hoardarr.storage.snapshot_plans import SnapshotPlanError, validate_snapshot_plan
+from hoardarr.storage.snapshots import (
+    SnapshotLifecycleError,
+    apply_snapshot_result,
+    queue_due_snapshots,
 )
 from hoardarr.storage.tiering import (
     TieringError,
@@ -158,6 +165,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.array.replace",
         "storage.redundancy.apply",
         "storage.volume.create",
+        "storage.volume.snapshot",
         "storage.drain",
         "connectivity.apply",
         "connectivity.remove",
@@ -1640,6 +1648,37 @@ def _execute_work(
                 needs_attention=getattr(exc, "needs_attention", False),
             ) from exc
         return MaintenanceExecution(result=result)
+    if item.kind == "storage.volume.snapshot":
+        raw_plan = item.request.get("plan")
+        if (
+            not isinstance(raw_plan, dict)
+            or raw_plan.get("plan_sha256") != item.request.get("plan_sha256")
+            or item.resource_type != "storage_volume"
+        ):
+            raise WorkFailure("snapshot_plan_changed", "The snapshot request is invalid")
+        try:
+            plan = validate_snapshot_plan(raw_plan)
+            if item.request.get("confirmation_sha256") != document_hash(
+                {"confirmation": plan["confirmation"]}
+            ):
+                raise SnapshotPlanError(
+                    "snapshot_confirmation_missing", "Exact snapshot confirmation is required."
+                )
+            result = apply_storage_volume_snapshot(
+                settings.storage_executor_socket,
+                operation_id=item.operation_id,
+                plan_sha256=str(item.request["plan_sha256"]),
+                plan=plan,
+                confirmation_sha256=str(item.request["confirmation_sha256"]),
+                timeout_seconds=settings.storage_executor_timeout_seconds,
+            )
+        except (StorageExecutorError, SnapshotPlanError) as exc:
+            raise WorkFailure(
+                exc.code,
+                str(exc),
+                needs_attention=getattr(exc, "needs_attention", False),
+            ) from exc
+        return MaintenanceExecution(result=result)
     if item.kind == "storage.transfer":
         value = item.request.get("plan")
         if not isinstance(value, dict) or document_hash(value) != item.request.get("plan_sha256"):
@@ -1985,6 +2024,35 @@ def _finalize_success(
                     {**execution.result, "volume_id": registered.id},
                 )
                 return
+            if item.kind == "storage.volume.snapshot":
+                raw_plan = operation.request_json.get("plan")
+                if not isinstance(raw_plan, dict):
+                    fail_operation(
+                        session,
+                        operation,
+                        code="snapshot_result_invalid",
+                        message="The snapshot plan could not be reconciled",
+                        needs_attention=True,
+                    )
+                    return
+                try:
+                    result = apply_snapshot_result(
+                        session,
+                        operation=operation,
+                        plan=raw_plan,
+                        result=execution.result,
+                    )
+                except (SnapshotLifecycleError, StorageVolumeError):
+                    fail_operation(
+                        session,
+                        operation,
+                        code="snapshot_result_invalid",
+                        message="The snapshot result could not be reconciled safely",
+                        needs_attention=True,
+                    )
+                    return
+                complete_operation(session, operation, result)
+                return
             complete_operation(session, operation, execution.result)
             return
 
@@ -2101,6 +2169,7 @@ def _finalize_failure(
             "storage.snapraid.replace",
             "storage.redundancy.apply",
             "storage.volume.create",
+            "storage.volume.snapshot",
             "storage.transfer",
             "storage.transfer.cleanup",
             "hardware.locate",
@@ -2410,6 +2479,7 @@ def recover_abandoned_operations(
                             "storage.snapraid.replace",
                             "storage.redundancy.apply",
                             "storage.volume.create",
+                            "storage.volume.snapshot",
                         )
                     ),
                     Operation.lease_owner.is_not(None),
@@ -2506,6 +2576,7 @@ def recover_abandoned_operations(
                 "storage.array.replace": storage_max_age,
                 "storage.redundancy.apply": storage_max_age,
                 "storage.volume.create": storage_max_age,
+                "storage.volume.snapshot": storage_max_age,
                 "connectivity.apply": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "connectivity.remove": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "backup.control_plane": 900,
@@ -2538,6 +2609,7 @@ def run_forever(
         next_servarr_activity = time.monotonic()
         next_media_refresh = time.monotonic()
         next_backup_schedule = time.monotonic()
+        next_snapshot_schedule = time.monotonic()
         next_fleet_sync = time.monotonic()
         while stop_event is None or not stop_event.is_set():
             try:
@@ -2582,6 +2654,13 @@ def run_forever(
                 except Exception as exc:
                     LOGGER.warning("Remote backup scheduling failed (%s)", type(exc).__name__)
                 next_backup_schedule = time.monotonic() + 60.0
+            if time.monotonic() >= next_snapshot_schedule:
+                try:
+                    with session_factory() as session, session.begin():
+                        queue_due_snapshots(session)
+                except SQLAlchemyError:
+                    LOGGER.exception("Snapshot scheduler could not query durable state")
+                next_snapshot_schedule = time.monotonic() + 60.0
             if time.monotonic() >= next_fleet_sync and not (
                 settings.environment == "test" and fleet_transport is None
             ):

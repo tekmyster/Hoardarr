@@ -119,6 +119,8 @@ jobs:
             dist/validation/snapraid-expansion.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .vdev_count_before == 1 and .vdev_count_after == 2 and .pool_guid_before == .pool_guid_after and .dry_run_executed and (.force_override_used | not)' \
             dist/validation/zfs-expansion.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .production_executor_used and .create_verified and .restore_verified and .clone_verified and .delete_verified and .provider_guid_before == .provider_guid_after and .journal_states == ["succeeded", "succeeded", "succeeded", "succeeded"]' \
+            dist/validation/zfs-snapshot-lifecycle.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .journal_state == "succeeded" and .parity_state == "current" and .recovered_sha256 == .expected_sha256 and .stable_alias_partition_used and .command_order == ["snapraid:status", "snapraid:fix", "snapraid:check", "snapraid:sync"]' \
             dist/validation/snapraid-replacement.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .provider == "linux_md" and .journal_state == "succeeded" and (.final_degraded | not) and .target_identity_before == .target_identity_after' \
@@ -143,6 +145,7 @@ jobs:
             dist/validation/snapraid-replacement.json
             dist/validation/md-replacement.json
             dist/validation/zfs-expansion.json
+            dist/validation/zfs-snapshot-lifecycle.json
             dist/validation/zfs-replacement.json
   disposable-block-devices:
     if: github.event_name == 'workflow_dispatch' && inputs.run_extended_self_hosted

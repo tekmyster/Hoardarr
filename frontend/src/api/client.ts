@@ -59,6 +59,9 @@ import type {
   StorageGroupDocument,
   StorageVolumeDocument,
   StorageVolumeDetailDocument,
+  StorageVolumeSnapshotInventory,
+  StorageVolumeSnapshotPlan,
+  StorageVolumeSnapshotSchedule,
   StorageVolumePlan,
   StorageRedundancyPlan,
   StorageRedundancyEventDocument,
@@ -455,6 +458,40 @@ class HoardarrApi {
 
   async storageVolume(id: string, signal?: AbortSignal): Promise<StorageVolumeDetailDocument> {
     return this.request<StorageVolumeDetailDocument>(`/storage/volumes/${encodeURIComponent(id)}`, { signal });
+  }
+
+  async storageVolumeSnapshots(id: string, signal?: AbortSignal): Promise<StorageVolumeSnapshotInventory> {
+    return this.request<StorageVolumeSnapshotInventory>(`/storage/volumes/${encodeURIComponent(id)}/snapshots`, { signal });
+  }
+
+  async previewStorageVolumeSnapshot(id: string, input: {
+    action: StorageVolumeSnapshotPlan["action"];
+    snapshot_id?: string;
+    snapshot_name?: string;
+    clone_name?: string;
+  }): Promise<StorageVolumeSnapshotPlan> {
+    const result = await this.request<{ plan: StorageVolumeSnapshotPlan }>(`/storage/volumes/${encodeURIComponent(id)}/snapshots/preview`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return result.plan;
+  }
+
+  async applyStorageVolumeSnapshot(id: string, plan: StorageVolumeSnapshotPlan): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(`/storage/volumes/${encodeURIComponent(id)}/snapshots`, {
+      method: "POST",
+      headers: { "Idempotency-Key": createIdempotencyKey() },
+      body: JSON.stringify({ plan, plan_sha256: plan.plan_sha256, confirmation: plan.confirmation }),
+    });
+    return result.operation;
+  }
+
+  async saveStorageVolumeSnapshotSchedule(id: string, schedule: Pick<StorageVolumeSnapshotSchedule, "enabled" | "interval_hours" | "retention_count" | "prefix">): Promise<StorageVolumeSnapshotSchedule> {
+    const result = await this.request<{ schedule: StorageVolumeSnapshotSchedule }>(`/storage/volumes/${encodeURIComponent(id)}/snapshot-schedule`, {
+      method: "PUT",
+      body: JSON.stringify(schedule),
+    });
+    return result.schedule;
   }
 
   async haStatus(signal?: AbortSignal): Promise<HAStatusDocument> {

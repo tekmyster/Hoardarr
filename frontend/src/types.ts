@@ -377,6 +377,62 @@ export interface StorageVolumeDetailDocument {
   operations: OperationDocument[];
 }
 
+export interface StorageVolumeSnapshotDocument {
+  id: string;
+  volume_id: string;
+  provider_snapshot_id: string;
+  snapshot_name: string;
+  provider_guid: string;
+  state: "available" | "deleted";
+  detail: Record<string, unknown>;
+  restored_at: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StorageVolumeSnapshotSchedule {
+  enabled: boolean;
+  interval_hours: number;
+  retention_count: number;
+  prefix: string;
+  next_run_at: string | null;
+  last_run_at: string | null;
+}
+
+export interface StorageVolumeSnapshotInventory {
+  items: StorageVolumeSnapshotDocument[];
+  schedule: StorageVolumeSnapshotSchedule;
+  source: "durable_provider_operations";
+}
+
+export interface StorageVolumeSnapshotPlan {
+  schema_version: 1;
+  kind: "storage.volume.snapshot";
+  action: "create" | "delete" | "restore" | "clone";
+  scheduled: boolean;
+  volume: {
+    id: string;
+    stable_identity: string;
+    name: string;
+    provider: "zfs";
+    resource_type: "dataset" | "zvol";
+    provider_resource_id: string;
+    provider_guid: string;
+    presentation: "file" | "block";
+  };
+  snapshot: {
+    id: string | null;
+    provider_snapshot_id: string;
+    snapshot_name: string;
+    provider_guid: string | null;
+  };
+  target_resource_id: string | null;
+  confirmation: "CREATE SNAPSHOT" | "DELETE SNAPSHOT" | "RESTORE SNAPSHOT" | "CREATE CLONE";
+  risk: string;
+  plan_sha256: string;
+}
+
 export type ConnectivityProtocol = "smb" | "nfs" | "iscsi" | "fcoe";
 
 export interface ConnectivityCapabilities {

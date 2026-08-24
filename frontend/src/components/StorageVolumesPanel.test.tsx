@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { OperationDocument, StorageInventory, StorageVolumeDocument, StorageVolumePlan } from "../types";
+import type { OperationDocument, StorageInventory, StorageVolumeDocument, StorageVolumePlan, StorageVolumeSnapshotPlan } from "../types";
 import { StorageVolumesPanel } from "./StorageVolumesPanel";
 
 const pools: StorageInventory["pools"]["items"] = [{
@@ -28,6 +28,17 @@ const operation: OperationDocument = {
   created_at: "2026-08-24T14:00:00Z", updated_at: "2026-08-24T14:00:00Z", result: null, error: null,
 };
 
+const snapshotOperation: OperationDocument = {
+  ...operation, id: "22222222-2222-4222-8222-222222222222", kind: "storage.volume.snapshot",
+};
+
+const snapshotPlan: StorageVolumeSnapshotPlan = {
+  schema_version: 1, kind: "storage.volume.snapshot", action: "create", scheduled: false,
+  volume: { id: "volume-1", stable_identity: "zfs:dataset:tank/media", name: "media", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media", provider_guid: "123456789", presentation: "file" },
+  snapshot: { id: null, provider_snapshot_id: "tank/media@manual", snapshot_name: "manual", provider_guid: null },
+  target_resource_id: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "b".repeat(64),
+};
+
 const volume: StorageVolumeDocument = {
   id: "volume-1", stable_identity: "zfs:dataset:tank/media", name: "media", provider: "zfs",
   resource_type: "dataset", provider_resource_id: "tank/media", presentation: "file",
@@ -51,6 +62,10 @@ describe("StorageVolumesPanel", () => {
     vi.spyOn(api, "createStorageVolume").mockResolvedValue(operation);
     vi.spyOn(api, "operation").mockResolvedValue({ ...operation, status: "succeeded", result: { volume_id: "volume-1" } });
     vi.spyOn(api, "storageVolume").mockResolvedValue({ item: volume, operations: [{ ...operation, status: "succeeded" }] });
+    vi.spyOn(api, "storageVolumeSnapshots").mockResolvedValue({ items: [], schedule: { enabled: false, interval_hours: 24, retention_count: 12, prefix: "hoardarr-auto", next_run_at: null, last_run_at: null }, source: "durable_provider_operations" });
+    vi.spyOn(api, "previewStorageVolumeSnapshot").mockResolvedValue(snapshotPlan);
+    vi.spyOn(api, "applyStorageVolumeSnapshot").mockResolvedValue(snapshotOperation);
+    vi.spyOn(api, "saveStorageVolumeSnapshotSchedule").mockResolvedValue({ enabled: true, interval_hours: 12, retention_count: 8, prefix: "media-auto", next_run_at: "2026-08-25T02:00:00Z", last_run_at: null });
   });
 
   it("shows an honest empty state and completes the real guided review flow", async () => {
@@ -112,5 +127,31 @@ describe("StorageVolumesPanel", () => {
     expect(screen.getByRole("cell", { name: "qos" })).toBeInTheDocument();
     expect(screen.getAllByRole("cell", { name: "unsupported" })).toHaveLength(2);
     expect(dialog).toHaveTextContent("storage volume create");
+    expect(dialog).toHaveTextContent("Snapshots and clones");
+    expect(dialog).toHaveTextContent("No provider snapshots");
+  });
+
+  it("reviews a real provider snapshot and persists a bounded schedule", async () => {
+    vi.mocked(api.storageVolumes).mockResolvedValue([volume]);
+    const user = userEvent.setup();
+    render(<StorageVolumesPanel pools={pools} />);
+    await user.click(await screen.findByRole("button", { name: "Manage" }));
+    await screen.findByText("No provider snapshots");
+    await user.click(screen.getByRole("button", { name: "Review snapshot" }));
+    expect(await screen.findByText("Review create")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "CREATE SNAPSHOT" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "CREATE SNAPSHOT" }));
+    await waitFor(() => expect(api.applyStorageVolumeSnapshot).toHaveBeenCalledWith("volume-1", snapshotPlan));
+    expect(await screen.findByText("Snapshot operation succeeded")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /Keep automatic recovery points/ }));
+    await user.clear(screen.getByLabelText("Every (hours)"));
+    await user.type(screen.getByLabelText("Every (hours)"), "12");
+    await user.clear(screen.getByLabelText("Keep latest"));
+    await user.type(screen.getByLabelText("Keep latest"), "8");
+    await user.clear(screen.getByLabelText("Name prefix"));
+    await user.type(screen.getByLabelText("Name prefix"), "media-auto");
+    await user.click(screen.getByRole("button", { name: "Save snapshot schedule" }));
+    await waitFor(() => expect(api.saveStorageVolumeSnapshotSchedule).toHaveBeenCalledWith("volume-1", { enabled: true, interval_hours: 12, retention_count: 8, prefix: "media-auto" }));
   });
 });

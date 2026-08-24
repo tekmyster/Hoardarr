@@ -69,6 +69,11 @@ from hoardarr.storage.snapraid import (
     replace_data_entry,
     validate_replacement_plan,
 )
+from hoardarr.storage.snapshot_plans import (
+    SnapshotPlanError,
+    snapshot_command,
+    validate_snapshot_plan,
+)
 from hoardarr.storage.volume_plans import (
     VolumePlanError,
     validate_guided_volume_plan,
@@ -211,6 +216,7 @@ InventoryProvider = Callable[[], dict[str, Any]]
 InspectionInventoryProvider = Callable[[Path, Mapping[str, int]], dict[str, Any]]
 ZfsStateProvider = Callable[[str], dict[str, Any]]
 ZfsResourceProvider = Callable[[str], dict[str, Any]]
+ZfsSnapshotProvider = Callable[[str], dict[str, Any] | None]
 LOGGER = logging.getLogger(__name__)
 
 
@@ -520,6 +526,59 @@ def _live_zfs_resource_state(resource_name: str) -> dict[str, Any]:
             "zfs_resource_verification_failed",
             "The created ZFS resource identity is incomplete.",
             needs_attention=True,
+        )
+    return values
+
+
+def _live_zfs_snapshot_state(snapshot_name: str) -> dict[str, Any] | None:
+    if (
+        re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_.:-]{0,254}/[A-Za-z0-9_.:/-]{1,510}@[a-z0-9][a-z0-9_.:-]{0,95}",
+            snapshot_name,
+        )
+        is None
+    ):
+        raise ExecutorFailure(
+            "snapshot_identity_invalid", "The reviewed ZFS snapshot identity is invalid."
+        )
+    try:
+        result = subprocess.run(
+            [
+                _tool("zfs"),
+                "get",
+                "-Hp",
+                "-o",
+                "property,value",
+                "guid,creation,used,referenced",
+                snapshot_name,
+            ],
+            check=False,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutorFailure(
+            "snapshot_capability_unavailable",
+            "The ZFS snapshot provider could not be queried safely.",
+        ) from exc
+    if result.returncode != 0:
+        return None
+    if len(result.stdout) > 64 * 1024:
+        raise ExecutorFailure(
+            "snapshot_provider_output_invalid", "The ZFS snapshot response is unexpectedly large."
+        )
+    values: dict[str, Any] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[0] in {"guid", "creation", "used", "referenced"}:
+            values[parts[0]] = parts[1]
+    if not valid_pool_guid(values.get("guid")):
+        raise ExecutorFailure(
+            "snapshot_provider_output_invalid", "The ZFS snapshot identity was incomplete."
         )
     return values
 
@@ -2977,7 +3036,7 @@ def apply_storage_volume(
         "filesystem_uuid": resource["guid"] if plan["resource_type"] == "dataset" else None,
         "size_bytes": plan["size_bytes"],
         "lifecycle_state": "active",
-        "config": {"purpose": plan["purpose"], **properties},
+        "config": {"purpose": plan["purpose"], "provider_guid": resource["guid"], **properties},
     }
     result = {
         "operation_id": operation_id,
@@ -2989,6 +3048,185 @@ def apply_storage_volume(
         {
             "state": "succeeded",
             "phase": "Logical storage created",
+            "completed_steps": 2,
+            "current_action": None,
+            "result": result,
+            "updated_at": time.time(),
+        }
+    )
+    atomic_json(journal_path, journal)
+    return result
+
+
+def apply_storage_volume_snapshot(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    runner: CommandRunner = _run,
+    zfs_resource_provider: ZfsResourceProvider = _live_zfs_resource_state,
+    zfs_snapshot_provider: ZfsSnapshotProvider = _live_zfs_snapshot_state,
+) -> dict[str, Any]:
+    expected = {"operation", "operation_id", "plan_sha256", "plan", "confirmation_sha256"}
+    operation_id = request.get("operation_id")
+    plan_sha = request.get("plan_sha256")
+    raw_plan = request.get("plan")
+    if (
+        set(request) != expected
+        or request.get("operation") != "apply_storage_volume_snapshot"
+        or not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(plan_sha, str)
+        or not SHA256_RE.fullmatch(plan_sha)
+        or not isinstance(raw_plan, dict)
+        or raw_plan.get("plan_sha256") != plan_sha
+    ):
+        raise ExecutorFailure("snapshot_confirmation_missing", "The snapshot request is invalid.")
+    try:
+        plan = validate_snapshot_plan(raw_plan)
+        command = snapshot_command(plan)
+    except SnapshotPlanError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+    if request.get("confirmation_sha256") != document_hash(
+        {"confirmation": plan["confirmation"]}
+    ):
+        raise ExecutorFailure(
+            "snapshot_confirmation_missing", "Exact snapshot confirmation is required."
+        )
+
+    paths = paths or Paths()
+    validate_quarantine(paths.quarantine_marker)
+    try:
+        paths.transaction_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = paths.transaction_root.lstat()
+    except OSError as exc:
+        raise ExecutorFailure(
+            "transaction_journal_unavailable",
+            "Snapshot activity tracking could not be prepared. No provider action was started.",
+        ) from exc
+    if not stat.S_ISDIR(details.st_mode) or (
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
+    ):
+        raise ExecutorFailure(
+            "transaction_journal_unsafe",
+            "Snapshot activity tracking is unsafe. No provider action was started.",
+        )
+    journal_path = _journal_path(paths, operation_id)
+    prior = _load_prior_journal(journal_path, plan_sha)
+    if prior is not None:
+        return {**prior, "replayed": True}
+
+    volume = plan["volume"]
+    snapshot = plan["snapshot"]
+    current = zfs_resource_provider(str(volume["provider_resource_id"]))
+    if current.get("guid") != volume["provider_guid"]:
+        raise ExecutorFailure(
+            "snapshot_volume_identity_changed",
+            "The ZFS storage identity changed after review. No snapshot action was run.",
+        )
+    before = zfs_snapshot_provider(str(snapshot["provider_snapshot_id"]))
+    if plan["action"] == "create" and before is not None:
+        raise ExecutorFailure("snapshot_exists", "A snapshot with this name already exists.")
+    if plan["action"] != "create" and (
+        before is None or before.get("guid") != snapshot["provider_guid"]
+    ):
+        raise ExecutorFailure(
+            "snapshot_identity_changed",
+            "The selected snapshot identity changed after review. No snapshot action was run.",
+        )
+
+    journal: dict[str, Any] = {
+        "schema_version": 1,
+        "operation_id": operation_id,
+        "plan_sha256": plan_sha,
+        "state": "running",
+        "phase": f"Running snapshot {plan['action']}",
+        "completed_steps": 0,
+        "total_steps": 2,
+        "current_action": {"id": f"snapshot:{plan['action']}", "type": command[1]},
+        "started_at": time.time(),
+        "updated_at": time.time(),
+    }
+    atomic_json(journal_path, journal)
+    try:
+        runner([_tool(command[0]), *command[1:]], 300)
+        journal.update(
+            {
+                "phase": "Verifying provider state",
+                "completed_steps": 1,
+                "current_action": {"id": "snapshot:verify", "type": "zfs.verify"},
+                "updated_at": time.time(),
+            }
+        )
+        atomic_json(journal_path, journal)
+        current = zfs_resource_provider(str(volume["provider_resource_id"]))
+        if current.get("guid") != volume["provider_guid"]:
+            raise ExecutorFailure(
+                "snapshot_volume_identity_changed",
+                "The ZFS storage identity changed during the snapshot action.",
+                needs_attention=True,
+            )
+        observed = zfs_snapshot_provider(str(snapshot["provider_snapshot_id"]))
+        if plan["action"] == "delete":
+            if observed is not None:
+                raise ExecutorFailure(
+                    "snapshot_delete_verification_failed",
+                    "The selected snapshot still exists after deletion.",
+                    needs_attention=True,
+                )
+        elif observed is None or (
+            plan["action"] != "create" and observed.get("guid") != snapshot["provider_guid"]
+        ):
+            raise ExecutorFailure(
+                "snapshot_verification_failed",
+                "The provider snapshot did not match the reviewed identity.",
+                needs_attention=True,
+            )
+        clone_resource = None
+        if plan["action"] == "clone":
+            clone_resource = zfs_resource_provider(str(plan["target_resource_id"]))
+    except Exception:
+        journal.update({"state": "needs_attention", "updated_at": time.time()})
+        atomic_json(journal_path, journal)
+        raise
+
+    result: dict[str, Any] = {
+        "operation_id": operation_id,
+        "action": plan["action"],
+        "snapshot": {
+            "provider_snapshot_id": snapshot["provider_snapshot_id"],
+            "snapshot_name": snapshot["snapshot_name"],
+            "provider_guid": (
+                None if plan["action"] == "delete" else str(observed["guid"])
+            ),
+            "detail": {} if observed is None else dict(observed),
+        },
+        "replayed": False,
+    }
+    if clone_resource is not None:
+        target = str(plan["target_resource_id"])
+        result["clone_volume"] = {
+            "provider": "zfs",
+            "resource_type": volume["resource_type"],
+            "provider_resource_id": target,
+            "name": target.split("/", 1)[-1],
+            "presentation": volume["presentation"],
+            "mountpoint": clone_resource.get("mountpoint"),
+            "device_path": f"/dev/zvol/{target}" if volume["resource_type"] == "zvol" else None,
+            "filesystem_type": "zfs" if volume["resource_type"] == "dataset" else None,
+            "filesystem_uuid": (
+                clone_resource.get("guid") if volume["resource_type"] == "dataset" else None
+            ),
+            "size_bytes": None,
+            "lifecycle_state": "active",
+            "config": {
+                "clone_of": snapshot["provider_snapshot_id"],
+                "provider_guid": clone_resource.get("guid"),
+            },
+        }
+    journal.update(
+        {
+            "state": "succeeded",
+            "phase": "Snapshot action completed",
             "completed_steps": 2,
             "current_action": None,
             "result": result,
@@ -5106,6 +5344,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_storage_redundancy(request, paths=paths)
         elif request.get("operation") == "apply_storage_volume":
             result = apply_storage_volume(request, paths=paths)
+        elif request.get("operation") == "apply_storage_volume_snapshot":
+            result = apply_storage_volume_snapshot(request, paths=paths)
         else:
             result = apply_storage_plan(request, paths=paths)
         response = {"ok": True, "result": result}

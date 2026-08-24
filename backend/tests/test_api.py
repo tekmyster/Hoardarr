@@ -42,6 +42,7 @@ from hoardarr.db.models import (
     StorageEntity,
     StorageGroup,
     StoragePath,
+    StorageVolumeSnapshot,
     User,
 )
 from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
@@ -233,6 +234,122 @@ def test_guided_volume_preview_uses_live_pool_identity_and_requires_operate_scop
     )
     assert replay.status_code == 202
     assert replay.json()["replayed"] is True
+
+
+def test_snapshot_api_enforces_capability_confirmation_schedule_and_identity(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    factory = app.state.session_factory
+    with factory() as session, session.begin():
+        volume, _created = register_volume(
+            session,
+            {
+                "provider": "zfs",
+                "resource_type": "dataset",
+                "provider_resource_id": "tank/media",
+                "name": "media",
+                "presentation": "file",
+                "mountpoint": "/srv/media",
+                "filesystem_type": "zfs",
+                "filesystem_uuid": "123456789",
+                "lifecycle_state": "active",
+                "config": {"provider_guid": "123456789"},
+                "capabilities": {
+                    "snapshot": {"support": "supported", "availability": "available"}
+                },
+            },
+        )
+        volume_id = volume.id
+
+    assert (
+        client.post(
+            f"/api/v1/storage/volumes/{volume_id}/snapshots/preview",
+            json={"action": "create", "snapshot_name": "before-upgrade"},
+        ).status_code
+        == 403
+    )
+    preview = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/snapshots/preview",
+        headers=_state_headers(csrf),
+        json={"action": "create", "snapshot_name": "before-upgrade"},
+    )
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()["plan"]
+    assert plan["snapshot"]["provider_snapshot_id"] == "tank/media@before-upgrade"
+    wrong = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/snapshots",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "snapshot-create"}),
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "wrong",
+        },
+    )
+    assert wrong.status_code == 409
+    created = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/snapshots",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "snapshot-create"}),
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "CREATE SNAPSHOT",
+        },
+    )
+    assert created.status_code == 202
+    assert created.json()["operation"]["kind"] == "storage.volume.snapshot"
+    schedule = client.put(
+        f"/api/v1/storage/volumes/{volume_id}/snapshot-schedule",
+        headers=_state_headers(csrf),
+        json={
+            "enabled": True,
+            "interval_hours": 24,
+            "retention_count": 7,
+            "prefix": "nightly",
+        },
+    )
+    assert schedule.status_code == 200
+    assert schedule.json()["schedule"]["retention_count"] == 7
+    snapshots = client.get(f"/api/v1/storage/volumes/{volume_id}/snapshots")
+    assert snapshots.status_code == 200
+    assert snapshots.json()["items"] == []
+    assert snapshots.json()["schedule"]["enabled"] is True
+
+    with factory() as session, session.begin():
+        snapshot = StorageVolumeSnapshot(
+            volume_id=volume_id,
+            provider_snapshot_id="tank/media@existing",
+            snapshot_name="existing",
+            provider_guid="987654321",
+            state="available",
+        )
+        session.add(snapshot)
+        session.flush()
+        snapshot_id = snapshot.id
+    restore = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/snapshots/preview",
+        headers=_state_headers(csrf),
+        json={"action": "restore", "snapshot_id": snapshot_id},
+    )
+    assert restore.status_code == 200
+    assert restore.json()["plan"]["confirmation"] == "RESTORE SNAPSHOT"
+    restore_plan = restore.json()["plan"]
+    with factory() as session, session.begin():
+        selected = session.get(StorageVolumeSnapshot, snapshot_id)
+        assert selected is not None
+        selected.state = "deleted"
+    changed = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/snapshots",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "snapshot-restore-stale"}),
+        json={
+            "plan": restore_plan,
+            "plan_sha256": restore_plan["plan_sha256"],
+            "confirmation": "RESTORE SNAPSHOT",
+        },
+    )
+    assert changed.status_code == 409
+    assert changed.json()["code"] == "snapshot_identity_changed"
 
 
 def test_ha_peer_configuration_and_heartbeat_are_persistent_and_identity_bound(

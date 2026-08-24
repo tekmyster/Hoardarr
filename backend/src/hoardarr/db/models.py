@@ -468,6 +468,74 @@ class StorageVolume(Base):
     )
 
 
+class StorageVolumeSnapshot(Base):
+    """One provider-native snapshot identity and its durable lifecycle state."""
+
+    __tablename__ = "storage_volume_snapshots"
+    __table_args__ = (
+        UniqueConstraint("provider_snapshot_id", name="uq_storage_volume_snapshot_provider_id"),
+        Index("ix_storage_volume_snapshots_volume_state", "volume_id", "state", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    volume_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("storage_volumes.id", ondelete="CASCADE"), nullable=False
+    )
+    provider_snapshot_id: Mapped[str] = mapped_column(String(640), nullable=False)
+    snapshot_name: Mapped[str] = mapped_column(String(96), nullable=False)
+    provider_guid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="available")
+    created_by_operation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("operations.id", ondelete="SET NULL"), nullable=True
+    )
+    detail_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class StorageVolumeSnapshotSchedule(Base):
+    """Bounded provider snapshot schedule evaluated by the durable worker."""
+
+    __tablename__ = "storage_volume_snapshot_schedules"
+    __table_args__ = (
+        CheckConstraint(
+            "interval_hours >= 1 AND interval_hours <= 8760",
+            name="ck_volume_snapshot_schedule_interval",
+        ),
+        CheckConstraint(
+            "retention_count >= 1 AND retention_count <= 1024",
+            name="ck_volume_snapshot_schedule_retention",
+        ),
+        Index("ix_volume_snapshot_schedules_due", "enabled", "next_run_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    volume_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("storage_volumes.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interval_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    retention_count: Mapped[int] = mapped_column(Integer, nullable=False, default=12)
+    prefix: Mapped[str] = mapped_column(String(32), nullable=False, default="hoardarr-auto")
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class HAConfiguration(Base):
     """Persistent two-node peer awareness; it does not authorize automatic ownership changes."""
 

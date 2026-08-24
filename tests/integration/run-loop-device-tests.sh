@@ -153,6 +153,11 @@ zfs_hash_before="$(sha256sum "$work/zfs/zfs-verified" | awk '{print $1}')"
 zfs_guid_before="$(zpool get -Hp -o value guid "$zpool_name")"
 zfs_mount_before="$(zfs get -Hp -o value mountpoint "$zpool_name/media")"
 zfs snapshot "$zpool_name/media@initial"
+"$python" "$repo/tests/integration/zfs_snapshot_lifecycle.py" \
+  --dataset "$zpool_name/media" \
+  --mountpoint "$work/zfs" \
+  --work-root "$work" \
+  --evidence "$repo/dist/validation/zfs-snapshot-lifecycle.json"
 zpool scrub "$zpool_name"
 zpool status "$zpool_name" | grep -q 'state: ONLINE'
 "$python" - "$zpool_name" >"$work/zfs-before.json" <<'PY'

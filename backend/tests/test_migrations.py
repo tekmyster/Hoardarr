@@ -98,6 +98,8 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
         "foreign_migration_jobs",
         "foreign_migration_entries",
         "storage_volumes",
+        "storage_volume_snapshots",
+        "storage_volume_snapshot_schedules",
     } <= set(inspect(engine).get_table_names())
     assert "not_before" in {column["name"] for column in inspect(engine).get_columns("operations")}
     assert {"expectation_id", "fingerprint", "state", "resolved_at"} <= {

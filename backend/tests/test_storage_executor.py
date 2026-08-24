@@ -21,9 +21,11 @@ from hoardarr.storage.executor import (
     _validate_plan,
     apply_storage_plan,
     apply_storage_volume,
+    apply_storage_volume_snapshot,
     storage_operation_status,
 )
 from hoardarr.storage.layouts import CommandSpec, snapraid_expand_config
+from hoardarr.storage.snapshot_plans import build_snapshot_plan
 from hoardarr.storage.volume_plans import build_guided_volume_plan
 
 
@@ -87,6 +89,7 @@ def test_guided_zfs_volume_execution_revalidates_pool_and_replays_journal(
         ]
     ]
     assert first["volume"]["provider_resource_id"] == "tank/movies"
+    assert first["volume"]["config"]["provider_guid"] == "1111222233334444"
     replay = apply_storage_volume(
         request,
         paths=paths,
@@ -174,6 +177,102 @@ def test_guided_zfs_volume_execution_refuses_pool_identity_drift(
             zfs_state_provider=lambda _name: {"pool_guid": "9876543210987654321"},
         )
     assert raised.value.code == "zfs_pool_identity_changed"
+
+
+def test_snapshot_execution_revalidates_guid_verifies_provider_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_snapshot_plan(
+        volume={
+            "id": "volume-1",
+            "stable_identity": "zfs:dataset:tank/movies",
+            "name": "movies",
+            "provider": "zfs",
+            "resource_type": "dataset",
+            "provider_resource_id": "tank/movies",
+            "presentation": "file",
+        },
+        provider_guid="1111222233334444",
+        action="create",
+        snapshot_name="before-upgrade",
+    )
+    request = {
+        "operation": "apply_storage_volume_snapshot",
+        "operation_id": "44444444-4444-4444-8444-444444444444",
+        "plan_sha256": plan["plan_sha256"],
+        "plan": plan,
+        "confirmation_sha256": document_hash({"confirmation": "CREATE SNAPSHOT"}),
+    }
+    observed = iter([None, {"guid": "5555666677778888", "used": "0"}])
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        quarantine_marker=tmp_path / "quarantine.json",
+    )
+    result = apply_storage_volume_snapshot(
+        request,
+        paths=paths,
+        runner=lambda command, _timeout: commands.append(command),
+        zfs_resource_provider=lambda _name: {
+            "guid": "1111222233334444",
+            "type": "filesystem",
+        },
+        zfs_snapshot_provider=lambda _name: next(observed),
+    )
+    assert commands == [["/usr/sbin/zfs", "snapshot", "tank/movies@before-upgrade"]]
+    assert result["snapshot"]["provider_guid"] == "5555666677778888"
+    replay = apply_storage_volume_snapshot(
+        request,
+        paths=paths,
+        runner=lambda *_args: pytest.fail("a replay must not run zfs again"),
+    )
+    assert replay["replayed"] is True
+
+
+def test_snapshot_execution_refuses_snapshot_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_snapshot_plan(
+        volume={
+            "id": "volume-1",
+            "stable_identity": "zfs:dataset:tank/movies",
+            "name": "movies",
+            "provider": "zfs",
+            "resource_type": "dataset",
+            "provider_resource_id": "tank/movies",
+            "presentation": "file",
+        },
+        provider_guid="1111222233334444",
+        action="delete",
+        snapshot={
+            "id": "snapshot-1",
+            "provider_snapshot_id": "tank/movies@old",
+            "snapshot_name": "old",
+            "provider_guid": "2222333344445555",
+        },
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    with pytest.raises(ExecutorFailure) as raised:
+        apply_storage_volume_snapshot(
+            {
+                "operation": "apply_storage_volume_snapshot",
+                "operation_id": "55555555-5555-4555-8555-555555555555",
+                "plan_sha256": plan["plan_sha256"],
+                "plan": plan,
+                "confirmation_sha256": document_hash({"confirmation": "DELETE SNAPSHOT"}),
+            },
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                quarantine_marker=tmp_path / "quarantine.json",
+            ),
+            runner=lambda *_args: pytest.fail("identity drift must fail before delete"),
+            zfs_resource_provider=lambda _name: {"guid": "1111222233334444"},
+            zfs_snapshot_provider=lambda _name: {"guid": "different"},
+        )
+    assert raised.value.code == "snapshot_identity_changed"
 
 
 @pytest.mark.parametrize(
