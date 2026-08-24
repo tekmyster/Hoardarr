@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { OperationDocument, StorageInventory, StorageVolumePlan } from "../types";
+import type { OperationDocument, StorageInventory, StorageVolumeDocument, StorageVolumePlan } from "../types";
 import { StorageVolumesPanel } from "./StorageVolumesPanel";
 
 const pools: StorageInventory["pools"]["items"] = [{
@@ -28,6 +28,19 @@ const operation: OperationDocument = {
   created_at: "2026-08-24T14:00:00Z", updated_at: "2026-08-24T14:00:00Z", result: null, error: null,
 };
 
+const volume: StorageVolumeDocument = {
+  id: "volume-1", stable_identity: "zfs:dataset:tank/media", name: "media", provider: "zfs",
+  resource_type: "dataset", provider_resource_id: "tank/media", presentation: "file",
+  parent_storage_entity_id: null, mountpoint: "/srv/hoardarr/volumes/media", device_path: null,
+  filesystem_type: "zfs", filesystem_uuid: null, size_bytes: 90_000_000_000, allocated_bytes: 10_000,
+  lifecycle_state: "active", config: {}, capabilities_detected_at: "2026-08-24T14:01:00Z",
+  capabilities: {
+    snapshot: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+    qos: { support: "unsupported", availability: "unsupported", source: "provider_baseline", constraints: {} },
+  },
+  created_at: "2026-08-24T14:00:00Z", updated_at: "2026-08-24T14:01:00Z",
+};
+
 describe("StorageVolumesPanel", () => {
   afterEach(() => cleanup());
 
@@ -37,6 +50,7 @@ describe("StorageVolumesPanel", () => {
     vi.spyOn(api, "previewStorageVolume").mockResolvedValue(plan);
     vi.spyOn(api, "createStorageVolume").mockResolvedValue(operation);
     vi.spyOn(api, "operation").mockResolvedValue({ ...operation, status: "succeeded", result: { volume_id: "volume-1" } });
+    vi.spyOn(api, "storageVolume").mockResolvedValue({ item: volume, operations: [{ ...operation, status: "succeeded" }] });
   });
 
   it("shows an honest empty state and completes the real guided review flow", async () => {
@@ -84,5 +98,19 @@ describe("StorageVolumesPanel", () => {
       sparse: false,
       size_bytes: 40 * 1024 ** 3,
     })));
+  });
+
+  it("shows provider capability truth and durable operation history", async () => {
+    vi.mocked(api.storageVolumes).mockResolvedValue([volume]);
+    const user = userEvent.setup();
+    render(<StorageVolumesPanel pools={pools} />);
+    await user.click(await screen.findByRole("button", { name: "Manage" }));
+    const dialog = await screen.findByRole("dialog", { name: "media" });
+    expect(dialog).toHaveTextContent("zfs:dataset:tank/media");
+    expect(screen.getByRole("cell", { name: "snapshot" })).toBeInTheDocument();
+    expect(screen.getAllByRole("cell", { name: "available" })).toHaveLength(1);
+    expect(screen.getByRole("cell", { name: "qos" })).toBeInTheDocument();
+    expect(screen.getAllByRole("cell", { name: "unsupported" })).toHaveLength(2);
+    expect(dialog).toHaveTextContent("storage volume create");
   });
 });

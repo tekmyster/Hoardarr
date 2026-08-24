@@ -322,32 +322,33 @@ def _optional_text(value: object, maximum: int) -> str | None:
 
 def volume_documents(session: Session) -> list[dict[str, object]]:
     items = session.scalars(select(StorageVolume).order_by(StorageVolume.name, StorageVolume.id))
-    return [
-        {
-            "id": item.id,
-            "stable_identity": item.stable_identity,
-            "name": item.name,
-            "provider": item.provider,
-            "resource_type": item.resource_type,
-            "provider_resource_id": item.provider_resource_id,
-            "presentation": item.presentation,
-            "parent_storage_entity_id": item.parent_storage_entity_id,
-            "mountpoint": item.mountpoint,
-            "device_path": item.device_path,
-            "filesystem_type": item.filesystem_type,
-            "filesystem_uuid": item.filesystem_uuid,
-            "size_bytes": item.size_bytes,
-            "allocated_bytes": item.allocated_bytes,
-            "lifecycle_state": item.lifecycle_state,
-            "config": dict(item.config_json),
-            "capabilities": dict(item.capabilities_json),
-            "capabilities_detected_at": (
-                item.capabilities_detected_at.isoformat()
-                if item.capabilities_detected_at is not None
-                else None
-            ),
-            "created_at": item.created_at.isoformat(),
-            "updated_at": item.updated_at.isoformat(),
-        }
-        for item in items
-    ]
+    return [volume_document(item) for item in items]
+
+
+def volume_document(item: StorageVolume) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "stable_identity": item.stable_identity,
+        "name": item.name,
+        "provider": item.provider,
+        "resource_type": item.resource_type,
+        "provider_resource_id": item.provider_resource_id,
+        "presentation": item.presentation,
+        "parent_storage_entity_id": item.parent_storage_entity_id,
+        "mountpoint": item.mountpoint,
+        "device_path": item.device_path,
+        "filesystem_type": item.filesystem_type,
+        "filesystem_uuid": item.filesystem_uuid,
+        "size_bytes": item.size_bytes,
+        "allocated_bytes": item.allocated_bytes,
+        "lifecycle_state": item.lifecycle_state,
+        "config": dict(item.config_json),
+        "capabilities": dict(item.capabilities_json),
+        "capabilities_detected_at": (
+            item.capabilities_detected_at.isoformat()
+            if item.capabilities_detected_at is not None
+            else None
+        ),
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+    }

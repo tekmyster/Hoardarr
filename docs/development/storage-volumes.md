@@ -22,6 +22,10 @@ Supported initial resource classes are:
 `POST /api/v1/storage/volumes/preview` followed by `POST /api/v1/storage/volumes`. The apply call
 requires the immutable preview hash and creates a durable `storage.volume.create` operation.
 The worker registers a volume only after the provider resource has been created and read back.
+`GET /api/v1/storage/volumes/{id}` returns one canonical item together with its bounded durable
+operation history. The Storage page's **Manage** action shows provider identity, the observed
+capability matrix, its observation timestamp, and that history; it never upgrades an unsupported
+or unavailable provider capability into an editable setting.
 
 The initial production mutation provider is ZFS. Guided users select a human purpose rather than
 provider geometry:

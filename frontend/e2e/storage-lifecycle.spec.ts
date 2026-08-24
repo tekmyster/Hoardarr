@@ -359,6 +359,26 @@ async function storageLifecycleServer(page: Page) {
       guidedVolumeCreated = true;
       return json({ operation: { id: volumeOperationId, kind: "storage.volume.create", status: "queued", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: null, error: null, created_at: now, updated_at: now }, replayed: false }, 202);
     }
+    if (pathname.endsWith("/storage/volumes/volume-media-library")) return json({
+      item: {
+        id: "volume-media-library", stable_identity: "zfs:dataset:tank/media-library", name: "media-library",
+        provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library", presentation: "file",
+        parent_storage_entity_id: null, mountpoint: "/srv/hoardarr/volumes/media-library", device_path: null,
+        filesystem_type: "zfs", filesystem_uuid: null, size_bytes: 900_000_000_000, allocated_bytes: 0,
+        lifecycle_state: "active", config: volumePlan.properties,
+        capabilities: {
+          snapshot: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+          clone: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+          qos: { support: "unsupported", availability: "unsupported", source: "provider_baseline", constraints: {} },
+        },
+        capabilities_detected_at: now, created_at: now, updated_at: now,
+      },
+      operations: [{
+        id: volumeOperationId, kind: "storage.volume.create", status: "succeeded",
+        resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" },
+        result: { volume_id: "volume-media-library" }, error: null, created_at: now, updated_at: now,
+      }],
+    });
     if (pathname.endsWith("/storage/volumes")) return json({ items: guidedVolumeCreated ? [{
       id: "volume-media-library", stable_identity: "zfs:dataset:tank/media-library", name: "media-library",
       provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library", presentation: "file",
@@ -450,6 +470,11 @@ test("creates a real provider-backed media area through the Guided Storage UI", 
   expect(observed.guidedVolumeCreated()).toBe(true);
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(page.getByText("zfs:dataset:tank/media-library")).toBeVisible();
+  await page.getByRole("button", { name: "Manage" }).click();
+  const detail = page.getByRole("dialog", { name: "media-library" });
+  await expect(detail.getByText("Provider capabilities")).toBeVisible();
+  await expect(detail.getByRole("cell", { name: "snapshot" })).toBeVisible();
+  await expect(detail.getByText("storage volume create")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("guided-storage-volume-created.png"), fullPage: true });
 });
 

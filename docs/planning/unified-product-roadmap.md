@@ -336,7 +336,7 @@ These task families extend—rather than replace—the original 120 rows. Status
 | VOLUME-08 | P2 | Replication targets and schedules | Configure backend-aware remote replication, credentials, schedules, resumability, lag, and failure history. | NOT STARTED |
 | VOLUME-09 | P2 | Replication telemetry | Persist last success, lag, transferred bytes, destination state, recovery point, and honest unavailable values. | NOT STARTED |
 | VOLUME-10 | P2 | Hot-spare and rolling replacement policies | Model provider-native spares and maintenance replacement without conflating parity, replicas, or generic copies. | NOT STARTED |
-| VOLUME-11 | P2 | Logical-storage UI and Activity | Provide navigation, list/detail, wizard, capability matrix, history, loading/empty/error states, and durable operation progress. | NOT STARTED |
+| VOLUME-11 | P2 | Logical-storage UI and Activity | Provide navigation, list/detail, wizard, capability matrix, history, loading/empty/error states, and durable operation progress. | VERIFIED — Storage includes an authenticated canonical inventory, real Guided/Advanced creation wizard, bounded detail API, provider identity and observation timestamp, honest support/availability/source matrix, durable per-volume operation history, loading/empty/error states, abortable detail requests and Activity progress; focused backend API test, 4 component tests, production build and Playwright create/detail workflow pass with browser screenshot evidence |
 | VOLUME-12 | P2 | Disposable Linux integration | Execute capability, creation, snapshot, restore, quota, LUN, and replication tests only against purpose-created virtual storage. | NOT STARTED |
 
 ### HA — Active/passive storage ownership maturity

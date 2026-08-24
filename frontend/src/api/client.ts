@@ -58,6 +58,7 @@ import type {
   StorageExpansionAssessment,
   StorageGroupDocument,
   StorageVolumeDocument,
+  StorageVolumeDetailDocument,
   StorageVolumePlan,
   StorageRedundancyPlan,
   StorageRedundancyEventDocument,
@@ -450,6 +451,10 @@ class HoardarrApi {
       signal,
     });
     return result.items;
+  }
+
+  async storageVolume(id: string, signal?: AbortSignal): Promise<StorageVolumeDetailDocument> {
+    return this.request<StorageVolumeDetailDocument>(`/storage/volumes/${encodeURIComponent(id)}`, { signal });
   }
 
   async haStatus(signal?: AbortSignal): Promise<HAStatusDocument> {

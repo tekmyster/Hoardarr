@@ -372,6 +372,11 @@ export interface HAConfigurationInput {
   service_ip?: string | null;
 }
 
+export interface StorageVolumeDetailDocument {
+  item: StorageVolumeDocument;
+  operations: OperationDocument[];
+}
+
 export type ConnectivityProtocol = "smb" | "nfs" | "iscsi" | "fcoe";
 
 export interface ConnectivityCapabilities {

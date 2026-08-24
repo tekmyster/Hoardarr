@@ -58,6 +58,7 @@ from hoardarr.db.models import (
     StorageBackend,
     StorageDrainJob,
     StorageGroup,
+    StorageVolume,
 )
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
 from hoardarr.storage.client import StorageExecutorError, preview_foreign_stack
@@ -118,7 +119,7 @@ from hoardarr.storage.volume_plans import (
     build_guided_volume_plan,
     validate_guided_volume_plan,
 )
-from hoardarr.storage.volumes import canonical_volume_identity, volume_documents
+from hoardarr.storage.volumes import canonical_volume_identity, volume_document, volume_documents
 
 router = APIRouter(prefix="/storage", tags=["storage"])
 
@@ -1015,6 +1016,35 @@ def create_storage_volume(
             details={"plan_sha256": payload.plan_sha256, "purpose": plan["purpose"]},
         )
     return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.get("/volumes/{volume_id}")
+def storage_volume_detail(
+    volume_id: str,
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    operations = session.scalars(
+        select(Operation)
+        .where(
+            Operation.resource_type == "storage_volume",
+            Operation.resource_id == volume.stable_identity,
+        )
+        .order_by(Operation.created_at.desc())
+        .limit(100)
+    )
+    return {
+        "item": volume_document(volume),
+        "operations": [operation_document(item) for item in operations],
+    }
 
 
 @router.post("/redundancy/preview")

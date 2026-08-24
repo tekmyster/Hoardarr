@@ -105,7 +105,7 @@ def test_storage_volume_inventory_requires_authentication_and_returns_provider_i
     _claim_owner(client, setup_token)
     factory = app.state.session_factory
     with factory() as session, session.begin():
-        register_volume(
+        volume, _created = register_volume(
             session,
             {
                 "provider": "filesystem",
@@ -123,6 +123,19 @@ def test_storage_volume_inventory_requires_authentication_and_returns_provider_i
                 "config": {},
             },
         )
+        session.add(
+            Operation(
+                kind="storage.volume.create",
+                status="succeeded",
+                actor_type="user",
+                actor_id="owner",
+                resource_type="storage_volume",
+                resource_id=volume.stable_identity,
+                request_sha256="a" * 64,
+                request_json={"name": "Media filesystem"},
+                result_json={"volume_id": volume.id},
+            )
+        )
 
     response = client.get("/api/v1/storage/volumes")
     assert response.status_code == 200
@@ -132,6 +145,15 @@ def test_storage_volume_inventory_requires_authentication_and_returns_provider_i
     assert item["presentation"] == "file"
     assert item["capabilities"]["size"]["availability"] == "available"
     assert item["capabilities"]["snapshot"]["support"] == "unsupported"
+
+    detail = client.get(f"/api/v1/storage/volumes/{item['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["item"] == item
+    assert detail.json()["operations"][0]["kind"] == "storage.volume.create"
+    assert detail.json()["operations"][0]["resource"]["id"] == item["stable_identity"]
+    missing = client.get("/api/v1/storage/volumes/00000000-0000-4000-8000-000000000000")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "volume_not_found"
 
 
 def test_guided_volume_preview_uses_live_pool_identity_and_requires_operate_scope(
