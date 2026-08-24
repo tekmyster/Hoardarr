@@ -36,7 +36,16 @@ jobs:
           version: 0.11.28
       - run: uv sync --project backend --locked --all-groups
       - name: Build the final MinIO Community release from its official signed tag
-        run: go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+        run: |
+          for attempt in 1 2 3; do
+            if GODEBUG=http2client=0 GOPROXY=https://proxy.golang.org,direct \
+              go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z; then
+              exit 0
+            fi
+            echo "MinIO dependency download failed on attempt ${attempt}; retrying"
+            sleep $((attempt * 10))
+          done
+          exit 1
       - name: Start disposable MinIO and exercise backup, checksum, and restore validation
         run: |
           mkdir -p /tmp/hoardarr-minio-data dist/validation
