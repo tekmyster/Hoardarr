@@ -19,7 +19,7 @@ describe("StoragePage", () => {
     expect(screen.queryByText(/Step 1 of/i)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Scan storage" }));
-    await user.click(screen.getByRole("button", { name: "Add storage" }));
+    await user.click(screen.getByRole("button", { name: "Add storage", exact: true }));
     await user.click(screen.getByRole("button", { name: "Move data" }));
     await user.click(screen.getByRole("button", { name: "Change storage" }));
 

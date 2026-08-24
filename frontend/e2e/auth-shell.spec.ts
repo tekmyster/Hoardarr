@@ -462,7 +462,7 @@ test.describe("production sign-in shell", () => {
     await expect(storageNav).toBeVisible();
     await storageNav.click();
     await expect(page.getByRole("heading", { name: "Storage", level: 1 })).toBeVisible();
-    await page.getByRole("button", { name: "Add storage" }).click();
+    await page.getByRole("button", { name: "Add storage", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Add storage" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Guided" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByText("Hoardarr finds drives before asking how they should be used. Identity comes from hardware, not a friendly nickname.")).toBeVisible();
@@ -494,7 +494,7 @@ test.describe("production sign-in shell", () => {
     await storageWizardServer(page);
     await page.goto("/");
     await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
-    await page.getByRole("button", { name: "Add storage" }).click();
+    await page.getByRole("button", { name: "Add storage", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Add storage" });
     await dialog.getByRole("checkbox", { name: /Select SSD-1TB serial SSD-1/ }).check();
     await dialog.getByRole("button", { name: "Advanced settings" }).click();
@@ -1134,7 +1134,7 @@ test.describe("production sign-in shell", () => {
     await storageWizardServer(page);
     await page.goto("/");
     await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
-    await page.getByRole("button", { name: "Add storage" }).click();
+    await page.getByRole("button", { name: "Add storage", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Add storage" });
     for (const serial of ["SSD-1", "SSD-2", "SSD-3", "SSD-4"]) {
       await dialog.getByRole("checkbox", { name: new RegExp(`Select SSD-1TB serial ${serial}`) }).check();
@@ -1165,7 +1165,7 @@ test.describe("production sign-in shell", () => {
     await storageWizardServer(page);
     await page.goto("/");
     await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
-    await page.getByRole("button", { name: "Add storage" }).click();
+    await page.getByRole("button", { name: "Add storage", exact: true }).click();
     let dialog = page.getByRole("dialog", { name: "Add storage" });
     await dialog.getByRole("checkbox", { name: /Select SSD-1TB serial SSD-1/ }).check();
     for (let step = 0; step < 7; step += 1) await dialog.getByRole("button", { name: "Continue" }).click();
