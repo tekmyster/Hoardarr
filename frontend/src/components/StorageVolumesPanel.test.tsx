@@ -36,7 +36,7 @@ const snapshotPlan: StorageVolumeSnapshotPlan = {
   schema_version: 1, kind: "storage.volume.snapshot", action: "create", scheduled: false,
   volume: { id: "volume-1", stable_identity: "zfs:dataset:tank/media", name: "media", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media", provider_guid: "123456789", presentation: "file" },
   snapshot: { id: null, provider_snapshot_id: "tank/media@manual", snapshot_name: "manual", provider_guid: null },
-  target_resource_id: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "b".repeat(64),
+  target_resource_id: null, target_mountpoint: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "b".repeat(64),
 };
 
 const volume: StorageVolumeDocument = {

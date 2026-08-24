@@ -78,6 +78,7 @@ def build_snapshot_plan(
         }
 
     target_resource_id = None
+    target_mountpoint = None
     if action == "clone":
         candidate = str(clone_name or "").strip().lower()
         if not _RESOURCE_NAME.fullmatch(candidate):
@@ -90,6 +91,8 @@ def build_snapshot_plan(
             raise SnapshotPlanError(
                 "snapshot_clone_target_invalid", "The clone must use a new provider resource name."
             )
+        if volume.get("resource_type") == "dataset":
+            target_mountpoint = f"/srv/hoardarr/volumes/{candidate}"
     confirmation = {
         "create": "CREATE SNAPSHOT",
         "delete": "DELETE SNAPSHOT",
@@ -119,6 +122,7 @@ def build_snapshot_plan(
             "provider_guid": None,
         },
         "target_resource_id": target_resource_id,
+        "target_mountpoint": target_mountpoint,
         "confirmation": confirmation,
         "risk": (
             "Restoring replaces current data with the selected point in time."
@@ -168,4 +172,13 @@ def snapshot_command(plan: Mapping[str, Any]) -> list[str]:
         return ["zfs", "destroy", snapshot_id]
     if action == "restore":
         return ["zfs", "rollback", snapshot_id]
+    if validated["target_mountpoint"] is not None:
+        return [
+            "zfs",
+            "clone",
+            "-o",
+            f"mountpoint={validated['target_mountpoint']}",
+            snapshot_id,
+            str(validated["target_resource_id"]),
+        ]
     return ["zfs", "clone", snapshot_id, str(validated["target_resource_id"])]

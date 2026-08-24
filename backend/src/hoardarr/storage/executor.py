@@ -3184,6 +3184,16 @@ def apply_storage_volume_snapshot(
         clone_resource = None
         if plan["action"] == "clone":
             clone_resource = zfs_resource_provider(str(plan["target_resource_id"]))
+            expected_type = "filesystem" if volume["resource_type"] == "dataset" else "volume"
+            if clone_resource.get("type") != expected_type or (
+                plan["target_mountpoint"] is not None
+                and clone_resource.get("mountpoint") != plan["target_mountpoint"]
+            ):
+                raise ExecutorFailure(
+                    "snapshot_clone_verification_failed",
+                    "The provider clone presentation did not match the reviewed plan.",
+                    needs_attention=True,
+                )
     except Exception:
         journal.update({"state": "needs_attention", "updated_at": time.time()})
         atomic_json(journal_path, journal)

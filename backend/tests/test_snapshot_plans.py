@@ -52,6 +52,8 @@ def test_create_restore_delete_and_clone_commands_are_fixed_argv() -> None:
     assert snapshot_command(clone) == [
         "zfs",
         "clone",
+        "-o",
+        "mountpoint=/srv/hoardarr/volumes/media-test",
         "tank/media@before-upgrade",
         "tank/media-test",
     ]

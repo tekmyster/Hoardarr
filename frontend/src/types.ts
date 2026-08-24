@@ -428,6 +428,7 @@ export interface StorageVolumeSnapshotPlan {
     provider_guid: string | null;
   };
   target_resource_id: string | null;
+  target_mountpoint: string | null;
   confirmation: "CREATE SNAPSHOT" | "DELETE SNAPSHOT" | "RESTORE SNAPSHOT" | "CREATE CLONE";
   risk: string;
   plan_sha256: string;

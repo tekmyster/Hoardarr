@@ -365,7 +365,7 @@ async function storageLifecycleServer(page: Page) {
         schema_version: 1, kind: "storage.volume.snapshot", action: "create", scheduled: false,
         volume: { id: "volume-media-library", stable_identity: "zfs:dataset:tank/media-library", name: "media-library", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library", provider_guid: "123456789", presentation: "file" },
         snapshot: { id: null, provider_snapshot_id: "tank/media-library@manual", snapshot_name: "manual", provider_guid: null },
-        target_resource_id: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "a".repeat(64),
+        target_resource_id: null, target_mountpoint: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "a".repeat(64),
       };
       return json({ plan: snapshotPlan, plan_sha256: snapshotPlan.plan_sha256 });
     }
