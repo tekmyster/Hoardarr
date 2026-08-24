@@ -194,6 +194,7 @@ def test_mixed_layout_builds_two_component_pools_behind_one_mergerfs_namespace()
         "/mnt/hoardarr/media-all",
     )
     assert "category.create=epmfs" in mergerfs.argv[2]
+    assert "allow_other" in mergerfs.argv[2]
     assert commands[-1].argv == ("findmnt", "--mountpoint", "/mnt/hoardarr/media-all")
 
 

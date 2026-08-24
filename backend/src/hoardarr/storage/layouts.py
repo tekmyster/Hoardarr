@@ -441,7 +441,7 @@ def layout_commands(
         merger_options = (
             f"category.create={options['create_policy']},"
             f"category.search={options['search_policy']},"
-            "use_ino,cache.files=off,dropcacheonclose=true"
+            "allow_other,use_ino,cache.files=off,dropcacheonclose=true"
         )
         commands.extend(
             [

@@ -1948,6 +1948,44 @@ def _replace_mergerfs_source(content: str, mountpoint: str, branches: list[str])
     return "\n".join(rows) + ("\n" if content.endswith("\n") else "")
 
 
+def _ensure_mergerfs_allow_other(fstab_path: Path, mountpoint: str) -> bool:
+    """Persist the libfuse access option for one exact reviewed mergerFS mount."""
+
+    try:
+        content = fstab_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ExecutorFailure(
+            "fstab_unavailable", "Automatic mount configuration could not be read."
+        ) from exc
+    matches: list[tuple[int, list[str]]] = []
+    rows = content.splitlines()
+    for index, row in enumerate(rows):
+        stripped = row.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if (
+            len(fields) == 6
+            and fields[2] in MERGERFS_TYPES
+            and _fstab_decode(fields[1]) == mountpoint
+        ):
+            matches.append((index, fields))
+    if len(matches) != 1:
+        raise ExecutorFailure(
+            "mergerfs_fstab_ambiguous",
+            "The managed combined-storage mount configuration could not be identified safely.",
+            needs_attention=True,
+        )
+    index, fields = matches[0]
+    options = fields[3].split(",")
+    if "allow_other" in options:
+        return False
+    fields[3] = ",".join(["allow_other", *options])
+    rows[index] = " ".join(fields)
+    atomic_text(fstab_path, "\n".join(rows) + ("\n" if content.endswith("\n") else ""), mode=0o644)
+    return True
+
+
 def _append_fstab(
     paths: Paths,
     operation_id: str,
@@ -2407,7 +2445,7 @@ def _execute_actions(
             prior_branches: list[str] = []
             options = (
                 f"category.create={create_policy},category.search={search_policy},"
-                "use_ino,cache.files=off,dropcacheonclose=true"
+                "allow_other,use_ino,cache.files=off,dropcacheonclose=true"
             )
         else:
             discovery = discover_mergerfs(
@@ -2781,7 +2819,7 @@ def _execute_actions(
             mixed_options = (
                 f"category.create={options['create_policy']},"
                 f"category.search={options['search_policy']},"
-                "use_ino,cache.files=off,dropcacheonclose=true"
+                "allow_other,use_ino,cache.files=off,dropcacheonclose=true"
             )
             fstab_lines.append(
                 f"{':'.join(component_mounts)} {presentation_root} "
@@ -2820,7 +2858,7 @@ def _execute_actions(
             [
                 _tool("mergerfs"),
                 "-o",
-                "category.create=mfs,category.search=ff,use_ino",
+                "category.create=mfs,category.search=ff,allow_other,use_ino",
                 data_branches,
                 str(presentation_root),
             ],
@@ -2828,7 +2866,7 @@ def _execute_actions(
         )
         fstab_lines.append(
             f"{data_branches} {presentation_root} fuse.mergerfs "
-            "category.create=mfs,category.search=ff,use_ino,nofail 0 0"
+            "category.create=mfs,category.search=ff,allow_other,use_ino,nofail 0 0"
         )
         _install_storage_timer(
             paths,
@@ -3018,11 +3056,27 @@ def reconcile_storage_access(
         actions["directories"],
         username,
     )
+    topology = storage.get("topology")
+    mergerfs_mountpoint: str | None = None
+    if topology == "mergerfs":
+        mergerfs = storage.get("mergerfs")
+        value = mergerfs.get("mountpoint") if isinstance(mergerfs, Mapping) else None
+        if isinstance(value, str):
+            mergerfs_mountpoint = os.fspath(_safe_mountpoint(value))
+    elif topology in {"snapraid", "mixed"}:
+        mergerfs_mountpoint = os.fspath(presentation_root)
+    mount_configuration_updated = False
+    if mergerfs_mountpoint is not None:
+        mount_configuration_updated = _ensure_mergerfs_allow_other(
+            paths.fstab, mergerfs_mountpoint
+        )
     return {
         "operation_id": operation_id,
         "mountpoint": os.fspath(presentation_root),
         "username": username,
         "directories_reconciled": applied,
+        "mount_configuration_updated": mount_configuration_updated,
+        "activation": "next_mount" if mount_configuration_updated else "active",
         "replayed": False,
     }
 

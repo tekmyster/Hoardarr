@@ -1247,7 +1247,9 @@ def test_mixed_layout_executor_revalidates_and_builds_component_pools_before_mer
     assert "findmnt" in tools
     assert revalidations >= len(commands)
     assert result["topology"] == "mixed"
-    assert "fuse.mergerfs" in paths.fstab.read_text(encoding="utf-8")
+    fstab_content = paths.fstab.read_text(encoding="utf-8")
+    assert "fuse.mergerfs" in fstab_content
+    assert "allow_other" in fstab_content
 
 
 def test_mergerfs_periodic_trim_never_installs_snapraid_timers(
@@ -1325,7 +1327,9 @@ def test_mergerfs_periodic_trim_never_installs_snapraid_timers(
     )
 
     assert result["topology"] == "mergerfs"
-    assert any(command[0] == "mergerfs" for command in commands)
+    mergerfs_command = next(command for command in commands if command[0] == "mergerfs")
+    assert "allow_other" in mergerfs_command[2]
+    assert "allow_other" in paths.fstab.read_text(encoding="utf-8")
     assert list(paths.systemd_unit_root.glob("hoardarr-fstrim-*.timer"))
     assert not list(paths.systemd_unit_root.glob("hoardarr-snapraid-*.timer"))
 
@@ -1430,7 +1434,11 @@ def test_access_reconciliation_is_bound_to_hashed_plan(
 ) -> None:
     document = {
         "presentation_root": "/data",
-        "storage": {"service_account": {"username": "media"}},
+        "storage": {
+            "topology": "mergerfs",
+            "mergerfs": {"mountpoint": "/mnt/hoardarr/media"},
+            "service_account": {"username": "media"},
+        },
         "actions": {
             "directories": [{"type": "directory.ensure", "path": "/data/media/Movies"}]
         },
@@ -1451,19 +1459,27 @@ def test_access_reconciliation_is_bound_to_hashed_plan(
         "_ensure_storage_directory_access",
         lambda root, actions, username: [f"{root}/media", f"{root}/media/Movies"],
     )
+    fstab = tmp_path / "fstab"
+    fstab.write_text(
+        f"/mnt/a:/mnt/b {presentation} fuse.mergerfs category.create=mfs,nofail 0 0\n",
+        encoding="utf-8",
+    )
 
-    result = reconcile_storage_access(request, paths=Paths())
+    result = reconcile_storage_access(request, paths=Paths(fstab=fstab))
     assert result["operation_id"] == operation_id
     assert result["username"] == "media"
     assert result["directories_reconciled"] == [
         f"{presentation}/media",
         f"{presentation}/media/Movies",
     ]
+    assert result["mount_configuration_updated"] is True
+    assert result["activation"] == "next_mount"
+    assert "allow_other" in fstab.read_text(encoding="utf-8")
 
     changed = deepcopy(request)
     changed["document"]["presentation_root"] = "/srv/different"
     with pytest.raises(ExecutorFailure) as failure:
-        reconcile_storage_access(changed, paths=Paths())
+        reconcile_storage_access(changed, paths=Paths(fstab=fstab))
     assert failure.value.code == "storage_access_request_invalid"
 
 
