@@ -1,8 +1,8 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { PhysicalDiskDocument, StorageBackendActivationPlan, StorageDrainPlan, StorageGroupDocument } from "../types";
+import type { LogicalStorageDocument, PhysicalDiskDocument, StorageBackendActivationPlan, StorageDrainPlan, StorageGroupDocument } from "../types";
 import { StorageGroupsPanel } from "./StorageGroupsPanel";
 
 const disk: PhysicalDiskDocument = {
@@ -52,7 +52,41 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+beforeEach(() => {
+  vi.spyOn(api, "logicalStorage").mockResolvedValue([]);
+});
+
 describe("StorageGroupsPanel", () => {
+  it("attaches a completed logical pool and hides its managed member disks", async () => {
+    const managedMember = { ...disk, lifecycle_state: "managed_member" };
+    const storage: LogicalStorageDocument = {
+      id: "88888888-8888-4888-8888-888888888888",
+      name: "media-library",
+      stable_identity: "mergerfs:0123456789abcdef",
+      storage_kind: "mergerfs",
+      provider: "mergerfs",
+      redundancy_capable: false,
+      filesystem_uuid: null,
+      mountpoint: "/data",
+      presentation_device: "/mnt/hoardarr/media",
+      topology_state: "not_applicable",
+      capacity_bytes: 24_000_000_000,
+      paths: [],
+    };
+    vi.mocked(api.logicalStorage).mockResolvedValue([storage]);
+    vi.spyOn(api, "storageGroups").mockResolvedValue([group]);
+    vi.spyOn(api, "registeredDisks").mockResolvedValue([managedMember]);
+    const attach = vi.spyOn(api, "assignStorageGroupEntity").mockResolvedValue(group);
+    const user = userEvent.setup();
+    render(<StorageGroupsPanel />);
+
+    const chooser = await screen.findByLabelText("Managed storage to add to Media");
+    expect(screen.queryByRole("option", { name: /Media Disk/ })).not.toBeInTheDocument();
+    await user.selectOptions(chooser, storage.id);
+    await user.click(screen.getByRole("button", { name: "Attach managed storage" }));
+    await waitFor(() => expect(attach).toHaveBeenCalledWith(group.id, storage.id, "/data"));
+  });
+
   it("shows an honest empty state and creates a stable media namespace", async () => {
     vi.spyOn(api, "storageGroups").mockResolvedValue([]);
     vi.spyOn(api, "registeredDisks").mockResolvedValue([]);

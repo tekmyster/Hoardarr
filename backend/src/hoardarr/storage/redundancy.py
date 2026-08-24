@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -12,6 +14,7 @@ from sqlalchemy.orm import Session
 from hoardarr.db.models import (
     ConnectivityService,
     MetricEntity,
+    PhysicalDisk,
     StorageController,
     StorageEntity,
     StoragePath,
@@ -437,7 +440,116 @@ def register_completed_storage(
     hardware_snapshot: Mapping[str, Any] | None = None,
 ) -> StorageEntity | None:
     storage = plan_document.get("storage")
-    if not isinstance(storage, Mapping) or storage.get("topology") not in {
+    if not isinstance(storage, Mapping):
+        return None
+    topology = str(storage.get("topology") or "")
+    if topology == "mergerfs":
+        mergerfs = storage.get("mergerfs")
+        selected = storage.get("selected_devices")
+        if not isinstance(mergerfs, Mapping) or not isinstance(selected, list) or not selected:
+            return None
+        pool_mountpoint = mergerfs.get("mountpoint")
+        presentation_mountpoint = result.get("mountpoint")
+        if not isinstance(pool_mountpoint, str) or not pool_mountpoint.startswith("/"):
+            return None
+        if not isinstance(presentation_mountpoint, str) or not presentation_mountpoint.startswith(
+            "/"
+        ):
+            presentation_mountpoint = pool_mountpoint
+        stable_identity = f"mergerfs:{hashlib.sha256(pool_mountpoint.encode()).hexdigest()[:16]}"
+        name = str(mergerfs.get("name") or "mergerFS storage")[:128]
+        capacity_bytes = 0
+        try:
+            capacity_bytes = shutil.disk_usage(presentation_mountpoint).total
+        except OSError:
+            for item in selected:
+                if isinstance(item, Mapping) and isinstance(item.get("capacity_bytes"), int):
+                    capacity_bytes += max(0, int(item["capacity_bytes"]))
+        if capacity_bytes <= 0:
+            return None
+        entity = session.scalar(
+            select(StorageEntity).where(StorageEntity.stable_identity == stable_identity)
+        )
+        member_ids = [
+            str(item.get("id"))
+            for item in selected
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        ]
+        configuration = {
+            "pool_mountpoint": pool_mountpoint,
+            "member_stable_identities": member_ids,
+            "create_policy": mergerfs.get("create_policy"),
+            "search_policy": mergerfs.get("search_policy"),
+            "redundancy_capable": False,
+        }
+        if entity is None:
+            entity = StorageEntity(
+                name=name,
+                stable_identity=stable_identity,
+                storage_kind="mergerfs",
+                filesystem_uuid=None,
+                mountpoint=presentation_mountpoint,
+                presentation_device=pool_mountpoint,
+                capacity_bytes=capacity_bytes,
+                logical_sector_bytes=None,
+                physical_sector_bytes=None,
+                topology_state="not_applicable",
+                provider="mergerfs",
+                config_json=configuration,
+            )
+            session.add(entity)
+            session.flush()
+        else:
+            entity.name = name
+            entity.mountpoint = presentation_mountpoint
+            entity.presentation_device = pool_mountpoint
+            entity.capacity_bytes = capacity_bytes
+            entity.config_json = {**entity.config_json, **configuration}
+        for stable_member_id in member_ids:
+            disk = session.scalar(
+                select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_member_id)
+            )
+            if disk is None:
+                continue
+            disk.lifecycle_state = "managed_member"
+            disk.metadata_json = {
+                **disk.metadata_json,
+                "managed_storage_entity_id": entity.id,
+                "managed_storage_kind": "mergerfs",
+            }
+        metric = session.scalar(
+            select(MetricEntity).where(
+                MetricEntity.entity_type == "logical_storage",
+                MetricEntity.stable_id == f"logical-storage:{stable_identity}",
+            )
+        )
+        if metric is None:
+            session.add(
+                MetricEntity(
+                    entity_type="logical_storage",
+                    stable_id=f"logical-storage:{stable_identity}",
+                    display_name=name,
+                    labels_json={"storage_entity_id": entity.id, "provider": "mergerfs"},
+                    topology_json={
+                        "member_count": len(member_ids),
+                        "topology_state": "not_applicable",
+                    },
+                )
+            )
+        else:
+            metric.display_name = name
+            metric.labels_json = {
+                **metric.labels_json,
+                "storage_entity_id": entity.id,
+                "provider": "mergerfs",
+            }
+            metric.topology_json = {
+                **metric.topology_json,
+                "member_count": len(member_ids),
+                "topology_state": "not_applicable",
+            }
+        return entity
+    if topology not in {
         "individual",
         "import",
         "cache",
@@ -1191,6 +1303,8 @@ def storage_documents(
                 "id": entity.id,
                 "name": entity.name,
                 "stable_identity": entity.stable_identity,
+                "storage_kind": entity.storage_kind,
+                "provider": entity.provider,
                 "filesystem_uuid": entity.filesystem_uuid,
                 "mountpoint": entity.mountpoint,
                 "presentation_device": entity.presentation_device,
@@ -1201,8 +1315,19 @@ def storage_documents(
                 "ownership_mode": entity.config_json.get("ownership_mode"),
                 "ownership_state": entity.config_json.get("ownership_state"),
                 "peer_node": entity.config_json.get("peer_node"),
-                "transition_capability": transition_capability(
-                    entity, action="add", resulting_path_count=len(paths) + 1
+                "redundancy_capable": bool(
+                    entity.config_json.get("redundancy_capable", entity.provider != "mergerfs")
+                ),
+                "transition_capability": (
+                    transition_capability(entity, action="add", resulting_path_count=len(paths) + 1)
+                    if entity.config_json.get("redundancy_capable", entity.provider != "mergerfs")
+                    else {
+                        "mode": "automatic_conversion_unsupported",
+                        "message": (
+                            "This file-level pool is managed above its member devices; "
+                            "controller-path conversion does not apply."
+                        ),
+                    }
                 ),
                 "redundancy_settings": normalized_redundancy_settings(
                     entity.config_json.get("redundancy_settings")

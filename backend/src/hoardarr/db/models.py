@@ -408,8 +408,11 @@ class StorageEntity(Base):
     mountpoint: Mapped[str] = mapped_column(String(4096), nullable=False)
     presentation_device: Mapped[str] = mapped_column(String(4096), nullable=False)
     capacity_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    logical_sector_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    physical_sector_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # File-level pools such as mergerFS do not expose a truthful logical or
+    # physical block-sector geometry.  Keep those values absent instead of
+    # borrowing a member's geometry and presenting it as a pool property.
+    logical_sector_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    physical_sector_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     topology_state: Mapped[str] = mapped_column(String(32), nullable=False, default="single_path")
     provider: Mapped[str] = mapped_column(String(64), nullable=False, default="scsi")
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

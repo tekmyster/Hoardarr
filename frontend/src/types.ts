@@ -798,6 +798,9 @@ export interface LogicalStorageDocument {
   id: string;
   name: string;
   stable_identity: string;
+  storage_kind?: string;
+  provider?: string;
+  redundancy_capable?: boolean;
   filesystem_uuid: string | null;
   mountpoint: string;
   presentation_device: string;

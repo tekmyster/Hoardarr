@@ -352,9 +352,9 @@ export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageI
       <button type="button" className="text-button dashboard-reset" onClick={() => setPanels([...DEFAULT_DASHBOARD_PANELS])}>Reset layout</button>
     </div>}
 
-    {logicalStorage.length > 0 && <section className="overview-redundancy-strip" aria-label="Storage redundancy status">
-      <div><strong>Storage redundancy</strong><span>{logicalStorage.some((storage) => ["reduced_redundancy", "failed_over", "no_path"].includes(storage.topology_state)) ? "Needs attention" : "Healthy"}</span></div>
-      <div className="overview-redundancy-items">{logicalStorage.map((storage) => <button type="button" key={storage.id} onClick={() => onOpenStorage?.(storage.id)}><strong>{storage.name}</strong><span>{storage.topology_state.replaceAll("_", " ")} · {storage.redundancy_summary?.healthy_paths ?? storage.paths.filter((path) => path.active).length}/{storage.paths.length} paths healthy</span></button>)}</div>
+    {logicalStorage.some((storage) => storage.redundancy_capable !== false) && <section className="overview-redundancy-strip" aria-label="Storage redundancy status">
+      <div><strong>Storage redundancy</strong><span>{logicalStorage.filter((storage) => storage.redundancy_capable !== false).some((storage) => ["reduced_redundancy", "failed_over", "no_path"].includes(storage.topology_state)) ? "Needs attention" : "Healthy"}</span></div>
+      <div className="overview-redundancy-items">{logicalStorage.filter((storage) => storage.redundancy_capable !== false).map((storage) => <button type="button" key={storage.id} onClick={() => onOpenStorage?.(storage.id)}><strong>{storage.name}</strong><span>{storage.topology_state.replaceAll("_", " ")} · {storage.redundancy_summary?.healthy_paths ?? storage.paths.filter((path) => path.active).length}/{storage.paths.length} paths healthy</span></button>)}</div>
     </section>}
 
     {panels.length ? <div className="dashboard-grid">{panels.map((panel, index) => <article

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type {
   OperationDocument,
+  LogicalStorageDocument,
   PhysicalDiskDocument,
   StorageBackendActivationPlan,
   StorageDrainPlan,
@@ -27,6 +28,7 @@ function formatBytes(value: number): string {
 export function StorageGroupsPanel() {
   const [groups, setGroups] = useState<StorageGroupDocument[]>([]);
   const [disks, setDisks] = useState<PhysicalDiskDocument[]>([]);
+  const [logicalStorage, setLogicalStorage] = useState<LogicalStorageDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +36,7 @@ export function StorageGroupsPanel() {
   const [namespacePath, setNamespacePath] = useState("/srv/hoardarr/media");
   const [purpose, setPurpose] = useState<Purpose>("media");
   const [selectedDisks, setSelectedDisks] = useState<Record<string, string>>(Object.create(null));
+  const [selectedStorage, setSelectedStorage] = useState<Record<string, string>>(Object.create(null));
   const [backendPaths, setBackendPaths] = useState<Record<string, string>>(Object.create(null));
   const [drainPlan, setDrainPlan] = useState<StorageDrainPlan | null>(null);
   const [drainVerification, setDrainVerification] = useState<"fast" | "accurate" | "paranoid">("accurate");
@@ -50,12 +53,14 @@ export function StorageGroupsPanel() {
   const [activationPlan, setActivationPlan] = useState<StorageBackendActivationPlan | null>(null);
 
   const load = async (signal?: AbortSignal) => {
-    const [nextGroups, nextDisks] = await Promise.all([
+    const [nextGroups, nextDisks, nextLogicalStorage] = await Promise.all([
       api.storageGroups(signal),
       api.registeredDisks(signal),
+      api.logicalStorage(signal),
     ]);
     setGroups(nextGroups);
     setDisks(nextDisks);
+    setLogicalStorage(nextLogicalStorage);
   };
 
   useEffect(() => {
@@ -122,7 +127,14 @@ export function StorageGroupsPanel() {
     () => new Set(groups.flatMap((group) => group.backends.map((backend) => backend.physical_disk_id).filter(Boolean))),
     [groups],
   );
-  const availableDisks = disks.filter((disk) => !assignedDiskIds.has(disk.id));
+  const assignedStorageIds = useMemo(
+    () => new Set(groups.flatMap((group) => group.backends.map((backend) => backend.storage_entity_id).filter(Boolean))),
+    [groups],
+  );
+  const availableDisks = disks.filter(
+    (disk) => !assignedDiskIds.has(disk.id) && ["discovered", "reuse_ready"].includes(disk.lifecycle_state),
+  );
+  const availableStorage = logicalStorage.filter((storage) => !assignedStorageIds.has(storage.id));
 
   const create = async () => {
     setBusy(true);
@@ -150,6 +162,23 @@ export function StorageGroupsPanel() {
       await load();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "The disk could not be assigned.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const assignLogicalStorage = async (groupId: string) => {
+    const storageId = selectedStorage[groupId];
+    const storage = logicalStorage.find((item) => item.id === storageId);
+    if (!storage) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.assignStorageGroupEntity(groupId, storage.id, storage.mountpoint);
+      setSelectedStorage((current) => ({ ...current, [groupId]: "" }));
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The managed storage could not be assigned.");
     } finally {
       setBusy(false);
     }
@@ -311,6 +340,7 @@ export function StorageGroupsPanel() {
           setSelectedDisks((current) => ({ ...current, [group.id]: diskId }));
           setBackendPaths((current) => ({ ...current, [group.id]: diskId ? `/srv/hoardarr/backends/${diskId}` : "" }));
         }}><option value="">Choose a disk</option>{availableDisks.map((disk) => <option key={disk.id} value={disk.id}>{disk.model || "Disk"} · {disk.serial || disk.wwn || disk.stable_identity}</option>)}</select></label><label>Backend mount path<input aria-label={`Backend mount path for ${group.name}`} value={backendPaths[group.id] ?? ""} onChange={(event) => setBackendPaths((current) => ({ ...current, [group.id]: event.target.value }))} placeholder="/srv/hoardarr/backends/disk-id" /></label><button type="button" className="button button-secondary" disabled={busy || !selectedDisks[group.id] || !backendPaths[group.id]} onClick={() => void assign(group.id)}>Assign</button></div>
+        {availableStorage.length > 0 && <div className="storage-group-assign"><label>Add existing managed storage<select aria-label={`Managed storage to add to ${group.name}`} value={selectedStorage[group.id] ?? ""} onChange={(event) => setSelectedStorage((current) => ({ ...current, [group.id]: event.target.value }))}><option value="">Choose managed storage</option>{availableStorage.map((storage) => <option key={storage.id} value={storage.id}>{storage.name} · {storage.provider || storage.storage_kind || "managed"} · {storage.mountpoint}</option>)}</select></label><p className="muted">Attach the existing pool as one logical backend. Its member disks remain protected from separate reuse.</p><button type="button" className="button button-secondary" disabled={busy || !selectedStorage[group.id]} onClick={() => void assignLogicalStorage(group.id)}>Attach managed storage</button></div>}
         {group.events.length > 0 && <details><summary>Recent lifecycle activity</summary><ol className="event-list">{group.events.slice(0, 8).map((event) => <li key={event.id}><time dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString()}</time> {event.event_type.replaceAll("_", " ")}</li>)}</ol></details>}
       </section>)}
     </div>}

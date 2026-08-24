@@ -404,9 +404,9 @@ class HoardarrApi {
     return this.request<StorageTelemetryDocument>("/storage/telemetry");
   }
 
-  async logicalStorage(): Promise<LogicalStorageDocument[]> {
+  async logicalStorage(signal?: AbortSignal): Promise<LogicalStorageDocument[]> {
     if (demoMode) return [];
-    const result = await this.request<{ items: LogicalStorageDocument[] }>("/storage/logical");
+    const result = await this.request<{ items: LogicalStorageDocument[] }>("/storage/logical", { signal });
     return result.items;
   }
 
@@ -699,6 +699,25 @@ class HoardarrApi {
         method: "POST",
         body: JSON.stringify({
           physical_disk_id: physicalDiskId,
+          namespace_path: namespacePath || undefined,
+          role: "data",
+        }),
+      },
+    );
+    return result.item;
+  }
+
+  async assignStorageGroupEntity(
+    groupId: string,
+    storageEntityId: string,
+    namespacePath?: string,
+  ): Promise<StorageGroupDocument> {
+    const result = await this.request<{ item: StorageGroupDocument }>(
+      `/storage/groups/${encodeURIComponent(groupId)}/backends`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          storage_entity_id: storageEntityId,
           namespace_path: namespacePath || undefined,
           role: "data",
         }),

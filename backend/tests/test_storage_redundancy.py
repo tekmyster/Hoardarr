@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -14,6 +15,7 @@ from hoardarr.db.models import (
     MetricAlert,
     MetricEntity,
     MetricSample,
+    PhysicalDisk,
     StorageEntity,
     StoragePath,
     StorageRedundancyEvent,
@@ -156,6 +158,59 @@ def test_existing_multipath_import_becomes_one_logical_storage_object(
     documents = storage_documents(session)
     assert len(documents) == 1
     assert len(documents[0]["paths"]) == 2
+
+
+def test_completed_mergerfs_pool_is_one_logical_backend_and_members_are_not_reusable(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    members = [
+        PhysicalDisk(stable_identity="wwn:member-a", lifecycle_state="discovered"),
+        PhysicalDisk(stable_identity="wwn:member-b", lifecycle_state="discovered"),
+    ]
+    session.add_all(members)
+    session.flush()
+    monkeypatch.setattr(
+        "hoardarr.storage.redundancy.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=61_440_000, used=0, free=61_440_000),
+    )
+
+    entity = register_completed_storage(
+        session,
+        {
+            "storage": {
+                "topology": "mergerfs",
+                "selected_devices": [
+                    {"id": "wwn:member-a", "capacity_bytes": 40_000_000},
+                    {"id": "wwn:member-b", "capacity_bytes": 40_000_000},
+                ],
+                "mergerfs": {
+                    "name": "media-library",
+                    "mountpoint": "/mnt/hoardarr/media",
+                    "create_policy": "mfs",
+                    "search_policy": "ff",
+                },
+            }
+        },
+        {"mountpoint": "/data"},
+    )
+    session.flush()
+
+    assert entity is not None
+    assert entity.provider == "mergerfs"
+    assert entity.mountpoint == "/data"
+    assert entity.presentation_device == "/mnt/hoardarr/media"
+    assert entity.capacity_bytes == 61_440_000
+    assert entity.logical_sector_bytes is None
+    assert entity.physical_sector_bytes is None
+    assert entity.topology_state == "not_applicable"
+    assert entity.config_json["member_stable_identities"] == ["wwn:member-a", "wwn:member-b"]
+    assert {member.lifecycle_state for member in members} == {"managed_member"}
+    assert all(member.metadata_json["managed_storage_entity_id"] == entity.id for member in members)
+    document = storage_documents(session)[0]
+    assert document["storage_kind"] == "mergerfs"
+    assert document["provider"] == "mergerfs"
+    assert document["redundancy_capable"] is False
+    assert document["paths"] == []
 
 
 def test_matching_capacity_is_not_enough_when_wwid_differs(session: Session) -> None:

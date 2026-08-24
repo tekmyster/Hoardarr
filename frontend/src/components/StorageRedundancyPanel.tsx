@@ -44,7 +44,9 @@ export function StorageRedundancyPanel({ initialManagedId }: { initialManagedId?
 
   const refresh = useCallback(async () => {
     try {
-      const nextItems = await api.logicalStorage();
+      const nextItems = (await api.logicalStorage()).filter(
+        (item) => item.redundancy_capable !== false,
+      );
       setItems(nextItems);
       setSelected((current) => current
         ? nextItems.find((item) => item.id === current.id) ?? null
