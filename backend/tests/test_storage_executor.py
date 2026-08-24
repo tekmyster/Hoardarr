@@ -24,6 +24,7 @@ from hoardarr.storage.executor import (
     apply_storage_volume,
     apply_storage_volume_capacity,
     apply_storage_volume_snapshot,
+    reconcile_storage_access,
     storage_operation_status,
 )
 from hoardarr.storage.layouts import CommandSpec, snapraid_expand_config
@@ -1381,6 +1382,89 @@ def test_smb_configuration_is_validated_before_install_and_reload(
     assert f"include = {paths.samba_include}" in paths.samba_config.read_text(encoding="utf-8")
     assert commands[0][0].endswith("testparm")
     assert commands[-1] == ["/usr/bin/systemctl", "reload", "smbd.service"]
+
+
+def test_directory_access_includes_intermediate_folders_and_ignores_umask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    presentation = tmp_path / "data"
+    presentation.mkdir()
+    applied: list[tuple[Path, int]] = []
+    monkeypatch.setattr(executor, "_service_account_group_id", lambda username: 1234)
+    monkeypatch.setattr(
+        executor,
+        "_apply_directory_mode",
+        lambda path, group_id: applied.append((path, group_id)),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_safe_mountpoint",
+        lambda value: presentation / PurePosixPath(value).relative_to("/data"),
+    )
+
+    previous = os.umask(0o077)
+    try:
+        result = executor._ensure_storage_directory_access(
+            presentation,
+            [
+                {
+                    "type": "directory.ensure",
+                    "path": "/data/downloads/torrents/incomplete",
+                }
+            ],
+            "media",
+        )
+    finally:
+        os.umask(previous)
+
+    assert result == [
+        str(presentation / "downloads"),
+        str(presentation / "downloads" / "torrents"),
+        str(presentation / "downloads" / "torrents" / "incomplete"),
+    ]
+    assert applied == [(Path(path), 1234) for path in result]
+
+
+def test_access_reconciliation_is_bound_to_hashed_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = {
+        "presentation_root": "/data",
+        "storage": {"service_account": {"username": "media"}},
+        "actions": {
+            "directories": [{"type": "directory.ensure", "path": "/data/media/Movies"}]
+        },
+    }
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    request = {
+        "operation": "reconcile_storage_access",
+        "operation_id": operation_id,
+        "plan_sha256": document_hash(document),
+        "document": document,
+    }
+    presentation = tmp_path / "data"
+    presentation.mkdir()
+    monkeypatch.setattr(executor, "_safe_mountpoint", lambda _value: presentation)
+    monkeypatch.setattr(Path, "is_mount", lambda _path: True)
+    monkeypatch.setattr(
+        executor,
+        "_ensure_storage_directory_access",
+        lambda root, actions, username: [f"{root}/media", f"{root}/media/Movies"],
+    )
+
+    result = reconcile_storage_access(request, paths=Paths())
+    assert result["operation_id"] == operation_id
+    assert result["username"] == "media"
+    assert result["directories_reconciled"] == [
+        f"{presentation}/media",
+        f"{presentation}/media/Movies",
+    ]
+
+    changed = deepcopy(request)
+    changed["document"]["presentation_root"] = "/srv/different"
+    with pytest.raises(ExecutorFailure) as failure:
+        reconcile_storage_access(changed, paths=Paths())
+    assert failure.value.code == "storage_access_request_invalid"
 
 
 def test_plan_validation_rejects_unknown_action_fields() -> None:

@@ -102,6 +102,7 @@ from hoardarr.storage.client import (
     apply_storage_volume,
     apply_storage_volume_capacity,
     apply_storage_volume_snapshot,
+    reconcile_storage_access,
     storage_operation_status,
 )
 from hoardarr.storage.drain_worker import (
@@ -159,6 +160,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "media.discover",
         "servarr.apply",
         "storage.apply",
+        "storage.access.reconcile",
         "storage.transfer",
         "storage.transfer.cleanup",
         "storage.maintenance",
@@ -1577,6 +1579,46 @@ def _execute_work(
         )
     if item.kind == "storage.apply":
         return _execute_storage(session_factory, item, settings, storage_applier)
+    if item.kind == "storage.access.reconcile":
+        request = item.request
+        expected = {
+            "schema_version",
+            "wizard_id",
+            "wizard_revision",
+            "plan_id",
+            "plan_sha256",
+        }
+        if set(request) != expected or request.get("schema_version") != 1:
+            raise WorkFailure(
+                "invalid_operation_request", "The storage access request is invalid"
+            )
+        with session_factory() as session:
+            wizard = session.get(WizardSession, request.get("wizard_id"))
+            plan = session.get(Plan, request.get("plan_id"))
+            if (
+                wizard is None
+                or plan is None
+                or wizard.status not in {"applied", "completed"}
+                or wizard.plan_id != plan.id
+                or wizard.revision != request.get("wizard_revision")
+                or plan.sha256 != request.get("plan_sha256")
+                or document_hash(plan.document_json) != plan.sha256
+            ):
+                raise WorkFailure(
+                    "storage_plan_changed", "The applied storage plan could not be reconciled"
+                )
+            document = deepcopy(plan.document_json)
+        try:
+            result = reconcile_storage_access(
+                settings.storage_executor_socket,
+                operation_id=item.operation_id,
+                plan_sha256=plan.sha256,
+                document=document,
+                timeout_seconds=settings.storage_executor_timeout_seconds,
+            )
+        except StorageExecutorError as exc:
+            raise WorkFailure(exc.code, str(exc), needs_attention=exc.needs_attention) from exc
+        return MaintenanceExecution(result=result)
     if item.kind == "storage.maintenance":
         return _execute_maintenance(item, settings, maintenance_applier)
     if item.kind == "storage.foreign.inspect":

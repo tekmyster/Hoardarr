@@ -821,6 +821,81 @@ def test_recovery_reconciles_completed_storage_after_worker_loss(tmp_path: Path)
         ]
 
 
+def test_worker_reconciles_access_from_immutable_applied_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    document = {
+        "presentation_root": "/data",
+        "storage": {"service_account": {"username": "media"}},
+        "actions": {
+            "directories": [{"type": "directory.ensure", "path": "/data/media/Movies"}]
+        },
+    }
+    plan_sha = document_hash(document)
+    wizard = WizardSession(
+        id="access-wizard",
+        workflow="storage.add",
+        status="applied",
+        revision=4,
+        current_step="apply",
+    )
+    plan = Plan(
+        id="access-plan",
+        wizard_session_id=wizard.id,
+        revision=4,
+        kind="storage.add",
+        document_json=document,
+        sha256=plan_sha,
+    )
+    request = {
+        "schema_version": 1,
+        "wizard_id": wizard.id,
+        "wizard_revision": 4,
+        "plan_id": plan.id,
+        "plan_sha256": plan_sha,
+    }
+    with session_factory() as session, session.begin():
+        session.add(wizard)
+    with session_factory() as session, session.begin():
+        session.add(plan)
+        stored_wizard = session.get(WizardSession, wizard.id)
+        assert stored_wizard is not None
+        stored_wizard.plan_id = plan.id
+    operation_id = _enqueue(
+        session_factory,
+        kind="storage.access.reconcile",
+        resource_type="wizard_session",
+        resource_id=wizard.id,
+        request=request,
+    )
+    calls: list[dict[str, Any]] = []
+
+    def reconcile(_socket: object, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "operation_id": kwargs["operation_id"],
+            "mountpoint": "/data",
+            "username": "media",
+            "directories_reconciled": ["/data/media", "/data/media/Movies"],
+        }
+
+    monkeypatch.setattr("hoardarr.operations.worker.reconcile_storage_access", reconcile)
+    assert run_once(
+        session_factory=session_factory,
+        settings=settings,
+        secret_box=SecretBox(b"a" * 32),
+        worker_id="access-worker",
+    )
+    assert calls[0]["plan_sha256"] == plan_sha
+    assert calls[0]["document"] == document
+    with session_factory() as session:
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        assert operation.status == "succeeded"
+        assert operation.result_json["directories_reconciled"][-1] == "/data/media/Movies"
+
+
 def test_recovery_reconciles_completed_foreign_inspection_after_worker_loss(
     tmp_path: Path,
 ) -> None:

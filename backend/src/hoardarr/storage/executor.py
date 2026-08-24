@@ -22,6 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+try:  # pragma: no cover - unavailable only on the Windows test host.
+    import pwd
+except ImportError:  # pragma: no cover
+    pwd = None  # type: ignore[assignment]
+
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.capacity_plans import (
     CapacityPlanError,
@@ -1724,6 +1729,107 @@ def _safe_mountpoint(value: str) -> Path:
     return result
 
 
+def _service_account_group_id(username: str) -> int:
+    if not SERVICE_USERNAME_RE.fullmatch(username) or pwd is None:
+        raise ExecutorFailure(
+            "storage_access_account_invalid",
+            "The planned file-access account is unavailable.",
+        )
+    try:
+        account = pwd.getpwnam(username)
+    except KeyError as exc:
+        raise ExecutorFailure(
+            "storage_access_account_missing",
+            "The planned file-access account does not exist. No permissions were changed.",
+        ) from exc
+    if account.pw_uid == 0:
+        raise ExecutorFailure(
+            "storage_access_account_invalid",
+            "The root account cannot be used as a storage file-access account.",
+        )
+    return int(account.pw_gid)
+
+
+def _apply_directory_mode(path: Path, group_id: int) -> None:
+    """Set exact access through a no-follow descriptor, independent of service umask."""
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ExecutorFailure(
+            "storage_directory_unavailable",
+            "A planned storage folder could not be opened safely.",
+        ) from exc
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISDIR(details.st_mode):
+            raise ExecutorFailure(
+                "storage_directory_invalid",
+                "A planned storage folder is not a directory.",
+            )
+        os.fchown(descriptor, 0, group_id)
+        os.fchmod(descriptor, 0o770)
+    except ExecutorFailure:
+        raise
+    except OSError as exc:
+        raise ExecutorFailure(
+            "storage_directory_access_failed",
+            "The planned storage folder permissions could not be applied.",
+            needs_attention=True,
+        ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_storage_directory_access(
+    presentation_root: Path,
+    actions: list[Mapping[str, Any]],
+    username: str,
+) -> list[str]:
+    """Create only approved folders and grant the reviewed service account access."""
+
+    if not actions:
+        return []
+    group_id = _service_account_group_id(username)
+    directories: set[Path] = set()
+    for action in actions:
+        if (
+            not isinstance(action, Mapping)
+            or action.get("type") != "directory.ensure"
+            or not isinstance(action.get("path"), str)
+        ):
+            raise ExecutorFailure(
+                "directory_action_invalid", "The plan contains an invalid directory action."
+            )
+        directory = _safe_mountpoint(str(action["path"]))
+        if presentation_root != directory and presentation_root not in directory.parents:
+            raise ExecutorFailure(
+                "directory_outside_storage",
+                "A planned directory is outside the mounted storage root.",
+            )
+        current = directory
+        while current != presentation_root:
+            directories.add(current)
+            current = current.parent
+
+    applied: list[str] = []
+    for directory in sorted(directories, key=lambda item: (len(item.parts), str(item))):
+        try:
+            directory.mkdir(parents=False, exist_ok=True, mode=0o770)
+        except OSError as exc:
+            raise ExecutorFailure(
+                "storage_directory_unavailable",
+                "A planned storage folder could not be created.",
+            ) from exc
+        _assert_no_symlink_components(directory)
+        _apply_directory_mode(directory, group_id)
+        applied.append(os.fspath(directory))
+    return applied
+
+
 def _assert_no_symlink_components(path: Path) -> None:
     """Reject an existing symlink anywhere in a privileged storage path."""
 
@@ -2771,22 +2877,12 @@ def _execute_actions(
     journal["updated_at"] = time.time()
     atomic_json(_journal_path(paths, operation_id), journal)
 
-    for action in document.get("actions", {}).get("directories", []):
-        if (
-            not isinstance(action, Mapping)
-            or action.get("type") != "directory.ensure"
-            or not isinstance(action.get("path"), str)
-        ):
-            raise ExecutorFailure(
-                "directory_action_invalid", "The plan contains an invalid directory action."
-            )
-        directory = _safe_mountpoint(str(action["path"]))
-        if presentation_root != directory and presentation_root not in directory.parents:
-            raise ExecutorFailure(
-                "directory_outside_storage",
-                "A planned directory is outside the mounted storage root.",
-            )
-        directory.mkdir(parents=True, exist_ok=True, mode=0o770)
+    account = storage.get("service_account", {})
+    _ensure_storage_directory_access(
+        presentation_root,
+        document.get("actions", {}).get("directories", []),
+        str(account.get("username")),
+    )
     journal["completed_steps"] = int(journal["completed_steps"]) + 1
     journal["phase"] = "Saving automatic mount configuration"
     journal["current_action"] = {"id": "fstab", "type": "mount.configuration.save"}
@@ -2841,7 +2937,6 @@ def _execute_actions(
         journal["current_action"] = {"id": "smb-shares", "type": "smb.share.ensure"}
         journal["updated_at"] = time.time()
         atomic_json(_journal_path(paths, operation_id), journal)
-        account = storage.get("service_account", {})
         _ensure_smb_shares(
             paths,
             operation_id,
@@ -2865,6 +2960,69 @@ def _execute_actions(
         },
         "completed_actions": completed,
         "notices": list(journal.get("notices", [])),
+        "replayed": False,
+    }
+
+
+def reconcile_storage_access(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+) -> dict[str, Any]:
+    """Reapply an immutable storage plan's folder access without touching storage data."""
+
+    paths = paths or Paths()
+    expected = {"operation", "operation_id", "plan_sha256", "document"}
+    operation_id = request.get("operation_id")
+    plan_sha = request.get("plan_sha256")
+    document = request.get("document")
+    if (
+        set(request) != expected
+        or request.get("operation") != "reconcile_storage_access"
+        or not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(plan_sha, str)
+        or not SHA256_RE.fullmatch(plan_sha)
+        or not isinstance(document, dict)
+        or document_hash(document) != plan_sha
+    ):
+        raise ExecutorFailure(
+            "storage_access_request_invalid", "The storage access request is invalid."
+        )
+    presentation_value = document.get("presentation_root")
+    storage = document.get("storage")
+    actions = document.get("actions")
+    if (
+        not isinstance(presentation_value, str)
+        or not isinstance(storage, Mapping)
+        or not isinstance(actions, Mapping)
+        or not isinstance(actions.get("directories"), list)
+    ):
+        raise ExecutorFailure(
+            "storage_access_request_invalid", "The storage access request is invalid."
+        )
+    presentation_root = _safe_mountpoint(presentation_value)
+    if not presentation_root.is_mount():
+        raise ExecutorFailure(
+            "storage_presentation_unavailable",
+            "The managed storage is not mounted. No permissions were changed.",
+        )
+    account = storage.get("service_account")
+    username = account.get("username") if isinstance(account, Mapping) else None
+    if not isinstance(username, str):
+        raise ExecutorFailure(
+            "storage_access_account_invalid", "The planned file-access account is invalid."
+        )
+    applied = _ensure_storage_directory_access(
+        presentation_root,
+        actions["directories"],
+        username,
+    )
+    return {
+        "operation_id": operation_id,
+        "mountpoint": os.fspath(presentation_root),
+        "username": username,
+        "directories_reconciled": applied,
         "replayed": False,
     }
 
@@ -5608,6 +5766,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_foreign_inspection(request, paths=paths)
         elif request.get("operation") == "preview_foreign_stack":
             result = preview_foreign_stack(request, paths=paths)
+        elif request.get("operation") == "reconcile_storage_access":
+            result = reconcile_storage_access(request, paths=paths)
         elif request.get("operation") == "apply_storage_redundancy":
             result = apply_storage_redundancy(request, paths=paths)
         elif request.get("operation") == "apply_storage_volume":

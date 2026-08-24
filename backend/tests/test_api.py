@@ -2292,6 +2292,12 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     applied = client.get(f"/api/v1/operations/{storage_operation_id}")
     assert applied.json()["status"] == "succeeded"
     assert client.get(f"/api/v1/wizards/{wizard_id}").json()["status"] == "applied"
+    access = client.post(
+        f"/api/v1/wizards/{wizard_id}/reconcile-access",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "storage-access-reconcile-0001"}),
+    )
+    assert access.status_code == 202, access.text
+    assert access.json()["operation"]["kind"] == "storage.access.reconcile"
     completed_wizard = client.post(
         f"/api/v1/wizards/{wizard_id}/complete", headers=_state_headers(csrf)
     )
@@ -2304,6 +2310,9 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     assert replayed_completion.json()["status"] == "completed"
     with app.state.session_factory() as session:
         assert session.scalar(select(AuditEvent).where(AuditEvent.action == "wizard.plan.approve"))
+        assert session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "storage.access.reconcile.queue")
+        )
         assert session.scalar(select(AuditEvent).where(AuditEvent.action == "wizard.complete"))
 
 

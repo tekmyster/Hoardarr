@@ -508,3 +508,63 @@ def apply_plan(
             details={"wizard_id": wizard.id, "plan_id": plan.id, "plan_sha256": plan.sha256},
         )
     return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.post("/{wizard_id}/reconcile-access", status_code=202)
+def reconcile_access(
+    wizard_id: str,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    wizard = get_wizard(session, wizard_id)
+    plan = session.get(Plan, wizard.plan_id) if wizard.plan_id else None
+    if wizard.status not in {"applied", "completed"} or plan is None:
+        raise Problem(
+            409,
+            "storage_not_applied",
+            "Storage is not ready",
+            "Only a successfully applied storage plan can have its access reconciled.",
+        )
+    if plan.sha256 != document_hash(plan.document_json):
+        raise Problem(409, "plan_integrity_failed", "Plan changed", "Review the storage plan.")
+    directories = plan.document_json.get("actions", {}).get("directories")
+    if not isinstance(directories, list) or not directories:
+        raise Problem(
+            409,
+            "storage_access_not_configured",
+            "No managed folders",
+            "This storage plan does not contain managed media or download folders.",
+        )
+    operation_request = {
+        "schema_version": 1,
+        "wizard_id": wizard.id,
+        "wizard_revision": wizard.revision,
+        "plan_id": plan.id,
+        "plan_sha256": plan.sha256,
+    }
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.access.reconcile",
+            principal=principal,
+            request=operation_request,
+            idempotency_key=key,
+            resource_type="wizard_session",
+            resource_id=wizard.id,
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.access.reconcile.queue",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="operation",
+            target_id=operation.id,
+            details={"wizard_id": wizard.id, "plan_id": plan.id, "plan_sha256": plan.sha256},
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
