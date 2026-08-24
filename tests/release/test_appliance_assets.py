@@ -16,7 +16,10 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("console=tty0 ---", script)
         self.assertNotIn("console=ttyS0,115200n8 console=tty0 ---", script)
         self.assertIn("grub_maps", script)
-        self.assertIn('"$release/scripts/install.sh" "$release"', user_data)
+        self.assertIn(
+            '"$release/scripts/install.sh" apply --yes --preserve-existing-login-account',
+            user_data,
+        )
         self.assertIn("interactive-sections", user_data)
         self.assertRegex(user_data, r"interactive-sections:\s*\n\s*- identity\s*\n\s*- storage")
         self.assertNotIn('password: "!"', user_data)
@@ -34,6 +37,17 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("QEMU installer console is blank", workflow)
         self.assertNotIn("build-release-bundle.py --python", workflow)
         self.assertNotIn("${{ inputs.base_iso_url }}'", workflow)
+
+    def test_appliance_rewrites_media_checksums_for_every_injected_file(self) -> None:
+        builder = (ROOT / "scripts" / "build-appliance.sh").read_text(encoding="utf-8")
+        self.assertIn("xorriso -osirrox on -indev \"$base_iso\" -extract /md5sum.txt", builder)
+        self.assertIn('update_checksum "$work/user-data" nocloud/user-data', builder)
+        self.assertIn('update_checksum "$work/meta-data" nocloud/meta-data', builder)
+        self.assertIn(
+            'update_checksum "$work/hoardarr-release.tar.gz" hoardarr/hoardarr-release.tar.gz',
+            builder,
+        )
+        self.assertIn('"${checksum_map[@]}"', builder)
 
     def test_ci_has_linux_installer_accessibility_and_isolated_storage_profiles(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

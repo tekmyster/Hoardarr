@@ -27,6 +27,7 @@ install -m 0644 packaging/appliance/user-data "$work/user-data"
 install -m 0644 packaging/appliance/meta-data "$work/meta-data"
 install -m 0644 "$bundle" "$work/hoardarr-release.tar.gz"
 grub_maps=()
+checksum_map=()
 
 # The seed is inert unless the installer kernel is told where to find it.
 # Patch both normal and loopback boot menus while preserving the signed ISO's
@@ -48,6 +49,36 @@ for config in boot/grub/grub.cfg boot/grub/loopback.cfg; do
 done
 [[ ${#grub_maps[@]} -gt 0 ]] || { echo "Ubuntu GRUB configuration was not found" >&2; exit 1; }
 
+# Ubuntu verifies the installer medium against md5sum.txt. Replacing a GRUB
+# file without replacing its recorded digest makes an otherwise valid custom
+# appliance report a corrupt medium during installation. Include the injected
+# seed and release payload as well, so every Hoardarr-owned ISO file is covered.
+checksum_file="$work/md5sum.txt"
+if xorriso -osirrox on -indev "$base_iso" -extract /md5sum.txt "$checksum_file" >/dev/null 2>&1; then
+    update_checksum() {
+        local source="$1" relative="$2" digest updated
+        digest="$(md5sum -- "$source" | awk '{print $1}')"
+        updated="$work/md5sum.updated"
+        awk -v digest="$digest" -v target="./$relative" '
+            $2 == target || $2 == substr(target, 3) { print digest "  " $2; found=1; next }
+            { print }
+            END { if (!found) print digest "  " target }
+        ' "$checksum_file" >"$updated"
+        mv -- "$updated" "$checksum_file"
+    }
+    for config in boot/grub/grub.cfg boot/grub/loopback.cfg; do
+        candidate="$work/$(basename -- "$config")"
+        [[ -f "$candidate" ]] && update_checksum "$candidate" "$config"
+    done
+    update_checksum "$work/user-data" nocloud/user-data
+    update_checksum "$work/meta-data" nocloud/meta-data
+    update_checksum "$work/hoardarr-release.tar.gz" hoardarr/hoardarr-release.tar.gz
+    checksum_map=( -map "$checksum_file" /md5sum.txt )
+else
+    echo "Ubuntu md5sum.txt was not found" >&2
+    exit 1
+fi
+
 # Replay the signed Ubuntu ISO's original BIOS/UEFI boot layout. Only the
 # NoCloud seed and verified Hoardarr release bundle are injected.
 xorriso \
@@ -57,6 +88,7 @@ xorriso \
     -map "$work/meta-data" /nocloud/meta-data \
     -map "$work/hoardarr-release.tar.gz" /hoardarr/hoardarr-release.tar.gz \
     "${grub_maps[@]}" \
+    "${checksum_map[@]}" \
     -boot_image any replay \
     -commit
 
