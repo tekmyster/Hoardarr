@@ -2598,6 +2598,7 @@ def _execute_actions(
                 "mergerfs_plan_incomplete", "The combined-storage plan is incomplete."
             )
         combined = _safe_mountpoint(str(mergerfs.get("mountpoint")))
+        runtime_combined = combined
         combined.mkdir(parents=True, exist_ok=True, mode=0o750)
         if mergerfs.get("mode") == "create":
             create_policy = mergerfs.get("create_policy")
@@ -2627,14 +2628,41 @@ def _execute_actions(
                     "mergerfs_instance_drift",
                     "The existing combined-storage instance changed or is not active.",
                 )
-            prior_branches = [str(item) for item in matches[0].get("branches", [])]
+            selected_instance = matches[0]
+            prior_branches = [str(item) for item in selected_instance.get("branches", [])]
             if len(prior_branches) != len(set(prior_branches)):
                 raise ExecutorFailure(
                     "mergerfs_instance_invalid", "The existing branch list is invalid."
                 )
+            configured_instances = [
+                item
+                for item in discovery["items"]
+                if item.get("active") is True
+                and item.get("configured") is True
+                and item.get("source") == selected_instance.get("source")
+                and item.get("branches") == selected_instance.get("branches")
+            ]
+            if selected_instance.get("configured") is True:
+                configured_instance = selected_instance
+            elif len(configured_instances) == 1:
+                # A public bind presentation of an active mergerFS mount appears in
+                # mountinfo as another fuse.mergerfs mount with the same source and
+                # branches.  Keep the reviewed public namespace immutable, but apply
+                # runtime controls and persistent configuration to the one canonical
+                # fstab-managed instance.
+                configured_instance = configured_instances[0]
+                runtime_combined = _safe_mountpoint(
+                    str(configured_instance.get("mountpoint"))
+                )
+            else:
+                raise ExecutorFailure(
+                    "mergerfs_configuration_ambiguous",
+                    "The reviewed combined storage alias could not be tied to one active "
+                    "persistent mergerFS configuration.",
+                )
             options = ",".join(
                 item
-                for item in matches[0].get("options", [])
+                for item in configured_instance.get("options", [])
                 if isinstance(item, str) and "\x00" not in item
             )
             if not options:
@@ -2717,7 +2745,7 @@ def _execute_actions(
                     300,
                 )
             if mergerfs.get("mode") == "existing" and new_branches:
-                expand_commands = mergerfs_expand_commands(str(combined), new_branches)
+                expand_commands = mergerfs_expand_commands(str(runtime_combined), new_branches)
                 for command in expand_commands:
                     runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
                     changed_runtime = True
@@ -2725,7 +2753,9 @@ def _execute_actions(
                 runner([_tool("mergerfs"), "-o", options, branches, os.fspath(combined)], 120)
             if snapraid_role is not None:
                 persistent_update = (
-                    (str(combined), [*prior_branches, *new_branches]) if new_branches else None
+                    (str(runtime_combined), [*prior_branches, *new_branches])
+                    if new_branches
+                    else None
                 )
                 _append_fstab(
                     paths,
@@ -2766,7 +2796,7 @@ def _execute_actions(
                         "user.mergerfs.branches",
                         "-v",
                         ":".join(prior_branches),
-                        os.fspath(combined / ".mergerfs"),
+                        os.fspath(runtime_combined / ".mergerfs"),
                     ],
                     120,
                 )
@@ -2789,7 +2819,7 @@ def _execute_actions(
                         "user.mergerfs.branches",
                         "-v",
                         ":".join(prior_branches),
-                        os.fspath(combined / ".mergerfs"),
+                        os.fspath(runtime_combined / ".mergerfs"),
                     ],
                     120,
                 )
@@ -2797,9 +2827,12 @@ def _execute_actions(
         if (
             new_branches
             and mergerfs.get("mode") == "existing"
-            and matches[0].get("configured") is True
+            and configured_instance.get("configured") is True
         ):
-            mergerfs_fstab_update = (str(combined), [*prior_branches, *new_branches])
+            mergerfs_fstab_update = (
+                str(runtime_combined),
+                [*prior_branches, *new_branches],
+            )
         elif mergerfs.get("mode") == "create":
             dependencies = ",".join(
                 f"x-systemd.requires={_fstab_encode(branch)}" for branch in new_member_mounts

@@ -544,7 +544,8 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     operation_id = "11111111-1111-4111-8111-111111111111"
-    combined = tmp_path / "managed" / "data" / "media"
+    public_combined = tmp_path / "managed" / "data" / "media"
+    configured_combined = tmp_path / "managed" / "mnt" / "hoardarr" / "media"
     new_member = tmp_path / "mounts" / document_hash(DEVICE_ID)[:16]
     paths = Paths(
         transaction_root=tmp_path / "transactions",
@@ -552,7 +553,7 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
         mount_root=tmp_path / "mounts",
     )
     paths.fstab.write_text(
-        f"/mnt/member-a:/mnt/member-b {combined} fuse.mergerfs "
+        f"/mnt/member-a:/mnt/member-b {configured_combined} fuse.mergerfs "
         "category.create=mfs,category.search=ff,use_ino,nofail 0 0\n",
         encoding="utf-8",
     )
@@ -591,6 +592,7 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
         },
     }
     commands: list[list[str]] = []
+    expansion_targets: list[str] = []
     monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: live})
     monkeypatch.setattr(
         executor,
@@ -606,13 +608,16 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
     monkeypatch.setattr(
         executor,
         "mergerfs_expand_commands",
-        lambda _mountpoint, _branches: [
-            CommandSpec(
-                ("setfattr", "-n", "user.mergerfs.branches", "runtime"),
-                120,
-                "expand",
-            )
-        ],
+        lambda mountpoint, _branches: (
+            expansion_targets.append(mountpoint)
+            or [
+                CommandSpec(
+                    ("setfattr", "-n", "user.mergerfs.branches", "runtime"),
+                    120,
+                    "expand",
+                )
+            ]
+        ),
     )
     monkeypatch.setattr(
         executor,
@@ -621,12 +626,22 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
             "items": [
                 {
                     "id": "mergerfs:0123456789abcdef",
-                    "mountpoint": str(combined),
+                    "mountpoint": str(public_combined),
+                    "source": "/mnt/member-a:/mnt/member-b",
+                    "branches": ["/mnt/member-a", "/mnt/member-b"],
+                    "options": ["category.create=mfs", "category.search=ff", "use_ino"],
+                    "active": True,
+                    "configured": False,
+                },
+                {
+                    "id": "mergerfs:fedcba9876543210",
+                    "mountpoint": str(configured_combined),
+                    "source": "/mnt/member-a:/mnt/member-b",
                     "branches": ["/mnt/member-a", "/mnt/member-b"],
                     "options": ["category.create=mfs", "category.search=ff", "use_ino"],
                     "active": True,
                     "configured": True,
-                }
+                },
             ]
         },
     )
@@ -642,13 +657,15 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
     content = paths.fstab.read_text(encoding="utf-8")
     assert content.count("fuse.mergerfs") == 1
     assert (
-        f"/mnt/member-a:/mnt/member-b:{executor._fstab_encode(str(new_member))} {combined}"
+        f"/mnt/member-a:/mnt/member-b:{executor._fstab_encode(str(new_member))} "
+        f"{configured_combined}"
         in content
     )
     assert f"UUID=member-uuid {new_member} ext4 defaults 0 2" in content
     assert not any(command[0].startswith("mkfs") for command in commands)
     assert [command[0] for command in commands].count("setfattr") == 1
-    assert result["mountpoint"] == str(combined)
+    assert expansion_targets == [str(configured_combined)]
+    assert result["mountpoint"] == str(public_combined)
 
 
 @pytest.mark.parametrize(
