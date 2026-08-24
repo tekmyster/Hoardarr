@@ -4,6 +4,7 @@ import { copyText } from "../clipboard";
 import type { AddonDocument, ApiKeyDocument, StorageOperationProgress, UpdateCheckDocument, UpdateStatusDocument } from "../types";
 import { OneTimePassword } from "./OneTimePassword";
 import { RemoteBackupsPanel } from "./RemoteBackupsPanel";
+import { WebhooksPanel } from "./WebhooksPanel";
 import { Card, Field, Notice, Spinner } from "./ui";
 
 type AccessLevel = "read" | "operate" | "admin";
@@ -260,6 +261,7 @@ export function SettingsPage() {
         </div>
       </Card>
       <RemoteBackupsPanel />
+      <WebhooksPanel />
       <Card title="Updates" description="Signed direct-to-latest Hoardarr releases.">
         {!updateStatus ? <Spinner label="Loading update status" /> : (
           <div className="settings-summary-list">

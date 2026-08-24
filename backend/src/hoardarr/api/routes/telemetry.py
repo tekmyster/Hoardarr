@@ -17,6 +17,7 @@ from hoardarr.api.dependencies import (
 from hoardarr.api.problem import Problem
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
+from hoardarr.automation.webhooks import queue_event
 from hoardarr.db.engine import sqlite_database_path
 from hoardarr.db.models import (
     MetricAlert,
@@ -837,6 +838,18 @@ def acknowledge_alert(
     if alert.acknowledged_at is None:
         alert.acknowledged_at = datetime.now(UTC)
         alert.acknowledged_by = principal.user_id
+        queue_event(
+            session,
+            event_id=f"alert:{alert.id}:acknowledged",
+            event_type="alert.acknowledged",
+            payload={
+                "alert_id": alert.id,
+                "entity_id": alert.entity_id,
+                "metric_id": alert.metric_id,
+                "severity": alert.severity,
+                "acknowledged_by": principal.user_id,
+            },
+        )
         record_audit(
             session,
             principal=principal,
@@ -876,6 +889,19 @@ def suppress_alert(
     alert.suppressed_until = datetime.now(UTC) + timedelta(minutes=body.minutes)
     alert.suppressed_by = principal.user_id
     alert.suppression_reason = body.reason.strip()
+    queue_event(
+        session,
+        event_id=f"alert:{alert.id}:suppressed:{alert.suppressed_until.isoformat()}",
+        event_type="alert.suppressed",
+        payload={
+            "alert_id": alert.id,
+            "entity_id": alert.entity_id,
+            "metric_id": alert.metric_id,
+            "severity": alert.severity,
+            "suppressed_until": alert.suppressed_until.isoformat(),
+            "reason": alert.suppression_reason,
+        },
+    )
     entity = session.get(MetricEntity, alert.entity_id)
     if entity is None:
         raise Problem(
@@ -904,9 +930,23 @@ def unsuppress_alert(
     alert = session.get(MetricAlert, alert_id)
     if alert is None:
         raise Problem(404, "alert_not_found", "Alert not found", "The alert does not exist.")
+    was_suppressed = alert.suppressed_until is not None
     alert.suppressed_until = None
     alert.suppressed_by = None
     alert.suppression_reason = None
+    if was_suppressed:
+        queue_event(
+            session,
+            event_id=f"alert:{alert.id}:unsuppressed:{datetime.now(UTC).isoformat()}",
+            event_type="alert.unsuppressed",
+            payload={
+                "alert_id": alert.id,
+                "entity_id": alert.entity_id,
+                "metric_id": alert.metric_id,
+                "severity": alert.severity,
+                "resulting_state": "acknowledged" if alert.acknowledged_at else "active",
+            },
+        )
     entity = session.get(MetricEntity, alert.entity_id)
     if entity is None:
         raise Problem(

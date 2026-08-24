@@ -8,6 +8,8 @@ describe("SettingsPage updates and add-ons", () => {
   beforeEach(() => {
     vi.spyOn(api, "backupTargets").mockResolvedValue([]);
     vi.spyOn(api, "backupRuns").mockResolvedValue([]);
+    vi.spyOn(api, "webhookEndpoints").mockResolvedValue([]);
+    vi.spyOn(api, "webhookEventTypes").mockResolvedValue([]);
   });
 
   afterEach(() => {

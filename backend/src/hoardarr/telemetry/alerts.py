@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from hoardarr.automation.webhooks import queue_event
 from hoardarr.db.models import (
     MetricAlert,
     MetricAlertRule,
@@ -17,6 +18,7 @@ from hoardarr.db.models import (
     StoragePath,
     StorageRedundancyEvent,
     TelemetryState,
+    new_id,
 )
 from hoardarr.telemetry.store import aware, entity_document
 
@@ -59,6 +61,29 @@ def _rule_id(metric_id: str, entity_id: str) -> str:
     return f"basic:{digest}"
 
 
+def _queue_alert_event(
+    session: Session,
+    alert: MetricAlert,
+    entity: MetricEntity,
+    event_type: str,
+) -> None:
+    queue_event(
+        session,
+        event_id=f"alert:{alert.id}:{event_type}",
+        event_type=event_type,
+        payload={
+            "alert_id": alert.id,
+            "entity_id": entity.id,
+            "entity_type": entity.entity_type,
+            "metric_id": alert.metric_id,
+            "severity": alert.severity,
+            "resulting_state": "cleared" if event_type == "alert.cleared" else "active",
+            "trigger_value": alert.trigger_value,
+            "topology": dict(entity.topology_json),
+        },
+    )
+
+
 def evaluate_basic_alerts(session: Session, samples: list[MetricSample]) -> dict[str, int]:
     now = max((aware(sample.observed_at) for sample in samples), default=datetime.now(UTC))
     opened = 0
@@ -94,24 +119,25 @@ def evaluate_basic_alerts(session: Session, samples: list[MetricSample]) -> dict
             threshold = dict(rule)
         if triggered:
             if active is None:
-                session.add(
-                    MetricAlert(
-                        rule_id=rule_id,
-                        entity_id=entity.id,
-                        metric_id=sample.metric_id,
-                        severity=severity,
-                        state="active",
-                        trigger_value=sample.value,
-                        threshold_json=threshold,
-                        topology_json=dict(entity.topology_json),
-                        details_json={
-                            "source": sample.source,
-                            "observed_state": sample.value_text,
-                        },
-                        started_at=aware(sample.observed_at),
-                        last_seen_at=aware(sample.observed_at),
-                    )
+                active = MetricAlert(
+                    id=new_id(),
+                    rule_id=rule_id,
+                    entity_id=entity.id,
+                    metric_id=sample.metric_id,
+                    severity=severity,
+                    state="active",
+                    trigger_value=sample.value,
+                    threshold_json=threshold,
+                    topology_json=dict(entity.topology_json),
+                    details_json={
+                        "source": sample.source,
+                        "observed_state": sample.value_text,
+                    },
+                    started_at=aware(sample.observed_at),
+                    last_seen_at=aware(sample.observed_at),
                 )
+                session.add(active)
+                _queue_alert_event(session, active, entity, "alert.opened")
                 opened += 1
             else:
                 active.last_seen_at = aware(sample.observed_at)
@@ -124,6 +150,7 @@ def evaluate_basic_alerts(session: Session, samples: list[MetricSample]) -> dict
             if clear:
                 active.state = "resolved"
                 active.resolved_at = now
+                _queue_alert_event(session, active, entity, "alert.cleared")
                 resolved += 1
     flapping = _evaluate_path_flapping(session, now)
     custom = evaluate_custom_alerts(session, samples)
@@ -178,28 +205,29 @@ def _evaluate_path_flapping(session: Session, now: datetime) -> dict[str, int]:
         transition_count = counts[path.id]
         if enabled and transition_count >= PATH_FLAP_EVENT_THRESHOLD:
             if active is None:
-                session.add(
-                    MetricAlert(
-                        rule_id=rule_id,
-                        entity_id=entity.id,
-                        metric_id="storage.path.state",
-                        severity="warning",
-                        state="active",
-                        trigger_value=float(transition_count),
-                        threshold_json={
-                            "event_count": PATH_FLAP_EVENT_THRESHOLD,
-                            "window_seconds": int(PATH_FLAP_WINDOW.total_seconds()),
-                        },
-                        topology_json=dict(entity.topology_json),
-                        details_json={
-                            "condition": "path_flapping",
-                            "path_identity": path.stable_path_identity,
-                            "observed_transitions": transition_count,
-                        },
-                        started_at=now,
-                        last_seen_at=now,
-                    )
+                active = MetricAlert(
+                    id=new_id(),
+                    rule_id=rule_id,
+                    entity_id=entity.id,
+                    metric_id="storage.path.state",
+                    severity="warning",
+                    state="active",
+                    trigger_value=float(transition_count),
+                    threshold_json={
+                        "event_count": PATH_FLAP_EVENT_THRESHOLD,
+                        "window_seconds": int(PATH_FLAP_WINDOW.total_seconds()),
+                    },
+                    topology_json=dict(entity.topology_json),
+                    details_json={
+                        "condition": "path_flapping",
+                        "path_identity": path.stable_path_identity,
+                        "observed_transitions": transition_count,
+                    },
+                    started_at=now,
+                    last_seen_at=now,
                 )
+                session.add(active)
+                _queue_alert_event(session, active, entity, "alert.opened")
                 opened += 1
             else:
                 active.last_seen_at = now
@@ -207,6 +235,7 @@ def _evaluate_path_flapping(session: Session, now: datetime) -> dict[str, int]:
         elif active is not None:
             active.state = "resolved"
             active.resolved_at = now
+            _queue_alert_event(session, active, entity, "alert.cleared")
             resolved += 1
     return {"opened": opened, "resolved": resolved}
 
@@ -275,27 +304,28 @@ def evaluate_custom_alerts(session: Session, samples: list[MetricSample]) -> dic
                     ).total_seconds() >= rule.sustained_seconds
                     candidate.updated_at = observed_at
                 if sustained and active is None:
-                    session.add(
-                        MetricAlert(
-                            rule_id=rule_id,
-                            entity_id=entity.id,
-                            metric_id=sample.metric_id,
-                            severity=severity,
-                            state="active",
-                            trigger_value=sample.value,
-                            threshold_json={
-                                "operator": rule.operator,
-                                "warning": rule.warning_value,
-                                "critical": rule.critical_value,
-                                "clear": rule.clear_value,
-                                "sustained_seconds": rule.sustained_seconds,
-                            },
-                            topology_json=dict(entity.topology_json),
-                            details_json={"rule_name": rule.name, "source": sample.source},
-                            started_at=observed_at,
-                            last_seen_at=observed_at,
-                        )
+                    active = MetricAlert(
+                        id=new_id(),
+                        rule_id=rule_id,
+                        entity_id=entity.id,
+                        metric_id=sample.metric_id,
+                        severity=severity,
+                        state="active",
+                        trigger_value=sample.value,
+                        threshold_json={
+                            "operator": rule.operator,
+                            "warning": rule.warning_value,
+                            "critical": rule.critical_value,
+                            "clear": rule.clear_value,
+                            "sustained_seconds": rule.sustained_seconds,
+                        },
+                        topology_json=dict(entity.topology_json),
+                        details_json={"rule_name": rule.name, "source": sample.source},
+                        started_at=observed_at,
+                        last_seen_at=observed_at,
                     )
+                    session.add(active)
+                    _queue_alert_event(session, active, entity, "alert.opened")
                     opened += 1
                 elif active is not None:
                     active.last_seen_at = observed_at
@@ -307,6 +337,7 @@ def evaluate_custom_alerts(session: Session, samples: list[MetricSample]) -> dic
                 if active is not None:
                     active.state = "resolved"
                     active.resolved_at = observed_at
+                    _queue_alert_event(session, active, entity, "alert.cleared")
                     resolved += 1
     return {"opened": opened, "resolved": resolved}
 

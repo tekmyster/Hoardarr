@@ -69,6 +69,8 @@ import type {
   UpdateStatusDocument,
   WizardDocument,
   WizardMode,
+  WebhookDeliveryDocument,
+  WebhookEndpointDocument,
 } from "../types";
 import { createIdempotencyKey } from "./idempotency";
 
@@ -765,6 +767,67 @@ class HoardarrApi {
 
   async metricAlerts(state: "active" | "acknowledged" | "suppressed" | "cleared" | "resolved" | "all" = "active", signal?: AbortSignal): Promise<MetricAlertDocument[]> {
     const result = await this.request<{ items: MetricAlertDocument[] }>(`/telemetry/alerts?state=${state}`, { signal });
+    return result.items;
+  }
+
+  async webhookEventTypes(): Promise<string[]> {
+    const result = await this.request<{ items: string[] }>("/integrations/webhooks/event-types");
+    return result.items;
+  }
+
+  async webhookEndpoints(): Promise<WebhookEndpointDocument[]> {
+    const result = await this.request<{ items: WebhookEndpointDocument[] }>("/integrations/webhooks");
+    return result.items;
+  }
+
+  async createWebhookEndpoint(input: {
+    name: string;
+    url: string;
+    secret: string;
+    event_types: string[];
+    allow_localhost: boolean;
+    verify_tls: boolean;
+  }): Promise<WebhookEndpointDocument> {
+    return this.request<WebhookEndpointDocument>("/integrations/webhooks", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async updateWebhookEndpoint(
+    endpointId: string,
+    input: { enabled: boolean; event_types: string[]; verify_tls: boolean },
+  ): Promise<WebhookEndpointDocument> {
+    return this.request<WebhookEndpointDocument>(
+      `/integrations/webhooks/${encodeURIComponent(endpointId)}`,
+      { method: "PUT", body: JSON.stringify(input) },
+    );
+  }
+
+  async testWebhookEndpoint(endpointId: string): Promise<WebhookDeliveryDocument> {
+    return this.request<WebhookDeliveryDocument>(
+      `/integrations/webhooks/${encodeURIComponent(endpointId)}/test`,
+      { method: "POST" },
+    );
+  }
+
+  async rotateWebhookSecret(endpointId: string, secret: string): Promise<WebhookEndpointDocument> {
+    return this.request<WebhookEndpointDocument>(
+      `/integrations/webhooks/${encodeURIComponent(endpointId)}/secret`,
+      { method: "PUT", body: JSON.stringify({ secret }) },
+    );
+  }
+
+  async deleteWebhookEndpoint(endpointId: string): Promise<void> {
+    await this.request(`/integrations/webhooks/${encodeURIComponent(endpointId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async webhookDeliveries(endpointId: string): Promise<WebhookDeliveryDocument[]> {
+    const result = await this.request<{ items: WebhookDeliveryDocument[] }>(
+      `/integrations/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
+    );
     return result.items;
   }
 

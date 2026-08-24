@@ -1698,6 +1698,38 @@ export interface MetricAlertDocument {
   suppression_reason: string | null;
 }
 
+export interface WebhookEndpointDocument {
+  id: string;
+  name: string;
+  url: string;
+  event_types: string[];
+  allow_localhost: boolean;
+  verify_tls: boolean;
+  enabled: boolean;
+  status: "not_tested" | "testing" | "healthy" | "degraded";
+  secret_configured: true;
+  secret_fingerprint: string;
+  last_success_at: string | null;
+  last_error: { code?: string; message?: string } | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebhookDeliveryDocument {
+  id: string;
+  endpoint_id: string;
+  event_id: string;
+  event_type: string;
+  status: "queued" | "delivering" | "retrying" | "delivered" | "failed";
+  attempt_count: number;
+  next_attempt_at: string;
+  response_status: number | null;
+  last_error: { code?: string; message?: string } | null;
+  delivered_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TelemetryForecastDocument {
   status: "available" | "insufficient_history" | "stable_or_declining";
   methodology: string;

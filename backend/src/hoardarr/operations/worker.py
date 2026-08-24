@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from hoardarr.automation.webhooks import deliver_one as deliver_one_webhook
 from hoardarr.backups.scheduler import queue_due_control_plane_backups
 from hoardarr.backups.service import (
     BackupError,
@@ -2509,6 +2510,13 @@ def run_forever(
             if time.monotonic() >= next_recovery:
                 recover_abandoned_operations(session_factory=session_factory, settings=settings)
                 next_recovery = time.monotonic() + recovery_interval
+            try:
+                delivered_webhook = deliver_one_webhook(session_factory, settings, secret_box)
+            except Exception as exc:
+                LOGGER.warning("Webhook delivery failed unexpectedly (%s)", type(exc).__name__)
+                delivered_webhook = False
+            if delivered_webhook:
+                continue
             worked = run_once(
                 session_factory=session_factory,
                 settings=settings,

@@ -855,6 +855,67 @@ class RemoteBackupRun(Base):
     )
 
 
+class WebhookEndpoint(Base):
+    __tablename__ = "webhook_endpoints"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_webhook_endpoint_name"),
+        Index("ix_webhook_endpoints_enabled_updated", "enabled", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    approved_ips_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    allow_localhost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verify_tls: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    event_types_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    secret_fingerprint: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_tested")
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class WebhookDelivery(Base):
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        UniqueConstraint("endpoint_id", "event_id", name="uq_webhook_delivery_event"),
+        Index("ix_webhook_deliveries_due", "status", "next_attempt_at"),
+        Index("ix_webhook_deliveries_endpoint_created", "endpoint_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    endpoint_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("webhook_endpoints.id", ondelete="CASCADE"), nullable=False
+    )
+    event_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    response_status: Mapped[int | None] = mapped_column(Integer)
+    last_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 
