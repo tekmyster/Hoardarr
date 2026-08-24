@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
 import { humanCapacity } from "../policy";
-import type { ForeignInspectionPlan, ForeignStorageAssessment, OperationDocument, StorageOperationProgress } from "../types";
+import type { ForeignInspectionPlan, ForeignStackPreviewResult, ForeignStorageAssessment, OperationDocument, StorageOperationProgress } from "../types";
 import { Card, Notice, Spinner, StatusBadge } from "./ui";
 
 function errorText(error: unknown): string {
@@ -20,6 +20,7 @@ export function ForeignStoragePanel() {
   const [plan, setPlan] = useState<ForeignInspectionPlan | null>(null);
   const [operation, setOperation] = useState<OperationDocument | null>(null);
   const [progress, setProgress] = useState<StorageOperationProgress | null>(null);
+  const [stackPreview, setStackPreview] = useState<ForeignStackPreviewResult | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
 
   const refresh = useCallback(() => setReload((value) => value + 1), []);
@@ -64,6 +65,22 @@ export function ForeignStoragePanel() {
       setPlan(await api.previewForeignInspection(candidateId));
       setOperation(null);
       setProgress(null);
+      setStackPreview(null);
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const previewStack = async (candidateId: string) => {
+    setActionBusy(true);
+    setError(null);
+    setPlan(null);
+    setOperation(null);
+    setProgress(null);
+    try {
+      setStackPreview(await api.previewForeignStack(candidateId));
     } catch (requestError) {
       setError(errorText(requestError));
     } finally {
@@ -96,7 +113,11 @@ export function ForeignStoragePanel() {
       {error && <Notice tone="danger" title="Foreign storage assessment unavailable"><p>{error}</p><button type="button" className="button button-secondary" onClick={refresh}>Try again</button></Notice>}
       {assessment && <>
         <Notice tone="info" title="Read-only is the default">Discovery did not mount, assemble, or modify anything. A reviewed inspection uses a private no-recovery read-only mount, records a bounded inventory in Activity, then detaches it without changing automatic mounts.</Notice>
-        {!assessment.candidates.length ? <div className="empty-state compact-empty"><h3>No recognized foreign storage</h3><p>{assessment.unrecognized_device_count > 0 ? `${assessment.unrecognized_device_count} non-system device${assessment.unrecognized_device_count === 1 ? " has" : "s have"} insufficient signature evidence. Hoardarr does not call them empty.` : "The latest persisted scan did not report an unassigned supported filesystem or storage stack."}</p></div> : <div className="foreign-candidate-list">{assessment.candidates.map((candidate) => <article key={candidate.id} className="foreign-candidate">
+        {!assessment.candidates.length ? <div className="empty-state compact-empty"><h3>No recognized foreign storage</h3><p>{assessment.unrecognized_device_count > 0 ? `${assessment.unrecognized_device_count} non-system device${assessment.unrecognized_device_count === 1 ? " has" : "s have"} insufficient signature evidence. Hoardarr does not call them empty.` : "The latest persisted scan did not report an unassigned supported filesystem or storage stack."}</p></div> : <div className="foreign-candidate-list">{assessment.candidates.map((candidate) => {
+          const inspectionMode = candidate.modes.find((item) => item.id === "inspect_read_only");
+          const stackMode = candidate.modes.find((item) => item.id === "preview_stack");
+          const primaryMode = inspectionMode?.available ? inspectionMode : stackMode;
+          return <article key={candidate.id} className="foreign-candidate">
           <header><div><strong>{candidate.profile_name}</strong><span>{candidate.filesystems.length ? candidate.filesystems.join(", ") : candidate.signature_types.join(", ")}</span></div><StatusBadge status={candidate.state === "ready" ? "ready for read-only review" : candidate.state === "degraded-review" ? "review required" : "blocked"} /></header>
           <dl className="settings-list">
             <div><dt>Source system</dt><dd>{candidate.origin.name}<small>{candidate.origin.reason}</small></dd></div>
@@ -107,8 +128,15 @@ export function ForeignStoragePanel() {
           {candidate.warnings.map((warning) => <Notice key={warning} tone="warning" title="Review required">{warning}</Notice>)}
           {candidate.blockers.map((blocker) => <Notice key={blocker} tone="danger" title="Automatic inspection blocked">{blocker}</Notice>)}
           <details><summary>Member and signature evidence</summary><div className="table-scroll"><table className="data-table"><thead><tr><th>Device</th><th>Model</th><th>Signatures</th><th>Scan</th><th>Mounted</th></tr></thead><tbody>{candidate.members.map((member) => <tr key={member.device_id}><td><code>{member.kernel_path ?? member.device_id}</code></td><td>{member.model}</td><td>{member.signatures.map((item) => item.type).join(", ") || "Not reported"}</td><td>{member.signature_scan.status ?? "Not reported"}<small className="cell-detail">{member.signature_scan.source ?? "Source not reported"}</small></td><td>{member.mounted ? member.mountpoints.join(", ") : "No"}</td></tr>)}</tbody></table></div></details>
-          <footer><span>{candidate.modes[0].reason}</span><button type="button" className="button button-secondary" disabled={!candidate.modes[0].available || actionBusy} title={candidate.modes[0].reason} onClick={() => void preview(candidate.id)}>{actionBusy ? "Checking…" : "Review read-only inspection"}</button></footer>
-        </article>)}</div>}
+          <footer><span>{primaryMode?.reason ?? "No safe inspection mode is available."}</span>{inspectionMode?.available ? <button type="button" className="button button-secondary" disabled={actionBusy} title={inspectionMode.reason} onClick={() => void preview(candidate.id)}>{actionBusy ? "Checking…" : "Review read-only inspection"}</button> : stackMode?.available ? <button type="button" className="button button-secondary" disabled={actionBusy} title={stackMode.reason} onClick={() => void previewStack(candidate.id)}>{actionBusy ? "Reading metadata…" : "Review stack metadata"}</button> : <button type="button" className="button button-secondary" disabled title={primaryMode?.reason}>Inspection unavailable</button>}</footer>
+        </article>})}</div>}
+        {stackPreview && <section className="foreign-inspection-review" aria-live="polite">
+          <div className="section-heading"><div><p className="eyebrow">NO-ACTIVATION PREVIEW</p><h3>{stackPreview.name}</h3></div><StatusBadge status={stackPreview.completeness.state} /></div>
+          <Notice tone="success" title="Storage stack was not activated">Hoardarr revalidated every stable member and read only provider metadata. It did not assemble an MD array, activate an LVM volume group, import a ZFS pool, mount a filesystem, or change storage configuration.</Notice>
+          <dl className="review-list"><div><dt>Provider</dt><dd>{stackPreview.provider === "linux_md" ? "Linux MD" : stackPreview.provider === "lvm" ? "Linux LVM" : "ZFS"}</dd></div><div><dt>Stable stack identity</dt><dd><code>{stackPreview.identity}</code></dd></div><div><dt>Layout</dt><dd>{stackPreview.layout}</dd></div><div><dt>Members observed</dt><dd>{stackPreview.members.length}{stackPreview.completeness.expected_members === null ? " (expected total Not reported)" : ` of ${stackPreview.completeness.expected_members}`}</dd></div><div><dt>Read-only inspection readiness</dt><dd>{stackPreview.mountability.state}<small>{stackPreview.mountability.reason}</small></dd></div><div><dt>Current health</dt><dd>{stackPreview.health.state ?? "Not reported"}<small>{stackPreview.health.reason}</small></dd></div></dl>
+          <Notice tone="info" title="What this proves">Matching provider labels identify these members as one storage stack. Completeness and mountability are shown only when the provider metadata supports that conclusion; current inactive-stack health remains Not reported when it cannot be proven.</Notice>
+          <button type="button" className="button button-secondary" onClick={() => setStackPreview(null)}>Close preview</button>
+        </section>}
         {plan && <section className="foreign-inspection-review" aria-live="polite">
           <div className="section-heading"><div><p className="eyebrow">READ-ONLY INSPECTION</p><h3>{plan.source.filesystem_label || plan.source.filesystem_type.toUpperCase()}</h3></div><StatusBadge status={operation?.status ?? "ready"} /></div>
           <Notice tone="success" title="No storage configuration will change">Hoardarr will revalidate the stable disk identity and filesystem signature, mount privately with <code>{plan.source.read_only_options.join(",")}</code>, inventory metadata within fixed limits, and always detach the source. It will not write fstab or adopt the disk.</Notice>

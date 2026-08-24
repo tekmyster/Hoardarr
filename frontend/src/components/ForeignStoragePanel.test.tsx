@@ -59,7 +59,7 @@ describe("ForeignStoragePanel", () => {
 
     expect(await screen.findByText("Standalone filesystem")).toBeInTheDocument();
     expect(screen.getByText("Read-only is the default")).toBeInTheDocument();
-    expect(screen.getByText("Not reported")).toBeInTheDocument();
+    expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
     expect(screen.getByText("Confirmed evidence")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Review read-only inspection" })).toBeEnabled();
   });
@@ -123,6 +123,64 @@ describe("ForeignStoragePanel", () => {
 
     expect(await screen.findByText("No recognized foreign storage")).toBeInTheDocument();
     expect(screen.getByText(/2 non-system devices have insufficient signature evidence/i)).toBeInTheDocument();
+  });
+
+  it("previews inactive Linux MD metadata without claiming assembly or health", async () => {
+    const user = userEvent.setup();
+    const stackAssessment: ForeignStorageAssessment = {
+      ...assessment,
+      candidates: [{
+        ...assessment.candidates[0],
+        id: "foreign:1234567890abcdef12345678",
+        profile: "linux_md",
+        profile_name: "Linux MD array",
+        filesystems: [],
+        signature_types: ["linux_raid_member"],
+        members: [
+          {
+            ...assessment.candidates[0].members[0],
+            device_id: "wwn:md-one",
+            kernel_path: "/dev/sdb",
+            signatures: [{ type: "linux_raid_member", usage: "raid", uuid: "md-uuid", label: null, source: "wipefs" }],
+          },
+          {
+            ...assessment.candidates[0].members[0],
+            device_id: "wwn:md-two",
+            kernel_path: "/dev/sdc",
+            signatures: [{ type: "linux_raid_member", usage: "raid", uuid: "md-uuid", label: null, source: "wipefs" }],
+          },
+        ],
+        warnings: [],
+        modes: [
+          { id: "inspect_read_only", available: false, reason: "The stack is not a standalone filesystem." },
+          { id: "preview_stack", available: true, reason: "Provider labels can be reviewed without assembly." },
+        ],
+      }],
+    };
+    vi.spyOn(api, "foreignStorage").mockResolvedValue(stackAssessment);
+    const stackSpy = vi.spyOn(api, "previewForeignStack").mockResolvedValue({
+      candidate_id: "foreign:1234567890abcdef12345678",
+      plan_sha256: "c".repeat(64),
+      provider: "linux_md",
+      identity: "md-uuid",
+      name: "media:0",
+      layout: "raid6",
+      members: [{ source: "/dev/sdb", role: 0 }, { source: "/dev/sdc", role: 1 }],
+      completeness: { quality: "available", state: "incomplete", expected_members: 4, observed_roles: 2, missing_members: 2 },
+      health: { quality: "not_reported", state: null, reason: "Inactive metadata cannot prove health." },
+      mountability: { quality: "temporarily_unavailable", state: "not_ready", reason: "Two members are missing." },
+      activation_performed: false,
+      mutation_performed: false,
+    });
+    render(<ForeignStoragePanel />);
+
+    await user.click(await screen.findByRole("button", { name: "Review stack metadata" }));
+    expect(stackSpy).toHaveBeenCalledWith("foreign:1234567890abcdef12345678");
+    expect(await screen.findByText("Storage stack was not activated")).toBeInTheDocument();
+    expect(screen.getByText("md-uuid")).toBeInTheDocument();
+    expect(screen.getByText("2 of 4")).toBeInTheDocument();
+    expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /assemble|activate|import/i })).not.toBeInTheDocument();
   });
 
   it("shows a retryable error state", async () => {

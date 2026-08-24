@@ -113,6 +113,20 @@ async function storageLifecycleServer(page: Page) {
       foreignInspectionStarted = true;
       return json({ operation: { id: "foreign-operation", kind: "storage.foreign.inspect", status: "succeeded", resource: { type: "foreign_storage", id: "foreign:archive" }, result: { access: "read_only", persistent_mount: false, mutation_performed: false, inventory: { file_count: 24, total_bytes: 8192, read_errors: [] } } } }, 202);
     }
+    if (pathname.endsWith("/storage/foreign/stack-preview")) return json({ result: {
+      candidate_id: "foreign:1234567890abcdef12345678",
+      plan_sha256: "9".repeat(64),
+      provider: "linux_md",
+      identity: "4f6dbb74:8a9d60c1:0e9ff452:d42877bd",
+      name: "media:0",
+      layout: "raid6",
+      members: [{ source: "/dev/loop11", role: 0 }, { source: "/dev/loop12", role: 1 }],
+      completeness: { quality: "available", state: "incomplete", expected_members: 4, observed_roles: 2, missing_members: 2 },
+      health: { quality: "not_reported", state: null, reason: "Inactive MD member metadata does not prove current array health." },
+      mountability: { quality: "temporarily_unavailable", state: "not_ready", reason: "All expected MD member roles were not observed." },
+      activation_performed: false,
+      mutation_performed: false,
+    } });
     if (pathname.endsWith("/storage/foreign")) return json({
       snapshot: { id: "snapshot-foreign", captured_at: now, sha256: "d".repeat(64) },
       policy: { default_access: "read_only", automatic_mount: false, automatic_assembly: false, mutation_performed: false },
@@ -130,6 +144,27 @@ async function storageLifecycleServer(page: Page) {
         warnings: [],
         blockers: [],
         modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
+        mutation_performed: false,
+      }, {
+        id: "foreign:1234567890abcdef12345678",
+        profile: "linux_md",
+        profile_name: "Linux MD array",
+        origin: { name: "Generic Linux storage", confidence: "medium", reason: "Linux MD labels identify the storage technology, not a NAS vendor." },
+        confidence: "high",
+        state: "ready",
+        members: [
+          { device_id: "wwn:md-one", kernel_path: "/dev/loop11", model: "Disposable MD member", capacity_bytes: 1_000_000_000, stable_identity: true, system_device: false, read_only: false, removable: false, mounted: false, mountpoints: [], signature_scan: { status: "complete", source: "wipefs", reason: null }, confidence: "high", signatures: [{ type: "linux_raid_member", usage: "raid", uuid: "md-uuid", label: null, source: "wipefs" }] },
+          { device_id: "wwn:md-two", kernel_path: "/dev/loop12", model: "Disposable MD member", capacity_bytes: 1_000_000_000, stable_identity: true, system_device: false, read_only: false, removable: false, mounted: false, mountpoints: [], signature_scan: { status: "complete", source: "wipefs", reason: null }, confidence: "high", signatures: [{ type: "linux_raid_member", usage: "raid", uuid: "md-uuid", label: null, source: "wipefs" }] },
+        ],
+        filesystems: [],
+        signature_types: ["linux_raid_member"],
+        capacity_bytes: 2_000_000_000,
+        warnings: [],
+        blockers: [],
+        modes: [
+          { id: "inspect_read_only", available: false, reason: "The stack is not a standalone filesystem." },
+          { id: "preview_stack", available: true, reason: "Provider labels can be reviewed without assembly." },
+        ],
         mutation_performed: false,
       }],
       unrecognized_device_count: 0,
@@ -299,4 +334,18 @@ test("reviews and completes a bounded read-only foreign inventory in the real St
   await expect(page.getByText(/24 files/)).toBeVisible();
   expect(observed.foreignInspectionStarted()).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("foreign-readonly-completed.png"), fullPage: true });
+});
+
+test("reviews inactive storage-stack metadata without activating it", async ({ page }, testInfo) => {
+  await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await page.getByText("Inspect storage from another system").click();
+  await expect(page.getByText("Linux MD array", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Review stack metadata" }).click();
+  await expect(page.getByText("Storage stack was not activated")).toBeVisible();
+  await expect(page.getByText("4f6dbb74:8a9d60c1:0e9ff452:d42877bd")).toBeVisible();
+  await expect(page.getByText("2 of 4")).toBeVisible();
+  await expect(page.getByText("Inactive MD member metadata does not prove current array health.")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("foreign-stack-no-activation-preview.png"), fullPage: true });
 });

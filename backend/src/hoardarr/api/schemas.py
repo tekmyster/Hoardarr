@@ -369,6 +369,10 @@ class ForeignInspectionPreviewRequest(StrictModel):
     candidate_id: str = Field(pattern=r"^foreign:[0-9a-f]{24}$")
 
 
+class ForeignStackPreviewRequest(StrictModel):
+    candidate_id: str = Field(pattern=r"^foreign:[0-9a-f]{24}$")
+
+
 class ForeignInspectionApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

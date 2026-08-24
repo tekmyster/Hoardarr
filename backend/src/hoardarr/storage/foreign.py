@@ -25,7 +25,7 @@ SUPPORTED_FILESYSTEMS = {
 STACK_SIGNATURES = {
     "linux_raid_member": ("linux_md", "Linux MD", "mdadm"),
     "lvm2_member": ("lvm", "Linux LVM", "pvs"),
-    "zfs_member": ("zfs", "ZFS", "zpool"),
+    "zfs_member": ("zfs", "ZFS", "zdb"),
 }
 
 
@@ -201,6 +201,7 @@ def _candidate_document(
 
     safety_blocked = bool(blockers)
     inspection_available = False
+    stack_preview_available = False
     if profile == "standalone_filesystem" and not blockers and filesystems:
         filesystem_signatures = [
             signature
@@ -215,13 +216,12 @@ def _candidate_document(
             inspection_available = True
         else:
             blockers.append("Automatic inspection requires one unambiguous filesystem source path.")
-    elif profile != "standalone_filesystem" and not blockers:
-        blockers.append(
-            "A provider-specific no-activation member preview is required before this stack "
-            "can be mounted."
-        )
+    elif profile in {"linux_md", "lvm", "zfs"} and not blockers:
+        stack_preview_available = True
     state = (
-        "ready" if inspection_available else ("blocked" if safety_blocked else "degraded-review")
+        "ready"
+        if inspection_available or stack_preview_available
+        else ("blocked" if safety_blocked else "degraded-review")
     )
     capacity_values = [item["capacity_bytes"] for item in members]
     capacity = (
@@ -257,9 +257,13 @@ def _candidate_document(
             {
                 "id": "inspect_read_only",
                 "available": inspection_available,
-                "reason": blockers[0]
-                if blockers
-                else "A bounded read-only inventory can be reviewed and queued.",
+                "reason": (
+                    "A bounded read-only inventory can be reviewed and queued."
+                    if inspection_available
+                    else blockers[0]
+                    if blockers
+                    else "Review provider metadata before any stack activation is considered."
+                ),
             },
             {
                 "id": "copy_into_hoardarr",
@@ -270,6 +274,15 @@ def _candidate_document(
                 ),
             },
             {
+                "id": "preview_stack",
+                "available": stack_preview_available,
+                "reason": blockers[0]
+                if blockers
+                else (
+                    "Read provider metadata without assembling, activating, or importing the stack."
+                ),
+            },
+            {
                 "id": "adopt_in_place",
                 "available": False,
                 "reason": "No persistent adoption change is made during foreign-storage discovery.",
@@ -277,6 +290,162 @@ def _candidate_document(
         ],
         "mutation_performed": False,
     }
+
+
+def build_stack_preview_plan(
+    session: Session,
+    *,
+    snapshot: HardwareSnapshot,
+    candidate_id: str,
+) -> dict[str, Any]:
+    assessment = assess_foreign_storage(session, snapshot=snapshot)
+    matches = [item for item in assessment["candidates"] if item["id"] == candidate_id]
+    if len(matches) != 1:
+        raise ForeignStorageError(
+            "foreign_candidate_not_found", "Run discovery and select the source again."
+        )
+    candidate = matches[0]
+    if candidate["profile"] not in {"linux_md", "lvm", "zfs"}:
+        raise ForeignStorageError(
+            "foreign_stack_preview_unsupported", "This source is not a supported storage stack."
+        )
+    mode = next(item for item in candidate["modes"] if item["id"] == "preview_stack")
+    if mode["available"] is not True:
+        raise ForeignStorageError("foreign_stack_preview_blocked", str(mode["reason"]))
+    expected_signature = next(
+        signature
+        for signature, details in STACK_SIGNATURES.items()
+        if details[0] == candidate["profile"]
+    )
+    members: list[dict[str, Any]] = []
+    for member in candidate["members"]:
+        signatures = [
+            item
+            for item in member["signatures"]
+            if str(item["type"]).casefold() == expected_signature
+        ]
+        if len(signatures) != 1:
+            raise ForeignStorageError(
+                "foreign_stack_source_ambiguous", "A stack member source is not unambiguous."
+            )
+        signature = signatures[0]
+        device = member["reviewed_device"]
+        members.append(
+            {
+                "device": device,
+                "device_binding_sha256": document_hash(device),
+                "source": {
+                    "kind": (
+                        "whole_device"
+                        if signature["kernel_path"] == member["kernel_path"]
+                        else "partition"
+                    ),
+                    "kernel_path_at_preview": signature["kernel_path"],
+                    "partition_number": signature["partition_number"],
+                    "signature_type": expected_signature,
+                    "signature_uuid": signature["uuid"],
+                },
+            }
+        )
+    plan = {
+        "schema_version": 1,
+        "operation": "foreign.preview_stack",
+        "candidate_id": candidate_id,
+        "profile": candidate["profile"],
+        "hardware_snapshot_id": snapshot.id,
+        "hardware_snapshot_sha256": snapshot.sha256,
+        "members": members,
+        "activation_allowed": False,
+        "mutation_performed": False,
+    }
+    return {**plan, "plan_sha256": document_hash(plan)}
+
+
+def validate_stack_preview_plan(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "operation",
+        "candidate_id",
+        "profile",
+        "hardware_snapshot_id",
+        "hardware_snapshot_sha256",
+        "members",
+        "activation_allowed",
+        "mutation_performed",
+        "plan_sha256",
+    }:
+        raise ForeignStorageError("foreign_stack_plan_invalid", "The stack preview is invalid.")
+    plan = dict(value)
+    expected_hash = plan.pop("plan_sha256", None)
+    profile = plan.get("profile")
+    members = plan.get("members")
+    expected_signature = next(
+        (key for key, details in STACK_SIGNATURES.items() if details[0] == profile), None
+    )
+    valid = (
+        plan.get("schema_version") == 1
+        and plan.get("operation") == "foreign.preview_stack"
+        and isinstance(plan.get("candidate_id"), str)
+        and len(plan["candidate_id"]) == 32
+        and plan["candidate_id"].startswith("foreign:")
+        and all(character in "0123456789abcdef" for character in plan["candidate_id"][8:])
+        and profile in {"linux_md", "lvm", "zfs"}
+        and isinstance(plan.get("hardware_snapshot_id"), str)
+        and isinstance(plan.get("hardware_snapshot_sha256"), str)
+        and len(plan["hardware_snapshot_sha256"]) == 64
+        and all(character in "0123456789abcdef" for character in plan["hardware_snapshot_sha256"])
+        and isinstance(members, list)
+        and 1 <= len(members) <= 256
+        and plan.get("activation_allowed") is False
+        and plan.get("mutation_performed") is False
+        and expected_hash == document_hash(plan)
+    )
+    if not valid:
+        raise ForeignStorageError("foreign_stack_plan_invalid", "The stack preview is invalid.")
+    for member in members:
+        if not isinstance(member, dict) or set(member) != {
+            "device",
+            "device_binding_sha256",
+            "source",
+        }:
+            raise ForeignStorageError("foreign_stack_plan_invalid", "A stack member is invalid.")
+        device = member.get("device")
+        source = member.get("source")
+        if (
+            not isinstance(device, dict)
+            or set(device) != set(IDENTITY_FIELDS)
+            or device.get("stable_identity") is not True
+            or document_hash(device) != member.get("device_binding_sha256")
+            or not isinstance(source, dict)
+            or set(source)
+            != {
+                "kind",
+                "kernel_path_at_preview",
+                "partition_number",
+                "signature_type",
+                "signature_uuid",
+            }
+            or source.get("kind") not in {"whole_device", "partition"}
+            or not isinstance(source.get("kernel_path_at_preview"), str)
+            or not source["kernel_path_at_preview"].startswith("/dev/")
+            or "\0" in source["kernel_path_at_preview"]
+            or source.get("signature_type") != expected_signature
+            or not isinstance(source.get("signature_uuid"), str)
+            or not source["signature_uuid"]
+            or (source.get("kind") == "whole_device" and source.get("partition_number") is not None)
+            or (
+                source.get("kind") == "partition"
+                and (
+                    not isinstance(source.get("partition_number"), int)
+                    or isinstance(source.get("partition_number"), bool)
+                    or not 1 <= source["partition_number"] <= 4096
+                )
+            )
+        ):
+            raise ForeignStorageError("foreign_stack_plan_invalid", "A stack member is invalid.")
+    if len({member["device"]["id"] for member in members}) != len(members):
+        raise ForeignStorageError("foreign_stack_plan_invalid", "Stack members are duplicated.")
+    return value
 
 
 def build_inspection_plan(

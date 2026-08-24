@@ -158,6 +158,25 @@ def apply_foreign_inspection(
     return result
 
 
+def preview_foreign_stack(
+    socket_path: Path,
+    *,
+    plan_sha256: str,
+    plan: dict[str, Any],
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    result = _request_executor(
+        socket_path,
+        {"operation": "preview_foreign_stack", "plan_sha256": plan_sha256, "plan": plan},
+        timeout_seconds=timeout_seconds,
+    )
+    if result.get("candidate_id") != plan.get("candidate_id"):
+        raise StorageExecutorError(
+            "executor_response_invalid", "The storage service returned an invalid response."
+        )
+    return result
+
+
 def apply_snapraid_replacement(
     socket_path: Path,
     *,

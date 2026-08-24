@@ -2099,6 +2099,107 @@ def test_foreign_inspection_api_is_snapshot_bound_idempotent_and_durable(
         assert audit is not None
 
 
+def test_foreign_stack_preview_is_authorized_audited_and_nonactivating(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    endpoint = "/api/v1/storage/foreign/stack-preview"
+    candidate_id = "foreign:0123456789abcdef01234567"
+    assert client.post(endpoint, json={"candidate_id": candidate_id}).status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    monkeypatch.setattr("hoardarr.storage.foreign.shutil.which", lambda _name: "/usr/bin/mdadm")
+    disks = []
+    for index in range(2):
+        disks.append(
+            {
+                "id": f"wwn:foreign-md-{index}",
+                "stable_identity": True,
+                "kernel_path": f"/dev/sd{chr(98 + index)}",
+                "identity": {
+                    "serial": f"FOREIGN-MD-{index}",
+                    "wwn": f"500000000000001{index}",
+                    "eui64": None,
+                    "nguid": None,
+                },
+                "vendor": "TEST",
+                "model": "MD member",
+                "capacity_bytes": 8_000_000_000,
+                "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+                "system_disk": False,
+                "read_only": False,
+                "mountpoints": [],
+                "partitions": [],
+                "signatures": [
+                    {
+                        "type": "linux_raid_member",
+                        "usage": "raid",
+                        "uuid": "md-array-api",
+                        "label": None,
+                        "source": "wipefs",
+                    }
+                ],
+                "signature_scan": {"status": "complete", "source": "wipefs", "reason": None},
+            }
+        )
+    hardware = {"schema_version": 1, "source": {"kind": "sysfs"}, "disks": disks}
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="sysfs",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+    assessment = client.get("/api/v1/storage/foreign").json()
+    candidate = assessment["candidates"][0]
+    captured: dict[str, Any] = {}
+
+    def provider(_socket: object, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "candidate_id": kwargs["plan"]["candidate_id"],
+            "provider": "linux_md",
+            "identity": "md-array-api",
+            "activation_performed": False,
+            "mutation_performed": False,
+            "members": [{"role": 0}, {"role": 1}],
+            "completeness": {"quality": "available", "state": "complete"},
+            "health": {"quality": "not_reported", "state": None},
+            "mountability": {"quality": "derived", "state": "read_only_assembly_candidate"},
+        }
+
+    monkeypatch.setattr("hoardarr.api.routes.storage.preview_foreign_stack", provider)
+    assert client.post(endpoint, json={"candidate_id": candidate["id"]}).status_code == 403
+    response = client.post(
+        endpoint,
+        headers=_state_headers(csrf),
+        json={"candidate_id": candidate["id"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["activation_performed"] is False
+    assert response.json()["result"]["mutation_performed"] is False
+    assert len(captured["plan"]["members"]) == 2
+    assert captured["plan"]["activation_allowed"] is False
+    with app.state.session_factory() as session:
+        audit = session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "storage.foreign.preview_stack")
+        )
+        assert audit is not None
+
+
 def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: Any) -> None:
     client, app, setup_token, secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

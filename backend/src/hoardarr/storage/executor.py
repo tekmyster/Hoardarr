@@ -26,6 +26,7 @@ from hoardarr.operations.service import document_hash
 from hoardarr.storage.foreign import (
     ForeignStorageError,
     validate_inspection_plan,
+    validate_stack_preview_plan,
 )
 from hoardarr.storage.layouts import (
     LayoutError,
@@ -3108,15 +3109,350 @@ def _verify_foreign_signature(
         60,
     )
     signatures = _parse_wipefs_signatures(output)
-    matches = [item for item in signatures if item["type"] == expected.get("filesystem_type")]
-    expected_uuid = expected.get("filesystem_uuid")
+    expected_type = expected.get("filesystem_type", expected.get("signature_type"))
+    matches = [item for item in signatures if item["type"] == expected_type]
+    expected_uuid = expected.get("filesystem_uuid", expected.get("signature_uuid"))
     if expected_uuid is not None:
         matches = [item for item in matches if item["uuid"] == expected_uuid]
     if len(matches) != 1:
         raise ExecutorFailure(
             "foreign_signature_changed",
-            "The source filesystem signature no longer matches the reviewed plan.",
+            "The source storage signature no longer matches the reviewed plan.",
         )
+
+
+def _parse_export_lines(output: str, *, provider: str) -> dict[str, str]:
+    if len(output) > MAXIMUM_RESPONSE_BYTES:
+        raise ExecutorFailure("foreign_provider_invalid", f"The {provider} report was oversized.")
+    result: dict[str, str] = {}
+    for line in output.splitlines():
+        if not line or line.startswith(" ") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key) or len(value) > 4096:
+            raise ExecutorFailure(
+                "foreign_provider_invalid", f"The {provider} report was malformed."
+            )
+        if key in result and result[key] != value:
+            raise ExecutorFailure(
+                "foreign_provider_invalid", f"The {provider} report was ambiguous."
+            )
+        result[key] = value.strip()
+    return result
+
+
+def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, Any]:
+    members: list[dict[str, Any]] = []
+    for source in sources:
+        fields = _parse_export_lines(
+            probe([_tool("mdadm"), "--examine", "--export", os.fspath(source)], 60),
+            provider="Linux MD",
+        )
+        array_uuid = fields.get("MD_UUID")
+        if not array_uuid:
+            raise ExecutorFailure(
+                "foreign_provider_invalid", "Linux MD did not report an array UUID."
+            )
+        expected_devices = fields.get("MD_DEVICES")
+        role = fields.get("MD_DEVICE_ROLE")
+        members.append(
+            {
+                "source": os.fspath(source),
+                "array_uuid": array_uuid[:256],
+                "array_name": fields.get("MD_NAME", "Not reported")[:256],
+                "level": fields.get("MD_LEVEL", "Not reported")[:64],
+                "expected_devices": int(expected_devices)
+                if expected_devices and expected_devices.isdigit()
+                else None,
+                "role": int(role) if role and role.isdigit() else role[:64] if role else None,
+                "events": int(fields["MD_EVENTS"])
+                if fields.get("MD_EVENTS", "").isdigit()
+                else None,
+                "metadata_version": fields.get("MD_METADATA", "Not reported")[:64],
+            }
+        )
+    uuids = {item["array_uuid"] for item in members}
+    levels = {item["level"] for item in members}
+    expected = {
+        item["expected_devices"] for item in members if item["expected_devices"] is not None
+    }
+    if len(uuids) != 1 or len(levels) != 1 or len(expected) > 1:
+        raise ExecutorFailure("foreign_provider_conflict", "Linux MD member metadata conflicts.")
+    expected_count = next(iter(expected), None)
+    numeric_roles = {item["role"] for item in members if isinstance(item["role"], int)}
+    complete = expected_count is not None and len(numeric_roles) == expected_count
+    return {
+        "provider": "linux_md",
+        "identity": next(iter(uuids)),
+        "name": members[0]["array_name"],
+        "layout": members[0]["level"],
+        "members": members,
+        "completeness": {
+            "quality": "available" if expected_count is not None else "not_reported",
+            "state": "complete"
+            if complete
+            else "incomplete"
+            if expected_count is not None
+            else "not_reported",
+            "expected_members": expected_count,
+            "observed_roles": len(numeric_roles),
+            "missing_members": max(0, expected_count - len(numeric_roles))
+            if expected_count is not None
+            else None,
+        },
+        "health": {
+            "quality": "not_reported",
+            "state": None,
+            "reason": "Inactive MD member metadata does not prove current array health.",
+        },
+        "mountability": {
+            "quality": "derived" if complete else "temporarily_unavailable",
+            "state": "read_only_assembly_candidate" if complete else "not_ready",
+            "reason": "All expected member roles were observed."
+            if complete
+            else "All expected MD member roles were not observed.",
+        },
+    }
+
+
+def _parse_lvm_report(output: str, report_name: str) -> list[dict[str, Any]]:
+    try:
+        document = json.loads(output)
+        reports = document.get("report") if isinstance(document, dict) else None
+        report = (
+            reports[0].get(report_name)
+            if isinstance(reports, list) and len(reports) == 1 and isinstance(reports[0], dict)
+            else None
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ExecutorFailure(
+            "foreign_provider_invalid", "The LVM metadata report was malformed."
+        ) from exc
+    if (
+        not isinstance(report, list)
+        or len(report) > 512
+        or any(not isinstance(item, dict) for item in report)
+    ):
+        raise ExecutorFailure("foreign_provider_invalid", "The LVM metadata report was malformed.")
+    return report
+
+
+def _lvm_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.isdigit():
+            return int(normalized)
+    return None
+
+
+def _foreign_lvm_preview(sources: list[Path], probe: CommandProbe) -> dict[str, Any]:
+    device_list = ",".join(os.fspath(item) for item in sources)
+    common = [
+        "--readonly",
+        "--foreign",
+        "--devices",
+        device_list,
+        "--reportformat",
+        "json",
+        "--units",
+        "b",
+        "--nosuffix",
+    ]
+    pv_rows = _parse_lvm_report(
+        probe(
+            [
+                _tool("pvs"),
+                *common,
+                "--options",
+                "pv_uuid,pv_name,vg_uuid,vg_name,pv_size,pv_free,pv_attr",
+            ],
+            60,
+        ),
+        "pv",
+    )
+    vg_rows = _parse_lvm_report(
+        probe(
+            [
+                _tool("vgs"),
+                *common,
+                "--options",
+                "vg_uuid,vg_name,pv_count,vg_missing_pv_count,vg_attr,vg_size,vg_free",
+            ],
+            60,
+        ),
+        "vg",
+    )
+    if not pv_rows:
+        raise ExecutorFailure(
+            "foreign_provider_invalid", "LVM did not report any physical volumes."
+        )
+    groups = {str(item.get("vg_uuid", "")).strip() for item in pv_rows}
+    if "" in groups or len(groups) != 1:
+        raise ExecutorFailure(
+            "foreign_provider_conflict", "LVM physical-volume metadata conflicts."
+        )
+    group_id = next(iter(groups))
+    matching_vgs = [item for item in vg_rows if str(item.get("vg_uuid", "")).strip() == group_id]
+    vg = matching_vgs[0] if len(matching_vgs) == 1 else {}
+    expected = _lvm_int(vg.get("pv_count"))
+    missing = _lvm_int(vg.get("vg_missing_pv_count"))
+    complete = expected is not None and missing == 0 and expected == len(pv_rows)
+    return {
+        "provider": "lvm",
+        "identity": group_id[:256],
+        "name": str(vg.get("vg_name") or pv_rows[0].get("vg_name") or "Not reported")[:256],
+        "layout": "volume_group",
+        "members": [
+            {
+                "source": str(item.get("pv_name") or "Not reported")[:4096],
+                "pv_uuid": str(item.get("pv_uuid") or "Not reported")[:256],
+                "size_bytes": _lvm_int(item.get("pv_size")),
+                "free_bytes": _lvm_int(item.get("pv_free")),
+                "attributes": str(item.get("pv_attr") or "Not reported")[:64],
+            }
+            for item in pv_rows
+        ],
+        "completeness": {
+            "quality": "available"
+            if expected is not None and missing is not None
+            else "not_reported",
+            "state": "complete"
+            if complete
+            else "incomplete"
+            if expected is not None and missing is not None
+            else "not_reported",
+            "expected_members": expected,
+            "observed_roles": len(pv_rows),
+            "missing_members": missing,
+        },
+        "health": {
+            "quality": "not_reported",
+            "state": None,
+            "reason": "Read-only LVM metadata does not prove filesystem or logical-volume health.",
+        },
+        "mountability": {
+            "quality": "derived" if complete else "temporarily_unavailable",
+            "state": "read_only_activation_candidate" if complete else "not_ready",
+            "reason": "The volume group reports all physical volumes."
+            if complete
+            else "The volume group does not report a complete physical-volume set.",
+        },
+    }
+
+
+def _foreign_zfs_preview(sources: list[Path], probe: CommandProbe) -> dict[str, Any]:
+    members: list[dict[str, Any]] = []
+    for source in sources:
+        output = probe([_tool("zdb"), "-l", os.fspath(source)], 60)
+        if len(output) > MAXIMUM_RESPONSE_BYTES:
+            raise ExecutorFailure("foreign_provider_invalid", "The ZFS label report was oversized.")
+        name = re.search(r"(?m)^\s*name:\s*'([^'\r\n]{1,255})'\s*$", output)
+        pool_guid = re.search(r"(?m)^\s*pool_guid:\s*([0-9]{1,32})\s*$", output)
+        guids = re.findall(r"(?m)^\s*guid:\s*([0-9]{1,32})\s*$", output)
+        txg = re.findall(r"(?m)^\s*txg:\s*([0-9]{1,32})\s*$", output)
+        if pool_guid is None or not guids:
+            raise ExecutorFailure(
+                "foreign_provider_invalid", "ZFS did not report a valid member label."
+            )
+        members.append(
+            {
+                "source": os.fspath(source),
+                "pool_guid": pool_guid.group(1),
+                "pool_name": name.group(1) if name else "Not reported",
+                "reported_guids": sorted(set(guids))[:256],
+                "maximum_txg": max((int(item) for item in txg), default=None),
+            }
+        )
+    pool_guids = {item["pool_guid"] for item in members}
+    if len(pool_guids) != 1:
+        raise ExecutorFailure(
+            "foreign_provider_conflict", "ZFS member labels report different pools."
+        )
+    return {
+        "provider": "zfs",
+        "identity": next(iter(pool_guids)),
+        "name": next(
+            (item["pool_name"] for item in members if item["pool_name"] != "Not reported"),
+            "Not reported",
+        ),
+        "layout": "Not reported",
+        "members": members,
+        "completeness": {
+            "quality": "not_reported",
+            "state": "not_reported",
+            "expected_members": None,
+            "observed_roles": len(members),
+            "missing_members": None,
+        },
+        "health": {
+            "quality": "not_reported",
+            "state": None,
+            "reason": "Offline ZFS labels identify the pool but do not prove import health.",
+        },
+        "mountability": {
+            "quality": "not_reported",
+            "state": "not_reported",
+            "reason": "Hoardarr does not run zpool import during a metadata preview.",
+        },
+    }
+
+
+def preview_foreign_stack(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    inventory_provider: InventoryProvider | None = None,
+    probe: CommandProbe = _capture_read_only,
+) -> dict[str, Any]:
+    if (
+        set(request) != {"operation", "plan_sha256", "plan"}
+        or request.get("operation") != "preview_foreign_stack"
+    ):
+        raise ExecutorFailure("request_invalid", "The foreign stack preview request is invalid.")
+    plan = request.get("plan")
+    if not isinstance(plan, dict) or request.get("plan_sha256") != plan.get("plan_sha256"):
+        raise ExecutorFailure("foreign_stack_plan_invalid", "The stack preview is invalid.")
+    try:
+        validate_stack_preview_plan(plan)
+    except ForeignStorageError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+    paths = paths or Paths()
+    provider = inventory_provider or (lambda: _live_inventory(paths))
+    devices = [dict(member["device"]) for member in plan["members"]]
+    document = {
+        "storage": {
+            "selected_devices": devices,
+            "snapshot_binding": {
+                "selected_device_ids": [device["id"] for device in devices],
+                "device_binding_sha256": document_hash(devices),
+            },
+        }
+    }
+    with _device_locks(paths, [str(device["id"]) for device in devices]):
+        live = _selected_live_devices(document, provider())
+        _ensure_not_active(paths, live)
+        sources: list[Path] = []
+        for member in plan["members"]:
+            current = live[str(member["device"]["id"])]
+            source = _foreign_source_path(paths, current, member["source"])
+            _verify_foreign_signature(source, member["source"], probe)
+            sources.append(source)
+        profile = plan["profile"]
+        if profile == "linux_md":
+            result = _foreign_md_preview(sources, probe)
+        elif profile == "lvm":
+            result = _foreign_lvm_preview(sources, probe)
+        else:
+            result = _foreign_zfs_preview(sources, probe)
+    return {
+        "candidate_id": plan["candidate_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "activation_performed": False,
+        "mutation_performed": False,
+        **result,
+    }
 
 
 def _verify_read_only_mount(
@@ -4536,6 +4872,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_array_replacement(request, paths=paths)
         elif request.get("operation") == "apply_foreign_inspection":
             result = apply_foreign_inspection(request, paths=paths)
+        elif request.get("operation") == "preview_foreign_stack":
+            result = preview_foreign_stack(request, paths=paths)
         elif request.get("operation") == "apply_storage_redundancy":
             result = apply_storage_redundancy(request, paths=paths)
         else:

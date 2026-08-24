@@ -956,6 +956,27 @@ export interface ForeignInspectionPlan {
   plan_sha256: string;
 }
 
+export interface ForeignStackPreviewResult {
+  candidate_id: string;
+  plan_sha256: string;
+  provider: "linux_md" | "lvm" | "zfs";
+  identity: string;
+  name: string;
+  layout: string;
+  members: Array<Record<string, unknown>>;
+  completeness: {
+    quality: "available" | "not_reported";
+    state: "complete" | "incomplete" | "not_reported";
+    expected_members: number | null;
+    observed_roles: number;
+    missing_members: number | null;
+  };
+  health: { quality: string; state: string | null; reason: string };
+  mountability: { quality: string; state: string; reason: string };
+  activation_performed: false;
+  mutation_performed: false;
+}
+
 export interface StorageExpansionSelection {
   candidate_id: string;
   kind: string;

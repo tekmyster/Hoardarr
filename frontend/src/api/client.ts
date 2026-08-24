@@ -14,6 +14,7 @@ import type {
   DeviceMaintenancePlan,
   ForeignStorageAssessment,
   ForeignInspectionPlan,
+  ForeignStackPreviewResult,
   HardwareSnapshot,
   MergerFsInventory,
   MetricAlertDocument,
@@ -464,6 +465,14 @@ class HoardarrApi {
       },
     );
     return result.operation;
+  }
+
+  async previewForeignStack(candidateId: string): Promise<ForeignStackPreviewResult> {
+    const result = await this.request<{ result: ForeignStackPreviewResult }>(
+      "/storage/foreign/stack-preview",
+      { method: "POST", body: JSON.stringify({ candidate_id: candidateId }) },
+    );
+    return result.result;
   }
 
   async setDiskReservation(

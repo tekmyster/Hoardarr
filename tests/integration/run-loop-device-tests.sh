@@ -13,9 +13,11 @@ managed="/mnt/hoardarr/ci-$$"
 loops=()
 md_device=""
 zpool_name=""
+vg_name=""
 cleanup() {
   set +e
   [[ -z "$zpool_name" ]] || zpool destroy -f "$zpool_name" 2>/dev/null || true
+  [[ -z "$vg_name" ]] || vgremove -ff -y "$vg_name" 2>/dev/null || true
   [[ -z "$md_device" ]] || mdadm --stop "$md_device" 2>/dev/null || true
   for loop in "${loops[@]}"; do
     findmnt -rn -S "$loop" -o TARGET | while IFS= read -r target; do umount -- "$target" 2>/dev/null || true; done
@@ -105,6 +107,19 @@ mdadm --detail "$md_device" | grep -q 'State : clean'
 umount "$work/md"
 mdadm --stop "$md_device"
 md_device=""
+md_preview_members=("${md_members[1]}" "${md_members[2]}" "${md_members[3]}" "$md_replacement")
+
+lvm_members=()
+for number in 1 2; do
+  make_loop "lvm$number" 512M
+  member="$created_loop"
+  assert_test_loop "$member"
+  lvm_members+=("$member")
+done
+vg_name="hoardarr_ci_vg_$$"
+pvcreate -ff -y "${lvm_members[@]}"
+vgcreate "$vg_name" "${lvm_members[@]}"
+vgchange -an "$vg_name"
 
 zfs_members=()
 for number in 1 2 3 4; do
@@ -159,7 +174,26 @@ assert_test_loop "$zfs_replacement"
 [[ "$(zpool get -Hp -o value guid "$zpool_name")" == "$zfs_guid_before" ]]
 [[ "$(sha256sum "$work/zfs/zfs-verified" | awk '{print $1}')" == "$zfs_hash_before" ]]
 zpool status "$zpool_name" | grep -q 'state: ONLINE'
-zpool destroy -f "$zpool_name"
+zpool export "$zpool_name"
+
+"$python" "$repo/tests/integration/foreign_stack_preview.py" \
+  --md-member "${md_preview_members[0]}" \
+  --md-member "${md_preview_members[1]}" \
+  --md-member "${md_preview_members[2]}" \
+  --md-member "${md_preview_members[3]}" \
+  --lvm-member "${lvm_members[0]}" \
+  --lvm-member "${lvm_members[1]}" \
+  --zfs-member "${zfs_members[1]}" \
+  --zfs-member "${zfs_members[2]}" \
+  --zfs-member "${zfs_members[3]}" \
+  --zfs-member "$zfs_replacement" \
+  --evidence "$repo/dist/validation/foreign-stack-preview.json"
+jq -e '.classification == "VERIFIED IN ISOLATION" and (.activation_performed | not) and (.mutation_performed_during_preview | not)' \
+  "$repo/dist/validation/foreign-stack-preview.json"
+
+vgremove -ff -y "$vg_name"
+vg_name=""
+zpool_name=""
 zpool_name=""
 
 make_loop snap-data 512M

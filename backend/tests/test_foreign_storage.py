@@ -214,10 +214,18 @@ def test_linux_md_members_group_by_reported_uuid_without_assembly(
     candidate = document["candidates"][0]
     assert candidate["profile"] == "linux_md"
     assert len(candidate["members"]) == 2
-    assert candidate["state"] == "degraded-review"
+    assert candidate["state"] == "ready"
+    assert (
+        next(item for item in candidate["modes"] if item["id"] == "inspect_read_only")["available"]
+        is False
+    )
+    assert (
+        next(item for item in candidate["modes"] if item["id"] == "preview_stack")["available"]
+        is True
+    )
     assert candidate["origin"]["confidence"] == "unknown"
     assert any("no array" in item.lower() for item in candidate["warnings"])
-    assert any("no-activation member preview" in item for item in candidate["blockers"])
+    assert candidate["blockers"] == []
 
 
 def test_unrecognized_media_remains_unclassified_instead_of_being_called_empty() -> None:

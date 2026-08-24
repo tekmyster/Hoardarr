@@ -101,7 +101,7 @@ jobs:
           version: 0.11.28
       - run: uv sync --project backend --locked --all-groups
       - name: Install disposable filesystem and storage-stack tools
-        run: sudo apt-get update && sudo apt-get install -y acl e2fsprogs jq mdadm snapraid xfsprogs zfsutils-linux
+        run: sudo apt-get update && sudo apt-get install -y acl e2fsprogs jq lvm2 mdadm snapraid xfsprogs zfsutils-linux
       - name: Validate ACLs, array replacement, expansion, and SnapRAID on test-created loops
         run: |
           sudo touch /.hoardarr-disposable-runner
@@ -120,11 +120,14 @@ jobs:
             dist/validation/md-replacement.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .provider == "zfs" and .journal_state == "succeeded" and (.final_degraded | not) and .target_identity_before == .target_identity_after' \
             dist/validation/zfs-replacement.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and (.activation_performed | not) and (.mutation_performed_during_preview | not) and .profiles.linux_md.completeness.state == "complete" and .profiles.lvm.completeness.state == "complete" and .profiles.zfs.mountability.state == "not_reported"' \
+            dist/validation/foreign-stack-preview.json
       - uses: actions/upload-artifact@v4
         with:
           name: storage-expansion-evidence
           path: |
             dist/validation/foreign-readonly-inspection.json
+            dist/validation/foreign-stack-preview.json
             dist/validation/snapraid-expansion.json
             dist/validation/snapraid-replacement.json
             dist/validation/md-replacement.json

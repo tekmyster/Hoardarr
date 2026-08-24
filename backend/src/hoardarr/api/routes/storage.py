@@ -13,6 +13,7 @@ from hoardarr.api.dependencies import (
     database_session,
     idempotency_key,
     require_state_scope,
+    settings_from_request,
 )
 from hoardarr.api.problem import Problem
 from hoardarr.api.schemas import (
@@ -22,6 +23,7 @@ from hoardarr.api.schemas import (
     DeviceMaintenancePreviewRequest,
     ForeignInspectionApplyRequest,
     ForeignInspectionPreviewRequest,
+    ForeignStackPreviewRequest,
     PhysicalDiskReconcileRequest,
     PhysicalDiskReservationRequest,
     SnapraidReplacementApplyRequest,
@@ -42,6 +44,7 @@ from hoardarr.api.schemas import (
 from hoardarr.api.serializers import operation_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
+from hoardarr.core.config import Settings
 from hoardarr.db.models import (
     HardwareSnapshot,
     Operation,
@@ -50,12 +53,14 @@ from hoardarr.db.models import (
     StorageGroup,
 )
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
+from hoardarr.storage.client import StorageExecutorError, preview_foreign_stack
 from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
 from hoardarr.storage.expansion import build_expansion_assessment
 from hoardarr.storage.foreign import (
     ForeignStorageError,
     assess_foreign_storage,
     build_inspection_plan,
+    build_stack_preview_plan,
     validate_inspection_plan,
 )
 from hoardarr.storage.groups import (
@@ -181,6 +186,51 @@ def foreign_storage_assessment(
     """Fingerprint persisted signatures without mounting or activating foreign storage."""
 
     return assess_foreign_storage(session, snapshot=_latest_hardware(session))
+
+
+@router.post("/foreign/stack-preview")
+def preview_foreign_storage_stack(
+    payload: ForeignStackPreviewRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    settings: Settings = Depends(settings_from_request),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Read provider metadata without assembling, activating, or importing a stack."""
+
+    snapshot = _latest_hardware(session)
+    try:
+        plan = build_stack_preview_plan(
+            session,
+            snapshot=snapshot,
+            candidate_id=payload.candidate_id,
+        )
+        result = preview_foreign_stack(
+            settings.storage_executor_socket,
+            plan_sha256=plan["plan_sha256"],
+            plan=plan,
+            timeout_seconds=min(120.0, settings.storage_executor_timeout_seconds),
+        )
+    except ForeignStorageError as exc:
+        raise Problem(422, exc.code, "Stack preview unavailable", str(exc)) from exc
+    except StorageExecutorError as exc:
+        raise Problem(503, exc.code, "Stack preview unavailable", str(exc)) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.foreign.preview_stack",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="foreign_storage",
+        target_id=payload.candidate_id,
+        details={
+            "plan_sha256": plan["plan_sha256"],
+            "provider": result.get("provider"),
+            "activation_performed": False,
+            "mutation_performed": False,
+        },
+    )
+    return {"plan": plan, "result": result}
 
 
 @router.post("/foreign/inspection/preview")
