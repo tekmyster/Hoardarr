@@ -234,7 +234,7 @@ jobs:
           sudo sh -c "printf '%s\n' 'HOARDARR_BIND_HOST=127.0.0.1' 'HOARDARR_SETUP_TOKEN=must-not-transfer' >'$source_root/config/hoardarr.env'"
           source_env=(
             HOARDARR_ENVIRONMENT=test
-            "HOARDARR_DATABASE_URL=sqlite:////$source_root/hoardarr.db"
+            "HOARDARR_DATABASE_URL=sqlite:///$source_root/hoardarr.db"
             "HOARDARR_SECRET_KEY_FILE=$source_root/secret.key"
             "HOARDARR_BACKUP_ARTIFACT_ROOT=$source_root/artifacts"
             "HOARDARR_CONFIGURATION_ROOT=$source_root/config"
@@ -242,7 +242,7 @@ jobs:
           )
           target_env=(
             HOARDARR_ENVIRONMENT=test
-            "HOARDARR_DATABASE_URL=sqlite:////$target_root/hoardarr.db"
+            "HOARDARR_DATABASE_URL=sqlite:///$target_root/hoardarr.db"
             "HOARDARR_SECRET_KEY_FILE=$target_root/secret.key"
             "HOARDARR_BACKUP_ARTIFACT_ROOT=$target_root/artifacts"
             "HOARDARR_CONFIGURATION_ROOT=$target_root/config"

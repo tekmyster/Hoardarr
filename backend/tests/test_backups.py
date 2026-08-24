@@ -20,6 +20,7 @@ from hoardarr.backups.scheduler import queue_due_control_plane_backups
 from hoardarr.backups.service import (
     BackupError,
     UploadRateLimiter,
+    _readonly_sqlite_uri,
     apply_fresh_control_plane_restore,
     build_control_plane_artifact,
     decrypt_credentials,
@@ -132,6 +133,16 @@ def _settings(tmp_path: Path) -> Settings:
     )
     upgrade_database(settings.database_url)
     return settings
+
+
+def test_readonly_sqlite_uri_is_absolute_and_encoded(tmp_path: Path) -> None:
+    database = tmp_path / "database with spaces-é.db"
+
+    uri = _readonly_sqlite_uri(database)
+
+    assert uri == f"{database.resolve(strict=False).as_uri()}?mode=ro"
+    assert "%20" in uri
+    assert "?mode=ro" in uri
 
 
 def _target(secret_box: SecretBox) -> RemoteBackupTarget:

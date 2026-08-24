@@ -390,8 +390,14 @@ def _include_configuration(configuration_root: Path) -> tuple[list[Path], list[s
     return included, excluded
 
 
+def _readonly_sqlite_uri(path: Path) -> str:
+    """Return an encoded, absolute SQLite URI without treating a path as an authority."""
+
+    return f"{path.resolve(strict=False).as_uri()}?mode=ro"
+
+
 def _database_backup(source: Path, destination: Path) -> None:
-    source_connection = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+    source_connection = sqlite3.connect(_readonly_sqlite_uri(source), uri=True)
     destination_connection = sqlite3.connect(destination)
     try:
         source_connection.backup(destination_connection)
@@ -1004,7 +1010,7 @@ def _extract_and_validate_archive(archive_path: Path, extract_root: Path) -> dic
             "backup_restore_database_mismatch",
             "The restored database checksum does not match the manifest.",
         )
-    connection = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
+    connection = sqlite3.connect(_readonly_sqlite_uri(database_path), uri=True)
     try:
         if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
             raise BackupError(
@@ -1020,7 +1026,7 @@ def _fresh_database(path: Path) -> bool:
     if not path.exists():
         return True
     try:
-        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        connection = sqlite3.connect(_readonly_sqlite_uri(path), uri=True)
         try:
             tables = {
                 str(row[0])
