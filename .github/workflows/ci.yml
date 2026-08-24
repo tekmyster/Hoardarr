@@ -248,7 +248,8 @@ jobs:
             "HOARDARR_CONFIGURATION_ROOT=$target_root/config"
             HOARDARR_SECURE_COOKIES=false
           )
-          sudo env "${source_env[@]}" /usr/lib/hoardarr/current/venv/bin/hoardarr-migrate
+          sudo env "${source_env[@]}" /usr/lib/hoardarr/venv/bin/python \
+            -m hoardarr.runtime migrate
           printf '%s\n' 'source owner password' | sudo env "${source_env[@]}" \
             /usr/local/bin/hoardarr setup --console --username source-owner \
             --password-stdin --site-url http://127.0.0.1:7877
@@ -272,11 +273,12 @@ jobs:
             --sha256 "$artifact_sha256" --passphrase-stdin --yes \
             > /tmp/hoardarr-restore-report.json
           grep -F '"credential_mode": "encrypted_secret_key"' /tmp/hoardarr-restore-report.json
-          sudo env "${target_env[@]}" /usr/lib/hoardarr/current/venv/bin/hoardarr-migrate
+          sudo env "${target_env[@]}" /usr/lib/hoardarr/venv/bin/python \
+            -m hoardarr.runtime migrate
           printf '%s\n' 'fresh owner password' | sudo env "${target_env[@]}" \
             /usr/local/bin/hoardarr setup --console --username fresh-owner \
             --password-stdin --site-url http://127.0.0.1:7877
-          sudo env "${target_env[@]}" /usr/lib/hoardarr/current/venv/bin/python - <<'PY'
+          sudo env "${target_env[@]}" /usr/lib/hoardarr/venv/bin/python - <<'PY'
           import os
           import sqlite3
           from pathlib import Path
