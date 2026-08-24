@@ -268,6 +268,8 @@ validate_release_layout() {
     done
     grep -Fxq "mergerfs" "${BUNDLE_ROOT}/packages/appliance-core.txt" || \
         die "mandatory package is missing from appliance-core.txt: mergerfs"
+    grep -Fxq "attr" "${BUNDLE_ROOT}/packages/appliance-core.txt" || \
+        die "mandatory package is missing from appliance-core.txt: attr"
     grep -Fxq "samba" "${BUNDLE_ROOT}/packages/appliance-core.txt" || \
         die "mandatory package is missing from appliance-core.txt: samba"
     grep -Fxq "lldpd" "${BUNDLE_ROOT}/packages/appliance-core.txt" || \
@@ -393,6 +395,7 @@ Target: Ubuntu ${TARGET_OS_VERSION} ${TARGET_ARCH}, Python ${TARGET_PYTHON}
 
 Plan (no changes made):
   - install and verify the mandatory Ubuntu package "mergerfs" when missing
+  - install and verify filesystem attribute tools used for live mergerFS expansion
   - install and verify Samba account tools for Windows file-access credentials
   - install and enable LLDP/CDP neighbor discovery for live network topology
   - create or validate locked system account "hoardarr"
@@ -427,6 +430,24 @@ ensure_mergerfs() {
         die "mandatory command is unavailable after package installation: mergerfs"
     mergerfs --version >/dev/null 2>&1 || \
         die "mandatory command failed its version check: mergerfs"
+}
+
+ensure_filesystem_attribute_tools() {
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' attr 2>/dev/null | grep -q '^ii'; then
+        log "Installing mandatory host package: attr"
+        apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=5 update
+        DEBIAN_FRONTEND=noninteractive apt-get \
+            -o DPkg::Lock::Timeout=120 \
+            -o Acquire::Retries=5 \
+            install --yes --no-install-recommends attr
+    fi
+    dpkg-query -W -f='${db:Status-Abbrev}' attr 2>/dev/null | grep -q '^ii' || \
+        die "mandatory package is not installed: attr"
+    local command_name
+    for command_name in getfattr setfattr; do
+        command -v "${command_name}" >/dev/null 2>&1 || \
+            die "mandatory command is unavailable after package installation: ${command_name}"
+    done
 }
 
 ensure_account_tools() {
@@ -691,6 +712,7 @@ apply_release() {
     [[ "${CONFIRMED}" == "true" ]] || die "apply requires --yes"
     acquire_install_lock
     ensure_mergerfs
+    ensure_filesystem_attribute_tools
     ensure_account_tools
     ensure_neighbor_discovery
     ensure_service_account

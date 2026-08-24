@@ -34,6 +34,7 @@ from hoardarr.operations.service import (
     append_event,
     document_hash,
     request_cancellation,
+    resume_storage_apply,
 )
 from hoardarr.operations.worker import (
     INTEGRATION_AAD_RECORD_TYPE,
@@ -116,6 +117,35 @@ def test_running_host_mutation_cannot_be_recorded_as_cancelled(tmp_path: Path) -
             assert operation is not None
             assert operation.status == "running"
             assert operation.cancel_requested is False
+
+
+def test_storage_apply_needs_attention_can_be_queued_for_checkpoint_resume(
+    tmp_path: Path,
+) -> None:
+    _settings, session_factory = _runtime(tmp_path)
+    operation_id = _enqueue(session_factory, kind="storage.apply")
+    with session_factory() as session, session.begin():
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        operation.status = "needs_attention"
+        operation.error_json = {"code": "storage_tool_missing", "message": "setfattr missing"}
+        operation.lease_owner = "worker-one"
+        resume_storage_apply(session, operation)
+
+    with session_factory() as session:
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        assert operation.status == "queued"
+        assert operation.lease_owner is None
+        assert operation.result_json == {"resume_requested": True, "resume_attempt": 1}
+        events = list(
+            session.scalars(
+                select(OperationEvent)
+                .where(OperationEvent.operation_id == operation_id)
+                .order_by(OperationEvent.sequence)
+            )
+        )
+        assert [event.event_type for event in events] == ["queued", "resumed"]
 
 
 def test_volume_worker_persists_executor_result_under_stable_provider_identity(

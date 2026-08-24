@@ -1626,6 +1626,94 @@ def test_executor_journals_success_and_replays_without_executing(
     assert calls == ["execute"]
 
 
+def test_existing_mergerfs_expansion_requires_setfattr_before_any_storage_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _document()
+    storage = document["storage"]
+    assert isinstance(storage, dict)
+    storage["topology"] = "mergerfs"
+    storage["mergerfs"] = {
+        "mode": "existing",
+        "instance_id": "mergerfs:0123456789abcdef",
+        "name": "data",
+        "mountpoint": "/data",
+    }
+    storage["expansion"] = {"kind": "add_mergerfs_member"}
+    requested: list[str] = []
+
+    def missing(name: str) -> str:
+        requested.append(name)
+        raise ExecutorFailure(
+            "storage_tool_missing", f"A required storage tool is unavailable: {name}."
+        )
+
+    monkeypatch.setattr(executor, "_tool", missing)
+    with pytest.raises(ExecutorFailure) as failure:
+        executor._preflight_storage_tools(document)
+    assert failure.value.code == "storage_tool_missing"
+    assert requested == ["setfattr"]
+
+
+def test_storage_build_resumes_exact_needs_attention_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _document()
+    request = _request(document)
+    request["operation"] = "resume_storage_plan"
+    paths = Paths(
+        quarantine_marker=tmp_path / "quarantine.json",
+        transaction_root=tmp_path / "transactions",
+        lock_root=tmp_path / "locks",
+    )
+    paths.transaction_root.mkdir(mode=0o700)
+    journal = {
+        "schema_version": 1,
+        "operation_id": request["operation_id"],
+        "plan_sha256": request["plan_sha256"],
+        "state": "needs_attention",
+        "started_at": 1.0,
+        "updated_at": 2.0,
+        "completed_actions": [f"identity:{DEVICE_ID}"],
+        "completed_steps": 1,
+        "total_steps": 6,
+        "notices": [],
+        "action_results": [],
+        "current_action": {"id": "layout", "type": "storage.layout.apply"},
+    }
+    (paths.transaction_root / f"{request['operation_id']}.json").write_text(
+        json.dumps(journal), encoding="utf-8"
+    )
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    monkeypatch.setattr(executor, "_device_locks", lambda _paths, _ids: nullcontext())
+    monkeypatch.setattr(
+        executor,
+        "_resume_revalidate",
+        lambda *_args: {DEVICE_ID: _live_disk()},
+    )
+    observed: dict[str, object] = {}
+
+    def execute(**kwargs: object) -> dict[str, object]:
+        observed.update(kwargs)
+        return {
+            "operation_id": request["operation_id"],
+            "topology": "individual",
+            "selected_device_ids": [DEVICE_ID],
+            "replayed": False,
+        }
+
+    monkeypatch.setattr(executor, "_execute_actions", execute)
+    result = apply_storage_plan(request, paths=paths, inventory_provider=lambda: {"disks": []})
+    assert observed["resume"] is True
+    resumed_journal = observed["journal"]
+    assert isinstance(resumed_journal, dict)
+    assert resumed_journal["completed_actions"] == [f"identity:{DEVICE_ID}"]
+    assert resumed_journal["notices"][-1]["code"] == "storage_build_resumed"
+    assert result["operation_id"] == request["operation_id"]
+    status = storage_operation_status(str(request["operation_id"]), paths=paths)
+    assert status["state"] == "succeeded"
+
+
 def test_storage_progress_waits_safely_before_the_executor_starts(tmp_path: Path) -> None:
     paths = Paths(transaction_root=tmp_path / "transactions")
     progress = storage_operation_status("11111111-1111-4111-8111-111111111111", paths=paths)

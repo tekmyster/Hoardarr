@@ -78,6 +78,14 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertIn("install --yes --no-install-recommends mergerfs", installer)
         self.assertIn("mandatory command failed its version check: mergerfs", installer)
 
+    def test_release_installer_enforces_mergerfs_attribute_runtime(self):
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('grep -Fxq "attr"', installer)
+        self.assertIn("ensure_filesystem_attribute_tools", installer)
+        self.assertIn("install --yes --no-install-recommends attr", installer)
+        self.assertIn("getfattr setfattr", installer)
+
     def test_release_installer_enforces_media_account_runtime(self):
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
 
@@ -299,7 +307,7 @@ class BuildPlanTests(unittest.TestCase):
         self.assertIn('flock --exclusive --nonblock "${INSTALL_LOCK_FD}"', installer)
         self.assertLess(
             installer.index(
-                "acquire_install_lock\n    ensure_mergerfs\n    ensure_account_tools\n    ensure_neighbor_discovery\n    ensure_service_account"
+                "acquire_install_lock\n    ensure_mergerfs\n    ensure_filesystem_attribute_tools\n    ensure_account_tools\n    ensure_neighbor_discovery\n    ensure_service_account"
             ),
             installer.index('stage_release "${expected_manifest}"'),
         )

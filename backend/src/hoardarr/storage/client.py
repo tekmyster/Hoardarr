@@ -85,11 +85,12 @@ def apply_storage_plan(
     document: dict[str, Any],
     approval: dict[str, Any] | None,
     timeout_seconds: float,
+    resume: bool = False,
 ) -> dict[str, Any]:
     result = _request_executor(
         socket_path,
         {
-            "operation": "apply_storage_plan",
+            "operation": "resume_storage_plan" if resume else "apply_storage_plan",
             "operation_id": operation_id,
             "plan_sha256": plan_sha256,
             "document": document,

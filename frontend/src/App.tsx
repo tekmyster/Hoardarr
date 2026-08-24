@@ -1137,6 +1137,28 @@ export default function App() {
     }
   }
 
+  async function resumeStorageBuild(): Promise<void> {
+    if (!storageOperation || storageOperation.status !== "needs_attention") return;
+    setBusy(true);
+    setError(null);
+    setStatus("Checking the durable storage checkpoint…");
+    try {
+      const operation = await api.resumeOperation(storageOperation.id);
+      setStorageOperation(operation);
+      setStorageProgress((current) => current ? {
+        ...current,
+        state: operation.status,
+        phase: "Waiting for the storage executor to resume",
+      } : null);
+      setStatus("Storage execution was queued to resume from its last safe checkpoint.");
+    } catch (caught) {
+      setStatus(null);
+      setError(messageFromError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function refreshStaleStoragePlan(): Promise<void> {
     if (!wizard) return;
     setBusy(true);
@@ -2199,6 +2221,7 @@ export default function App() {
           {storageProgress?.notices.map((notice) => <Notice key={`${notice.action_id ?? notice.code}:${notice.device_id ?? "drive"}`} tone="warning" title="SMART self-test skipped">{notice.message}</Notice>)}
           {storageOperation.status === "succeeded" && <Notice tone="success" title="Storage build completed">The executor completed the approved plan. Select Close to refresh inventory and leave the wizard.</Notice>}
           {["failed", "cancelled", "needs_attention"].includes(storageOperation.status) && <Notice tone="danger" title={storageOperation.error?.code ?? "Storage was not completed"}>{storageOperation.error?.detail ?? storageOperation.error?.message ?? "The operation stopped. No success is being claimed; review the latest event before retrying."}</Notice>}
+          {storageOperation.status === "needs_attention" && <div className="button-row"><button type="button" className="button button-primary" disabled={busy} onClick={() => void resumeStorageBuild()}>Resume from safe checkpoint</button><button type="button" className="button button-secondary" onClick={minimizeStorageActivity}>Review in Activity</button></div>}
           {storageEvents.length > 0 && <details className="operation-events"><summary>Operation details</summary><ol>{storageEvents.slice(-12).map((event) => <li key={event.sequence}><time>{new Date(event.created_at).toLocaleTimeString()}</time><span>{event.message}</span></li>)}</ol></details>}
         </Card>}
         {storageRole !== "test" && storageOperation?.status === "succeeded" && accountReady && <Card title="File access account is ready" description={`The non-login Linux account and SMB credential are enabled for ${serviceUsername}.`}>
@@ -2232,6 +2255,7 @@ export default function App() {
   const finalAccountReady = storageRole === "test" || provisionedServiceUsername === serviceUsername;
   const finalGeneratedPasswordPending = finalAccountReady && serviceCredentialMode === "generate" && generatedServicePassword !== null;
   const storageTerminalWithAttention = storageOperation && ["failed", "cancelled", "needs_attention"].includes(storageOperation.status);
+  const storageCanResume = storageOperation?.status === "needs_attention";
   const planExecutable = plan?.document.apply_available === true && (plan.document.blockers?.length ?? 0) === 0;
   const wizardNext = activeStep === 10
     ? !storageOperation
@@ -2242,8 +2266,10 @@ export default function App() {
           : finalGeneratedPasswordPending
             ? undefined
             : closeCompletedStorageAction
-        : storageTerminalWithAttention
-          ? minimizeStorageActivity
+        : storageCanResume
+          ? resumeStorageBuild
+          : storageTerminalWithAttention
+            ? minimizeStorageActivity
           : undefined
     : advance;
   const wizardNextLabel = activeStep === 9
@@ -2251,8 +2277,10 @@ export default function App() {
     : activeStep === 10
       ? !storageOperation
         ? "Apply settings"
-        : storageTerminalWithAttention
-          ? "Review in Activity"
+        : storageCanResume
+          ? "Resume from safe checkpoint"
+          : storageTerminalWithAttention
+            ? "Review in Activity"
           : storageOperation.status === "succeeded" && !finalAccountReady
             ? "Create access credential"
             : storageOperation.status === "succeeded" ? "Close" : "Working…"

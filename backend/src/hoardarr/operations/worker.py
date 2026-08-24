@@ -1286,6 +1286,12 @@ def _execute_storage(
                 "confirmation_sha256": approval.confirmation_sha256,
             }
         plan_document = deepcopy(plan.document_json)
+        operation = session.get(Operation, item.operation_id)
+        resume_requested = bool(
+            operation is not None
+            and isinstance(operation.result_json, dict)
+            and operation.result_json.get("resume_requested") is True
+        )
     try:
         result = storage_applier(
             settings.storage_executor_socket,
@@ -1294,6 +1300,7 @@ def _execute_storage(
             document=plan_document,
             approval=approval_document,
             timeout_seconds=settings.storage_executor_timeout_seconds,
+            **({"resume": True} if resume_requested else {}),
         )
     except StorageExecutorError as exc:
         raise WorkFailure(exc.code, str(exc), needs_attention=exc.needs_attention) from exc

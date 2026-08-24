@@ -1100,6 +1100,8 @@ def _ensure_not_active(paths: Paths, devices: Mapping[str, Mapping[str, Any]]) -
 
 def _validate_plan(
     request: Mapping[str, Any],
+    *,
+    operation: str = "apply_storage_plan",
 ) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
     if set(request) != {"operation", "operation_id", "plan_sha256", "document", "approval"}:
         raise ExecutorFailure("request_invalid", "The storage request is invalid.")
@@ -1108,7 +1110,7 @@ def _validate_plan(
     document = request.get("document")
     approval = request.get("approval")
     if (
-        request.get("operation") != "apply_storage_plan"
+        request.get("operation") != operation
         or not isinstance(operation_id, str)
         or not UUID_RE.fullmatch(operation_id)
     ):
@@ -1710,6 +1712,36 @@ def _load_prior_journal(path: Path, plan_sha: str) -> dict[str, Any] | None:
     )
 
 
+def _load_resume_journal(path: Path, plan_sha: str) -> dict[str, Any]:
+    if not path.exists():
+        raise ExecutorFailure(
+            "resume_journal_missing",
+            "The storage checkpoint is unavailable; the operation cannot be resumed safely.",
+            needs_attention=True,
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ExecutorFailure(
+            "transaction_journal_invalid", "The prior transaction journal is invalid."
+        ) from exc
+    if not isinstance(document, dict) or document.get("plan_sha256") != plan_sha:
+        raise ExecutorFailure(
+            "operation_id_conflict", "This operation identity belongs to another plan."
+        )
+    if document.get("state") != "needs_attention":
+        raise ExecutorFailure(
+            "operation_not_resumable",
+            "Only a storage operation that needs attention can resume from its checkpoint.",
+        )
+    completed = document.get("completed_actions")
+    if not isinstance(completed, list) or not all(isinstance(item, str) for item in completed):
+        raise ExecutorFailure(
+            "transaction_journal_invalid", "The storage checkpoint is incomplete."
+        )
+    return document
+
+
 def _safe_mountpoint(value: str) -> Path:
     if (
         not isinstance(value, str)
@@ -1923,6 +1955,91 @@ def _revalidate(
     devices = _selected_live_devices(document, inventory_provider())
     _ensure_not_active(paths, devices)
     return devices
+
+
+def _resume_revalidate(
+    document: Mapping[str, Any],
+    inventory_provider: InventoryProvider,
+    paths: Paths,
+    journal: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    """Allow only executor-created member mounts while resuming an exact plan.
+
+    A failed storage build can have completed partitioning, formatting, and a
+    managed member mount before a later layout command stops.  Normal plan
+    validation quite correctly rejects any active selected disk.  Resumption
+    is narrower: the active path must be the deterministic Hoardarr member
+    mount, and the journal must prove that this operation completed both the
+    partition and filesystem actions for that same stable device identity.
+    """
+
+    devices = _selected_live_devices(document, inventory_provider())
+    storage = document.get("storage")
+    completed = {
+        item for item in journal.get("completed_actions", []) if isinstance(item, str)
+    }
+    actions = storage.get("actions") if isinstance(storage, Mapping) else None
+    if not isinstance(actions, list):
+        raise ExecutorFailure("plan_invalid", "The plan has no typed actions.")
+    completed_types_by_device: dict[str, set[str]] = {}
+    for action in actions:
+        if not isinstance(action, Mapping) or action.get("action_id") not in completed:
+            continue
+        identifier = action.get("device_id")
+        action_type = action.get("type")
+        if isinstance(identifier, str) and isinstance(action_type, str):
+            completed_types_by_device.setdefault(identifier, set()).add(action_type)
+
+    for identifier, disk in devices.items():
+        expected_mount = os.fspath(paths.mount_root / document_hash(identifier)[:16])
+        observed_mounts = {
+            mount
+            for mount in disk.get("mountpoints", [])
+            if isinstance(mount, str) and mount
+        }
+        partitions = disk.get("partitions") if isinstance(disk.get("partitions"), list) else []
+        for partition in partitions:
+            if not isinstance(partition, Mapping):
+                continue
+            observed_mounts.update(
+                mount
+                for mount in partition.get("mountpoints", [])
+                if isinstance(mount, str) and mount
+            )
+        if observed_mounts:
+            completed_types = completed_types_by_device.get(identifier, set())
+            if observed_mounts != {expected_mount} or not {
+                "disk.partition_table.create",
+                "filesystem.create",
+            }.issubset(completed_types):
+                raise ExecutorFailure(
+                    "resume_activation_changed",
+                    "A selected drive is active outside the exact Hoardarr checkpoint. "
+                    "No resume action was started.",
+                    needs_attention=True,
+                )
+        else:
+            _ensure_not_active(paths, {identifier: disk})
+    return devices
+
+
+def _preflight_storage_tools(document: Mapping[str, Any]) -> None:
+    storage = document.get("storage")
+    if not isinstance(storage, Mapping):
+        return
+    mergerfs = storage.get("mergerfs")
+    expansion = storage.get("expansion")
+    if (
+        storage.get("topology") == "mergerfs"
+        and isinstance(mergerfs, Mapping)
+        and mergerfs.get("mode") == "existing"
+        and isinstance(expansion, Mapping)
+        and expansion.get("kind") in {"add_mergerfs_member", "add_snapraid_data"}
+    ):
+        # Live branch expansion is implemented by mergerFS' documented xattr
+        # interface.  Resolve it before a surface test, partition, or format so
+        # a missing appliance package cannot leave a partially applied plan.
+        _tool("setfattr")
 
 
 _FSTAB_OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
@@ -2210,13 +2327,20 @@ def _execute_actions(
     inventory_provider: InventoryProvider,
     runner: CommandRunner,
     journal: dict[str, Any],
+    resume: bool = False,
     zfs_state_provider: ZfsStateProvider = _live_zfs_pool_state,
 ) -> dict[str, Any]:
     storage = document["storage"]
     topology = storage["topology"]
-    devices = _revalidate(document, inventory_provider, paths)
+    devices = (
+        _resume_revalidate(document, inventory_provider, paths, journal)
+        if resume
+        else _revalidate(document, inventory_provider, paths)
+    )
     partitions: dict[str, Path] = {}
-    completed: list[str] = []
+    completed: list[str] = [
+        item for item in journal.get("completed_actions", []) if isinstance(item, str)
+    ]
 
     def smart_progress(progress: dict[str, Any]) -> None:
         current = journal.get("current_action")
@@ -2226,6 +2350,8 @@ def _execute_actions(
         atomic_json(_journal_path(paths, operation_id), journal)
 
     for action_index, action in enumerate(storage["actions"]):
+        if action["action_id"] in completed:
+            continue
         action_type = action["type"]
         journal["phase"] = "Checking and preparing drives"
         journal["current_action"] = {
@@ -2382,8 +2508,8 @@ def _execute_actions(
         atomic_json(_journal_path(paths, operation_id), journal)
         partition = partitions.get(identifier)
         created = partition is not None
+        parts = disk.get("partitions") if isinstance(disk.get("partitions"), list) else []
         if partition is None:
-            parts = disk.get("partitions") if isinstance(disk.get("partitions"), list) else []
             filesystem_parts = [
                 part
                 for part in parts
@@ -2411,18 +2537,28 @@ def _execute_actions(
         ]
         mountpoint = paths.mount_root / document_hash(identifier)[:16]
         mountpoint.mkdir(parents=True, exist_ok=True, mode=0o750)
-        runner(
-            [
-                _tool("mount"),
-                "-t",
-                filesystem_type,
-                "-o",
-                ",".join(device_options) if device_options else "defaults",
-                os.fspath(partition),
-                os.fspath(mountpoint),
-            ],
-            120,
-        )
+        partition_mounts = {
+            value
+            for part in parts
+            if isinstance(part, Mapping)
+            and part.get("kernel_path") == os.fspath(partition)
+            for value in part.get("mountpoints", [])
+            if isinstance(value, str) and value
+        }
+        already_mounted = partition_mounts == {os.fspath(mountpoint)}
+        if not already_mounted:
+            runner(
+                [
+                    _tool("mount"),
+                    "-t",
+                    filesystem_type,
+                    "-o",
+                    ",".join(device_options) if device_options else "defaults",
+                    os.fspath(partition),
+                    os.fspath(mountpoint),
+                ],
+                120,
+            )
         disk_mounts.append(mountpoint)
         disk_mounts_by_id[identifier] = mountpoint
         # UUID and type are resolved now; /dev/sdX names are never persisted.
@@ -2432,7 +2568,9 @@ def _execute_actions(
         fstab_lines.append(
             f"UUID={filesystem_uuid} {mountpoint} {filesystem_type} {option_text} 0 2"
         )
-        journal["completed_steps"] = int(journal["completed_steps"]) + 1
+        journal["completed_steps"] = max(
+            int(journal["completed_steps"]), len(completed) + mount_index + 1
+        )
         journal["current_action"] = None
         journal["updated_at"] = time.time()
         atomic_json(_journal_path(paths, operation_id), journal)
@@ -3124,7 +3262,11 @@ def apply_storage_plan(
     zfs_state_provider: ZfsStateProvider = _live_zfs_pool_state,
 ) -> dict[str, Any]:
     paths = paths or Paths()
-    operation_id, plan_sha, document, _approval = _validate_plan(request)
+    resume = request.get("operation") == "resume_storage_plan"
+    operation_id, plan_sha, document, _approval = _validate_plan(
+        request,
+        operation="resume_storage_plan" if resume else "apply_storage_plan",
+    )
     validate_quarantine(paths.quarantine_marker)
     try:
         paths.transaction_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3146,43 +3288,62 @@ def apply_storage_plan(
         )
     provider = inventory_provider or (lambda: _live_inventory(paths))
     journal_path = _journal_path(paths, operation_id)
-    prior = _load_prior_journal(journal_path, plan_sha)
-    if prior is not None:
-        return {**prior, "replayed": True}
+    if resume:
+        resume_journal = _load_resume_journal(journal_path, plan_sha)
+    else:
+        prior = _load_prior_journal(journal_path, plan_sha)
+        if prior is not None:
+            return {**prior, "replayed": True}
+        _preflight_storage_tools(document)
     storage = document["storage"]
     selected_ids = list(storage["snapshot_binding"]["selected_device_ids"])
     with _device_locks(paths, selected_ids):
         # Recheck after locks; another operation may have changed activation or identity.
-        _revalidate(document, provider, paths)
-        journal: dict[str, Any] = {
-            "schema_version": 1,
-            "operation_id": operation_id,
-            "plan_sha256": plan_sha,
-            "state": "running",
-            "started_at": time.time(),
-            "updated_at": time.time(),
-            "completed_actions": [],
-            "notices": [],
-            "action_results": [],
-            "phase": "Validating plan and drive identities",
-            "completed_steps": 0,
-            "total_steps": (
-                len(storage["actions"])
-                if storage["topology"] == "test"
-                else len(storage["actions"])
-                + len(selected_ids)
-                + 3
-                + (
-                    1
-                    if paths.managed_udev_rule is not None
-                    and paths.managed_storage_state is not None
-                    else 0
-                )
-                + (1 if document.get("actions", {}).get("connectivity") else 0)
-            ),
-            "current_action": None,
-        }
-        atomic_json(journal_path, journal)
+        if resume:
+            _resume_revalidate(document, provider, paths, resume_journal)
+            journal = dict(resume_journal)
+            journal["state"] = "running"
+            journal["phase"] = "Resuming storage build from the last safe checkpoint"
+            journal["current_action"] = None
+            journal["updated_at"] = time.time()
+            journal.setdefault("notices", []).append(
+                {
+                    "code": "storage_build_resumed",
+                    "message": "Storage execution resumed from its durable checkpoint.",
+                }
+            )
+            atomic_json(journal_path, journal)
+        else:
+            _revalidate(document, provider, paths)
+            journal = {
+                "schema_version": 1,
+                "operation_id": operation_id,
+                "plan_sha256": plan_sha,
+                "state": "running",
+                "started_at": time.time(),
+                "updated_at": time.time(),
+                "completed_actions": [],
+                "notices": [],
+                "action_results": [],
+                "phase": "Validating plan and drive identities",
+                "completed_steps": 0,
+                "total_steps": (
+                    len(storage["actions"])
+                    if storage["topology"] == "test"
+                    else len(storage["actions"])
+                    + len(selected_ids)
+                    + 3
+                    + (
+                        1
+                        if paths.managed_udev_rule is not None
+                        and paths.managed_storage_state is not None
+                        else 0
+                    )
+                    + (1 if document.get("actions", {}).get("connectivity") else 0)
+                ),
+                "current_action": None,
+            }
+            atomic_json(journal_path, journal)
         selected_devices = {
             str(item.get("id")): item
             for item in storage.get("selected_devices", [])
@@ -3217,6 +3378,7 @@ def apply_storage_plan(
                 inventory_provider=provider,
                 runner=runner,
                 journal=journal,
+                resume=resume,
                 zfs_state_provider=zfs_state_provider,
             )
         except Exception:

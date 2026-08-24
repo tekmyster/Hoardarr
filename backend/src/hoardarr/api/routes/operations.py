@@ -24,7 +24,11 @@ from hoardarr.db.models import (
     StorageDrainJob,
     utc_now,
 )
-from hoardarr.operations.service import OperationConflict, request_cancellation
+from hoardarr.operations.service import (
+    OperationConflict,
+    request_cancellation,
+    resume_storage_apply,
+)
 from hoardarr.storage.client import StorageExecutorError, storage_operation_status
 from hoardarr.storage.drain_worker import (
     DrainExecutionError,
@@ -340,12 +344,16 @@ def resume_operation(
 ) -> dict[str, object]:
     operation = visible_operation(session, operation_id, principal)
     try:
-        if operation.kind == "storage.foreign.migrate":
+        if operation.kind == "storage.apply":
+            resume_storage_apply(session, operation)
+        elif operation.kind == "storage.foreign.migrate":
             resume_foreign_migration(session, operation)
         else:
             resume_drain(session, operation)
-    except (DrainExecutionError, ForeignMigrationError) as exc:
-        raise Problem(409, exc.code, "Operation cannot be resumed", exc.safe_message) from exc
+    except (DrainExecutionError, ForeignMigrationError, OperationConflict) as exc:
+        code = getattr(exc, "code", "operation_not_resumable")
+        message = getattr(exc, "safe_message", str(exc))
+        raise Problem(409, code, "Operation cannot be resumed", message) from exc
     record_audit(
         session,
         principal=principal,

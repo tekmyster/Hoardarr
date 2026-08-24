@@ -193,6 +193,31 @@ def fail_operation(
     append_event(session, operation, operation.status, message, {"code": code})
 
 
+def resume_storage_apply(session: Session, operation: Operation) -> None:
+    if operation.kind != "storage.apply":
+        raise OperationConflict("this operation is not a storage build")
+    if operation.status != "needs_attention":
+        raise OperationConflict("this storage build is not waiting for a safe resume")
+    metadata = dict(operation.result_json or {})
+    attempt = int(metadata.get("resume_attempt", 0)) + 1
+    metadata.update({"resume_requested": True, "resume_attempt": attempt})
+    operation.result_json = metadata
+    operation.status = "queued"
+    operation.cancel_requested = False
+    operation.lease_owner = None
+    operation.leased_at = None
+    operation.heartbeat_at = None
+    operation.not_before = None
+    operation.updated_at = utc_now()
+    append_event(
+        session,
+        operation,
+        "resumed",
+        "Storage build queued to resume from its durable checkpoint",
+        {"attempt": attempt},
+    )
+
+
 def request_cancellation(session: Session, operation: Operation) -> None:
     now = utc_now()
     if (
