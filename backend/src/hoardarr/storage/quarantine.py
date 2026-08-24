@@ -40,6 +40,13 @@ def atomic_json(path: Path, document: dict[str, Any], *, mode: int = 0o600) -> N
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
+        # The executor service intentionally uses a restrictive umask for new
+        # state. Public system configuration such as fstab still needs the
+        # explicit reviewed mode passed by its caller.
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, mode)
+        else:  # pragma: no cover - Windows compatibility path
+            os.chmod(temporary, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(document, handle, sort_keys=True, separators=(",", ":"))
             handle.write("\n")
