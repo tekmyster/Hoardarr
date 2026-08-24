@@ -75,6 +75,41 @@ def test_disk_registry_preserves_identity_across_kernel_path_changes() -> None:
         assert disk_documents(session)[0]["health_state"] == "healthy"
 
 
+def test_disk_registry_refresh_preserves_managed_pool_membership() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        disk, _created = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:managed-member",
+                "kernel_path": "/dev/sdb",
+                "metadata": {
+                    "managed_storage_entity_id": "11111111-1111-4111-8111-111111111111",
+                    "managed_storage_kind": "mergerfs",
+                },
+            },
+        )
+        disk.lifecycle_state = "managed_member"
+
+        refreshed, created_again = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:managed-member",
+                "kernel_path": "/dev/sdz",
+                "metadata": {"transport": "sas"},
+            },
+        )
+
+        assert created_again is False
+        assert refreshed.lifecycle_state == "managed_member"
+        assert refreshed.metadata_json == {
+            "managed_storage_entity_id": "11111111-1111-4111-8111-111111111111",
+            "managed_storage_kind": "mergerfs",
+            "transport": "sas",
+        }
+
+
 def test_disk_reservation_is_persistent_idempotent_and_blocks_assignment() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

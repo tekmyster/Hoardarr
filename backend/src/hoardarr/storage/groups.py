@@ -386,7 +386,13 @@ def register_disk(session: Session, observation: dict[str, Any]) -> tuple[Physic
         if field in observation:
             setattr(disk, field, observation[field])
     disk.health_state = str(observation.get("health_state") or "not_reported")
-    disk.metadata_json = dict(observation.get("metadata") or {})
+    # Discovery refreshes provider observations, but durable lifecycle links
+    # (for example membership in a managed file-level pool) belong to the
+    # registry and must survive the next hardware scan.
+    disk.metadata_json = {
+        **(disk.metadata_json or {}),
+        **dict(observation.get("metadata") or {}),
+    }
     disk.last_seen_at = datetime.now(UTC)
     session.flush()
     return disk, created
