@@ -209,13 +209,19 @@ def _read_only_source(operation_id: str, plan: dict[str, Any]) -> Iterator[Path]
         )
     mounted = False
     if target.exists():
+        target_is_mount = os.path.ismount(target)
         try:
             target_details = target.lstat()
             safe_target = (
                 stat.S_ISDIR(target_details.st_mode)
                 and not target.is_symlink()
-                and target_details.st_uid == os.geteuid()
-                and not target_details.st_mode & 0o077
+                and (
+                    target_is_mount
+                    or (
+                        target_details.st_uid == os.geteuid()
+                        and not target_details.st_mode & 0o077
+                    )
+                )
             )
         except OSError:
             safe_target = False
@@ -225,7 +231,7 @@ def _read_only_source(operation_id: str, plan: dict[str, Any]) -> Iterator[Path]
                 "The private migration mount has unsafe ownership or permissions.",
                 needs_attention=True,
             )
-        if os.path.ismount(target):
+        if target_is_mount:
             if _verified_mount(target, plan, str(findmnt)) is None:
                 raise ForeignMigrationError(
                     "foreign_mountpoint_busy",
