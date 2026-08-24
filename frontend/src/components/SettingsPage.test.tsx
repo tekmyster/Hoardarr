@@ -26,6 +26,7 @@ describe("SettingsPage updates and add-ons", () => {
       country_code: "US",
       timezone: "America/New_York",
       location_detection_method: "manual",
+      location_confirmed: true,
       queued_records: 0,
       queued_bytes: 0,
       dead_letter_records: 0,

@@ -22,6 +22,7 @@ const settings: FleetTelemetrySettingsDocument = {
   country_code: "US",
   timezone: "America/New_York",
   location_detection_method: "manual",
+  location_confirmed: true,
   queued_records: 1,
   queued_bytes: 256,
   dead_letter_records: 0,
@@ -97,6 +98,18 @@ describe("FleetTelemetryPanel", () => {
       country_code: "CA",
       timezone: "America/New_York",
     })));
+  });
+
+  it("does not present an inferred location as confirmed", async () => {
+    vi.mocked(api.fleetTelemetrySettings).mockResolvedValue({
+      ...settings,
+      country_code: "CA",
+      location_detection_method: "os_timezone",
+      location_confirmed: false,
+    });
+    render(<FleetTelemetryPanel />);
+    expect(await screen.findByText("Please confirm your location")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("CA")).toBeInTheDocument();
   });
 
   it("has no automated accessibility violations", async () => {

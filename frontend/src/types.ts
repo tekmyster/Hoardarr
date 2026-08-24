@@ -1697,6 +1697,7 @@ export interface FleetTelemetrySettingsDocument {
   country_code: string | null;
   timezone: string;
   location_detection_method: "os_timezone" | "locale" | "network" | "manual";
+  location_confirmed: boolean;
   queued_records: number;
   queued_bytes: number;
   dead_letter_records: number;

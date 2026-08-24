@@ -22,6 +22,8 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     create_engine,
+    delete,
+    exists,
     func,
     select,
 )
@@ -142,6 +144,61 @@ class CategoryObservation(CentralBase):
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
+class ControllerObservation(CentralBase):
+    __tablename__ = "fleet_controller_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installation_id: Mapped[str] = mapped_column(
+        ForeignKey("fleet_installations.installation_id"), index=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class StorageLayoutObservation(CentralBase):
+    __tablename__ = "fleet_storage_layout_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installation_id: Mapped[str] = mapped_column(
+        ForeignKey("fleet_installations.installation_id"), index=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class ApplicationObservation(CentralBase):
+    __tablename__ = "fleet_application_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installation_id: Mapped[str] = mapped_column(
+        ForeignKey("fleet_installations.installation_id"), index=True
+    )
+    product: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CapacityObservation(CentralBase):
+    __tablename__ = "fleet_capacity_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installation_id: Mapped[str] = mapped_column(
+        ForeignKey("fleet_installations.installation_id"), index=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class FeatureUsageObservation(CentralBase):
+    __tablename__ = "fleet_feature_usage_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installation_id: Mapped[str] = mapped_column(
+        ForeignKey("fleet_installations.installation_id"), index=True
+    )
+    feature: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class GeographicSetting(CentralBase):
     __tablename__ = "fleet_geographic_settings"
 
@@ -184,6 +241,14 @@ class IngestedRecord(CentralBase):
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
+class CentralMaintenance(CentralBase):
+    __tablename__ = "fleet_central_maintenance"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class Registration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -207,6 +272,12 @@ class FleetCentralSettings(BaseModel):
     secret_key_file: Path
     admin_token: str | None = None
     active_window_days: int = Field(default=30, ge=1, le=365)
+    raw_retention_days: int = Field(default=90, ge=7, le=730)
+    opt_in_retention_days: int = Field(default=30, ge=1, le=365)
+    heartbeat_retention_days: int = Field(default=400, ge=30, le=1825)
+    snapshot_retention_days: int = Field(default=730, ge=30, le=3650)
+    drive_lifecycle_retention_days: int = Field(default=3650, ge=365, le=7300)
+    retention_batch_size: int = Field(default=1000, ge=10, le=10000)
 
 
 def _problem(status: int, code: str, detail: str) -> JSONResponse:
@@ -336,20 +407,55 @@ def _project_record(
                     details_json=item,
                 )
             )
-        categories = {
-            "storage_layout": payload.get("storage_configuration"),
-            "application": payload.get("applications_detected"),
-            "capacity": payload.get("capacity"),
-            "feature_usage": payload.get("feature_usage"),
-        }
-        for kind, details in categories.items():
-            if details is not None:
+        storage = payload.get("storage_configuration")
+        if isinstance(storage, dict):
+            session.add(
+                StorageLayoutObservation(
+                    installation_id=installation_id,
+                    observed_at=observed_at,
+                    details_json=storage,
+                )
+            )
+            session.add(
+                CapacityObservation(
+                    installation_id=installation_id,
+                    observed_at=observed_at,
+                    details_json={
+                        key: storage[key]
+                        for key in (
+                            "logical_capacity_bytes",
+                            "usable_capacity_bytes",
+                            "free_percent",
+                        )
+                        if key in storage
+                    },
+                )
+            )
+        controllers = payload.get("controller_observations")
+        if isinstance(controllers, dict):
+            session.add(
+                ControllerObservation(
+                    installation_id=installation_id,
+                    observed_at=observed_at,
+                    details_json=controllers,
+                )
+            )
+        for product in payload.get("applications_detected", [])[:128]:
+            if isinstance(product, str):
                 session.add(
-                    CategoryObservation(
+                    ApplicationObservation(
                         installation_id=installation_id,
-                        kind=kind,
+                        product=product[:64],
                         observed_at=observed_at,
-                        details_json={"value": details},
+                    )
+                )
+        for feature in payload.get("feature_usage", [])[:128]:
+            if isinstance(feature, str):
+                session.add(
+                    FeatureUsageObservation(
+                        installation_id=installation_id,
+                        feature=feature[:96],
+                        observed_at=observed_at,
                     )
                 )
         if payload.get("country_code") or payload.get("timezone"):
@@ -378,22 +484,149 @@ def _project_record(
             )
         else:
             session.add(
-                CategoryObservation(
+                FeatureUsageObservation(
                     installation_id=installation_id,
-                    kind="feature_usage",
+                    feature=event_type,
                     observed_at=observed_at,
-                    details_json=payload,
                 )
             )
         return
     session.add(
-        CategoryObservation(
+        CapacityObservation(
             installation_id=installation_id,
-            kind="capacity",
             observed_at=observed_at,
             details_json=payload,
         )
     )
+
+
+def _bounded_delete(
+    session: Session,
+    model: type[CentralBase],
+    id_column: Any,
+    *conditions: Any,
+    limit: int,
+) -> int:
+    identifiers = list(session.scalars(select(id_column).where(*conditions).limit(limit)))
+    if identifiers:
+        session.execute(delete(model).where(id_column.in_(identifiers)))
+    return len(identifiers)
+
+
+def run_retention(
+    session: Session,
+    settings: FleetCentralSettings,
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+) -> dict[str, int | str]:
+    now = now or utc_now()
+    state = session.get(CentralMaintenance, "retention")
+    if state is not None:
+        last_run = state.last_run_at
+        if last_run.tzinfo is None:
+            last_run = last_run.replace(tzinfo=UTC)
+        if not force and now - last_run < timedelta(hours=1):
+            return {"status": "not_due", "deleted": 0}
+    limit = settings.retention_batch_size
+    counts: dict[str, int | str] = {"status": "completed"}
+    counts["opt_in_records"] = _bounded_delete(
+        session,
+        IngestedRecord,
+        IngestedRecord.id,
+        IngestedRecord.telemetry_level >= 2,
+        IngestedRecord.observed_at < now - timedelta(days=settings.opt_in_retention_days),
+        limit=limit,
+    )
+    counts["raw_records"] = _bounded_delete(
+        session,
+        IngestedRecord,
+        IngestedRecord.id,
+        IngestedRecord.observed_at < now - timedelta(days=settings.raw_retention_days),
+        limit=limit,
+    )
+    counts["heartbeats"] = _bounded_delete(
+        session,
+        InstallationHeartbeat,
+        InstallationHeartbeat.id,
+        InstallationHeartbeat.observed_at < now - timedelta(days=settings.heartbeat_retention_days),
+        limit=limit,
+    )
+    counts["versions"] = _bounded_delete(
+        session,
+        VersionObservation,
+        VersionObservation.id,
+        VersionObservation.observed_at < now - timedelta(days=settings.heartbeat_retention_days),
+        limit=limit,
+    )
+    counts["hardware_snapshots"] = _bounded_delete(
+        session,
+        HardwareSnapshot,
+        HardwareSnapshot.id,
+        HardwareSnapshot.observed_at < now - timedelta(days=settings.snapshot_retention_days),
+        limit=limit,
+    )
+    counts["category_observations"] = _bounded_delete(
+        session,
+        CategoryObservation,
+        CategoryObservation.id,
+        CategoryObservation.observed_at < now - timedelta(days=settings.snapshot_retention_days),
+        limit=limit,
+    )
+    for label, model in (
+        ("controller_observations", ControllerObservation),
+        ("storage_layout_observations", StorageLayoutObservation),
+        ("application_observations", ApplicationObservation),
+        ("capacity_observations", CapacityObservation),
+        ("feature_usage_observations", FeatureUsageObservation),
+    ):
+        counts[label] = _bounded_delete(
+            session,
+            model,
+            model.id,
+            model.observed_at < now - timedelta(days=settings.snapshot_retention_days),
+            limit=limit,
+        )
+    counts["drive_observations"] = _bounded_delete(
+        session,
+        DriveObservation,
+        DriveObservation.id,
+        DriveObservation.observed_at
+        < now - timedelta(days=settings.drive_lifecycle_retention_days),
+        limit=limit,
+    )
+    counts["drive_lifecycle_events"] = _bounded_delete(
+        session,
+        DriveLifecycleEvent,
+        DriveLifecycleEvent.id,
+        DriveLifecycleEvent.observed_at
+        < now - timedelta(days=settings.drive_lifecycle_retention_days),
+        limit=limit,
+    )
+    orphaned_batches = list(
+        session.scalars(
+            select(IngestedBatch.batch_id)
+            .where(
+                IngestedBatch.received_at < now - timedelta(days=settings.raw_retention_days),
+                ~exists(
+                    select(IngestedRecord.id).where(
+                        IngestedRecord.batch_id == IngestedBatch.batch_id
+                    )
+                ),
+            )
+            .limit(limit)
+        )
+    )
+    if orphaned_batches:
+        session.execute(delete(IngestedBatch).where(IngestedBatch.batch_id.in_(orphaned_batches)))
+    counts["batches"] = len(orphaned_batches)
+    counts["deleted"] = sum(value for value in counts.values() if isinstance(value, int))
+    if state is None:
+        state = CentralMaintenance(id="retention", last_run_at=now, details_json={})
+        session.add(state)
+    state.last_run_at = now
+    state.details_json = counts
+    return counts
 
 
 def create_central_app(settings: FleetCentralSettings) -> FastAPI:
@@ -505,6 +738,7 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                 return _problem(422, "invalid_record", "Telemetry record is invalid.")
             installation.last_sequence_number = sequence
             installation.last_seen_at = utc_now()
+            run_retention(session, settings)
             acknowledged = [str(record["id"]) for record in records]
         return JSONResponse({"acknowledged_record_ids": acknowledged, "batch_id": batch_id})
 
@@ -526,6 +760,36 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
             versions = session.execute(
                 select(Installation.version, func.count()).group_by(Installation.version)
             ).all()
+            countries = session.execute(
+                select(GeographicSetting.country_code, func.count())
+                .where(GeographicSetting.country_code.is_not(None))
+                .group_by(GeographicSetting.country_code)
+                .order_by(GeographicSetting.country_code)
+            ).all()
+            timezones = session.execute(
+                select(GeographicSetting.timezone, func.count())
+                .where(GeographicSetting.timezone.is_not(None))
+                .group_by(GeographicSetting.timezone)
+                .order_by(GeographicSetting.timezone)
+            ).all()
+            applications = session.execute(
+                select(
+                    ApplicationObservation.product,
+                    func.count(func.distinct(ApplicationObservation.installation_id)),
+                )
+                .where(ApplicationObservation.observed_at >= cutoff)
+                .group_by(ApplicationObservation.product)
+                .order_by(ApplicationObservation.product)
+            ).all()
+            features = session.execute(
+                select(
+                    FeatureUsageObservation.feature,
+                    func.count(func.distinct(FeatureUsageObservation.installation_id)),
+                )
+                .where(FeatureUsageObservation.observed_at >= cutoff)
+                .group_by(FeatureUsageObservation.feature)
+                .order_by(FeatureUsageObservation.feature)
+            ).all()
             cross_system = session.scalar(
                 select(func.count()).select_from(
                     select(DriveObservation.drive_id)
@@ -534,6 +798,45 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                     .subquery()
                 )
             )
+            maintenance = session.get(CentralMaintenance, "retention")
+            recent_system = session.scalars(
+                select(HardwareSnapshot).order_by(HardwareSnapshot.observed_at.desc()).limit(10_000)
+            ).all()
+            systems_by_installation: dict[str, dict[str, Any]] = {}
+            for observation in recent_system:
+                systems_by_installation.setdefault(
+                    observation.installation_id, observation.system_json
+                )
+            recent_drives = session.scalars(
+                select(DriveObservation).order_by(DriveObservation.observed_at.desc()).limit(50_000)
+            ).all()
+            drives_by_id: dict[str, dict[str, Any]] = {}
+            for observation in recent_drives:
+                drives_by_id.setdefault(observation.drive_id, observation.details_json)
+            recent_layouts = session.scalars(
+                select(StorageLayoutObservation)
+                .order_by(StorageLayoutObservation.observed_at.desc())
+                .limit(10_000)
+            ).all()
+            layouts_by_installation: dict[str, dict[str, Any]] = {}
+            for observation in recent_layouts:
+                layouts_by_installation.setdefault(
+                    observation.installation_id, observation.details_json
+                )
+
+        def distribution(values: list[str | None]) -> list[dict[str, int | str]]:
+            counts: dict[str, int] = {}
+            for value in values:
+                label = value or "not_reported"
+                counts[label] = counts.get(label, 0) + 1
+            return [
+                {"value": value, "count": count}
+                for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+            ]
+
+        drive_values = list(drives_by_id.values())
+        system_values = list(systems_by_installation.values())
+        layout_values = list(layouts_by_installation.values())
         return JSONResponse(
             {
                 "active_installations": active or 0,
@@ -542,6 +845,98 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                 ],
                 "drives_seen_in_multiple_installations": cross_system or 0,
                 "active_window_days": settings.active_window_days,
+                "countries": [
+                    {"country_code": country, "installations": count}
+                    for country, count in countries
+                ],
+                "timezones": [
+                    {"timezone": timezone, "installations": count} for timezone, count in timezones
+                ],
+                "hardware": {
+                    "cpu_vendors": distribution(
+                        [
+                            str(item.get("cpu_vendor")) if item.get("cpu_vendor") else None
+                            for item in system_values
+                        ]
+                    ),
+                    "cpu_models": distribution(
+                        [
+                            str(item.get("cpu_model")) if item.get("cpu_model") else None
+                            for item in system_values
+                        ]
+                    ),
+                    "platform_models": distribution(
+                        [
+                            str(item.get("platform_model")) if item.get("platform_model") else None
+                            for item in system_values
+                        ]
+                    ),
+                    "sampled_installations": len(system_values),
+                },
+                "drives": {
+                    "vendors": distribution(
+                        [
+                            str(item.get("vendor")) if item.get("vendor") else None
+                            for item in drive_values
+                        ]
+                    ),
+                    "models": distribution(
+                        [
+                            str(item.get("model")) if item.get("model") else None
+                            for item in drive_values
+                        ]
+                    ),
+                    "media_types": distribution(
+                        [
+                            str(item.get("media_type")) if item.get("media_type") else None
+                            for item in drive_values
+                        ]
+                    ),
+                    "health": distribution(
+                        [
+                            str(item.get("health")) if item.get("health") else None
+                            for item in drive_values
+                        ]
+                    ),
+                    "sampled_drives": len(drive_values),
+                },
+                "storage": {
+                    "backend_types": distribution(
+                        [
+                            str(value)
+                            for layout in layout_values
+                            for value in layout.get("backend_types", [])
+                            if isinstance(value, str)
+                        ]
+                    ),
+                    "purposes": distribution(
+                        [
+                            str(value)
+                            for layout in layout_values
+                            for value in layout.get("purposes", [])
+                            if isinstance(value, str)
+                        ]
+                    ),
+                    "sampled_installations": len(layout_values),
+                },
+                "applications": [
+                    {"product": product, "installations": count} for product, count in applications
+                ],
+                "feature_usage": [
+                    {"feature": feature, "installations": count} for feature, count in features
+                ],
+                "query_limits": {
+                    "hardware_observations": 10_000,
+                    "drive_observations": 50_000,
+                    "storage_observations": 10_000,
+                },
+                "methodology": (
+                    "Latest retained observation per installation or drive; observed in Hoardarr "
+                    "installations, not manufacturer failure-rate evidence."
+                ),
+                "last_retention_run": maintenance.last_run_at.isoformat()
+                if maintenance is not None
+                else None,
             }
         )
 

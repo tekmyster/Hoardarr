@@ -932,6 +932,7 @@ class FleetTelemetryState(Base):
     location_detection_method: Mapped[str] = mapped_column(
         String(32), nullable=False, default="os_timezone"
     )
+    location_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     credential_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     credential_fingerprint: Mapped[str | None] = mapped_column(String(16), nullable=True)
     registration_status: Mapped[str] = mapped_column(
@@ -976,6 +977,17 @@ class FleetTelemetryQueue(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class FleetTelemetryCursor(Base):
+    __tablename__ = "fleet_telemetry_cursors"
+
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_record_id: Mapped[str] = mapped_column(String(64), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )

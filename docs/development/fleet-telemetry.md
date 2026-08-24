@@ -48,10 +48,26 @@ admin summary. Raw installation records and public aggregate statistics remain s
 is not added to telemetry analytics.
 
 The normalized receiver schema contains installations, heartbeats, version observations, hardware
-snapshots, drives, drive observations, lifecycle events, category observations for controllers,
-storage layouts, applications, capacity and feature usage, geographic settings, batches, and
+snapshots, drives, drive observations, lifecycle events, explicit controller, storage-layout,
+application, capacity and feature-usage observations, geographic settings, batches, and
 deduplicated records. SQLite is supported only for isolated tests and staging smoke checks; the
 production hoardarr.com deployment must use its managed server database and normal backup policy.
+
+Schema version 1 is the initial supported wire format. Application version and telemetry schema are
+stored independently, so an older supported Hoardarr build is not rejected merely for being old.
+The receiver rejects unknown schema versions with a permanent Problem Details response rather than
+guessing field meaning. Before version 1 is deprecated, a new receiver parser/normalizer and
+compatibility fixtures must ship first, followed by a published support window; removal is a later
+server migration, never an implicit direct-to-latest client requirement.
+
+Central retention is type-specific and bounded per transaction. Defaults keep raw accepted records
+for 90 days, explicitly opted-in Level 2/3 raw records for 30 days, heartbeats/version observations
+for 400 days, hardware/category observations for 730 days, and drive observations/lifecycle events
+for 3,650 days. Every value has server-side minimum and maximum bounds. Cleanup runs at most hourly
+during ingestion, deletes no more than the configured batch size per table, removes empty old batch
+envelopes after their records, and publishes the last cleanup time through the authenticated admin
+summary. Lifecycle retention is intentionally longer; access-log/source-IP retention belongs to the
+TLS proxy and must remain separately bounded.
 
 ## Operational behavior
 

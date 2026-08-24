@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import platform
 import uuid
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+import psutil
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -17,12 +21,19 @@ from hoardarr import __version__
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox, SecretStoreError
 from hoardarr.db.models import (
+    FleetTelemetryCursor,
     FleetTelemetryQueue,
     FleetTelemetryState,
     HardwareSnapshot,
     IntegrationConnection,
+    Operation,
+    PhysicalDisk,
     StorageBackend,
+    StorageController,
+    StorageEntity,
     StorageGroup,
+    StorageLifecycleEvent,
+    StoragePath,
     utc_now,
 )
 
@@ -64,6 +75,20 @@ NEVER_KEYS = (
 )
 RETRY_BASE_SECONDS = (30, 120, 600, 1800, 7200, 21600)
 MAX_RECORD_BYTES = 128 * 1024
+FEATURE_OPERATION_KINDS = frozenset(
+    {
+        "storage.drain",
+        "storage.expansion",
+        "storage.redundancy.add",
+        "storage.redundancy.remove",
+        "storage.redundancy.replace",
+        "storage.smart.short",
+        "storage.smart.long",
+        "storage.foreign_import",
+        "storage.sanitize",
+        "backup.remote",
+    }
+)
 
 
 class SessionFactory(Protocol):
@@ -78,17 +103,61 @@ def ensure_state(session: Session) -> FleetTelemetryState:
     state = session.get(FleetTelemetryState, STATE_ID)
     if state is not None:
         return state
-    timezone = datetime.now().astimezone().tzinfo
-    timezone_name = getattr(timezone, "key", None) or str(timezone or "UTC")
+    timezone_name = host_timezone_name()
     state = FleetTelemetryState(
         id=STATE_ID,
         installation_id=str(uuid.uuid4()),
         timezone=timezone_name[:128],
+        country_code=suggest_country_for_timezone(timezone_name),
         location_detection_method="os_timezone",
     )
     session.add(state)
     session.flush()
     return state
+
+
+def host_timezone_name() -> str:
+    candidates: list[str] = []
+    if os.environ.get("TZ"):
+        candidates.append(os.environ["TZ"])
+    timezone = datetime.now().astimezone().tzinfo
+    key = getattr(timezone, "key", None)
+    if isinstance(key, str):
+        candidates.append(key)
+    system_timezone = _read_small_text(Path("/etc/timezone"))
+    if system_timezone:
+        candidates.append(system_timezone)
+    try:
+        localtime = Path("/etc/localtime").resolve()
+        parts = localtime.parts
+        if "zoneinfo" in parts:
+            candidates.append("/".join(parts[parts.index("zoneinfo") + 1 :]))
+    except OSError:
+        pass
+    for candidate in candidates:
+        try:
+            ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+        return candidate
+    return "UTC"
+
+
+def suggest_country_for_timezone(timezone_name: str) -> str | None:
+    try:
+        zone_table = files("tzdata.zoneinfo").joinpath("zone.tab").read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, OSError):
+        try:
+            zone_table = Path("/usr/share/zoneinfo/zone.tab").read_text(encoding="utf-8")
+        except OSError:
+            return None
+    for line in zone_table.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[2] == timezone_name and len(parts[0]) == 2:
+            return parts[0].upper()
+    return None
 
 
 def validate_location(country_code: str | None, timezone: str) -> tuple[str | None, str]:
@@ -198,6 +267,74 @@ def _safe_drive(drive: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+def _read_small_text(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return value[:256] or None
+
+
+def _cpu_identity() -> tuple[str | None, str | None]:
+    vendor: str | None = None
+    model = platform.processor().strip()[:256] or None
+    if os.name == "posix":
+        try:
+            cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            cpuinfo = ""
+        for line in cpuinfo.splitlines()[:256]:
+            key, separator, value = line.partition(":")
+            if not separator:
+                continue
+            if key.strip() in {"vendor_id", "CPU implementer"} and vendor is None:
+                vendor = value.strip()[:128] or None
+            if key.strip() in {"model name", "Hardware"} and model is None:
+                model = value.strip()[:256] or None
+    else:
+        identifier = os.environ.get("PROCESSOR_IDENTIFIER", "").strip()
+        model = model or identifier[:256] or None
+        if "intel" in identifier.casefold():
+            vendor = "Intel"
+        elif "amd" in identifier.casefold():
+            vendor = "AMD"
+    return vendor, model
+
+
+def _system_inventory() -> dict[str, Any]:
+    cpu_vendor, cpu_model = _cpu_identity()
+    platform_vendor = _read_small_text(Path("/sys/class/dmi/id/sys_vendor"))
+    platform_model = _read_small_text(Path("/sys/class/dmi/id/product_name"))
+    virtualization_detected: bool | None = None
+    evidence = " ".join(value for value in (platform_vendor, platform_model) if value).casefold()
+    virtual_markers = ("vmware", "virtualbox", "kvm", "qemu", "hyper-v", "xen", "bochs")
+    if any(marker in evidence for marker in virtual_markers):
+        virtualization_detected = True
+    elif os.name == "posix":
+        try:
+            cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            cpuinfo = ""
+        if " hypervisor " in f" {cpuinfo.casefold()} ":
+            virtualization_detected = True
+    memory = psutil.virtual_memory()
+    return _bounded(
+        {
+            "cpu_vendor": cpu_vendor,
+            "cpu_model": cpu_model,
+            "cpu_architecture": platform.machine() or None,
+            "physical_cores": psutil.cpu_count(logical=False),
+            "logical_threads": psutil.cpu_count(logical=True),
+            "installed_memory_bytes": int(memory.total),
+            "os": platform.system() or None,
+            "kernel": platform.release() or None,
+            "platform_vendor": platform_vendor,
+            "platform_model": platform_model,
+            "virtualization_detected": virtualization_detected,
+        }
+    )
+
+
 def inventory_payload(session: Session, state: FleetTelemetryState) -> dict[str, Any]:
     snapshot = session.scalar(
         select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
@@ -216,24 +353,87 @@ def inventory_payload(session: Session, state: FleetTelemetryState) -> dict[str,
     )
     groups = session.scalars(select(StorageGroup).order_by(StorageGroup.id).limit(256)).all()
     backends = session.scalars(select(StorageBackend).order_by(StorageBackend.id).limit(1024)).all()
+    entities = session.scalars(select(StorageEntity).order_by(StorageEntity.id).limit(1024)).all()
+    managed_disks = session.scalars(
+        select(PhysicalDisk).order_by(PhysicalDisk.id).limit(4096)
+    ).all()
+    controllers = session.scalars(
+        select(StorageController).order_by(StorageController.id).limit(256)
+    ).all()
+    paths = session.scalars(select(StoragePath).order_by(StoragePath.id).limit(2048)).all()
+    successful_kinds = sorted(
+        {
+            kind
+            for kind in session.scalars(
+                select(Operation.kind)
+                .where(Operation.status == "succeeded", Operation.kind.in_(FEATURE_OPERATION_KINDS))
+                .distinct()
+            )
+        }
+    )
+    backend_types = sorted(
+        {
+            str(value)[:64]
+            for backend in backends
+            for key in ("backend_kind", "storage_kind", "filesystem")
+            if (value := backend.config_json.get(key)) is not None
+        }
+    )
+    controller_models = sorted(
+        {
+            ":".join(filter(None, (controller.provider, controller.model)))[:256]
+            for controller in controllers
+        }
+    )
+    usable_paths = sum(
+        1 for path in paths if path.active and path.state not in {"failed", "offline"}
+    )
+    capacity_total = 0
+    capacity_free = 0
+    for entity in entities:
+        try:
+            usage = psutil.disk_usage(entity.mountpoint)
+        except (FileNotFoundError, OSError):
+            continue
+        capacity_total += int(usage.total)
+        capacity_free += int(usage.free)
     return {
         "installation_id": state.installation_id,
         "schema_version": SCHEMA_VERSION,
         "observed_at": utc_now().isoformat(),
         "level": 1,
-        "system": {
-            "cpu_architecture": platform.machine() or None,
-            "os": platform.system() or None,
-            "kernel": platform.release() or None,
-        },
+        "system": _system_inventory(),
         "storage_hardware": disks,
         "storage_configuration": {
             "storage_group_count": len(groups),
             "backend_count": len(backends),
             "purposes": sorted({group.purpose for group in groups}),
             "backend_roles": sorted({backend.role for backend in backends}),
+            "backend_types": backend_types,
+            "logical_storage_kinds": sorted({entity.storage_kind for entity in entities}),
+            "logical_capacity_bytes": sum(entity.capacity_bytes for entity in entities),
+            "raw_capacity_bytes": sum(
+                disk.capacity_bytes for disk in managed_disks if disk.capacity_bytes is not None
+            ),
+            "usable_capacity_bytes": capacity_total or None,
+            "free_percent": round(capacity_free * 100 / capacity_total, 2)
+            if capacity_total
+            else None,
+            "controller_redundant_count": sum(
+                1 for entity in entities if entity.topology_state == "fully_redundant"
+            ),
+            "path_count": len(paths),
+            "usable_path_count": usable_paths,
+            "topology_states": sorted({entity.topology_state for entity in entities}),
+            "landing_tier_count": sum(
+                1 for group in groups if group.purpose in {"cache", "download", "landing"}
+            ),
         },
+        "controller_observations": {"models": controller_models, "count": len(controllers)},
         "applications_detected": applications,
+        "feature_usage": successful_kinds,
+        "country_code": state.country_code if state.location_confirmed else None,
+        "timezone": state.timezone if state.location_confirmed else None,
     }
 
 
@@ -322,6 +522,89 @@ def enqueue_inventory(session: Session, settings: Settings) -> FleetTelemetryQue
         telemetry_level=1,
         payload=inventory_payload(session, state),
     )
+
+
+def _disk_event_identity(disk: PhysicalDisk | None) -> str | None:
+    if disk is None:
+        return None
+    value, _source = pseudonymous_drive_id(
+        {
+            "wwn": disk.wwn,
+            "serial": disk.serial,
+            "vendor": disk.vendor,
+            "model": disk.model,
+        }
+    )
+    return value
+
+
+def enqueue_lifecycle_events(
+    session: Session,
+    settings: Settings,
+    *,
+    limit: int = 200,
+) -> int:
+    source = "storage_lifecycle"
+    cursor = session.get(FleetTelemetryCursor, source)
+    query = select(StorageLifecycleEvent).order_by(
+        StorageLifecycleEvent.occurred_at, StorageLifecycleEvent.id
+    )
+    if cursor is not None:
+        query = query.where(
+            (StorageLifecycleEvent.occurred_at > cursor.last_occurred_at)
+            | (
+                (StorageLifecycleEvent.occurred_at == cursor.last_occurred_at)
+                & (StorageLifecycleEvent.id > cursor.last_record_id)
+            )
+        )
+    records = session.scalars(query.limit(min(max(limit, 1), 1000))).all()
+    if not records:
+        return 0
+    state = ensure_state(session)
+    event_map = {
+        "storage_group_created": "pool_created",
+        "backend_assigned": "drive_assigned",
+        "backend_retired": "drive_decommissioned",
+        "backend_released_for_reuse": "drive_removed",
+    }
+    emitted = 0
+    for record in records:
+        mapped = event_map.get(record.event_type, "storage_layout_changed")
+        if state.hardware_enabled:
+            disk = (
+                session.get(PhysicalDisk, record.physical_disk_id)
+                if record.physical_disk_id
+                else None
+            )
+            occurred_at = record.occurred_at
+            if occurred_at.tzinfo is None:
+                occurred_at = occurred_at.replace(tzinfo=UTC)
+            enqueue(
+                session,
+                settings,
+                message_type="event",
+                telemetry_level=1,
+                payload={
+                    "event_type": mapped,
+                    "source_event_type": record.event_type,
+                    "drive_id": _disk_event_identity(disk),
+                    "previous_state": record.previous_state,
+                    "resulting_state": record.resulting_state,
+                    "occurred_at": occurred_at.astimezone(UTC).isoformat(),
+                },
+            )
+            emitted += 1
+        if cursor is None:
+            cursor = FleetTelemetryCursor(
+                source=source,
+                last_occurred_at=record.occurred_at,
+                last_record_id=record.id,
+            )
+            session.add(cursor)
+        else:
+            cursor.last_occurred_at = record.occurred_at
+            cursor.last_record_id = record.id
+    return emitted
 
 
 def enqueue_lifecycle_event(

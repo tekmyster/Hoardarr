@@ -6,12 +6,12 @@ The CSV is authoritative for per-task execution fields; the roadmap remains auth
 ## Queue summary
 
 - Total tasks: 253
-- IMPLEMENTED: 2
-- IN PROGRESS: 6
-- NOT STARTED: 116
+- IMPLEMENTED: 1
+- IN PROGRESS: 4
+- NOT STARTED: 115
 - PHYSICAL VALIDATION PENDING: 1
 - VERIFIED: 79
-- VERIFIED IN ISOLATION: 49
+- VERIFIED IN ISOLATION: 53
 
 ## Active selection rule
 

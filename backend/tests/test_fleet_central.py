@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -16,7 +16,12 @@ from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.migrate import upgrade_database
 from hoardarr.db.models import FleetTelemetryQueue, HardwareSnapshot, Operation, utc_now
-from hoardarr.fleet.central import FleetCentralSettings, create_central_app
+from hoardarr.fleet.central import (
+    FleetCentralSettings,
+    InstallationHeartbeat,
+    create_central_app,
+    run_retention,
+)
 from hoardarr.fleet.service import (
     canonical_json,
     deliver_batch,
@@ -206,6 +211,12 @@ def test_cross_installation_drive_lifecycle_and_admin_aggregate(tmp_path: Path) 
         assert summary.status_code == 200
         assert summary.json()["active_installations"] == 2
         assert summary.json()["drives_seen_in_multiple_installations"] == 1
+        assert summary.json()["drives"]["models"] == [{"value": "VirtualSSD", "count": 1}]
+        assert summary.json()["applications"] == [
+            {"product": "Plex", "installations": 2},
+            {"product": "Radarr", "installations": 2},
+        ]
+        assert "manufacturer failure-rate" in summary.json()["methodology"]
 
 
 def test_schema_and_body_limits_fail_closed(tmp_path: Path) -> None:
@@ -326,3 +337,51 @@ def test_real_clients_preserve_drive_identity_across_two_installations(tmp_path:
         ).json()
         assert summary["active_installations"] == 2
         assert summary["drives_seen_in_multiple_installations"] == 1
+
+
+def test_central_retention_is_data_class_specific_and_bounded(tmp_path: Path) -> None:
+    settings = FleetCentralSettings(
+        database_url=f"sqlite:///{(tmp_path / 'retention.db').as_posix()}",
+        secret_key_file=tmp_path / "retention.key",
+        admin_token="test-admin-token-that-is-long",
+        heartbeat_retention_days=30,
+        retention_batch_size=10,
+    )
+    app = create_central_app(settings)
+    with TestClient(app) as client:
+        installation_id = str(uuid.uuid4())
+        _register(client, installation_id)
+        old = datetime.now(UTC) - timedelta(days=45)
+        with app.state.sessions() as session, session.begin():
+            for _ in range(12):
+                session.add(
+                    InstallationHeartbeat(
+                        installation_id=installation_id,
+                        version="0.3.10",
+                        platform_family="linux",
+                        observed_at=old,
+                    )
+                )
+            session.add(
+                InstallationHeartbeat(
+                    installation_id=installation_id,
+                    version="0.3.11",
+                    platform_family="linux",
+                    observed_at=datetime.now(UTC),
+                )
+            )
+        with app.state.sessions() as session, session.begin():
+            result = run_retention(session, settings, force=True)
+            assert result["heartbeats"] == 10
+        with app.state.sessions() as session:
+            remaining = session.scalar(select(func.count()).select_from(InstallationHeartbeat))
+            assert remaining == 3
+        with app.state.sessions() as session, session.begin():
+            second = run_retention(session, settings, force=True)
+            assert second["heartbeats"] == 2
+        summary = client.get(
+            "/api/admin/v1/fleet/summary",
+            headers={"X-Hoardarr-Admin-Token": "test-admin-token-that-is-long"},
+        )
+        assert summary.status_code == 200
+        assert summary.json()["last_retention_run"] is not None

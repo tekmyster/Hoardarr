@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import httpx
 import pytest
@@ -17,6 +17,9 @@ from hoardarr.db.models import (
     FleetTelemetryQueue,
     HardwareSnapshot,
     Operation,
+    PhysicalDisk,
+    StorageGroup,
+    StorageLifecycleEvent,
     utc_now,
 )
 from hoardarr.fleet.service import (
@@ -26,6 +29,7 @@ from hoardarr.fleet.service import (
     enqueue_heartbeat,
     enqueue_inventory,
     enqueue_lifecycle_event,
+    enqueue_lifecycle_events,
     ensure_state,
     heartbeat_payload,
     install_credential,
@@ -34,6 +38,7 @@ from hoardarr.fleet.service import (
     queue_summary,
     register_installation,
     reset_identity,
+    suggest_country_for_timezone,
 )
 
 
@@ -111,6 +116,15 @@ def test_required_heartbeat_is_minimal_and_identity_is_random_and_persistent() -
         assert session.query(FleetTelemetryQueue).count() == 1
 
 
+def test_timezone_country_suggestion_is_explicitly_unconfirmed() -> None:
+    assert suggest_country_for_timezone("America/Toronto") == "CA"
+    assert suggest_country_for_timezone("Etc/UTC") is None
+    factory, _settings, _box = _runtime()
+    with factory() as session, session.begin():
+        state = ensure_state(session)
+        assert state.location_confirmed is False
+
+
 def test_drive_pseudonym_is_cross_installation_and_serial_is_never_transmitted() -> None:
     drive = {
         "identity": {"wwn": "5000C500AABBCCDD"},
@@ -132,6 +146,10 @@ def test_drive_pseudonym_is_cross_installation_and_serial_is_never_transmitted()
         assert b"/dev/sdz" not in encoded
         assert b"must-never-leave" not in encoded
         assert b"\xe2\x80\xa6A93F" in encoded
+        system = pending_payloads(session)[0]["payload"]["system"]
+        assert system["logical_threads"]
+        assert system["installed_memory_bytes"] > 0
+        assert "hostname" not in system
 
 
 def test_opt_out_remains_distinct_from_required_heartbeat() -> None:
@@ -236,6 +254,40 @@ def test_permanent_schema_rejection_moves_record_to_bounded_dead_letter() -> Non
         assert item.last_error_json["code"] == "permanent_rejection"
 
 
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_temporary_server_failures_back_off_without_losing_records(status_code: int) -> None:
+    factory, settings, box = _runtime()
+    with factory() as session, session.begin():
+        state = ensure_state(session)
+        install_credential(state, box, "installation-secret-credential-1234567890")
+        enqueue_heartbeat(session, settings)
+    transport = httpx.MockTransport(lambda _request: httpx.Response(status_code))
+    assert deliver_batch(factory, settings, box, transport=transport)
+    with factory() as session:
+        item = session.scalar(select(FleetTelemetryQueue))
+        assert item is not None
+        assert item.status == "retrying"
+        assert item.attempt_count == 1
+        next_attempt = item.next_attempt_at
+        if next_attempt.tzinfo is None:
+            next_attempt = next_attempt.replace(tzinfo=UTC)
+        assert next_attempt > utc_now()
+
+
+def test_rejected_credential_is_visible_and_record_is_retained() -> None:
+    factory, settings, box = _runtime()
+    with factory() as session, session.begin():
+        state = ensure_state(session)
+        install_credential(state, box, "installation-secret-credential-1234567890")
+        enqueue_heartbeat(session, settings)
+    transport = httpx.MockTransport(lambda _request: httpx.Response(401))
+    assert deliver_batch(factory, settings, box, transport=transport)
+    with factory() as session:
+        assert ensure_state(session).registration_status == "credential_rejected"
+        item = session.scalar(select(FleetTelemetryQueue))
+        assert item is not None and item.status == "retrying"
+
+
 def test_identity_reset_removes_credential_and_all_pending_records() -> None:
     factory, settings, box = _runtime()
     with factory() as session, session.begin():
@@ -253,3 +305,53 @@ def test_identity_reset_removes_credential_and_all_pending_records() -> None:
 def test_production_fleet_endpoint_cannot_disable_tls() -> None:
     with pytest.raises(ValueError, match="HTTPS"):
         Settings(fleet_telemetry_endpoint="http://hoardarr.com/api/telemetry/v1")
+
+
+def test_storage_lifecycle_events_are_emitted_once_and_opt_out_advances_cursor() -> None:
+    factory, settings, _box = _runtime()
+    with factory() as session, session.begin():
+        state = ensure_state(session)
+        group = StorageGroup(name="Media", namespace_path="/test/media", purpose="media")
+        disk = PhysicalDisk(
+            stable_identity="wwn:test-event-drive",
+            serial="PRIVATE-EVENT-SERIAL",
+            wwn="test-event-drive",
+            vendor="Example",
+            model="VirtualSSD",
+        )
+        session.add_all((group, disk))
+        session.flush()
+        first = StorageLifecycleEvent(
+            storage_group_id=group.id,
+            physical_disk_id=disk.id,
+            event_type="backend_assigned",
+            resulting_state="active",
+            actor_type="user",
+            actor_id="00000000-0000-0000-0000-000000000001",
+        )
+        session.add(first)
+        session.flush()
+        assert enqueue_lifecycle_events(session, settings) == 1
+        assert enqueue_lifecycle_events(session, settings) == 0
+        state.hardware_enabled = False
+        second = StorageLifecycleEvent(
+            storage_group_id=group.id,
+            physical_disk_id=disk.id,
+            event_type="backend_retired",
+            previous_state="read_only",
+            resulting_state="retired",
+            actor_type="user",
+            actor_id="00000000-0000-0000-0000-000000000001",
+        )
+        session.add(second)
+        session.flush()
+        assert enqueue_lifecycle_events(session, settings) == 0
+        state.hardware_enabled = True
+        assert enqueue_lifecycle_events(session, settings) == 0
+    with factory() as session:
+        events = [item for item in pending_payloads(session) if item["message_type"] == "event"]
+        assert len(events) == 1
+        assert events[0]["payload"]["event_type"] == "drive_assigned"
+        encoded = json.dumps(events, default=str)
+        assert "PRIVATE-EVENT-SERIAL" not in encoded
+        assert events[0]["payload"]["drive_id"]

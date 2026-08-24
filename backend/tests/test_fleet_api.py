@@ -89,6 +89,7 @@ def test_privacy_hierarchy_location_queue_and_reset_are_enforced(tmp_path: Path)
         )
         assert saved.status_code == 200, saved.text
         assert saved.json()["location_detection_method"] == "manual"
+        assert saved.json()["location_confirmed"] is True
         queued = client.post("/api/v1/fleet-telemetry/send-now", headers=headers)
         assert queued.status_code == 200
         assert queued.json()["queued_records"] >= 1

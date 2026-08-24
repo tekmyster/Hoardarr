@@ -69,6 +69,7 @@ def _document(request: Request, session: Session) -> dict[str, object]:
         "country_code": state.country_code,
         "timezone": state.timezone,
         "location_detection_method": state.location_detection_method,
+        "location_confirmed": state.location_confirmed,
         **queue_summary(session),
         "limitations": (
             "Telemetry is authenticated and replay-resistant in transit, but an administrator "
@@ -104,6 +105,7 @@ def update_settings(
     state.country_code = country
     state.timezone = timezone
     state.location_detection_method = "manual"
+    state.location_confirmed = True
     if not state.hardware_enabled:
         session.execute(delete(FleetTelemetryQueue).where(FleetTelemetryQueue.telemetry_level > 0))
     elif not state.enhanced_enabled:

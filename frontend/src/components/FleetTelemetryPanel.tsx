@@ -120,6 +120,9 @@ export function FleetTelemetryPanel() {
       <Field label="Country / Region" hint="Two-letter code. Leave blank rather than accepting an uncertain inference."><input value={country} maxLength={2} onChange={(event) => setCountry(event.target.value.toUpperCase())} /></Field>
       <Field label="Timezone" hint={`Current source: ${settings.location_detection_method.replaceAll("_", " ")}`}><input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></Field>
     </div>
+    {!settings.location_confirmed && <Notice tone="warning" title="Please confirm your location">
+      Hoardarr suggested these values from the host timezone. Review them and save before they are treated as confirmed telemetry settings.
+    </Notice>}
     <p className="settings-help">{settings.limitations}</p>
     <div className="form-actions">
       <button className="button button-primary" type="button" disabled={busy || demoMode} onClick={() => void save()}>Save privacy settings</button>

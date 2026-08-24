@@ -56,6 +56,7 @@ from hoardarr.fleet.service import (
 from hoardarr.fleet.service import (
     enqueue_heartbeat,
     enqueue_inventory,
+    enqueue_lifecycle_events,
     register_installation,
 )
 from hoardarr.fleet.service import (
@@ -2529,6 +2530,7 @@ def run_forever(
                         needs_registration = fleet_state.credential_ciphertext is None
                         enqueue_heartbeat(session, settings)
                         enqueue_inventory(session, settings)
+                        enqueue_lifecycle_events(session, settings)
                     if needs_registration:
                         register_installation(
                             session_factory,
