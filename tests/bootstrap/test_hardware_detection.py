@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import pathlib
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DETECTOR = ROOT / "scripts" / "detect-hardware.py"
@@ -17,6 +19,15 @@ FIXTURES = ROOT / "tests" / "fixtures" / "hardware"
 PROVIDERS_FILE = ROOT / "packaging" / "hardware" / "providers.json"
 VENDOR_TOOLS_FILE = ROOT / "packaging" / "hardware" / "vendor-tools.json"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def load_detector_module():
+    spec = importlib.util.spec_from_file_location("hoardarr_detect_hardware", DETECTOR)
+    if spec is None or spec.loader is None:
+        raise AssertionError("detector module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def invoke_detector(
@@ -68,6 +79,97 @@ def vpd_designator(
 
 
 class HardwareFixtureTests(unittest.TestCase):
+    def test_wipefs_probe_normalizes_and_deduplicates_bounded_signatures(self) -> None:
+        detector = load_detector_module()
+        output = json.dumps(
+            {
+                "signatures": [
+                    {
+                        "device": "sda",
+                        "type": "GPT",
+                        "uuid": "disk-guid",
+                        "label": None,
+                        "usage": "partition-table",
+                    },
+                    {
+                        "device": "sda",
+                        "type": "GPT",
+                        "uuid": "disk-guid",
+                        "label": None,
+                        "usage": "partition-table",
+                    },
+                    {
+                        "device": "sda1",
+                        "type": "ext4",
+                        "uuid": "fs-guid",
+                        "label": "Media",
+                        "usage": "filesystem",
+                    },
+                ]
+            }
+        ).encode()
+
+        parsed = detector._parse_wipefs_probe(output, {"sda", "sda1", "sdb"})
+
+        self.assertEqual(len(parsed["sda"]), 1)
+        self.assertEqual(parsed["sda"][0]["type"], "gpt")
+        self.assertEqual(parsed["sda"][0]["usage"], "partition_table")
+        self.assertEqual(parsed["sda1"][0]["uuid"], "fs-guid")
+        self.assertEqual(parsed["sdb"], [])
+
+    def test_live_signature_probe_is_one_bounded_non_mutating_command(self) -> None:
+        detector = load_detector_module()
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=b'{"signatures": []}',
+            stderr=b"",
+        )
+        with (
+            mock.patch.object(detector.shutil, "which", return_value="/usr/sbin/wipefs"),
+            mock.patch.object(detector.subprocess, "run", return_value=completed) as run,
+        ):
+            signatures, error = detector._probe_block_signatures(
+                ["sdb", "sda", "sda"], enabled=True, sysfs_root=pathlib.Path("/sys")
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(signatures, {"sda": [], "sdb": []})
+        command = run.call_args.args[0]
+        self.assertIn("--no-act", command)
+        self.assertNotIn("--all", command)
+        self.assertEqual(command[-2:], ["/dev/sda", "/dev/sdb"])
+        self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertLessEqual(
+            run.call_args.kwargs["timeout"], detector.SIGNATURE_PROBE_TIMEOUT_SECONDS
+        )
+
+    def test_signature_probe_failure_preserves_partial_udev_state(self) -> None:
+        detector = load_detector_module()
+        completed = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"denied")
+        with (
+            mock.patch.object(detector.shutil, "which", return_value="/usr/sbin/wipefs"),
+            mock.patch.object(detector.subprocess, "run", return_value=completed),
+        ):
+            signatures, error = detector._probe_block_signatures(
+                ["sda"], enabled=True, sysfs_root=pathlib.Path("/sys")
+            )
+
+        self.assertIsNone(signatures)
+        self.assertEqual(
+            error, "The bounded read-only signature probe did not complete successfully."
+        )
+        values, scan = detector._effective_signatures(
+            kernel_name="sda",
+            udev_signatures=[{"type": "gpt"}],
+            udev_available=True,
+            probed=signatures,
+            probe_error=error,
+        )
+        self.assertEqual(values, [{"type": "gpt"}])
+        self.assertEqual(scan["status"], "partial")
+        self.assertEqual(scan["reason"], error)
+
     def test_dell_oem_generation_resolution_precedes_generic_drivers(self) -> None:
         payload, _ = detect_fixture("dell-generations.json")
         self.assertEqual(
@@ -694,7 +796,7 @@ class LiveSysfsTests(unittest.TestCase):
         self.assertIn("address must be a non-empty string", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_detector_has_no_command_execution_imports(self) -> None:
+    def test_detector_command_execution_is_limited_to_the_reviewed_probe(self) -> None:
         tree = ast.parse(DETECTOR.read_text(encoding="utf-8"), filename=str(DETECTOR))
         imported: set[str] = set()
         called_names: set[str] = set()
@@ -708,12 +810,14 @@ class LiveSysfsTests(unittest.TestCase):
                     called_names.add(node.func.id)
                 elif isinstance(node.func, ast.Attribute):
                     called_names.add(node.func.attr)
-        self.assertTrue({"subprocess", "ctypes", "socket", "shlex"}.isdisjoint(imported))
+        self.assertTrue({"ctypes", "socket", "shlex"}.isdisjoint(imported))
+        self.assertIn("subprocess", imported)
         self.assertTrue(
-            {"system", "popen", "Popen", "run", "check_call", "check_output"}.isdisjoint(
+            {"system", "popen", "Popen", "check_call", "check_output"}.isdisjoint(
                 called_names
             )
         )
+        self.assertIn("run", called_names)
 
 
 class RegistryAndCatalogTests(unittest.TestCase):

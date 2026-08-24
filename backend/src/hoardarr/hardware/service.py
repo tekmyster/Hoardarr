@@ -38,7 +38,13 @@ def run_hardware_detector(
         raise HardwareScanError(f"hardware detector is unavailable: {detector}")
     try:
         result = subprocess.run(
-            [sys.executable, os.fspath(detector), "--format", "json"],
+            [
+                sys.executable,
+                os.fspath(detector),
+                "--format",
+                "json",
+                "--probe-block-signatures",
+            ],
             shell=False,
             capture_output=True,
             timeout=timeout_seconds,

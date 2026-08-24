@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Read-only storage hardware discovery for the Hoardarr bootstrap.
 
-The detector deliberately reads Linux sysfs and the read-only udev database. It
-does not load drivers, open block devices, probe devices with vendor utilities,
-or issue commands that can change storage. Recorded fixtures use the same
-normalized controller and disk records as live discovery.
+The detector reads Linux sysfs and the read-only udev database. Production
+callers may explicitly request one bounded ``wipefs --no-act`` probe so a user
+can distinguish a blank disk from unknown media before planning storage. It
+never loads drivers, invokes vendor utilities, or issues a command that can
+change storage. Recorded fixtures use the same normalized records as live
+discovery.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import datetime
 import json
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -81,6 +85,10 @@ HEALTH_STATUSES = {"available", "conflicting", "unavailable"}
 HEALTH_CONFIDENCE = {"high", "medium", "low", "conflicting", "unavailable"}
 MAPPING_CONFIDENCE = {"high", "medium", "low", "unknown"}
 VPD_QUALITY = {"available", "not_reported", "temporarily_unavailable"}
+BLOCK_DEVICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+SIGNATURE_PROBE_DEVICE_LIMIT = 512
+SIGNATURE_PROBE_OUTPUT_LIMIT = 1024 * 1024
+SIGNATURE_PROBE_TIMEOUT_SECONDS = 12
 
 
 class DetectionError(RuntimeError):
@@ -1345,6 +1353,133 @@ def _signature_scan(udev_available: bool) -> dict[str, Any]:
     }
 
 
+def _parse_wipefs_probe(output: bytes, requested_names: set[str]) -> dict[str, list[dict[str, Any]]]:
+    if len(output) > SIGNATURE_PROBE_OUTPUT_LIMIT:
+        raise DetectionError("read-only signature probe exceeded its output limit")
+    try:
+        payload = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DetectionError("read-only signature probe returned invalid JSON") from exc
+    raw = payload.get("signatures") if isinstance(payload, dict) else None
+    if not isinstance(raw, list) or len(raw) > 4096:
+        raise DetectionError("read-only signature probe returned an invalid signature list")
+    result: dict[str, list[dict[str, Any]]] = {name: [] for name in requested_names}
+    seen: dict[str, set[tuple[str, str | None, str | None, str | None]]] = {
+        name: set() for name in requested_names
+    }
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise DetectionError("read-only signature probe returned a malformed record")
+        device = item.get("device")
+        signature_type = item.get("type")
+        if not isinstance(device, str) or not isinstance(signature_type, str):
+            raise DetectionError("read-only signature probe omitted required fields")
+        name = pathlib.PurePath(device).name
+        if name not in requested_names or len(signature_type) > 64:
+            raise DetectionError("read-only signature probe returned an unexpected device")
+        uuid = item.get("uuid")
+        label = item.get("label")
+        usage = item.get("usage")
+        if (
+            (uuid is not None and (not isinstance(uuid, str) or len(uuid) > 256))
+            or (label is not None and (not isinstance(label, str) or len(label) > 256))
+            or (usage is not None and (not isinstance(usage, str) or len(usage) > 64))
+        ):
+            raise DetectionError("read-only signature probe returned an oversized field")
+        normalized_type = signature_type.casefold()
+        normalized_usage = usage.casefold().replace("-", "_") if usage else None
+        key = (normalized_type, uuid, label, normalized_usage)
+        if key in seen[name]:
+            continue
+        seen[name].add(key)
+        result[name].append(
+            {
+                "label": label,
+                "source": "wipefs --no-act",
+                "type": normalized_type,
+                "usage": normalized_usage,
+                "uuid": uuid,
+            }
+        )
+    for records in result.values():
+        records.sort(
+            key=lambda item: (
+                str(item["usage"] or ""),
+                str(item["type"]),
+                str(item["uuid"] or ""),
+            )
+        )
+    return result
+
+
+def _probe_block_signatures(
+    names: Sequence[str], *, enabled: bool, sysfs_root: pathlib.Path
+) -> tuple[dict[str, list[dict[str, Any]]] | None, str | None]:
+    """Run one bounded, non-mutating probe for every discovered block node."""
+
+    if not enabled or sysfs_root != pathlib.Path("/sys"):
+        return None, None
+    unique_names = sorted(set(names))
+    if (
+        not unique_names
+        or len(unique_names) > SIGNATURE_PROBE_DEVICE_LIMIT
+        or any(BLOCK_DEVICE_NAME_RE.fullmatch(name) is None for name in unique_names)
+    ):
+        return None, "The bounded read-only signature probe could not safely enumerate devices."
+    wipefs = shutil.which("wipefs", path="/usr/sbin:/usr/bin:/sbin:/bin")
+    if wipefs is None:
+        return None, "wipefs is unavailable, so the on-media signature scan was not completed."
+    command = [
+        wipefs,
+        "--no-act",
+        "--json",
+        "--output",
+        "DEVICE,TYPE,UUID,LABEL,USAGE",
+        *(f"/dev/{name}" for name in unique_names),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            shell=False,
+            capture_output=True,
+            timeout=SIGNATURE_PROBE_TIMEOUT_SECONDS,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "The bounded read-only signature probe was temporarily unavailable."
+    if (
+        completed.returncode != 0
+        or len(completed.stdout) > SIGNATURE_PROBE_OUTPUT_LIMIT
+        or len(completed.stderr) > SIGNATURE_PROBE_OUTPUT_LIMIT
+    ):
+        return None, "The bounded read-only signature probe did not complete successfully."
+    try:
+        return _parse_wipefs_probe(completed.stdout, set(unique_names)), None
+    except DetectionError:
+        return None, "The bounded read-only signature probe returned unusable output."
+
+
+def _effective_signatures(
+    *,
+    kernel_name: str,
+    udev_signatures: list[dict[str, Any]],
+    udev_available: bool,
+    probed: Mapping[str, list[dict[str, Any]]] | None,
+    probe_error: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if probed is not None:
+        return list(probed.get(kernel_name, [])), {
+            "reason": None,
+            "source": "wipefs --no-act",
+            "status": "complete",
+        }
+    scan = _signature_scan(udev_available)
+    if probe_error:
+        scan = {**scan, "reason": probe_error}
+    return udev_signatures, scan
+
+
 def _resolved_path(path: pathlib.Path) -> pathlib.Path:
     try:
         return path.resolve(strict=False)
@@ -1726,6 +1861,8 @@ def _discover_partitions(
     block_entries: Sequence[pathlib.Path],
     udev_data_root: pathlib.Path,
     mountpoints_by_device: Mapping[str, list[str]],
+    probed_signatures: Mapping[str, list[dict[str, Any]]] | None,
+    signature_probe_error: str | None,
 ) -> list[dict[str, Any]]:
     candidates: dict[str, pathlib.Path] = {}
     try:
@@ -1743,7 +1880,13 @@ def _discover_partitions(
     partitions: list[dict[str, Any]] = []
     for name, path in sorted(candidates.items()):
         properties, udev_available = _read_udev_properties(path, udev_data_root)
-        signatures = _udev_signatures(properties)
+        signatures, signature_scan = _effective_signatures(
+            kernel_name=name,
+            udev_signatures=_udev_signatures(properties),
+            udev_available=udev_available,
+            probed=probed_signatures,
+            probe_error=signature_probe_error,
+        )
         filesystem = next((item for item in signatures if item.get("usage") == "filesystem"), None)
         start = _read_int(path / "start")
         sectors = _read_int(path / "size")
@@ -1755,7 +1898,7 @@ def _discover_partitions(
                 "mountpoints": mountpoints_by_device.get(_read_text(path / "dev") or "", []),
                 "number": _read_int(path / "partition"),
                 "signatures": signatures,
-                "signature_scan": _signature_scan(udev_available),
+                "signature_scan": signature_scan,
                 "size_bytes": sectors * KERNEL_SECTOR_BYTES if sectors is not None else None,
                 "start_bytes": start * KERNEL_SECTOR_BYTES if start is not None else None,
             }
@@ -1875,7 +2018,11 @@ def _system_backing_disks(
 
 
 def _discover_disks(
-    sysfs_root: pathlib.Path, udev_data_root: pathlib.Path, captured_at: str
+    sysfs_root: pathlib.Path,
+    udev_data_root: pathlib.Path,
+    captured_at: str,
+    *,
+    probe_block_signatures: bool,
 ) -> list[dict[str, Any]]:
     block_root = sysfs_root / "class" / "block"
     try:
@@ -1883,6 +2030,23 @@ def _discover_disks(
     except OSError:
         return []
     system_disks = _system_backing_disks(sysfs_root, entries)
+    probe_names: list[str] = []
+    for entry in entries:
+        if BLOCK_DEVICE_NAME_RE.fullmatch(entry.name) is None:
+            continue
+        if _read_text(entry / "partition") is not None:
+            probe_names.append(entry.name)
+            continue
+        if entry.name.startswith(NON_PHYSICAL_BLOCK_PREFIXES):
+            continue
+        scsi_type = _read_int(entry / "device" / "type")
+        if scsi_type is None or scsi_type == 0:
+            probe_names.append(entry.name)
+    probed_signatures, signature_probe_error = _probe_block_signatures(
+        probe_names,
+        enabled=probe_block_signatures,
+        sysfs_root=sysfs_root,
+    )
     mountinfo_path = (
         pathlib.Path("/proc/self/mountinfo")
         if sysfs_root == pathlib.Path("/sys")
@@ -1957,7 +2121,13 @@ def _discover_disks(
         connection["target_port_identifier_type"] = vpd_page_83.get(
             "target_port_identifier_type"
         )
-        signatures = _udev_signatures(properties)
+        signatures, signature_scan = _effective_signatures(
+            kernel_name=kernel_name,
+            udev_signatures=_udev_signatures(properties),
+            udev_available=udev_available,
+            probed=probed_signatures,
+            probe_error=signature_probe_error,
+        )
         kernel_path = f"/dev/{kernel_name}"
         disks.append(
             {
@@ -1986,7 +2156,13 @@ def _discover_disks(
                 "model": model,
                 "mountpoints": mountpoints_by_device.get(_read_text(block_path / "dev") or "", []),
                 "partitions": _discover_partitions(
-                    block_path, kernel_name, entries, udev_data_root, mountpoints_by_device
+                    block_path,
+                    kernel_name,
+                    entries,
+                    udev_data_root,
+                    mountpoints_by_device,
+                    probed_signatures,
+                    signature_probe_error,
                 ),
                 "read_only": _read_bool(block_path / "ro"),
                 "removable": _read_bool(block_path / "removable"),
@@ -1995,7 +2171,7 @@ def _discover_disks(
                     "logical_bytes": _read_int(block_path / "queue" / "logical_block_size"),
                     "physical_bytes": _read_int(block_path / "queue" / "physical_block_size"),
                 },
-                "signature_scan": _signature_scan(udev_available),
+                "signature_scan": signature_scan,
                 "signatures": signatures,
                 "stable_identity": stable_identity,
                 "system_disk": kernel_name in system_disks,
@@ -2010,6 +2186,8 @@ def _discover_sysfs(
     sysfs_root: pathlib.Path,
     udev_data_root: pathlib.Path,
     providers: Sequence[Mapping[str, Any]],
+    *,
+    probe_block_signatures: bool,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -2026,7 +2204,12 @@ def _discover_sysfs(
     ]
     transport_hosts = _discover_transport_hosts(sysfs_root)
     captured_at = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
-    disks = _discover_disks(sysfs_root, udev_data_root, captured_at)
+    disks = _discover_disks(
+        sysfs_root,
+        udev_data_root,
+        captured_at,
+        probe_block_signatures=probe_block_signatures,
+    )
     return (
         controllers,
         transport_hosts,
@@ -2376,6 +2559,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--format", choices=("json",), default="json")
     parser.add_argument("--fixture", type=pathlib.Path, help="read a recorded JSON fixture")
     parser.add_argument(
+        "--probe-block-signatures",
+        action="store_true",
+        help="perform one bounded wipefs --no-act scan of discovered live block devices",
+    )
+    parser.add_argument(
         "--sysfs-root",
         type=pathlib.Path,
         default=pathlib.Path("/sys"),
@@ -2407,7 +2595,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 udev_data_root = args.sysfs_root / "run" / "udev" / "data"
             controllers, transport_hosts, disks, dmi, bmc = _discover_sysfs(
-                args.sysfs_root, udev_data_root, providers
+                args.sysfs_root,
+                udev_data_root,
+                providers,
+                probe_block_signatures=args.probe_block_signatures,
             )
             source = {"kind": "sysfs"}
         result = detect(

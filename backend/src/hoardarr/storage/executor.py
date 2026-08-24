@@ -818,7 +818,13 @@ def _live_inventory(paths: Paths) -> dict[str, Any]:
         )
     try:
         result = subprocess.run(
-            [sys.executable, os.fspath(paths.detector), "--format", "json"],
+            [
+                sys.executable,
+                os.fspath(paths.detector),
+                "--format",
+                "json",
+                "--probe-block-signatures",
+            ],
             check=False,
             shell=False,
             capture_output=True,
