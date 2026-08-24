@@ -4,6 +4,7 @@ import io
 import json
 import sqlite3
 import tarfile
+from collections import namedtuple
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -443,6 +444,35 @@ def test_fresh_restore_rolls_configuration_back_when_database_switch_fails(
         assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     finally:
         database.close()
+
+
+def test_fresh_restore_fails_before_mutation_when_staging_space_is_insufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = _settings(source_root)
+    source.configuration_root.mkdir()
+    (source.configuration_root / "hoardarr.env").write_text(
+        "HOARDARR_ENVIRONMENT=test\n", encoding="utf-8"
+    )
+    artifact, artifact_report = build_control_plane_artifact(source, "space-source")
+
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    target = _settings(target_root)
+    target.configuration_root.mkdir()
+    original = "HOARDARR_BIND_HOST=127.0.0.1\n"
+    (target.configuration_root / "hoardarr.env").write_text(original, encoding="utf-8")
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(backup_service.shutil, "disk_usage", lambda _path: usage(1, 1, 0))
+
+    with pytest.raises(BackupError, match="enough free space"):
+        apply_fresh_control_plane_restore(
+            target, artifact, artifact_report["artifact_sha256"]
+        )
+    assert (target.configuration_root / "hoardarr.env").read_text() == original
+    assert not any(target.backup_artifact_root.glob("restore-rollback-*"))
 
 
 def test_durable_control_plane_backup_multipart_upload_and_restore_validation(

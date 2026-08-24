@@ -36,6 +36,7 @@ TARGET_RECORD_TYPE = "remote_backup_target"
 MULTIPART_PART_BYTES = 8 * 1024 * 1024
 MAX_CONFIG_FILE_BYTES = 1024 * 1024
 MAX_RESTORE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MIN_RESTORE_FREE_MARGIN_BYTES = 64 * 1024 * 1024
 EXCLUDED_NAME_FRAGMENTS = ("credential", "password", "private", "secret", "token")
 
 
@@ -859,6 +860,12 @@ def _extract_and_validate_archive(archive_path: Path, extract_root: Path) -> dic
                         "backup_restore_archive_too_large",
                         "The expanded backup exceeds the restore safety limit.",
                     )
+            available = shutil.disk_usage(extract_root.parent).free
+            if available < total_size + MIN_RESTORE_FREE_MARGIN_BYTES:
+                raise BackupError(
+                    "backup_restore_insufficient_space",
+                    "The restore staging filesystem does not have enough free space.",
+                )
             archive.extractall(extract_root, filter="data")
     except (tarfile.TarError, OSError) as exc:
         raise BackupError(

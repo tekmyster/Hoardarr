@@ -56,7 +56,7 @@ sudo systemctl start hoardarr-account-executor hoardarr-storage-executor \
   hoardarr-storage-status hoardarr-worker hoardarr-api
 ```
 
-The command requires root, refuses to run while a Hoardarr service is active, requires an independent expected SHA-256 value, refuses an appliance that already has an owner, rejects archives that do not prove credential redaction, atomically replaces the empty SQLite database, and retains the prior empty database/configuration under the reported rollback path. After migration, issue a new one-time setup link or create a new console owner before restarting normal access; then re-enter integration credentials and reconcile discovered disks by stable identity. Optional encrypted-secret export remains separate work; restore validation must not be presented as an applied restore.
+The command requires root, refuses to run while a Hoardarr service is active, requires an independent expected SHA-256 value, refuses an appliance that already has an owner, rejects archives that do not prove credential redaction, and checks bounded expanded size plus a 64 MiB staging safety margin before extraction. It atomically replaces the empty SQLite database and retains the prior empty database/configuration under the reported rollback path. After migration, issue a new one-time setup link or create a new console owner before restarting normal access; then re-enter integration credentials and reconcile discovered disks by stable identity. Optional encrypted-secret export remains separate work; restore validation must not be presented as an applied restore.
 
 ## User interface and activity
 

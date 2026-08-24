@@ -200,6 +200,9 @@ export function RemoteBackupsPanel() {
       <Notice tone="info" title="Control-plane backup">
         This protects Hoardarr settings and history—not the media files stored on your disks. Secrets and API keys are excluded.
       </Notice>
+      <Notice tone="info" title="Fresh appliance recovery">
+        Restore validation is read-only. To recover a new appliance, download the verified object from your provider, stop Hoardarr services, and run <code>sudo hoardarr restore-control-plane</code> with the recorded SHA-256. The recovered appliance requires a new owner setup and credential re-entry.
+      </Notice>
       {error && <Notice tone="danger" title="Backup request failed">{error}</Notice>}
       {operation && ["queued", "running"].includes(operation.status) && (
         <Notice tone="info" title="Backup activity in progress">
@@ -271,6 +274,7 @@ export function RemoteBackupsPanel() {
               <strong>{run.status.replaceAll("_", " ")}</strong>
               <span>{dateLabel(run.created_at)} · {sizeLabel(run.artifact_size_bytes)}</span>
               <small>{run.object_key ?? run.phase}</small>
+              {run.artifact_sha256 && <small>SHA-256: <code>{run.artifact_sha256}</code></small>}
             </div>
             {run.status === "succeeded" && <button className="button button-secondary" type="button" disabled={busy !== null} onClick={() => void startAction("validate", run.id)}>{busy === `validate:${run.id}` ? "Starting…" : "Validate restore"}</button>}
           </article>

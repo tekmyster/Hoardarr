@@ -94,6 +94,8 @@ describe("RemoteBackupsPanel", () => {
     }]);
     const validate = vi.spyOn(api, "validateBackupRestore").mockResolvedValue({ id: "validate-1", kind: "backup.restore.validate", status: "succeeded" });
     render(<RemoteBackupsPanel />);
+    expect(await screen.findByText("Fresh appliance recovery")).toBeInTheDocument();
+    expect(screen.getByText("a".repeat(64))).toBeInTheDocument();
     await userEvent.click(await screen.findByRole("button", { name: "Validate restore" }));
     await waitFor(() => expect(validate).toHaveBeenCalledWith("run-1"));
   });
