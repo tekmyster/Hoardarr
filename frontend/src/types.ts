@@ -449,7 +449,7 @@ export interface StorageOperationProgress {
     remaining_bytes: number | null;
   } | null;
   updated_at: number | null;
-  files?: { total: number; copied: number; verified: number };
+  files?: { total: number; copied: number; verified: number; reused?: number };
   bytes?: { total: number; copied: number };
   report?: Record<string, unknown> | null;
   sanitization_report?: Record<string, unknown> | null;
@@ -893,6 +893,7 @@ export interface ForeignStorageAssessment {
     mutation_performed: false;
   };
   unraid_evidence: UnraidEvidenceSummary | null;
+  migration_destinations: ForeignMigrationDestination[];
   candidates: Array<{
     id: string;
     profile: "standalone_filesystem" | "linux_md" | "lvm" | "zfs" | "unraid_unknown";
@@ -934,6 +935,42 @@ export interface ForeignStorageAssessment {
     mutation_performed: false;
   }>;
   unrecognized_device_count: number;
+}
+
+export interface ForeignMigrationDestination {
+  id: string;
+  storage_group_id: string;
+  name: string;
+  path: string;
+  stable_identity: string;
+  lifecycle_state: "active" | "preferred_write";
+  device_number: number;
+  free_bytes: number;
+}
+
+export interface ForeignMigrationPlan {
+  schema_version: 1;
+  operation: "foreign.migrate_files";
+  candidate_id: string;
+  hardware_snapshot_id: string;
+  hardware_snapshot_sha256: string;
+  source_inventory_operation_id: string;
+  source_inventory_sha256: string;
+  device: ForeignInspectionPlan["device"];
+  device_binding_sha256: string;
+  source: ForeignInspectionPlan["source"];
+  destination: ForeignMigrationDestination & {
+    backend_id: string;
+    free_bytes_at_preview: number;
+    reserve_bytes: number;
+  };
+  inventory: { file_count: number; total_bytes: number };
+  verification: { mode: "fast" | "accurate"; algorithm: "size_mtime" | "blake3" };
+  collision_policy: "stop" | "reuse_identical";
+  source_access: "read_only";
+  source_retained: true;
+  parity_reuse_supported: false;
+  plan_sha256: string;
 }
 
 export interface ForeignInventoryReport {

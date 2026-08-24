@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
 import { api } from "../api/client";
 import { humanCapacity } from "../policy";
-import type { ForeignInspectionPlan, ForeignStackPreviewResult, ForeignStorageAssessment, OperationDocument, StorageOperationProgress, UnraidEvidenceInput } from "../types";
+import type { ForeignInspectionPlan, ForeignMigrationPlan, ForeignStackPreviewResult, ForeignStorageAssessment, OperationDocument, StorageOperationProgress, UnraidEvidenceInput } from "../types";
 import { Card, Notice, Spinner, StatusBadge } from "./ui";
 
 function errorText(error: unknown): string {
@@ -31,6 +31,11 @@ export function ForeignStoragePanel() {
   const [operation, setOperation] = useState<OperationDocument | null>(null);
   const [progress, setProgress] = useState<StorageOperationProgress | null>(null);
   const [stackPreview, setStackPreview] = useState<ForeignStackPreviewResult | null>(null);
+  const [migrationCandidateId, setMigrationCandidateId] = useState<string | null>(null);
+  const [migrationDestinationId, setMigrationDestinationId] = useState("");
+  const [migrationVerification, setMigrationVerification] = useState<"fast" | "accurate">("accurate");
+  const [migrationCollisionPolicy, setMigrationCollisionPolicy] = useState<"stop" | "reuse_identical">("stop");
+  const [migrationPlan, setMigrationPlan] = useState<ForeignMigrationPlan | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
 
@@ -106,6 +111,66 @@ export function ForeignStoragePanel() {
     try {
       setOperation(await api.startForeignInspection(plan));
       setProgress(null);
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const selectMigration = (candidateId: string) => {
+    setMigrationCandidateId(candidateId);
+    setMigrationDestinationId(assessment?.migration_destinations[0]?.id ?? "");
+    setMigrationPlan(null);
+    setOperation(null);
+    setProgress(null);
+    setPlan(null);
+    setStackPreview(null);
+  };
+
+  const previewMigration = async () => {
+    if (!migrationCandidateId || !migrationDestinationId) return;
+    setActionBusy(true);
+    setError(null);
+    try {
+      setMigrationPlan(await api.previewForeignMigration({
+        candidate_id: migrationCandidateId,
+        destination_backend_id: migrationDestinationId,
+        verification_mode: migrationVerification,
+        collision_policy: migrationCollisionPolicy,
+        reserve_bytes: 1_073_741_824,
+      }));
+      setOperation(null);
+      setProgress(null);
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const startMigration = async () => {
+    if (!migrationPlan) return;
+    setActionBusy(true);
+    setError(null);
+    try {
+      setOperation(await api.startForeignMigration(migrationPlan));
+      setProgress(null);
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const toggleMigrationPause = async () => {
+    if (!operation) return;
+    setActionBusy(true);
+    setError(null);
+    try {
+      setOperation(operation.status === "paused"
+        ? await api.resumeOperation(operation.id)
+        : await api.pauseOperation(operation.id));
     } catch (requestError) {
       setError(errorText(requestError));
     } finally {
@@ -193,7 +258,7 @@ export function ForeignStoragePanel() {
           {candidate.warnings.map((warning) => <Notice key={warning} tone="warning" title="Review required">{warning}</Notice>)}
           {candidate.blockers.map((blocker) => <Notice key={blocker} tone="danger" title="Automatic inspection blocked">{blocker}</Notice>)}
           <details><summary>Member and signature evidence</summary><div className="table-scroll"><table className="data-table"><thead><tr><th>Device</th><th>Model</th><th>Signatures</th><th>Scan</th><th>Mounted</th></tr></thead><tbody>{candidate.members.map((member) => <tr key={member.device_id}><td><code>{member.kernel_path ?? member.device_id}</code></td><td>{member.model}</td><td>{member.signatures.map((item) => item.type).join(", ") || "Not reported"}</td><td>{member.signature_scan.status ?? "Not reported"}<small className="cell-detail">{member.signature_scan.source ?? "Source not reported"}</small></td><td>{member.mounted ? member.mountpoints.join(", ") : "No"}</td></tr>)}</tbody></table></div></details>
-          <footer><span>{primaryMode?.reason ?? "No safe inspection mode is available."}</span>{inspectionMode?.available ? <button type="button" className="button button-secondary" disabled={actionBusy} title={inspectionMode.reason} onClick={() => void preview(candidate.id)}>{actionBusy ? "Checking…" : latestInventory ? "Refresh read-only inventory" : "Review read-only inspection"}</button> : stackMode?.available ? <button type="button" className="button button-secondary" disabled={actionBusy} title={stackMode.reason} onClick={() => void previewStack(candidate.id)}>{actionBusy ? "Reading metadata…" : "Review stack metadata"}</button> : <button type="button" className="button button-secondary" disabled title={primaryMode?.reason}>Inspection unavailable</button>}</footer>
+          <footer><span>{primaryMode?.reason ?? "No safe inspection mode is available."}</span><div className="panel-actions">{latestInventory?.current_snapshot_match && !latestInventory.inventory.truncated && latestInventory.inventory.read_errors.length === 0 && candidate.unraid?.role !== "parity" && <button type="button" className="button button-primary" disabled={actionBusy || assessment.migration_destinations.length === 0} title={assessment.migration_destinations.length ? "Copy this reviewed source into managed storage." : "Create and activate a managed Storage Group backend first."} onClick={() => selectMigration(candidate.id)}>Plan verified copy</button>}{inspectionMode?.available ? <button type="button" className="button button-secondary" disabled={actionBusy} title={inspectionMode.reason} onClick={() => void preview(candidate.id)}>{actionBusy ? "Checking…" : latestInventory ? "Refresh read-only inventory" : "Review read-only inspection"}</button> : stackMode?.available ? <button type="button" className="button button-secondary" disabled={actionBusy} title={stackMode.reason} onClick={() => void previewStack(candidate.id)}>{actionBusy ? "Reading metadata…" : "Review stack metadata"}</button> : <button type="button" className="button button-secondary" disabled title={primaryMode?.reason}>Inspection unavailable</button>}</div></footer>
         </article>})}</div>}
         {stackPreview && <section className="foreign-inspection-review" aria-live="polite">
           <div className="section-heading"><div><p className="eyebrow">NO-ACTIVATION PREVIEW</p><h3>{stackPreview.name}</h3></div><StatusBadge status={stackPreview.completeness.state} /></div>
@@ -212,6 +277,28 @@ export function ForeignStoragePanel() {
             {operation.error && <Notice tone="danger" title="Inspection stopped safely">{operation.error.detail ?? operation.error.message ?? "The source was not imported or changed."}</Notice>}
             {inventory && <Notice tone="success" title="Read-only inventory completed"><p>{Number(inventory.file_count ?? 0).toLocaleString()} files · {humanCapacity(Number(inventory.total_bytes ?? 0))} · {Number(inventory.read_errors instanceof Array ? inventory.read_errors.length : 0)} reported read/stat errors.</p><p>The private source mount was detached. The complete bounded report remains in Activity.</p></Notice>}
             {!["queued", "running"].includes(operation.status) && <button type="button" className="button button-secondary" onClick={() => { setPlan(null); setOperation(null); setProgress(null); refresh(); }}>Close report</button>}
+          </>}
+        </section>}
+        {migrationCandidateId && !migrationPlan && <section className="foreign-inspection-review" aria-live="polite">
+          <div className="section-heading"><div><p className="eyebrow">COPY INTO MANAGED STORAGE</p><h3>Plan a verified file migration</h3></div><StatusBadge status="source remains read only" /></div>
+          <Notice tone="info" title="This copies files; it does not adopt or erase the source">Hoardarr will privately mount the reviewed filesystem read-only, preserve every relative path, checkpoint the copy, verify the destination, and detach the source. Original files and Unraid parity are not changed or reused.</Notice>
+          {assessment.migration_destinations.length === 0 ? <Notice tone="warning" title="No managed destination is ready">Create a Storage Group and activate at least one backend before copying foreign files.</Notice> : <div className="settings-grid">
+            <label>Destination<select value={migrationDestinationId} onChange={(event) => setMigrationDestinationId(event.target.value)}>{assessment.migration_destinations.map((destination) => <option key={destination.id} value={destination.id}>{destination.name} — {destination.path} — {humanCapacity(destination.free_bytes)} free</option>)}</select></label>
+            <label>Verification<select value={migrationVerification} onChange={(event) => setMigrationVerification(event.target.value as "fast" | "accurate")}><option value="accurate">Accurate — BLAKE3 read verification</option><option value="fast">Fast — size and modified time</option></select></label>
+            <label>Existing files<select value={migrationCollisionPolicy} onChange={(event) => setMigrationCollisionPolicy(event.target.value as "stop" | "reuse_identical")}><option value="stop">Stop before replacing anything</option><option value="reuse_identical">Reuse only byte-identical files</option></select></label>
+          </div>}
+          <div className="panel-actions"><button type="button" className="button button-secondary" onClick={() => setMigrationCandidateId(null)} disabled={actionBusy}>Cancel</button><button type="button" className="button button-primary" onClick={() => void previewMigration()} disabled={actionBusy || !migrationDestinationId}>{actionBusy ? "Checking…" : "Review copy plan"}</button></div>
+        </section>}
+        {migrationPlan && <section className="foreign-inspection-review" aria-live="polite">
+          <div className="section-heading"><div><p className="eyebrow">VERIFIED FILE MIGRATION</p><h3>{migrationPlan.inventory.file_count.toLocaleString()} files to {migrationPlan.destination.name}</h3></div><StatusBadge status={operation?.status ?? "ready"} /></div>
+          <Notice tone="success" title="Source data stays untouched">The source remains read-only and attached only to a private temporary mount. Hoardarr copies {humanCapacity(migrationPlan.inventory.total_bytes)}, preserves relative paths, and verifies the destination using {migrationPlan.verification.algorithm === "blake3" ? "BLAKE3" : "size and modified time"}.</Notice>
+          <dl className="review-list"><div><dt>Destination</dt><dd><code>{migrationPlan.destination.path}</code></dd></div><div><dt>Free at review</dt><dd>{humanCapacity(migrationPlan.destination.free_bytes_at_preview)}</dd></div><div><dt>Collision behavior</dt><dd>{migrationPlan.collision_policy === "stop" ? "Stop before replacing any existing file" : "Reuse only a byte-identical existing file"}</dd></div><div><dt>Source after completion</dt><dd>Retained unchanged</dd></div><div><dt>Parity reuse</dt><dd>Not supported or claimed</dd></div><div><dt>Plan SHA-256</dt><dd><code>{migrationPlan.plan_sha256}</code></dd></div></dl>
+          {!operation && <div className="panel-actions"><button type="button" className="button button-secondary" onClick={() => setMigrationPlan(null)} disabled={actionBusy}>Change options</button><button type="button" className="button button-primary" onClick={() => void startMigration()} disabled={actionBusy}>{actionBusy ? "Starting…" : "COPY AND VERIFY"}</button></div>}
+          {operation && <>
+            {["queued", "running", "paused"].includes(operation.status) && <><p>{progress?.phase ?? (operation.status === "paused" ? "Paused at a safe checkpoint" : "Waiting for the durable worker")}</p><div className="operation-progress-track" role="progressbar" aria-label="Foreign migration progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress?.percent ?? 0}><span style={{ width: `${progress?.percent ?? 0}%` }} /></div><p>{progress?.files ? `${progress.files.verified.toLocaleString()} of ${progress.files.total.toLocaleString()} files verified` : "Preparing durable checkpoints…"}</p><button type="button" className="button button-secondary" onClick={() => void toggleMigrationPause()} disabled={actionBusy || operation.status === "queued"}>{operation.status === "paused" ? "Resume copy" : "Pause safely"}</button></>}
+            {operation.error && <Notice tone="danger" title="Copy stopped safely">{operation.error.detail ?? operation.error.message ?? "The source was retained and no destination file was overwritten."}</Notice>}
+            {operation.status === "succeeded" && <Notice tone="success" title="Copy and verification completed"><p>{Number(operation.result?.files_verified ?? 0).toLocaleString()} files verified at <code>{String(operation.result?.destination_path ?? migrationPlan.destination.path)}</code>.</p><p>The source stayed read-only and remains unchanged. The full report and checkpoints remain in Activity.</p></Notice>}
+            {!['queued', 'running', 'paused'].includes(operation.status) && <button type="button" className="button button-secondary" onClick={() => { setMigrationCandidateId(null); setMigrationPlan(null); setOperation(null); setProgress(null); refresh(); }}>Close report</button>}
           </>}
         </section>}
         <footer className="panel-actions"><small>Snapshot {new Date(assessment.snapshot.captured_at).toLocaleString()}</small><button type="button" className="button button-secondary" onClick={refresh} disabled={busy}>{busy ? "Refreshing…" : "Refresh assessment"}</button></footer>

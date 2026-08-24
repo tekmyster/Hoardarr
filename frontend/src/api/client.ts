@@ -14,6 +14,7 @@ import type {
   DeviceMaintenancePlan,
   ForeignStorageAssessment,
   ForeignInspectionPlan,
+  ForeignMigrationPlan,
   ForeignStackPreviewResult,
   UnraidEvidenceInput,
   UnraidEvidenceSummary,
@@ -479,6 +480,36 @@ class HoardarrApi {
           plan,
           plan_sha256: plan.plan_sha256,
           confirmation: "INSPECT READ ONLY",
+        }),
+      },
+    );
+    return result.operation;
+  }
+
+  async previewForeignMigration(input: {
+    candidate_id: string;
+    destination_backend_id: string;
+    verification_mode: "fast" | "accurate";
+    collision_policy: "stop" | "reuse_identical";
+    reserve_bytes: number;
+  }): Promise<ForeignMigrationPlan> {
+    const result = await this.request<{ plan: ForeignMigrationPlan }>(
+      "/storage/foreign/migration/preview",
+      { method: "POST", body: JSON.stringify(input) },
+    );
+    return result.plan;
+  }
+
+  async startForeignMigration(plan: ForeignMigrationPlan): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(
+      "/storage/foreign/migration",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": createIdempotencyKey() },
+        body: JSON.stringify({
+          plan,
+          plan_sha256: plan.plan_sha256,
+          confirmation: "COPY AND VERIFY",
         }),
       },
     );

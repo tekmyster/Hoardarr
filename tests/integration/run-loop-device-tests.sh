@@ -84,6 +84,13 @@ assert_test_loop "$unraid_parity"
 jq -e '.classification == "VERIFIED IN ISOLATION" and .data_source_has_real_filesystem and .parity_source_has_no_filesystem_signature and .identified_roles.data == "identified" and .identified_roles.parity == "identified" and .matched_assignments == 2 and .without_assignment_role == "parity" and .without_assignment_classification == "suspected" and (.parity_reuse_supported | not) and (.mutation_performed_by_classification | not)' \
   "$repo/dist/validation/unraid-classification.json"
 
+"$python" "$repo/tests/integration/foreign_migration.py" \
+  --loop "$loop" \
+  --work-root "$work" \
+  --evidence "$repo/dist/validation/foreign-migration.json"
+jq -e '.classification == "VERIFIED IN ISOLATION" and .source_access == "read_only" and .source_retained and (.parity_reused | not) and .relative_paths_preserved and .pause_resume_executed and .restart_recovery_requeued and .stale_private_mount_recovered and .collision_failure_code == "destination_collision" and .source_sha256 == .destination_sha256 and .entry_states == ["verified"] and .source_unmounted_after' \
+  "$repo/dist/validation/foreign-migration.json"
+
 md_members=()
 for number in 1 2 3 4; do
   make_loop "md$number" 512M

@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import shutil
 from collections import defaultdict
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import ForeignImportEvidence, HardwareSnapshot, Operation, StorageBackend
+from hoardarr.db.models import (
+    ForeignImportEvidence,
+    HardwareSnapshot,
+    Operation,
+    StorageBackend,
+    StorageEntity,
+    StorageGroup,
+)
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.maintenance import IDENTITY_FIELDS, reviewed_device
 
@@ -225,9 +233,7 @@ def _unraid_classification(
                 "role": role,
                 "classification": "identified",
                 "slot": slot,
-                "reason": (
-                    f"Stable identity matches the persisted Unraid {slot} assignment."
-                ),
+                "reason": (f"Stable identity matches the persisted Unraid {slot} assignment."),
                 "evidence_sha256": evidence.document_sha256,
                 "parity_reuse_supported": False,
             }
@@ -874,6 +880,298 @@ def validate_inspection_plan(value: object) -> dict[str, Any]:
     return value
 
 
+def _managed_backend_path(session: Session, backend: StorageBackend) -> str:
+    value = backend.namespace_path
+    if not value and backend.storage_entity_id:
+        entity = session.get(StorageEntity, backend.storage_entity_id)
+        value = entity.mountpoint if entity is not None else None
+    if not isinstance(value, str):
+        raise ForeignStorageError(
+            "foreign_destination_path_missing",
+            "The selected managed destination does not have a storage path.",
+        )
+    path = PurePosixPath(value)
+    if not path.is_absolute() or ".." in path.parts or "\0" in value or len(value) > 4096:
+        raise ForeignStorageError(
+            "foreign_destination_path_invalid", "The managed destination path is invalid."
+        )
+    return value
+
+
+def migration_destinations(session: Session) -> list[dict[str, Any]]:
+    """Return only real, writable managed backends that can receive imported files."""
+
+    documents: list[dict[str, Any]] = []
+    for backend in session.scalars(select(StorageBackend).order_by(StorageBackend.created_at)):
+        if backend.lifecycle_state not in {"active", "preferred_write"}:
+            continue
+        try:
+            path = _managed_backend_path(session, backend)
+            details = Path(path).stat()
+            usage = shutil.disk_usage(path)
+        except (ForeignStorageError, OSError):
+            continue
+        if not Path(path).is_dir():
+            continue
+        group = session.get(StorageGroup, backend.storage_group_id)
+        documents.append(
+            {
+                "id": backend.id,
+                "storage_group_id": backend.storage_group_id,
+                "name": group.name if group is not None else "Managed storage",
+                "path": path,
+                "stable_identity": backend.stable_identity,
+                "lifecycle_state": backend.lifecycle_state,
+                "device_number": details.st_dev,
+                "free_bytes": usage.free,
+            }
+        )
+    return documents
+
+
+def build_migration_plan(
+    session: Session,
+    *,
+    snapshot: HardwareSnapshot,
+    candidate_id: str,
+    destination_backend_id: str,
+    verification_mode: str,
+    collision_policy: str,
+    reserve_bytes: int,
+) -> dict[str, Any]:
+    """Bind a current foreign inventory to one managed destination without adopting the source."""
+
+    if verification_mode not in {"fast", "accurate"}:
+        raise ForeignStorageError(
+            "foreign_verification_invalid", "Choose fast or accurate copy verification."
+        )
+    if collision_policy not in {"stop", "reuse_identical"}:
+        raise ForeignStorageError(
+            "foreign_collision_policy_invalid", "Choose how existing destination files are handled."
+        )
+    if reserve_bytes < 0 or reserve_bytes > 10**15:
+        raise ForeignStorageError(
+            "foreign_reserve_invalid", "The destination reserve is outside safe bounds."
+        )
+    assessment = assess_foreign_storage(session, snapshot=snapshot)
+    candidate = next(
+        (item for item in assessment["candidates"] if item["id"] == candidate_id), None
+    )
+    if candidate is None:
+        raise ForeignStorageError(
+            "foreign_candidate_missing", "The reviewed source is unavailable."
+        )
+    role = candidate.get("unraid")
+    if isinstance(role, dict) and role.get("role") == "parity":
+        raise ForeignStorageError(
+            "foreign_parity_not_importable",
+            "Parity is never copied as file content and parity reuse is not supported.",
+        )
+    report = candidate.get("latest_inventory")
+    if not isinstance(report, dict) or report.get("current_snapshot_match") is not True:
+        raise ForeignStorageError(
+            "foreign_inventory_required", "Run a current read-only inventory before migration."
+        )
+    inventory = report.get("inventory")
+    if not isinstance(inventory, dict) or inventory.get("truncated") is True:
+        raise ForeignStorageError(
+            "foreign_inventory_incomplete", "The bounded source inventory must be complete."
+        )
+    if inventory.get("read_errors"):
+        raise ForeignStorageError(
+            "foreign_inventory_has_errors",
+            "Resolve or explicitly isolate source read errors before migration.",
+        )
+    destination = session.get(StorageBackend, destination_backend_id)
+    if destination is None or destination.lifecycle_state not in {"active", "preferred_write"}:
+        raise ForeignStorageError(
+            "foreign_destination_unavailable", "Choose an active managed storage destination."
+        )
+    destination_path = _managed_backend_path(session, destination)
+    destination_group = session.get(StorageGroup, destination.storage_group_id)
+    try:
+        destination_details = Path(destination_path).stat()
+        destination_usage = shutil.disk_usage(destination_path)
+    except OSError as exc:
+        raise ForeignStorageError(
+            "foreign_destination_unavailable", "The managed destination is unavailable."
+        ) from exc
+    total_bytes = inventory.get("total_bytes")
+    file_count = inventory.get("file_count")
+    if (
+        not isinstance(total_bytes, int)
+        or isinstance(total_bytes, bool)
+        or total_bytes < 0
+        or not isinstance(file_count, int)
+        or isinstance(file_count, bool)
+        or file_count < 0
+    ):
+        raise ForeignStorageError(
+            "foreign_inventory_invalid", "The persisted source inventory is invalid."
+        )
+    free_bytes = destination_usage.free
+    if free_bytes < total_bytes + reserve_bytes:
+        raise ForeignStorageError(
+            "foreign_destination_full",
+            "The destination does not have enough free space plus the requested reserve.",
+        )
+    source_plan = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
+    plan = {
+        "schema_version": 1,
+        "operation": "foreign.migrate_files",
+        "candidate_id": candidate_id,
+        "hardware_snapshot_id": snapshot.id,
+        "hardware_snapshot_sha256": snapshot.sha256,
+        "source_inventory_operation_id": report["operation_id"],
+        "source_inventory_sha256": document_hash(inventory),
+        "device": source_plan["device"],
+        "device_binding_sha256": source_plan["device_binding_sha256"],
+        "source": source_plan["source"],
+        "destination": {
+            "backend_id": destination.id,
+            "storage_group_id": destination.storage_group_id,
+            "name": destination_group.name if destination_group is not None else "Managed storage",
+            "path": destination_path,
+            "stable_identity": destination.stable_identity,
+            "device_number": destination_details.st_dev,
+            "free_bytes_at_preview": free_bytes,
+            "reserve_bytes": reserve_bytes,
+        },
+        "inventory": {"file_count": file_count, "total_bytes": total_bytes},
+        "verification": {
+            "mode": verification_mode,
+            "algorithm": "blake3" if verification_mode == "accurate" else "size_mtime",
+        },
+        "collision_policy": collision_policy,
+        "source_access": "read_only",
+        "source_retained": True,
+        "parity_reuse_supported": False,
+    }
+    return {**plan, "plan_sha256": document_hash(plan)}
+
+
+def validate_migration_plan(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ForeignStorageError(
+            "foreign_migration_plan_invalid", "The migration plan is invalid."
+        )
+    plan = dict(value)
+    expected = plan.pop("plan_sha256", None)
+    destination = plan.get("destination")
+    inventory = plan.get("inventory")
+    verification = plan.get("verification")
+    source = plan.get("source")
+    source_fields = {
+        "kind",
+        "kernel_path_at_preview",
+        "partition_number",
+        "filesystem_type",
+        "filesystem_uuid",
+        "filesystem_label",
+        "signature_source",
+        "read_only_options",
+    }
+    source_path = source.get("kernel_path_at_preview") if isinstance(source, dict) else None
+    source_type = str(source.get("filesystem_type")).casefold() if isinstance(source, dict) else ""
+    if (
+        set(value)
+        != {
+            "schema_version",
+            "operation",
+            "candidate_id",
+            "hardware_snapshot_id",
+            "hardware_snapshot_sha256",
+            "source_inventory_operation_id",
+            "source_inventory_sha256",
+            "device",
+            "device_binding_sha256",
+            "source",
+            "destination",
+            "inventory",
+            "verification",
+            "collision_policy",
+            "source_access",
+            "source_retained",
+            "parity_reuse_supported",
+            "plan_sha256",
+        }
+        or plan.get("schema_version") != 1
+        or plan.get("operation") != "foreign.migrate_files"
+        or plan.get("source_access") != "read_only"
+        or plan.get("source_retained") is not True
+        or plan.get("parity_reuse_supported") is not False
+        or not isinstance(plan.get("candidate_id"), str)
+        or not plan["candidate_id"].startswith("foreign:")
+        or len(plan["candidate_id"]) != 32
+        or any(character not in "0123456789abcdef" for character in plan["candidate_id"][8:])
+        or not isinstance(plan.get("hardware_snapshot_id"), str)
+        or not isinstance(plan.get("hardware_snapshot_sha256"), str)
+        or len(plan["hardware_snapshot_sha256"]) != 64
+        or not isinstance(plan.get("source_inventory_operation_id"), str)
+        or not isinstance(plan.get("source_inventory_sha256"), str)
+        or len(plan["source_inventory_sha256"]) != 64
+        or not isinstance(plan.get("device"), dict)
+        or set(plan["device"]) != set(IDENTITY_FIELDS)
+        or plan["device"].get("stable_identity") is not True
+        or document_hash(plan["device"]) != plan.get("device_binding_sha256")
+        or not isinstance(source, dict)
+        or set(source) != source_fields
+        or not isinstance(source_path, str)
+        or not source_path.startswith("/dev/")
+        or "\0" in source_path
+        or source.get("kind") not in {"whole_device", "partition"}
+        or source_type not in SUPPORTED_FILESYSTEMS
+        or source.get("read_only_options")
+        != SUPPORTED_FILESYSTEMS[source_type]["read_only_options"]
+        or not isinstance(destination, dict)
+        or set(destination)
+        != {
+            "backend_id",
+            "storage_group_id",
+            "name",
+            "path",
+            "stable_identity",
+            "device_number",
+            "free_bytes_at_preview",
+            "reserve_bytes",
+        }
+        or not isinstance(destination.get("path"), str)
+        or not PurePosixPath(destination["path"]).is_absolute()
+        or ".." in PurePosixPath(destination["path"]).parts
+        or "\0" in destination["path"]
+        or not isinstance(destination.get("backend_id"), str)
+        or not isinstance(destination.get("storage_group_id"), str)
+        or not isinstance(destination.get("stable_identity"), str)
+        or not isinstance(destination.get("device_number"), int)
+        or isinstance(destination.get("device_number"), bool)
+        or not isinstance(destination.get("free_bytes_at_preview"), int)
+        or isinstance(destination.get("free_bytes_at_preview"), bool)
+        or destination["free_bytes_at_preview"] < 0
+        or not isinstance(destination.get("reserve_bytes"), int)
+        or isinstance(destination.get("reserve_bytes"), bool)
+        or not 0 <= destination["reserve_bytes"] <= 10**15
+        or not isinstance(inventory, dict)
+        or set(inventory) != {"file_count", "total_bytes"}
+        or not all(
+            isinstance(inventory.get(key), int)
+            and not isinstance(inventory.get(key), bool)
+            and inventory[key] >= 0
+            for key in inventory
+        )
+        or verification
+        not in (
+            {"mode": "fast", "algorithm": "size_mtime"},
+            {"mode": "accurate", "algorithm": "blake3"},
+        )
+        or plan.get("collision_policy") not in {"stop", "reuse_identical"}
+        or expected != document_hash(plan)
+    ):
+        raise ForeignStorageError(
+            "foreign_migration_plan_invalid", "The migration plan is invalid."
+        )
+    return value
+
+
 def assess_foreign_storage(
     session: Session,
     *,
@@ -916,16 +1214,16 @@ def assess_foreign_storage(
     for (profile, _identity), candidate_members in sorted(grouped.items()):
         if profile in {"standalone_filesystem", "unraid_unknown"}:
             candidate = _candidate_document(
-                    profile=profile,
-                    name=(
-                        "Standalone filesystem"
-                        if profile == "standalone_filesystem"
-                        else "Unrecognized foreign disk"
-                    ),
-                    members=candidate_members,
-                    managed_identities=managed_identities,
-                    tool=None,
-                )
+                profile=profile,
+                name=(
+                    "Standalone filesystem"
+                    if profile == "standalone_filesystem"
+                    else "Unrecognized foreign disk"
+                ),
+                members=candidate_members,
+                managed_identities=managed_identities,
+                tool=None,
+            )
             classification = candidate_members[0].get("unraid")
             candidate["unraid"] = classification
             if (
@@ -946,8 +1244,7 @@ def assess_foreign_storage(
                 else:
                     candidate["profile_name"] = "Identified Unraid data disk"
             elif (
-                isinstance(classification, dict)
-                and classification["classification"] == "suspected"
+                isinstance(classification, dict) and classification["classification"] == "suspected"
             ):
                 candidate["profile_name"] = (
                     "Suspected Unraid parity disk"
@@ -979,9 +1276,7 @@ def assess_foreign_storage(
         if report is not None:
             candidate["latest_inventory"] = {
                 **report,
-                "current_snapshot_match": (
-                    report["hardware_snapshot_sha256"] == snapshot.sha256
-                ),
+                "current_snapshot_match": (report["hardware_snapshot_sha256"] == snapshot.sha256),
             }
         else:
             candidate["latest_inventory"] = None
@@ -999,6 +1294,7 @@ def assess_foreign_storage(
             "mutation_performed": False,
         },
         "unraid_evidence": unraid_evidence,
+        "migration_destinations": migration_destinations(session),
         "candidates": candidates,
         "unrecognized_device_count": sum(
             1 for member in members if not member["signatures"] and not member["system_device"]

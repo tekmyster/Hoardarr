@@ -17,13 +17,24 @@ from hoardarr.api.serializers import event_document, operation_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.core.config import Settings
-from hoardarr.db.models import Operation, OperationEvent, StorageDrainJob, utc_now
+from hoardarr.db.models import (
+    ForeignMigrationJob,
+    Operation,
+    OperationEvent,
+    StorageDrainJob,
+    utc_now,
+)
 from hoardarr.operations.service import OperationConflict, request_cancellation
 from hoardarr.storage.client import StorageExecutorError, storage_operation_status
 from hoardarr.storage.drain_worker import (
     DrainExecutionError,
     request_drain_pause,
     resume_drain,
+)
+from hoardarr.storage.foreign_migration_worker import (
+    ForeignMigrationError,
+    request_foreign_migration_pause,
+    resume_foreign_migration,
 )
 from hoardarr.updates.service import UpdatePaths
 
@@ -102,6 +113,74 @@ def drain_progress_document(job: StorageDrainJob, operation: Operation) -> dict[
     }
 
 
+def foreign_migration_progress_document(
+    job: ForeignMigrationJob, operation: Operation
+) -> dict[str, object]:
+    if job.phase in {"preflight", "inventory", "paused"}:
+        percent = 0 if job.phase == "preflight" else 5
+    elif job.phase == "copying":
+        percent = 5 + round(70 * job.bytes_copied / max(job.bytes_total, 1))
+    elif job.phase == "verifying":
+        percent = 75 + round(20 * job.files_verified / max(job.files_total, 1))
+    elif job.phase == "finalizing":
+        percent = 98
+    else:
+        percent = 100 if job.status == "succeeded" else 0
+    elapsed_seconds = 0
+    if job.started_at is not None:
+        started = job.started_at
+        now = utc_now()
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=now.tzinfo)
+        elapsed_seconds = max(int((now - started).total_seconds()), 0)
+    bytes_per_second = job.bytes_copied / elapsed_seconds if elapsed_seconds else 0
+    remaining_bytes = max(job.bytes_total - job.bytes_copied, 0)
+    remaining_seconds = round(remaining_bytes / bytes_per_second) if bytes_per_second > 0 else None
+    return {
+        "operation_id": operation.id,
+        "state": job.status,
+        "phase": job.phase,
+        "completed_steps": job.files_verified,
+        "total_steps": job.files_total,
+        "percent": min(max(percent, 0), 100),
+        "completed_actions": [],
+        "notices": [],
+        "current_action": {
+            "id": job.current_relative_path,
+            "type": job.phase,
+            "progress": {
+                "kind": "bytes",
+                "device": job.destination_backend_id,
+                "processed_bytes": job.bytes_copied,
+                "total_bytes": job.bytes_total,
+                "percent": round(100 * job.bytes_copied / max(job.bytes_total, 1)),
+                "elapsed_seconds": elapsed_seconds,
+                "bytes_per_second": round(bytes_per_second),
+                "estimated_seconds_remaining": remaining_seconds,
+            },
+        }
+        if job.current_relative_path
+        else None,
+        "estimate": {
+            "scope": "foreign storage copy",
+            "estimated_seconds_remaining": remaining_seconds,
+            "estimated_completion_at": int(utc_now().timestamp()) + remaining_seconds,
+            "remaining_bytes": remaining_bytes,
+        }
+        if remaining_seconds is not None
+        else None,
+        "updated_at": int(job.updated_at.timestamp()) if job.updated_at else None,
+        "files": {
+            "total": job.files_total,
+            "copied": job.files_copied,
+            "verified": job.files_verified,
+            "reused": job.files_reused,
+        },
+        "bytes": {"total": job.bytes_total, "copied": job.bytes_copied},
+        "report": job.report_json if job.status == "succeeded" else None,
+    }
+
+
 @router.get("")
 def list_operations(
     principal: Principal = Depends(authenticated_principal),
@@ -155,6 +234,16 @@ def get_operation_progress(
                 "The durable drain checkpoint is unavailable.",
             )
         return drain_progress_document(job, operation)
+    if operation.kind == "storage.foreign.migrate":
+        migration_job = session.get(ForeignMigrationJob, operation.id)
+        if migration_job is None:
+            raise Problem(
+                503,
+                "foreign_migration_job_missing",
+                "Migration progress unavailable",
+                "The durable migration checkpoint is unavailable.",
+            )
+        return foreign_migration_progress_document(migration_job, operation)
     if operation.kind == "update.apply":
         current = settings.frontend_dir.parent
         paths = UpdatePaths(
@@ -224,8 +313,11 @@ def pause_operation(
 ) -> dict[str, object]:
     operation = visible_operation(session, operation_id, principal)
     try:
-        request_drain_pause(session, operation)
-    except DrainExecutionError as exc:
+        if operation.kind == "storage.foreign.migrate":
+            request_foreign_migration_pause(session, operation)
+        else:
+            request_drain_pause(session, operation)
+    except (DrainExecutionError, ForeignMigrationError) as exc:
         raise Problem(409, exc.code, "Operation cannot be paused", exc.safe_message) from exc
     record_audit(
         session,
@@ -248,8 +340,11 @@ def resume_operation(
 ) -> dict[str, object]:
     operation = visible_operation(session, operation_id, principal)
     try:
-        resume_drain(session, operation)
-    except DrainExecutionError as exc:
+        if operation.kind == "storage.foreign.migrate":
+            resume_foreign_migration(session, operation)
+        else:
+            resume_drain(session, operation)
+    except (DrainExecutionError, ForeignMigrationError) as exc:
         raise Problem(409, exc.code, "Operation cannot be resumed", exc.safe_message) from exc
     record_audit(
         session,

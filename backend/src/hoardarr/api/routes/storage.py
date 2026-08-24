@@ -23,6 +23,8 @@ from hoardarr.api.schemas import (
     DeviceMaintenancePreviewRequest,
     ForeignInspectionApplyRequest,
     ForeignInspectionPreviewRequest,
+    ForeignMigrationApplyRequest,
+    ForeignMigrationPreviewRequest,
     ForeignStackPreviewRequest,
     PhysicalDiskReconcileRequest,
     PhysicalDiskReservationRequest,
@@ -47,6 +49,7 @@ from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.core.config import Settings
 from hoardarr.db.models import (
+    ForeignMigrationJob,
     HardwareSnapshot,
     Operation,
     StorageBackend,
@@ -61,10 +64,12 @@ from hoardarr.storage.foreign import (
     ForeignStorageError,
     assess_foreign_storage,
     build_inspection_plan,
+    build_migration_plan,
     build_stack_preview_plan,
     clear_unraid_evidence,
     persist_unraid_evidence,
     validate_inspection_plan,
+    validate_migration_plan,
 )
 from hoardarr.storage.groups import (
     StorageGroupError,
@@ -358,6 +363,99 @@ def start_foreign_inspection(
                 "device_id": plan["device"]["id"],
                 "filesystem_type": plan["source"]["filesystem_type"],
                 "persistent_mount": False,
+            },
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
+
+
+@router.post("/foreign/migration/preview")
+def preview_foreign_migration(
+    payload: ForeignMigrationPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        plan = build_migration_plan(
+            session,
+            snapshot=_latest_hardware(session),
+            candidate_id=payload.candidate_id,
+            destination_backend_id=payload.destination_backend_id,
+            verification_mode=payload.verification_mode,
+            collision_policy=payload.collision_policy,
+            reserve_bytes=payload.reserve_bytes,
+        )
+    except ForeignStorageError as exc:
+        raise Problem(422, exc.code, "Migration unavailable", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": plan["plan_sha256"]}
+
+
+@router.post("/foreign/migration", status_code=202)
+def start_foreign_migration(
+    payload: ForeignMigrationApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    try:
+        plan = validate_migration_plan(payload.plan)
+    except ForeignStorageError as exc:
+        raise Problem(422, exc.code, "Invalid migration plan", str(exc)) from exc
+    if payload.plan_sha256 != plan["plan_sha256"]:
+        raise Problem(409, "foreign_plan_changed", "Plan changed", "Preview migration again.")
+    if _latest_hardware(session).sha256 != plan["hardware_snapshot_sha256"]:
+        raise Problem(
+            409,
+            "hardware_snapshot_changed",
+            "Discovery changed",
+            "Run discovery and review the source again.",
+        )
+    request_document = {
+        "plan": plan,
+        "plan_sha256": plan["plan_sha256"],
+        "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
+    }
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.foreign.migrate",
+            principal=principal,
+            request=request_document,
+            idempotency_key=key,
+            resource_type="foreign_storage",
+            resource_id=str(plan["candidate_id"]),
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        session.add(
+            ForeignMigrationJob(
+                id=operation.id,
+                candidate_id=str(plan["candidate_id"]),
+                destination_backend_id=str(plan["destination"]["backend_id"]),
+                plan_sha256=str(plan["plan_sha256"]),
+                verification_mode=str(plan["verification"]["mode"]),
+                collision_policy=str(plan["collision_policy"]),
+                report_json={
+                    "source_inventory_operation_id": plan["source_inventory_operation_id"],
+                    "source_retained": True,
+                    "parity_reused": False,
+                },
+            )
+        )
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.foreign.migrate_files",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="foreign_storage",
+            target_id=str(plan["candidate_id"]),
+            details={
+                "plan_sha256": plan["plan_sha256"],
+                "destination_backend_id": plan["destination"]["backend_id"],
+                "source_retained": True,
+                "parity_reuse_supported": False,
             },
         )
     return {"operation": operation_document(operation), "replayed": not created}

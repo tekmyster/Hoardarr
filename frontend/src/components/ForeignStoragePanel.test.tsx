@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { ForeignInspectionPlan, ForeignStorageAssessment } from "../types";
+import type { ForeignInspectionPlan, ForeignMigrationPlan, ForeignStorageAssessment } from "../types";
 import { ForeignStoragePanel } from "./ForeignStoragePanel";
 
 const assessment: ForeignStorageAssessment = {
@@ -14,6 +14,7 @@ const assessment: ForeignStorageAssessment = {
     mutation_performed: false,
   },
   unraid_evidence: null,
+  migration_destinations: [],
   candidates: [{
     id: "foreign:one",
     profile: "standalone_filesystem",
@@ -156,6 +157,109 @@ describe("ForeignStoragePanel", () => {
     expect(screen.getByText("4,020")).toBeInTheDocument();
     expect(screen.getByText(/Movies\/Feature.mkv/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh read-only inventory" })).toBeEnabled();
+  });
+
+  it("plans and completes a verified copy while preserving the read-only source", async () => {
+    const user = userEvent.setup();
+    const migratable: ForeignStorageAssessment = {
+      ...assessment,
+      migration_destinations: [{
+        id: "backend-1",
+        storage_group_id: "group-1",
+        name: "Media",
+        path: "/srv/hoardarr/media/disk2",
+        stable_identity: "managed:disk2",
+        lifecycle_state: "preferred_write",
+        device_number: 42,
+        free_bytes: 100_000_000_000,
+      }],
+      candidates: [{
+        ...assessment.candidates[0],
+        latest_inventory: {
+          operation_id: "inventory-1",
+          completed_at: "2026-08-23T20:15:00Z",
+          hardware_snapshot_sha256: "a".repeat(64),
+          current_snapshot_match: true,
+          filesystem: { type: "xfs", uuid: "fs-1", label: "Archive" },
+          inventory: {
+            file_count: 2,
+            total_bytes: 4096,
+            largest_file: { path: "Movies/Feature.mkv", bytes: 4000 },
+            oldest_mtime_unix: 1_700_000_000,
+            newest_mtime_unix: 1_710_000_000,
+            extension_distribution: [{ extension: ".mkv", files: 1 }],
+            case_collision_count: 0,
+            unicode_collision_count: 0,
+            read_errors: [],
+            truncated: false,
+          },
+          access: "read_only",
+          persistent_mount: false,
+          mutation_performed: false,
+        },
+      }],
+    };
+    const migrationPlan = {
+      schema_version: 1,
+      operation: "foreign.migrate_files",
+      candidate_id: "foreign:one",
+      hardware_snapshot_id: "snapshot-1",
+      hardware_snapshot_sha256: "a".repeat(64),
+      source_inventory_operation_id: "inventory-1",
+      source_inventory_sha256: "b".repeat(64),
+      device: { id: "wwn:archive", model: "Archive disk", capacity_bytes: 8_000_000_000 },
+      device_binding_sha256: "c".repeat(64),
+      source: {
+        kind: "whole_device",
+        kernel_path_at_preview: "/dev/sdb",
+        partition_number: null,
+        filesystem_type: "xfs",
+        filesystem_uuid: "fs-1",
+        filesystem_label: "Archive",
+        signature_source: "wipefs",
+        read_only_options: ["ro", "norecovery", "nodev", "nosuid", "noexec"],
+      },
+      destination: {
+        ...migratable.migration_destinations[0],
+        backend_id: "backend-1",
+        free_bytes_at_preview: 100_000_000_000,
+        reserve_bytes: 1_073_741_824,
+      },
+      inventory: { file_count: 2, total_bytes: 4096 },
+      verification: { mode: "accurate", algorithm: "blake3" },
+      collision_policy: "stop",
+      source_access: "read_only",
+      source_retained: true,
+      parity_reuse_supported: false,
+      plan_sha256: "d".repeat(64),
+    } satisfies ForeignMigrationPlan;
+    vi.spyOn(api, "foreignStorage").mockResolvedValue(migratable);
+    const previewSpy = vi.spyOn(api, "previewForeignMigration").mockResolvedValue(migrationPlan);
+    vi.spyOn(api, "startForeignMigration").mockResolvedValue({
+      id: "migration-1",
+      kind: "storage.foreign.migrate",
+      status: "succeeded",
+      result: {
+        files_verified: 2,
+        destination_path: "/srv/hoardarr/media/disk2",
+        source_retained: true,
+        parity_reused: false,
+      },
+    });
+    render(<ForeignStoragePanel />);
+
+    await user.click(await screen.findByRole("button", { name: "Plan verified copy" }));
+    expect(await screen.findByText("This copies files; it does not adopt or erase the source")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Review copy plan" }));
+    expect(previewSpy).toHaveBeenCalledWith(expect.objectContaining({
+      destination_backend_id: "backend-1",
+      verification_mode: "accurate",
+      collision_policy: "stop",
+    }));
+    expect(await screen.findByText("Source data stays untouched")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "COPY AND VERIFY" }));
+    expect(await screen.findByText("Copy and verification completed")).toBeInTheDocument();
+    expect(screen.getByText(/source stayed read-only and remains unchanged/i)).toBeInTheDocument();
   });
 
   it("keeps unknown media honest rather than calling it empty", async () => {

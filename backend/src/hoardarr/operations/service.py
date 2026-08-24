@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import (
     ConnectivityService,
+    ForeignMigrationJob,
     IntegrationConnection,
     Operation,
     OperationEvent,
@@ -35,6 +36,7 @@ NON_CANCELLABLE_AFTER_START = frozenset(
         "storage.apply",
         "storage.maintenance",
         "storage.foreign.inspect",
+        "storage.foreign.migrate",
         "storage.snapraid.replace",
         "storage.redundancy.apply",
         "storage.transfer",
@@ -224,6 +226,12 @@ def request_cancellation(session: Session, operation: Operation) -> None:
 
 
 def mark_cancelled_resource(session: Session, operation: Operation) -> None:
+    if operation.kind == "storage.foreign.migrate":
+        job = session.get(ForeignMigrationJob, operation.id)
+        if job is not None:
+            job.status = "cancelled"
+            job.updated_at = utc_now()
+        return
     if operation.kind == "storage.drain":
         job = session.get(StorageDrainJob, operation.id)
         if job is not None:
@@ -316,8 +324,12 @@ def recover_stale_operations(
             - timedelta(seconds=max_age_by_kind.get(operation.kind, max_age_seconds))
         ]
     for operation in stale:
-        if operation.kind == "storage.drain":
-            job = session.get(StorageDrainJob, operation.id)
+        if operation.kind in {"storage.drain", "storage.foreign.migrate"}:
+            job = (
+                session.get(StorageDrainJob, operation.id)
+                if operation.kind == "storage.drain"
+                else session.get(ForeignMigrationJob, operation.id)
+            )
             if job is not None and job.status != "succeeded":
                 job.status = "queued"
                 job.pause_requested = False
@@ -331,7 +343,7 @@ def recover_stale_operations(
                     session,
                     operation,
                     "recovered",
-                    "Interrupted storage drain queued from its last durable checkpoint",
+                    "Interrupted durable storage job queued from its last checkpoint",
                 )
                 continue
         mark_failed_resource(session, operation, "worker_interrupted")

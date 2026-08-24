@@ -126,6 +126,8 @@ jobs:
             dist/validation/foreign-stack-preview.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and .identified_roles.data == "identified" and .identified_roles.parity == "identified" and .matched_assignments == 2 and .without_assignment_role == "parity" and .without_assignment_classification == "suspected" and (.parity_reuse_supported | not) and (.mutation_performed_by_classification | not)' \
             dist/validation/unraid-classification.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .source_access == "read_only" and .source_retained and (.parity_reused | not) and .relative_paths_preserved and .pause_resume_executed and .restart_recovery_requeued and .stale_private_mount_recovered and .collision_failure_code == "destination_collision" and .source_sha256 == .destination_sha256 and .entry_states == ["verified"] and .source_unmounted_after' \
+            dist/validation/foreign-migration.json
       - uses: actions/upload-artifact@v4
         with:
           name: storage-expansion-evidence
@@ -133,6 +135,7 @@ jobs:
             dist/validation/foreign-readonly-inspection.json
             dist/validation/foreign-stack-preview.json
             dist/validation/unraid-classification.json
+            dist/validation/foreign-migration.json
             dist/validation/snapraid-expansion.json
             dist/validation/snapraid-replacement.json
             dist/validation/md-replacement.json

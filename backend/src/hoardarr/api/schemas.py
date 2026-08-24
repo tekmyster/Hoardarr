@@ -425,6 +425,20 @@ class ForeignInspectionApplyRequest(StrictModel):
     confirmation: Literal["INSPECT READ ONLY"]
 
 
+class ForeignMigrationPreviewRequest(StrictModel):
+    candidate_id: str = Field(pattern=r"^foreign:[0-9a-f]{24}$")
+    destination_backend_id: str = Field(min_length=36, max_length=36)
+    verification_mode: Literal["fast", "accurate"] = "accurate"
+    collision_policy: Literal["stop", "reuse_identical"] = "stop"
+    reserve_bytes: int = Field(default=1_073_741_824, ge=0, le=10**15)
+
+
+class ForeignMigrationApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["COPY AND VERIFY"]
+
+
 class SnapraidReplacementPreviewRequest(StrictModel):
     pool_name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,62}$")
     data_name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")

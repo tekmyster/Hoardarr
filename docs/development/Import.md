@@ -171,6 +171,37 @@ Initial adapters should prioritize common media-hoarding sources:
 
 - standalone ext4, XFS, Btrfs, NTFS, and exFAT disks;
 - Unraid data disks and pools;
+
+## Verified file migration into managed storage
+
+After a complete, current read-only inventory, an independently readable data
+filesystem can be copied into an active Storage Group backend. The migration
+plan binds the hardware snapshot, reviewed stable device identity, filesystem
+type and UUID, inventory operation and hash, destination backend identity,
+filesystem device number, free space and reserve, verification mode, and
+collision policy. A changed discovery snapshot, source signature, destination
+identity, destination filesystem, or insufficient capacity fails closed.
+
+The durable worker mounts the source at a private per-operation path with the
+reviewed filesystem-specific read-only/no-recovery options. It then inventories
+the source again, checkpoints every regular file, copies with descriptor-relative
+no-follow operations and atomic no-replace publication, and verifies the result.
+Accurate mode uses BLAKE3; fast mode verifies size and modified time. Pause,
+resume, and stale-worker recovery continue from durable file checkpoints. ARR
+activity pauses placement at a safe checkpoint rather than competing with an
+active import or download.
+
+Collision behavior is explicit:
+
+- **Stop before replacing anything** refuses every existing destination path.
+- **Reuse only identical files** hashes both files and reuses the destination
+  only when its bytes, size, and preserved modified time match.
+
+The source is never deleted, adopted, added to automatic mounts, or changed to
+read-write. Unraid parity is not file content and is refused by this workflow;
+Hoardarr does not claim parity validity or reuse. The final Activity report
+records copied, reused, and verified counts, bytes, destination, verification
+method, source-retention state, and the explicit absence of parity reuse.
 - ZFS pools from TrueNAS or another Linux/Unix host;
 - Linux MD RAID and LVM stacks used by common NAS distributions;
 - Synology and QNAP layouts where the complete stack can be identified safely;

@@ -3,14 +3,16 @@ from __future__ import annotations
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import Base, HardwareSnapshot, Operation
+from hoardarr.db.models import Base, HardwareSnapshot, Operation, StorageBackend, StorageGroup
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.foreign import (
     ForeignStorageError,
     assess_foreign_storage,
     build_inspection_plan,
+    build_migration_plan,
     persist_unraid_evidence,
     validate_inspection_plan,
+    validate_migration_plan,
 )
 
 
@@ -175,6 +177,129 @@ def test_completed_inventory_is_returned_with_snapshot_freshness() -> None:
     assert current["latest_inventory"]["access"] == "read_only"
     assert current["latest_inventory"]["mutation_performed"] is False
     assert stale["latest_inventory"]["current_snapshot_match"] is False
+
+
+def test_migration_plan_binds_current_inventory_and_managed_destination() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        snapshot = _snapshot(session, [_disk("wwn:archive", "ext4", signature_uuid="fs-1")])
+        candidate_id = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]["id"]
+        inspection = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
+        inventory = {
+            "file_count": 2,
+            "total_bytes": 128,
+            "largest_file": {"path": "Movies/Feature.mkv", "bytes": 96},
+            "oldest_mtime_unix": 1_700_000_000,
+            "newest_mtime_unix": 1_710_000_000,
+            "extension_distribution": [{"extension": ".mkv", "files": 1}],
+            "case_collision_count": 0,
+            "unicode_collision_count": 0,
+            "read_errors": [],
+            "truncated": False,
+        }
+        source_report = Operation(
+            kind="storage.foreign.inspect",
+            status="succeeded",
+            actor_type="user",
+            actor_id="owner",
+            resource_type="foreign_storage",
+            resource_id=candidate_id,
+            request_sha256=document_hash(inspection),
+            request_json={"plan": inspection},
+            result_json={
+                "filesystem": {"type": "ext4", "uuid": "fs-1", "label": "Media"},
+                "inventory": inventory,
+                "access": "read_only",
+                "persistent_mount": False,
+                "mutation_performed": False,
+            },
+        )
+        group = StorageGroup(name="Media", namespace_path="/", purpose="media")
+        session.add_all([source_report, group])
+        session.flush()
+        destination = StorageBackend(
+            storage_group_id=group.id,
+            stable_identity="managed:test-destination",
+            namespace_path="/",
+            role="data",
+            lifecycle_state="preferred_write",
+        )
+        session.add(destination)
+        session.flush()
+        plan = build_migration_plan(
+            session,
+            snapshot=snapshot,
+            candidate_id=candidate_id,
+            destination_backend_id=destination.id,
+            verification_mode="accurate",
+            collision_policy="stop",
+            reserve_bytes=0,
+        )
+
+    assert validate_migration_plan(plan) == plan
+    assert plan["source_inventory_operation_id"] == source_report.id
+    assert plan["source_inventory_sha256"] == document_hash(inventory)
+    assert plan["destination"]["stable_identity"] == "managed:test-destination"
+    assert plan["verification"] == {"mode": "accurate", "algorithm": "blake3"}
+    assert plan["source_retained"] is True
+    assert plan["parity_reuse_supported"] is False
+
+
+def test_migration_plan_rejects_parity_and_tampering() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        parity = _disk("wwn:parity", "ext4")
+        parity["signatures"] = []
+        parity["signature_scan"] = {"status": "complete", "source": "wipefs", "reason": None}
+        snapshot = _snapshot(session, [parity])
+        persist_unraid_evidence(
+            session,
+            created_by="owner",
+            document={
+                "schema_version": 1,
+                "source": "unraid_runtime_state",
+                "captured_at": "2026-08-23T20:00:00Z",
+                "unraid_version": "7.2.0",
+                "assignments": [
+                    {
+                        "slot": "parity",
+                        "role": "parity",
+                        "serial": "SERIAL-parity",
+                        "wwn": "parity",
+                        "capacity_bytes": 8_000_000_000,
+                        "filesystem_type": None,
+                    }
+                ],
+            },
+        )
+        candidate_id = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]["id"]
+        group = StorageGroup(name="Media", namespace_path="/", purpose="media")
+        session.add(group)
+        session.flush()
+        destination = StorageBackend(
+            storage_group_id=group.id,
+            stable_identity="managed:destination",
+            namespace_path="/",
+            lifecycle_state="active",
+        )
+        session.add(destination)
+        session.flush()
+        try:
+            build_migration_plan(
+                session,
+                snapshot=snapshot,
+                candidate_id=candidate_id,
+                destination_backend_id=destination.id,
+                verification_mode="accurate",
+                collision_policy="stop",
+                reserve_bytes=0,
+            )
+        except ForeignStorageError as exc:
+            assert exc.code == "foreign_parity_not_importable"
+        else:
+            raise AssertionError("parity was accepted as file content")
 
 
 def test_inspection_plan_rejects_tampering() -> None:

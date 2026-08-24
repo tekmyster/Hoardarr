@@ -27,6 +27,7 @@ from hoardarr.db.models import (
     AuditEvent,
     AuthSession,
     ConnectivityService,
+    ForeignMigrationJob,
     HardwareSnapshot,
     IntegrationConnection,
     MetricEntity,
@@ -1962,6 +1963,7 @@ def test_storage_step_api_rejects_read_only_device(api_runtime: Any) -> None:
 
 def test_foreign_inspection_api_is_snapshot_bound_idempotent_and_durable(
     api_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, app, setup_token, secret_box = api_runtime
     assert (
@@ -2100,6 +2102,124 @@ def test_foreign_inspection_api_is_snapshot_bound_idempotent_and_durable(
             select(AuditEvent).where(AuditEvent.action == "storage.foreign.inspect_read_only")
         )
         assert audit is not None
+
+    destination_path = "/"
+    with app.state.session_factory() as session, session.begin():
+        group = StorageGroup(
+            name="Media",
+            namespace_path=destination_path,
+            purpose="media",
+        )
+        session.add(group)
+        session.flush()
+        destination = StorageBackend(
+            storage_group_id=group.id,
+            stable_identity="managed:foreign-api-destination",
+            namespace_path=destination_path,
+            lifecycle_state="preferred_write",
+        )
+        session.add(destination)
+        session.flush()
+        destination_id = destination.id
+
+    migration_preview_endpoint = "/api/v1/storage/foreign/migration/preview"
+    migration_input = {
+        "candidate_id": candidate["id"],
+        "destination_backend_id": destination_id,
+        "verification_mode": "accurate",
+        "collision_policy": "stop",
+        "reserve_bytes": 0,
+    }
+    assert client.post(migration_preview_endpoint, json=migration_input).status_code == 403
+    migration_preview = client.post(
+        migration_preview_endpoint,
+        headers=_state_headers(csrf),
+        json=migration_input,
+    )
+    assert migration_preview.status_code == 200, migration_preview.text
+    migration_plan = migration_preview.json()["plan"]
+    assert migration_plan["source_retained"] is True
+    assert migration_plan["parity_reuse_supported"] is False
+    assert migration_plan["verification"]["algorithm"] == "blake3"
+    migration_headers = _state_headers(csrf, **{"Idempotency-Key": "foreign-migration-api-0001"})
+    wrong_migration_confirmation = client.post(
+        "/api/v1/storage/foreign/migration",
+        headers=migration_headers,
+        json={
+            "plan": migration_plan,
+            "plan_sha256": migration_plan["plan_sha256"],
+            "confirmation": "APPLY",
+        },
+    )
+    assert wrong_migration_confirmation.status_code == 422
+    migration_accepted = client.post(
+        "/api/v1/storage/foreign/migration",
+        headers=migration_headers,
+        json={
+            "plan": migration_plan,
+            "plan_sha256": migration_plan["plan_sha256"],
+            "confirmation": "COPY AND VERIFY",
+        },
+    )
+    assert migration_accepted.status_code == 202, migration_accepted.text
+    migration_replay = client.post(
+        "/api/v1/storage/foreign/migration",
+        headers=migration_headers,
+        json={
+            "plan": migration_plan,
+            "plan_sha256": migration_plan["plan_sha256"],
+            "confirmation": "COPY AND VERIFY",
+        },
+    )
+    assert migration_replay.status_code == 202
+    assert migration_replay.json()["replayed"] is True
+    migration_operation_id = migration_accepted.json()["operation"]["id"]
+
+    def execute_migration(
+        session_factory: Any, operation_id: str, queued_plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        report = {
+            "operation_id": operation_id,
+            "candidate_id": queued_plan["candidate_id"],
+            "destination_backend_id": queued_plan["destination"]["backend_id"],
+            "destination_path": queued_plan["destination"]["path"],
+            "files_total": 3,
+            "files_copied": 3,
+            "files_verified": 3,
+            "files_reused": 0,
+            "bytes_copied": 1024,
+            "source_retained": True,
+            "parity_reused": False,
+        }
+        with session_factory() as session, session.begin():
+            job = session.get(ForeignMigrationJob, operation_id)
+            assert job is not None
+            job.status = "succeeded"
+            job.phase = "completed"
+            job.files_total = 3
+            job.files_copied = 3
+            job.files_verified = 3
+            job.bytes_total = 1024
+            job.bytes_copied = 1024
+            job.report_json = report
+        return report
+
+    monkeypatch.setattr("hoardarr.operations.worker.execute_foreign_migration", execute_migration)
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        worker_id="foreign-migration-api-worker",
+    )
+    completed_migration = client.get(f"/api/v1/operations/{migration_operation_id}")
+    assert completed_migration.json()["status"] == "succeeded"
+    assert completed_migration.json()["result"]["source_retained"] is True
+    assert completed_migration.json()["result"]["parity_reused"] is False
+    with app.state.session_factory() as session:
+        migration_audit = session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "storage.foreign.migrate_files")
+        )
+        assert migration_audit is not None
 
 
 def test_foreign_stack_preview_is_authorized_audited_and_nonactivating(

@@ -564,6 +564,7 @@ def _copy_entry(
     control: Callable[[], None],
     digest_algorithm: str,
     limiter: BandwidthLimiter | None = None,
+    collision_policy: str = "reuse_identical",
 ) -> str:
     relative = _relative_path(entry.relative_path)
     source_parent = _open_directory(source_root_fd, relative.parts[:-1], create=False)
@@ -595,6 +596,11 @@ def _copy_entry(
             existing_fd = -1
         if existing_fd >= 0:
             try:
+                if collision_policy == "stop":
+                    raise DrainExecutionError(
+                        "destination_collision",
+                        "A file already exists at the destination and the reviewed policy is stop.",
+                    )
                 existing = os.fstat(existing_fd)
                 source_digest = _hash_fd(source_fd, control, algorithm=digest_algorithm)
                 if (

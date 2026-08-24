@@ -27,6 +27,7 @@ from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox, SecretStoreError
 from hoardarr.db.models import (
     ConnectivityService,
+    ForeignMigrationJob,
     HardwareSnapshot,
     IntegrationConnection,
     Operation,
@@ -81,6 +82,11 @@ from hoardarr.storage.drain_worker import (
     execute_drain,
     mark_drain_paused,
 )
+from hoardarr.storage.foreign_migration_worker import (
+    ForeignMigrationError,
+    execute_foreign_migration,
+    mark_foreign_migration_paused,
+)
 from hoardarr.storage.groups import reconcile_snapshot_disks
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
@@ -121,6 +127,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.transfer.cleanup",
         "storage.maintenance",
         "storage.foreign.inspect",
+        "storage.foreign.migrate",
         "storage.snapraid.replace",
         "storage.array.replace",
         "storage.redundancy.apply",
@@ -1530,6 +1537,25 @@ def _execute_work(
         return _execute_maintenance(item, settings, maintenance_applier)
     if item.kind == "storage.foreign.inspect":
         return _execute_foreign_inspection(item, settings, foreign_inspection_applier)
+    if item.kind == "storage.foreign.migrate":
+        value = item.request.get("plan")
+        if (
+            not isinstance(value, dict)
+            or value.get("plan_sha256") != item.request.get("plan_sha256")
+            or item.request.get("confirmation_sha256")
+            != document_hash({"confirmation": "COPY AND VERIFY"})
+            or item.resource_type != "foreign_storage"
+            or item.resource_id != value.get("candidate_id")
+        ):
+            raise WorkFailure("foreign_migration_plan_changed", "The migration request is invalid")
+        try:
+            return DrainExecution(
+                execute_foreign_migration(session_factory, item.operation_id, value)
+            )
+        except ForeignMigrationError as exc:
+            raise WorkFailure(
+                exc.code, exc.safe_message, needs_attention=exc.needs_attention
+            ) from exc
     if item.kind == "storage.snapraid.replace":
         return _execute_snapraid_replacement(item, settings, snapraid_replacement_applier)
     if item.kind == "storage.array.replace":
@@ -1984,6 +2010,15 @@ def _finalize_failure(
                     "error": {"code": failure.code, "message": failure.safe_message},
                 }
                 job.updated_at = utc_now()
+        elif item.kind == "storage.foreign.migrate":
+            migration_job = session.get(ForeignMigrationJob, operation.id)
+            if migration_job is not None:
+                migration_job.status = "needs_attention" if failure.needs_attention else "failed"
+                migration_job.report_json = {
+                    **migration_job.report_json,
+                    "error": {"code": failure.code, "message": failure.safe_message},
+                }
+                migration_job.updated_at = utc_now()
         fail_operation(
             session,
             operation,
@@ -2024,7 +2059,10 @@ def _finalize_paused(session_factory: SessionFactory, item: WorkItem, worker_id:
         operation = _leased_operation(session, item, worker_id)
         if operation is None:
             return
-        mark_drain_paused(session, operation)
+        if item.kind == "storage.foreign.migrate":
+            mark_foreign_migration_paused(session, operation)
+        else:
+            mark_drain_paused(session, operation)
 
 
 def run_once(

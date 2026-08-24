@@ -16,6 +16,7 @@ async function storageLifecycleServer(page: Page) {
   let lastGroupLifecycle = "assigned";
   let released = false;
   let foreignInspectionStarted = false;
+  let foreignMigrationStarted = false;
   let unraidEvidenceLoaded = false;
   const group = () => ({
     id: groupId,
@@ -114,6 +115,32 @@ async function storageLifecycleServer(page: Page) {
       foreignInspectionStarted = true;
       return json({ operation: { id: "foreign-operation", kind: "storage.foreign.inspect", status: "succeeded", resource: { type: "foreign_storage", id: "foreign:archive" }, result: { access: "read_only", persistent_mount: false, mutation_performed: false, inventory: { file_count: 24, total_bytes: 8192, read_errors: [] } } } }, 202);
     }
+    if (pathname.endsWith("/storage/foreign/migration/preview")) return json({ plan: {
+      schema_version: 1,
+      operation: "foreign.migrate_files",
+      candidate_id: "foreign:archive",
+      hardware_snapshot_id: "snapshot-foreign",
+      hardware_snapshot_sha256: "d".repeat(64),
+      source_inventory_operation_id: "foreign-operation",
+      source_inventory_sha256: "8".repeat(64),
+      device: { id: "wwn:archive", model: "Disposable archive disk", capacity_bytes: 8_000_000_000 },
+      device_binding_sha256: "7".repeat(64),
+      source: { kind: "whole_device", kernel_path_at_preview: "/dev/loop9", partition_number: null, filesystem_type: "xfs", filesystem_uuid: "archive-fs", filesystem_label: "Archive", signature_source: "wipefs", read_only_options: ["ro", "norecovery", "nodev", "nosuid", "noexec"] },
+      destination: { id: destinationId, backend_id: destinationId, storage_group_id: groupId, name: "Media", path: "/srv/hoardarr/backends/destination", stable_identity: "disk:wwn:destination", lifecycle_state: "preferred_write", device_number: 202, free_bytes: 900_000_000_000, free_bytes_at_preview: 900_000_000_000, reserve_bytes: 1_073_741_824 },
+      inventory: { file_count: 24, total_bytes: 8192 },
+      verification: { mode: "accurate", algorithm: "blake3" },
+      collision_policy: "stop",
+      source_access: "read_only",
+      source_retained: true,
+      parity_reuse_supported: false,
+      plan_sha256: "6".repeat(64),
+    } });
+    if (pathname.endsWith("/storage/foreign/migration")) {
+      const body = request.postDataJSON() as { confirmation: string };
+      expect(body.confirmation).toBe("COPY AND VERIFY");
+      foreignMigrationStarted = true;
+      return json({ operation: { id: "foreign-migration", kind: "storage.foreign.migrate", status: "succeeded", resource: { type: "foreign_storage", id: "foreign:archive" }, result: { files_total: 24, files_copied: 24, files_verified: 24, files_reused: 0, bytes_copied: 8192, destination_path: "/srv/hoardarr/backends/destination", source_retained: true, parity_reused: false } } }, 202);
+    }
     if (pathname.endsWith("/storage/foreign/stack-preview")) return json({ result: {
       candidate_id: "foreign:1234567890abcdef12345678",
       plan_sha256: "9".repeat(64),
@@ -145,6 +172,7 @@ async function storageLifecycleServer(page: Page) {
       snapshot: { id: "snapshot-foreign", captured_at: now, sha256: "d".repeat(64) },
       policy: { default_access: "read_only", automatic_mount: false, automatic_assembly: false, mutation_performed: false },
       unraid_evidence: unraidEvidenceLoaded ? { id: "unraid-evidence", source: "unraid_runtime_state", document_sha256: "1".repeat(64), captured_at: now, unraid_version: "7.1.4", assignment_count: 1, matched_assignment_count: 1, unmatched_slots: [], ambiguous_slots: [] } : null,
+      migration_destinations: [{ id: destinationId, storage_group_id: groupId, name: "Media", path: "/srv/hoardarr/backends/destination", stable_identity: "disk:wwn:destination", lifecycle_state: "preferred_write", device_number: 202, free_bytes: 900_000_000_000 }],
       candidates: [{
         id: "foreign:archive",
         profile: "standalone_filesystem",
@@ -292,6 +320,7 @@ async function storageLifecycleServer(page: Page) {
     lastGroupLifecycle: () => lastGroupLifecycle,
     released: () => released,
     foreignInspectionStarted: () => foreignInspectionStarted,
+    foreignMigrationStarted: () => foreignMigrationStarted,
     unraidEvidenceLoaded: () => unraidEvidenceLoaded,
   };
 }
@@ -373,6 +402,29 @@ test("reviews inactive storage-stack metadata without activating it", async ({ p
   await expect(page.getByText("2 of 4")).toBeVisible();
   await expect(page.getByText("Inactive MD member metadata does not prove current array health.")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("foreign-stack-no-activation-preview.png"), fullPage: true });
+});
+
+test("copies a reviewed foreign disk into managed storage with the source retained", async ({ page }, testInfo) => {
+  const observed = await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await page.getByText("Inspect storage from another system").click();
+  await page.getByRole("button", { name: "Review read-only inspection" }).click();
+  await page.getByRole("button", { name: "INSPECT READ ONLY" }).click();
+  await expect(page.getByText("Read-only inventory completed")).toBeVisible();
+  await page.getByRole("button", { name: "Close report" }).click();
+  await page.getByRole("button", { name: "Plan verified copy" }).click();
+  await expect(page.getByText("This copies files; it does not adopt or erase the source")).toBeVisible();
+  await expect(page.getByLabel("Destination")).toHaveValue("44444444-4444-4444-8444-444444444444");
+  await page.getByRole("button", { name: "Review copy plan" }).click();
+  await expect(page.getByText("Source data stays untouched")).toBeVisible();
+  await expect(page.getByText("Stop before replacing any existing file")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("foreign-migration-review.png"), fullPage: true });
+  await page.getByRole("button", { name: "COPY AND VERIFY" }).click();
+  await expect(page.getByText("Copy and verification completed")).toBeVisible();
+  await expect(page.getByText(/source stayed read-only and remains unchanged/i)).toBeVisible();
+  expect(observed.foreignMigrationStarted()).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("foreign-migration-completed.png"), fullPage: true });
 });
 
 test("loads stable Unraid assignment evidence and identifies a data disk in the real Storage UI", async ({ page }, testInfo) => {
