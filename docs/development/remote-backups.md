@@ -24,9 +24,19 @@ A control-plane archive contains:
 
 Files whose names indicate credentials, passwords, private keys, secrets, or tokens are excluded. Symlinks and oversized configuration files are also excluded. Secret-valued keys are removed from `hoardarr.env` while non-secret listener and appliance settings remain restorable.
 
-The SQLite copy is also made safe for a different installation key. User password verifiers, browser sessions, one-time setup claims, and API tokens are removed. ARR credentials, CHAP secrets, backup credentials, and webhook signing secrets are cleared; their non-secret endpoint/configuration rows remain disabled with `credentials_required` state so the owner can review and re-enter them. The manifest records the credential mode and row counts. This prevents a structurally valid fresh restore from containing permanently unreadable ciphertext, transferable authentication material, or live sessions.
+The default SQLite copy is also made safe for a different installation key. User password verifiers, browser sessions, one-time setup claims, and API tokens are removed. ARR credentials, CHAP secrets, backup credentials, and webhook signing secrets are cleared; their non-secret endpoint/configuration rows remain disabled with `credentials_required` state so the owner can review and re-enter them. The manifest records the credential mode and row counts. This prevents a structurally valid fresh restore from containing permanently unreadable ciphertext, transferable authentication material, or live sessions.
 
-The Hoardarr secret-store key is not exported. The archive is not described as encrypted: operators must use provider-side encryption or an encrypted destination when encryption at rest is required. A future optional encrypted-secrets export remains a separate roadmap item.
+The default Hoardarr secret-store key is not exported. The archive is not described as encrypted: operators must use provider-side encryption or an encrypted destination when encryption at rest is required.
+
+An owner who needs an offline full-credential recovery artifact can create one only from the appliance console:
+
+```console
+printf '%s\n' "$HOARDARR_RECOVERY_PASSPHRASE" | sudo hoardarr export-control-plane \
+  --output /secure-offline-media/hoardarr-control-plane.tar.gz \
+  --encrypt-secrets
+```
+
+The passphrase must contain 16 to 1024 characters. It is read only from standard input, never accepted as a command-line argument, and never recorded in an API request, browser state, durable operation, or Activity event. Hoardarr protects the installation key with scrypt and AES-256-GCM. Authentication sessions, API tokens, setup claims, owners, and password verifiers are still removed. The encrypted artifact is sensitive recovery material and belongs on access-controlled offline storage; losing either it or its passphrase makes the encrypted credentials unrecoverable.
 
 ## Upload, recovery, and verification
 
@@ -56,7 +66,7 @@ sudo systemctl start hoardarr-account-executor hoardarr-storage-executor \
   hoardarr-storage-status hoardarr-worker hoardarr-api
 ```
 
-The command requires root, refuses to run while a Hoardarr service is active, requires an independent expected SHA-256 value, refuses an appliance that already has an owner, rejects archives that do not prove credential redaction, and checks bounded expanded size plus a 64 MiB staging safety margin before extraction. It atomically replaces the empty SQLite database and retains the prior empty database/configuration under the reported rollback path. After migration, issue a new one-time setup link or create a new console owner before restarting normal access; then re-enter integration credentials and reconcile discovered disks by stable identity. Optional encrypted-secret export remains separate work; restore validation must not be presented as an applied restore.
+For an encrypted full-credential export, add `--passphrase-stdin` and pipe the passphrase to the same restore command. The command requires root, refuses to run while a Hoardarr service is active, requires an independent expected SHA-256 value, refuses an appliance that already has an owner, rejects archives whose credential mode is neither proven redaction nor the authenticated encrypted-key envelope, and checks bounded expanded size plus a 64 MiB staging safety margin before extraction. It atomically replaces the empty SQLite database and, for encrypted exports, the installation key; both are retained under the reported rollback path. A missing or incorrect passphrase fails before destination mutation. After migration, issue a new one-time setup link or create a new console owner before restarting normal access. Redacted archives require credential re-entry. Encrypted exports preserve credential ciphertext for review under the restored key. A hardware scan then reconciles the physical disk registry by stable identity rather than kernel path. Restore validation must not be presented as an applied restore.
 
 ## User interface and activity
 
@@ -64,7 +74,8 @@ Settings → Remote backups provides honest empty/loading/failure states, target
 
 ## Validation
 
-- `backend/tests/test_backups.py` covers endpoint policy, filename and environment-key exclusion, database credential/session redaction, re-entry states, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, transient-outage delayed resume, and failed-run reconciliation.
+- `backend/tests/test_backups.py` covers endpoint policy, filename and environment-key exclusion, database credential/session redaction, encrypted-key export, missing/wrong passphrases, credential recovery, re-entry states, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, transient-outage delayed resume, and failed-run reconciliation.
+- `backend/tests/test_cli_backups.py` executes the console-only encrypted export and fresh restore using standard-input passphrases and proves the restored credential decrypts while the owner account does not transfer.
 - backup-focused API tests cover authentication, scopes, redaction, credential rotation, idempotency, readiness gates, schedule persistence, and durable run creation.
 - `frontend/src/components/RemoteBackupsPanel.test.tsx` covers empty states, secret removal from the DOM after creation and rotation, readiness gating, scheduling, and validation actions.
 - the Playwright production-shell scenario exercises the visible create → prove connection → enable backup workflow.

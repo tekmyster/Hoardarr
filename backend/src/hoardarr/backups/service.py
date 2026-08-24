@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import ipaddress
@@ -22,6 +23,9 @@ from urllib.parse import urlsplit
 import boto3
 from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from sqlalchemy.orm import Session, sessionmaker
 
 from hoardarr import __version__
@@ -38,6 +42,7 @@ MAX_CONFIG_FILE_BYTES = 1024 * 1024
 MAX_RESTORE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MIN_RESTORE_FREE_MARGIN_BYTES = 64 * 1024 * 1024
 EXCLUDED_NAME_FRAGMENTS = ("credential", "password", "private", "secret", "token")
+SECRET_EXPORT_AAD = b"hoardarr-control-plane-secret-key-v1"
 
 
 class UploadRateLimiter:
@@ -400,7 +405,9 @@ def _database_backup(source: Path, destination: Path) -> None:
         source_connection.close()
 
 
-def _sanitize_database_backup(destination: Path) -> dict[str, int]:
+def _sanitize_database_backup(
+    destination: Path, *, preserve_encrypted_credentials: bool = False
+) -> dict[str, int]:
     """Remove live authentication state and make encrypted integrations re-keyable.
 
     A default control-plane archive deliberately excludes the installation SecretBox
@@ -430,28 +437,29 @@ def _sanitize_database_backup(destination: Path) -> dict[str, int]:
         execute("api_tokens", "DELETE FROM api_tokens")
         execute("setup_claims", "DELETE FROM setup_claims")
         execute("users", "DELETE FROM users")
-        execute(
-            "integration_connections",
-            "UPDATE integration_connections "
-            "SET api_key_ciphertext = X'', status = 'credentials_required'",
-        )
-        execute(
-            "connectivity_services",
-            "UPDATE connectivity_services "
-            "SET secret_ciphertext = NULL, status = CASE "
-            "WHEN secret_ciphertext IS NULL THEN status ELSE 'credentials_required' END",
-        )
-        execute(
-            "remote_backup_targets",
-            "UPDATE remote_backup_targets "
-            "SET secret_ciphertext = X'', enabled = 0, status = 'credentials_required', "
-            "schedule_json = '{\"enabled\":false}'",
-        )
-        execute(
-            "webhook_endpoints",
-            "UPDATE webhook_endpoints "
-            "SET secret_ciphertext = X'', enabled = 0, status = 'credentials_required'",
-        )
+        if not preserve_encrypted_credentials:
+            execute(
+                "integration_connections",
+                "UPDATE integration_connections "
+                "SET api_key_ciphertext = X'', status = 'credentials_required'",
+            )
+            execute(
+                "connectivity_services",
+                "UPDATE connectivity_services "
+                "SET secret_ciphertext = NULL, status = CASE "
+                "WHEN secret_ciphertext IS NULL THEN status ELSE 'credentials_required' END",
+            )
+            execute(
+                "remote_backup_targets",
+                "UPDATE remote_backup_targets "
+                "SET secret_ciphertext = X'', enabled = 0, status = 'credentials_required', "
+                "schedule_json = '{\"enabled\":false}'",
+            )
+            execute(
+                "webhook_endpoints",
+                "UPDATE webhook_endpoints "
+                "SET secret_ciphertext = X'', enabled = 0, status = 'credentials_required'",
+            )
         connection.commit()
         if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
             raise BackupError(
@@ -489,6 +497,84 @@ def _sanitized_environment_payload(path: Path) -> tuple[bytes, list[str]]:
     return "".join(kept).encode(), removed
 
 
+def _derive_export_key(passphrase: str, salt: bytes) -> bytes:
+    if not 16 <= len(passphrase) <= 1024:
+        raise BackupError(
+            "backup_secret_passphrase_invalid",
+            "The secret-export passphrase must contain 16 to 1024 characters.",
+        )
+    return Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(passphrase.encode())
+
+
+def _encrypt_secret_key(secret_key_file: Path, passphrase: str) -> bytes:
+    if secret_key_file.is_symlink() or not secret_key_file.is_file():
+        raise BackupError(
+            "backup_secret_key_unavailable", "The installation secret key is unavailable."
+        )
+    payload = secret_key_file.read_bytes()
+    if not payload or len(payload) > 4096:
+        raise BackupError(
+            "backup_secret_key_invalid", "The installation secret key has an invalid size."
+        )
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(_derive_export_key(passphrase, salt)).encrypt(
+        nonce, payload, SECRET_EXPORT_AAD
+    )
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kdf": "scrypt",
+                "n": 2**15,
+                "r": 8,
+                "p": 1,
+                "cipher": "AES-256-GCM",
+                "salt": base64.b64encode(salt).decode(),
+                "nonce": base64.b64encode(nonce).decode(),
+                "ciphertext": base64.b64encode(ciphertext).decode(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+
+
+def _decrypt_secret_key(envelope_path: Path, passphrase: str) -> bytes:
+    try:
+        if envelope_path.is_symlink() or not envelope_path.is_file():
+            raise ValueError("missing secret envelope")
+        document = json.loads(envelope_path.read_text(encoding="utf-8"))
+        if (
+            document.get("schema_version") != 1
+            or document.get("kdf") != "scrypt"
+            or document.get("n") != 2**15
+            or document.get("r") != 8
+            or document.get("p") != 1
+            or document.get("cipher") != "AES-256-GCM"
+        ):
+            raise ValueError("unsupported envelope")
+        salt = base64.b64decode(document["salt"], validate=True)
+        nonce = base64.b64decode(document["nonce"], validate=True)
+        ciphertext = base64.b64decode(document["ciphertext"], validate=True)
+        if len(salt) != 16 or len(nonce) != 12 or not 17 <= len(ciphertext) <= 8192:
+            raise ValueError("invalid envelope sizes")
+        payload = AESGCM(_derive_export_key(passphrase, salt)).decrypt(
+            nonce, ciphertext, SECRET_EXPORT_AAD
+        )
+        encoded_key = payload.strip()
+        decoded_key = base64.b64decode(encoded_key, altchars=b"-_", validate=True)
+        if len(decoded_key) != 32:
+            raise ValueError("invalid secret key")
+        return payload
+    except (InvalidTag, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise BackupError(
+            "backup_secret_decryption_failed",
+            "The encrypted secret export could not be decrypted with that passphrase.",
+        ) from exc
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -498,7 +584,10 @@ def _hash_file(path: Path) -> str:
 
 
 def build_control_plane_artifact(
-    settings: Settings, operation_id: str
+    settings: Settings,
+    operation_id: str,
+    *,
+    secret_export_passphrase: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     database = sqlite_database_path(settings.database_url)
     if database is None or not database.is_file():
@@ -512,7 +601,15 @@ def build_control_plane_artifact(
     artifact = operation_root / "hoardarr-control-plane.tar.gz"
     database_copy = operation_root / "hoardarr.db"
     _database_backup(database, database_copy)
-    database_redaction = _sanitize_database_backup(database_copy)
+    encrypted_secret_payload = (
+        _encrypt_secret_key(settings.secret_key_file, secret_export_passphrase)
+        if secret_export_passphrase is not None
+        else None
+    )
+    database_redaction = _sanitize_database_backup(
+        database_copy,
+        preserve_encrypted_credentials=encrypted_secret_payload is not None,
+    )
     included, excluded = _include_configuration(settings.configuration_root)
     redacted_configuration: dict[str, list[str]] = {}
     configuration_payloads: dict[str, bytes] = {}
@@ -531,7 +628,11 @@ def build_control_plane_artifact(
         "database": {
             "path": "database/hoardarr.db",
             "sha256": _hash_file(database_copy),
-            "credential_mode": "redacted_reentry_required",
+            "credential_mode": (
+                "encrypted_secret_key"
+                if encrypted_secret_payload is not None
+                else "redacted_reentry_required"
+            ),
             "redacted_rows": database_redaction,
         },
         "configuration": {
@@ -542,6 +643,11 @@ def build_control_plane_artifact(
             "secrets_included": False,
             "redacted_keys": redacted_configuration,
         },
+        "secrets": {
+            "included": encrypted_secret_payload is not None,
+            "path": "secrets/secret-key.json" if encrypted_secret_payload is not None else None,
+            "encryption": "scrypt+AES-256-GCM" if encrypted_secret_payload is not None else None,
+        },
     }
     manifest_path = operation_root / "manifest.json"
     manifest_path.write_text(
@@ -551,6 +657,12 @@ def build_control_plane_artifact(
     with tarfile.open(artifact, "w:gz", format=tarfile.PAX_FORMAT) as archive:
         archive.add(manifest_path, arcname="manifest.json", recursive=False)
         archive.add(database_copy, arcname="database/hoardarr.db", recursive=False)
+        if encrypted_secret_payload is not None:
+            secret_info = tarfile.TarInfo(name="secrets/secret-key.json")
+            secret_info.size = len(encrypted_secret_payload)
+            secret_info.mode = 0o600
+            secret_info.mtime = 0
+            archive.addfile(secret_info, io.BytesIO(encrypted_secret_payload))
         for path in included:
             relative = path.relative_to(settings.configuration_root).as_posix()
             if relative in configuration_payloads:
@@ -932,8 +1044,10 @@ def apply_fresh_control_plane_restore(
     settings: Settings,
     archive_path: Path,
     expected_sha256: str,
+    *,
+    secret_export_passphrase: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically apply a redacted archive to a fresh, offline appliance."""
+    """Atomically apply a safe redacted or encrypted archive to a fresh appliance."""
 
     archive = archive_path.resolve(strict=False)
     if archive.is_symlink() or not archive.is_file():
@@ -977,19 +1091,39 @@ def apply_fresh_control_plane_restore(
         staging = Path(directory)
         extracted = staging / "archive"
         manifest = _extract_and_validate_archive(archive, extracted)
-        if manifest.get("database", {}).get("credential_mode") != "redacted_reentry_required":
+        credential_mode = manifest.get("database", {}).get("credential_mode")
+        if credential_mode not in {"redacted_reentry_required", "encrypted_secret_key"}:
             raise BackupError(
                 "backup_restore_credentials_unsafe",
                 "This archive does not prove that installation-bound credentials were removed.",
             )
-        rollback.mkdir(mode=0o700)
+        restored_secret_key: bytes | None = None
+        if credential_mode == "encrypted_secret_key":
+            if secret_export_passphrase is None:
+                raise BackupError(
+                    "backup_secret_passphrase_required",
+                    "This archive requires its secret-export passphrase.",
+                )
+            restored_secret_key = _decrypt_secret_key(
+                extracted / "secrets" / "secret-key.json", secret_export_passphrase
+            )
         source_database = extracted / "database" / "hoardarr.db"
         staged_database = staging / "hoardarr.db"
         shutil.copyfile(source_database, staged_database)
         os.chmod(staged_database, 0o600)
+        secret_key = settings.secret_key_file.resolve(strict=False)
+        if secret_key.is_symlink():
+            raise BackupError(
+                "backup_restore_secret_key_unsafe",
+                "The destination secret key cannot be a symbolic link.",
+            )
+        rollback.mkdir(mode=0o700)
         existing_database = destination_database.exists()
         if existing_database:
             shutil.copy2(destination_database, rollback / "hoardarr.db")
+        existing_secret_key = secret_key.exists()
+        if restored_secret_key is not None and existing_secret_key:
+            shutil.copy2(secret_key, rollback / "secret.key")
         restored_configuration: list[str] = []
         configuration = extracted / "configuration"
         try:
@@ -1022,6 +1156,12 @@ def apply_fresh_control_plane_restore(
                 os.chmod(staged_config, 0o600)
                 os.replace(staged_config, destination)
                 restored_configuration.append(relative.as_posix())
+            if restored_secret_key is not None:
+                staged_secret_key = staging / "secret.key"
+                staged_secret_key.write_bytes(restored_secret_key)
+                os.chmod(staged_secret_key, 0o600)
+                secret_key.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.replace(staged_secret_key, secret_key)
             os.replace(staged_database, destination_database)
         except Exception:
             for relative in reversed(restored_configuration):
@@ -1033,19 +1173,28 @@ def apply_fresh_control_plane_restore(
                     destination.unlink(missing_ok=True)
             if existing_database and (rollback / "hoardarr.db").is_file():
                 shutil.copy2(rollback / "hoardarr.db", destination_database)
+            if restored_secret_key is not None:
+                if existing_secret_key and (rollback / "secret.key").is_file():
+                    shutil.copy2(rollback / "secret.key", secret_key)
+                else:
+                    secret_key.unlink(missing_ok=True)
             raise
     return {
         "restore_performed": True,
         "artifact_sha256": digest,
         "source_version": manifest.get("hoardarr_version"),
-        "credential_mode": "redacted_reentry_required",
+        "credential_mode": credential_mode,
         "configuration_files": restored_configuration,
         "rollback_path": str(rollback),
         "next_steps": [
             "run database migrations",
             "restart Hoardarr services",
             "create a new owner account",
-            "re-enter integration credentials",
+            (
+                "review restored integration credentials"
+                if credential_mode == "encrypted_secret_key"
+                else "re-enter integration credentials"
+            ),
             "reconcile disks by stable identity",
         ],
     }

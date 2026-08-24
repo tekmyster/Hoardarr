@@ -20,7 +20,11 @@ from hoardarr.auth.service import (
     create_initial_owner,
     issue_setup_token,
 )
-from hoardarr.backups.service import BackupError, apply_fresh_control_plane_restore
+from hoardarr.backups.service import (
+    BackupError,
+    apply_fresh_control_plane_restore,
+    build_control_plane_artifact,
+)
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import (
@@ -137,11 +141,59 @@ def _restore_command(args: argparse.Namespace, parser: argparse.ArgumentParser) 
                 "stop Hoardarr services before restore; active: " + ", ".join(active)
             )
     try:
+        passphrase = _read_secret_export_passphrase() if args.passphrase_stdin else None
         report = apply_fresh_control_plane_restore(
-            Settings(), Path(args.archive), args.sha256
+            Settings(),
+            Path(args.archive),
+            args.sha256,
+            secret_export_passphrase=passphrase,
         )
     except BackupError as exc:
         parser.error(exc.safe_message)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def _read_secret_export_passphrase() -> str:
+    passphrase = sys.stdin.readline().removesuffix("\n").removesuffix("\r")
+    if not passphrase:
+        raise BackupError(
+            "backup_secret_passphrase_required",
+            "A secret-export passphrase is required on standard input.",
+        )
+    return passphrase
+
+
+def _export_control_plane_command(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        parser.error("control-plane export must run as root")
+    output = Path(args.output).expanduser().resolve(strict=False)
+    if output.exists():
+        parser.error("refusing to overwrite an existing export")
+    try:
+        passphrase = _read_secret_export_passphrase() if args.encrypt_secrets else None
+        artifact, report = build_control_plane_artifact(
+            Settings(),
+            f"console-export-{os.getpid()}",
+            secret_export_passphrase=passphrase,
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if output.parent.is_symlink():
+            raise BackupError(
+                "backup_export_path_unsafe",
+                "The export destination directory cannot be a symbolic link.",
+            )
+        with artifact.open("rb") as source, output.open("xb") as destination:
+            while chunk := source.read(1024 * 1024):
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(output, 0o600)
+    except (BackupError, OSError) as exc:
+        output.unlink(missing_ok=True)
+        parser.error(exc.safe_message if isinstance(exc, BackupError) else "export failed")
+    report = {**report, "artifact_path": str(output)}
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
@@ -177,9 +229,24 @@ def main() -> None:
     restore.add_argument("--archive", required=True, help="local control-plane tar.gz archive")
     restore.add_argument("--sha256", required=True, help="expected 64-character SHA-256 digest")
     restore.add_argument(
+        "--passphrase-stdin",
+        action="store_true",
+        help="read the encrypted-secret export passphrase from standard input",
+    )
+    restore.add_argument(
         "--yes",
         action="store_true",
         help="confirm replacing the empty appliance database and restorable configuration",
+    )
+    export = commands.add_parser(
+        "export-control-plane",
+        help="write an offline control-plane archive to an explicit local path",
+    )
+    export.add_argument("--output", required=True, help="new local tar.gz archive path")
+    export.add_argument(
+        "--encrypt-secrets",
+        action="store_true",
+        help="include the installation key encrypted by a passphrase read from standard input",
     )
     args = parser.parse_args()
     if args.command == "setup":
@@ -188,6 +255,8 @@ def main() -> None:
         _setup_command(args, setup)
     elif args.command == "restore-control-plane":
         _restore_command(args, restore)
+    elif args.command == "export-control-plane":
+        _export_control_plane_command(args, export)
 
 
 def setup_token_main() -> None:

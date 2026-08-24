@@ -201,7 +201,7 @@ export function RemoteBackupsPanel() {
         This protects Hoardarr settings and history—not the media files stored on your disks. Secrets and API keys are excluded.
       </Notice>
       <Notice tone="info" title="Fresh appliance recovery">
-        Restore validation is read-only. To recover a new appliance, download the verified object from your provider, stop Hoardarr services, and run <code>sudo hoardarr restore-control-plane</code> with the recorded SHA-256. The recovered appliance requires a new owner setup and credential re-entry.
+        Scheduled remote backups are credential-redacted by default. Restore validation is read-only. To recover a new appliance, download the verified object from your provider, stop Hoardarr services, and run <code>sudo hoardarr restore-control-plane</code> with the recorded SHA-256. The recovered appliance requires a new owner setup and credential re-entry. An encrypted full-credential export is available only from the appliance console; its passphrase is read from standard input and is never stored in the Web UI or Activity.
       </Notice>
       {error && <Notice tone="danger" title="Backup request failed">{error}</Notice>}
       {operation && ["queued", "running"].includes(operation.status) && (

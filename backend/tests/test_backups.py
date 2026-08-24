@@ -22,6 +22,7 @@ from hoardarr.backups.service import (
     UploadRateLimiter,
     apply_fresh_control_plane_restore,
     build_control_plane_artifact,
+    decrypt_credentials,
     encrypt_credentials,
     execute_control_plane_backup,
     target_fingerprint,
@@ -334,6 +335,137 @@ def test_default_artifact_removes_live_auth_and_requires_credential_reentry(
         ).fetchone() == (0, "credentials_required", 0)
     finally:
         database.close()
+
+
+def test_encrypted_secret_export_restores_credentials_only_with_correct_passphrase(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source-encrypted"
+    source_root.mkdir()
+    source = _settings(source_root)
+    source.configuration_root.mkdir()
+    source_secret_box = SecretBox.from_file(source.secret_key_file, create=True)
+    source_key_payload = source.secret_key_file.read_bytes()
+    source_factory = create_session_factory(create_database_engine(source.database_url))
+    with source_factory() as session, session.begin():
+        session.add(User(id="owner", username="owner", password_hash="verifier"))
+        session.add(_target(source_secret_box))
+
+    passphrase = "correct horse battery staple"
+    artifact, artifact_report = build_control_plane_artifact(
+        source,
+        "encrypted-secret-export",
+        secret_export_passphrase=passphrase,
+    )
+    assert artifact_report["database"]["credential_mode"] == "encrypted_secret_key"
+    assert artifact_report["secrets"] == {
+        "included": True,
+        "path": "secrets/secret-key.json",
+        "encryption": "scrypt+AES-256-GCM",
+    }
+    with tarfile.open(artifact, "r:gz") as archive:
+        envelope = archive.extractfile("secrets/secret-key.json")
+        assert envelope is not None
+        envelope_payload = envelope.read()
+        assert source_key_payload.strip() not in envelope_payload
+
+    target_root = tmp_path / "target-encrypted"
+    target_root.mkdir()
+    target = _settings(target_root)
+    target.configuration_root.mkdir()
+    SecretBox.from_file(target.secret_key_file, create=True)
+    original_target_key = target.secret_key_file.read_bytes()
+    original_target_database = (target_root / "hoardarr.db").read_bytes()
+
+    with pytest.raises(BackupError, match="requires its secret-export passphrase"):
+        apply_fresh_control_plane_restore(
+            target,
+            artifact,
+            artifact_report["artifact_sha256"],
+        )
+    with pytest.raises(BackupError, match="could not be decrypted"):
+        apply_fresh_control_plane_restore(
+            target,
+            artifact,
+            artifact_report["artifact_sha256"],
+            secret_export_passphrase="this passphrase is incorrect",
+        )
+    assert target.secret_key_file.read_bytes() == original_target_key
+    assert (target_root / "hoardarr.db").read_bytes() == original_target_database
+    assert not any(target.backup_artifact_root.glob("restore-rollback-*"))
+
+    report = apply_fresh_control_plane_restore(
+        target,
+        artifact,
+        artifact_report["artifact_sha256"],
+        secret_export_passphrase=passphrase,
+    )
+    assert report["credential_mode"] == "encrypted_secret_key"
+    assert target.secret_key_file.read_bytes() == source_key_payload
+    restored_secret_box = SecretBox.from_file(target.secret_key_file, create=False)
+    restored_factory = create_session_factory(create_database_engine(target.database_url))
+    with restored_factory() as session:
+        assert session.scalar(select(User)) is None
+        restored_target = session.get(RemoteBackupTarget, "backup-target")
+        assert restored_target is not None
+        assert decrypt_credentials(restored_secret_box, restored_target) == {
+            "access_key_id": "test-access-key",
+            "secret_access_key": "test-secret-key",
+            "session_token": None,
+        }
+
+
+def test_encrypted_secret_export_rejects_short_passphrase(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.configuration_root.mkdir()
+    SecretBox.from_file(settings.secret_key_file, create=True)
+    with pytest.raises(BackupError, match="16 to 1024 characters"):
+        build_control_plane_artifact(
+            settings,
+            "short-secret-export",
+            secret_export_passphrase="too-short",
+        )
+
+
+def test_encrypted_restore_rolls_secret_key_back_when_database_switch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source-key-rollback"
+    source_root.mkdir()
+    source = _settings(source_root)
+    source.configuration_root.mkdir()
+    SecretBox.from_file(source.secret_key_file, create=True)
+    artifact, artifact_report = build_control_plane_artifact(
+        source,
+        "encrypted-key-rollback",
+        secret_export_passphrase="rollback passphrase value",
+    )
+
+    target_root = tmp_path / "target-key-rollback"
+    target_root.mkdir()
+    target = _settings(target_root)
+    target.configuration_root.mkdir()
+    SecretBox.from_file(target.secret_key_file, create=True)
+    original_target_key = target.secret_key_file.read_bytes()
+    destination_database = target_root / "hoardarr.db"
+    original_database = destination_database.read_bytes()
+    original_replace = backup_service.os.replace
+
+    def fail_database_switch(source_path: Path, destination_path: Path) -> None:
+        if Path(destination_path) == destination_database:
+            raise OSError("injected encrypted database switch failure")
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(backup_service.os, "replace", fail_database_switch)
+    with pytest.raises(OSError, match="injected encrypted database switch failure"):
+        apply_fresh_control_plane_restore(
+            target,
+            artifact,
+            artifact_report["artifact_sha256"],
+            secret_export_passphrase="rollback passphrase value",
+        )
+    assert target.secret_key_file.read_bytes() == original_target_key
+    assert destination_database.read_bytes() == original_database
 
 
 def test_fresh_restore_applies_atomically_and_retains_rollback(tmp_path: Path) -> None:
