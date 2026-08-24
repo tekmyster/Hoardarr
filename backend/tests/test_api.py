@@ -1963,6 +1963,52 @@ def test_existing_session_restores_csrf_after_page_refresh(api_runtime: Any) -> 
     assert "hoardarr_csrf" not in client.cookies
 
 
+def test_legacy_failed_storage_apply_resumes_only_with_executor_checkpoint(
+    api_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    with app.state.session_factory() as session, session.begin():
+        operation = Operation(
+            kind="storage.apply",
+            status="failed",
+            actor_type="user",
+            actor_id="legacy-owner",
+            resource_type="wizard_session",
+            resource_id="legacy-wizard",
+            request_sha256="f" * 64,
+            request_json={"wizard_id": "legacy-wizard"},
+            error_json={"code": "storage_tool_missing", "message": "setfattr missing"},
+        )
+        session.add(operation)
+        session.flush()
+        operation_id = operation.id
+
+    monkeypatch.setattr(
+        "hoardarr.api.routes.operations.storage_operation_status",
+        lambda *_args, **_kwargs: {
+            "operation_id": operation_id,
+            "state": "needs_attention",
+            "phase": "Building the selected storage layout",
+            "completed_steps": 6,
+            "total_steps": 11,
+            "percent": 54,
+        },
+    )
+    resumed = client.post(
+        f"/api/v1/operations/{operation_id}/resume",
+        headers=_state_headers(csrf),
+    )
+    assert resumed.status_code == 202, resumed.text
+    assert resumed.json()["status"] == "queued"
+    assert resumed.json()["result"] == {
+        "resume_requested": True,
+        "resume_attempt": 1,
+        "legacy_failed_checkpoint_reconciled": True,
+    }
+
+
 def test_authenticated_hardware_worker_and_wizard_flow(
     api_runtime: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

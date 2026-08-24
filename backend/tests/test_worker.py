@@ -148,6 +148,31 @@ def test_storage_apply_needs_attention_can_be_queued_for_checkpoint_resume(
         assert [event.event_type for event in events] == ["queued", "resumed"]
 
 
+def test_legacy_failed_storage_apply_requires_executor_needs_attention_checkpoint(
+    tmp_path: Path,
+) -> None:
+    _settings, session_factory = _runtime(tmp_path)
+    operation_id = _enqueue(session_factory, kind="storage.apply")
+    with session_factory() as session, session.begin():
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        operation.status = "failed"
+        operation.error_json = {"code": "storage_tool_missing", "message": "setfattr missing"}
+        with pytest.raises(OperationConflict, match="not waiting for a safe resume"):
+            resume_storage_apply(session, operation, checkpoint_state="failed")
+        resume_storage_apply(session, operation, checkpoint_state="needs_attention")
+
+    with session_factory() as session:
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        assert operation.status == "queued"
+        assert operation.result_json == {
+            "resume_requested": True,
+            "resume_attempt": 1,
+            "legacy_failed_checkpoint_reconciled": True,
+        }
+
+
 def test_volume_worker_persists_executor_result_under_stable_provider_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

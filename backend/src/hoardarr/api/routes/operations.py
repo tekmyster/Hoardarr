@@ -339,13 +339,35 @@ def pause_operation(
 def resume_operation(
     operation_id: str,
     request: Request,
+    settings: Settings = Depends(settings_from_request),
     principal: Principal = Depends(require_state_scope("operate")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
     operation = visible_operation(session, operation_id, principal)
     try:
         if operation.kind == "storage.apply":
-            resume_storage_apply(session, operation)
+            checkpoint_state = None
+            if operation.status == "failed":
+                try:
+                    checkpoint = storage_operation_status(
+                        settings.storage_status_socket,
+                        operation_id=operation.id,
+                        timeout_seconds=min(5.0, settings.storage_executor_timeout_seconds),
+                    )
+                except StorageExecutorError as exc:
+                    raise Problem(
+                        503,
+                        exc.code,
+                        "Storage checkpoint unavailable",
+                        "Hoardarr could not verify whether this legacy failed operation has a "
+                        "safe executor checkpoint.",
+                    ) from exc
+                checkpoint_state = str(checkpoint.get("state", ""))
+            resume_storage_apply(
+                session,
+                operation,
+                checkpoint_state=checkpoint_state,
+            )
         elif operation.kind == "storage.foreign.migrate":
             resume_foreign_migration(session, operation)
         else:

@@ -193,14 +193,28 @@ def fail_operation(
     append_event(session, operation, operation.status, message, {"code": code})
 
 
-def resume_storage_apply(session: Session, operation: Operation) -> None:
+def resume_storage_apply(
+    session: Session,
+    operation: Operation,
+    *,
+    checkpoint_state: str | None = None,
+) -> None:
     if operation.kind != "storage.apply":
         raise OperationConflict("this operation is not a storage build")
-    if operation.status != "needs_attention":
+    legacy_failed_checkpoint = (
+        operation.status == "failed" and checkpoint_state == "needs_attention"
+    )
+    if operation.status != "needs_attention" and not legacy_failed_checkpoint:
         raise OperationConflict("this storage build is not waiting for a safe resume")
     metadata = dict(operation.result_json or {})
     attempt = int(metadata.get("resume_attempt", 0)) + 1
-    metadata.update({"resume_requested": True, "resume_attempt": attempt})
+    metadata.update(
+        {
+            "resume_requested": True,
+            "resume_attempt": attempt,
+            **({"legacy_failed_checkpoint_reconciled": True} if legacy_failed_checkpoint else {}),
+        }
+    )
     operation.result_json = metadata
     operation.status = "queued"
     operation.cancel_requested = False
@@ -214,7 +228,7 @@ def resume_storage_apply(session: Session, operation: Operation) -> None:
         operation,
         "resumed",
         "Storage build queued to resume from its durable checkpoint",
-        {"attempt": attempt},
+        {"attempt": attempt, "legacy_failed_checkpoint_reconciled": legacy_failed_checkpoint},
     )
 
 

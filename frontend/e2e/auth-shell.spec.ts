@@ -77,7 +77,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
   });
 }
 
-async function storageWizardServer(page: Page, options: { firstDriveContainsData?: boolean; resumeAfterFailure?: boolean } = {}): Promise<void> {
+async function storageWizardServer(page: Page, options: { firstDriveContainsData?: boolean; resumeAfterFailure?: boolean; legacyFailedStatus?: boolean } = {}): Promise<void> {
   await authenticatedEmptyServer(page);
   const now = new Date().toISOString();
   const drives = Array.from({ length: 8 }, (_, index) => ({
@@ -247,7 +247,7 @@ async function storageWizardServer(page: Page, options: { firstDriveContainsData
   });
   const operationDocument = () => resumed
     ? { id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: operationResult(), created_at: now, updated_at: now }
-    : { id: "op-storage", kind: "storage.apply", status: "needs_attention", resource: { type: "wizard_session", id: "wizard-storage" }, error: { code: "storage_tool_missing", message: "A required storage tool is unavailable: setfattr." }, created_at: now, updated_at: now };
+    : { id: "op-storage", kind: "storage.apply", status: options.legacyFailedStatus ? "failed" : "needs_attention", resource: { type: "wizard_session", id: "wizard-storage" }, error: { code: "storage_tool_missing", message: "A required storage tool is unavailable: setfattr." }, created_at: now, updated_at: now };
   await page.route("**/api/v1/operations", (route) => route.fulfill({ json: { items: applied ? [operationDocument()] : [] } }));
   await page.route("**/api/v1/operations/op-storage", (route) => {
     if (new URL(route.request().url()).pathname.endsWith("/resume")) {
@@ -1251,7 +1251,7 @@ test.describe("production sign-in shell", () => {
   });
 
   test("resumes a storage build from its durable needs-attention checkpoint", async ({ page }) => {
-    await storageWizardServer(page, { resumeAfterFailure: true });
+    await storageWizardServer(page, { resumeAfterFailure: true, legacyFailedStatus: true });
     await page.goto("/");
     await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
     await page.getByRole("button", { name: "Add storage", exact: true }).click();
@@ -1263,7 +1263,7 @@ test.describe("production sign-in shell", () => {
     await dialog.getByRole("button", { name: "Apply settings" }).click();
 
     await expect(dialog.getByText("A required storage tool is unavailable: setfattr.").first()).toBeVisible();
-    await page.reload();
+    await page.goto("/?recovery=1");
     const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
     await expect(recoveredDialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "66");
     await recoveredDialog.getByText("Operation details").click();

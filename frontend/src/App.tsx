@@ -458,11 +458,24 @@ export default function App() {
       setFleetCountry(foundFleetSettings.country_code ?? "");
       setFleetHardwareEnabled(foundFleetSettings.hardware_enabled);
     }
-    const recoverableStorage = foundOperations.find((item) => {
+    let recoverableStorage = foundOperations.find((item) => {
       if (item.kind !== "storage.apply" || !["queued", "running", "succeeded", "needs_attention"].includes(item.status)) return false;
       const related = foundWizards.find((candidate) => candidate.id === item.resource?.id);
       return related !== undefined && related.status !== "completed" && related.status !== "cancelled";
     });
+    let preloadedRecoveryProgress: StorageOperationProgress | null = null;
+    if (!recoverableStorage) {
+      for (const candidate of foundOperations) {
+        if (candidate.kind !== "storage.apply" || candidate.status !== "failed") continue;
+        const related = foundWizards.find((wizardCandidate) => wizardCandidate.id === candidate.resource?.id);
+        if (!related || related.status === "completed" || related.status === "cancelled") continue;
+        const checkpoint = await api.storageOperationProgress(candidate.id).catch(() => null);
+        if (checkpoint?.state !== "needs_attention") continue;
+        recoverableStorage = { ...candidate, status: "needs_attention" };
+        preloadedRecoveryProgress = checkpoint;
+        break;
+      }
+    }
     if (recoverableStorage) {
       const recoveredWizard = foundWizards.find((candidate) => candidate.id === recoverableStorage.resource?.id);
       if (recoveredWizard) {
@@ -507,7 +520,9 @@ export default function App() {
           updated_at: null,
         };
         const [recoveredProgress, recoveredEvents] = await Promise.all([
-          api.storageOperationProgress(recoverableStorage.id).catch(() => fallbackProgress),
+          preloadedRecoveryProgress
+            ? Promise.resolve(preloadedRecoveryProgress)
+            : api.storageOperationProgress(recoverableStorage.id).catch(() => fallbackProgress),
           api.operationEvents(recoverableStorage.id).catch(() => [] as OperationEvent[]),
         ]);
         setStorageProgress(recoveredProgress);
