@@ -307,6 +307,10 @@ def _mdadm_policy(boot_arrays: list[str]) -> str:
 def _boot_volume_groups() -> list[str]:
     sources = set()
     for target in ("/", "/boot", "/boot/efi"):
+        # BIOS installations legitimately have no /boot/efi path. Its absence
+        # means there is no EFI mount to protect, not that host inspection failed.
+        if not Path(target).exists():
+            continue
         source = _command(
             ["findmnt", "--noheadings", "--output", "SOURCE", "--target", target]
         ).strip()
