@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import threading
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -313,3 +315,74 @@ def test_real_alert_transitions_route_once_and_deliver_without_api_consumer(
         )
         assert [item.status for item in deliveries] == ["delivered", "delivered"]
     engine.dispose()
+
+
+def test_production_worker_delivers_to_live_disposable_http_receiver(tmp_path: Path) -> None:
+    settings, engine, factory, token = runtime(tmp_path)
+    received: list[dict[str, object]] = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            body = self.rfile.read(length)
+            timestamp = self.headers["X-Hoardarr-Timestamp"]
+            expected = hmac.new(
+                SECRET.encode(), timestamp.encode() + b"." + body, hashlib.sha256
+            ).hexdigest()
+            received.append(
+                {
+                    "path": self.path,
+                    "body": json.loads(body),
+                    "signature_valid": hmac.compare_digest(
+                        self.headers["X-Hoardarr-Signature"], f"v1={expected}"
+                    ),
+                }
+            )
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    receiver = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    thread = threading.Thread(target=receiver.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = receiver.server_address[1]
+        with TestClient(create_app(settings), base_url="http://testserver") as client:
+            csrf = claim(client, token)
+            created = client.post(
+                "/api/v1/integrations/webhooks",
+                headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+                json={
+                    "name": "Live disposable receiver",
+                    "url": f"http://127.0.0.1:{port}/hoardarr-events",
+                    "secret": SECRET,
+                    "event_types": ["test.delivery"],
+                    "allow_localhost": True,
+                    "verify_tls": False,
+                },
+            )
+            assert created.status_code == 201
+            queued = client.post(
+                f"/api/v1/integrations/webhooks/{created.json()['id']}/test",
+                headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+            )
+            assert queued.status_code == 202
+        secret_box = SecretBox.from_file(settings.secret_key_file, create=False)
+        assert deliver_one(factory, settings, secret_box)
+        assert len(received) == 1
+        assert received[0]["path"] == "/hoardarr-events"
+        assert received[0]["signature_valid"] is True
+        body = received[0]["body"]
+        assert isinstance(body, dict)
+        assert body["schema_version"] == 1
+        assert body["delivery_id"] == queued.json()["id"]
+        assert body["event_id"] == queued.json()["event_id"]
+        assert body["event_type"] == "test.delivery"
+        assert body["payload"]["message"] == "Hoardarr webhook test"
+    finally:
+        receiver.shutdown()
+        receiver.server_close()
+        thread.join(timeout=2)
+        engine.dispose()
