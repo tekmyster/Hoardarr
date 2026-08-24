@@ -50,9 +50,13 @@ from hoardarr.storage.maintenance import (
 )
 from hoardarr.storage.mergerfs import MERGERFS_TYPES, discover_mergerfs
 from hoardarr.storage.quarantine import (
+    MANAGED_STORAGE_STATE,
+    MANAGED_UDEV_RULE,
     QuarantineError,
     atomic_json,
     atomic_text,
+    managed_identity_from_device,
+    persist_managed_identities,
     validate_quarantine,
 )
 from hoardarr.storage.redundancy import (
@@ -213,6 +217,8 @@ class Paths:
     snapraid_config_root: Path = Path("/etc/snapraid")
     systemd_unit_root: Path = Path("/etc/systemd/system")
     multipath_config_root: Path = Path("/etc/multipath/conf.d")
+    managed_udev_rule: Path | None = None
+    managed_storage_state: Path | None = None
 
 
 CommandRunner = Callable[[list[str], int], None]
@@ -1825,6 +1831,13 @@ def _replace_mergerfs_source(content: str, mountpoint: str, branches: list[str])
         )
     fields = rows[matches[0]].strip().split()
     fields[0] = _fstab_encode(":".join(branches))
+    options = [
+        option
+        for option in fields[3].split(",")
+        if option and not option.startswith("x-systemd.requires=")
+    ]
+    options.extend(f"x-systemd.requires={_fstab_encode(branch)}" for branch in branches)
+    fields[3] = ",".join(options)
     rows[matches[0]] = " ".join(fields)
     return "\n".join(rows) + ("\n" if content.endswith("\n") else "")
 
@@ -2480,7 +2493,12 @@ def _execute_actions(
         ):
             mergerfs_fstab_update = (str(combined), [*prior_branches, *new_branches])
         elif mergerfs.get("mode") == "create":
-            fstab_lines.append(f"{branches} {combined} fuse.mergerfs {options},nofail 0 0")
+            dependencies = ",".join(
+                f"x-systemd.requires={_fstab_encode(branch)}" for branch in new_member_mounts
+            )
+            fstab_lines.append(
+                f"{branches} {combined} fuse.mergerfs {options},{dependencies},nofail 0 0"
+            )
         if combined != presentation_root:
             runner(
                 [_tool("mount"), "--bind", os.fspath(combined), os.fspath(presentation_root)], 120
@@ -2784,6 +2802,39 @@ def _execute_actions(
     journal["current_action"] = None
     journal["updated_at"] = time.time()
     atomic_json(_journal_path(paths, operation_id), journal)
+    if paths.managed_udev_rule is not None and paths.managed_storage_state is not None:
+        journal["phase"] = "Releasing approved drives from startup quarantine"
+        journal["current_action"] = {
+            "id": "managed-drive-allowlist",
+            "type": "drive.quarantine.release",
+        }
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+        persist_managed_identities(
+            (managed_identity_from_device(device) for device in devices.values()),
+            state_path=paths.managed_storage_state,
+            rule_path=paths.managed_udev_rule,
+        )
+        runner([_tool("udevadm"), "control", "--reload-rules"], 60)
+        trigger_paths = {
+            os.fspath(_kernel_path(device)) for device in devices.values()
+        }
+        trigger_paths.update(os.fspath(partition) for partition in partitions.values())
+        for kernel_path in sorted(trigger_paths):
+            runner(
+                [
+                    _tool("udevadm"),
+                    "trigger",
+                    "--action=change",
+                    "--settle",
+                    f"--name-match={kernel_path}",
+                ],
+                120,
+            )
+        journal["completed_steps"] = int(journal["completed_steps"]) + 1
+        journal["current_action"] = None
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
     connectivity_actions = document.get("actions", {}).get("connectivity", [])
     if connectivity_actions:
         journal["phase"] = "Configuring file access"
@@ -2875,6 +2926,12 @@ def apply_storage_plan(
                 else len(storage["actions"])
                 + len(selected_ids)
                 + 3
+                + (
+                    1
+                    if paths.managed_udev_rule is not None
+                    and paths.managed_storage_state is not None
+                    else 0
+                )
                 + (1 if document.get("actions", {}).get("connectivity") else 0)
             ),
             "current_action": None,
@@ -5643,7 +5700,12 @@ def main() -> None:
     args = parser.parse_args()
     serve(
         args.socket,
-        Paths(detector=args.detector, quarantine_marker=args.quarantine_marker),
+        Paths(
+            detector=args.detector,
+            quarantine_marker=args.quarantine_marker,
+            managed_udev_rule=MANAGED_UDEV_RULE,
+            managed_storage_state=MANAGED_STORAGE_STATE,
+        ),
         status_only=args.status_only,
     )
 

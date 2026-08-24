@@ -5,9 +5,11 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,15 @@ POLICY_PATHS = (
     Path("/etc/mdadm/mdadm.conf"),
     Path("/etc/lvm/lvmlocal.conf"),
     Path("/etc/multipath/conf.d/99-hoardarr-quarantine.conf"),
+)
+MANAGED_UDEV_RULE = Path("/etc/udev/rules.d/98-hoardarr-managed-storage.rules")
+MANAGED_STORAGE_STATE = Path("/var/lib/hoardarr/storage-executor/managed-storage.json")
+FSTAB_PATH = Path("/etc/fstab")
+_FILESYSTEM_UUID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_BLOCK_NAME_RE = re.compile(r"^[A-Za-z0-9._!+:-]{1,128}$")
+_MANAGED_BEGIN_RE = re.compile(
+    r"^# BEGIN HOARDARR ([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
 )
 
 
@@ -383,6 +394,277 @@ def atomic_text(path: Path, content: str, *, mode: int = 0o600) -> None:
             temporary.unlink()
 
 
+def _managed_fstab_entries(content: str) -> tuple[list[str], list[str]]:
+    """Return filesystem UUIDs and mount targets from exact Hoardarr blocks."""
+    uuids: list[str] = []
+    targets: list[str] = []
+    operation_id: str | None = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        begin = _MANAGED_BEGIN_RE.fullmatch(line)
+        if begin is not None:
+            if operation_id is not None:
+                raise QuarantineError(
+                    "managed_fstab_invalid", "The Hoardarr mount configuration is malformed."
+                )
+            operation_id = begin.group(1)
+            continue
+        if operation_id is None:
+            continue
+        if line == f"# END HOARDARR {operation_id}":
+            operation_id = None
+            continue
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) != 6 or not fields[1].startswith("/"):
+            raise QuarantineError(
+                "managed_fstab_invalid", "The Hoardarr mount configuration is malformed."
+            )
+        targets.append(fields[1].replace("\\040", " "))
+        if fields[0].startswith("UUID="):
+            filesystem_uuid = fields[0][5:]
+            if _FILESYSTEM_UUID_RE.fullmatch(filesystem_uuid) is None:
+                raise QuarantineError(
+                    "managed_fstab_invalid", "A managed filesystem identity is invalid."
+                )
+            uuids.append(filesystem_uuid)
+    if operation_id is not None:
+        raise QuarantineError(
+            "managed_fstab_invalid", "The Hoardarr mount configuration is incomplete."
+        )
+    return uuids, targets
+
+
+def _with_mergerfs_dependencies(content: str) -> str:
+    """Bind managed mergerFS units to their member mounts at boot."""
+    output: list[str] = []
+    operation_id: str | None = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        begin = _MANAGED_BEGIN_RE.fullmatch(line)
+        if begin is not None:
+            operation_id = begin.group(1)
+            output.append(raw_line)
+            continue
+        if operation_id is not None and line == f"# END HOARDARR {operation_id}":
+            operation_id = None
+            output.append(raw_line)
+            continue
+        if operation_id is None or not line or line.startswith("#"):
+            output.append(raw_line)
+            continue
+        fields = raw_line.split()
+        if len(fields) == 6 and fields[2] == "fuse.mergerfs":
+            branches = [item.replace("\\040", " ") for item in fields[0].split(":")]
+            if not branches or any(not item.startswith("/") for item in branches):
+                raise QuarantineError(
+                    "managed_fstab_invalid", "A managed mergerFS branch is invalid."
+                )
+            options = [item for item in fields[3].split(",") if item]
+            options = [item for item in options if not item.startswith("x-systemd.requires=")]
+            options.extend(f"x-systemd.requires={branch}" for branch in branches)
+            fields[3] = ",".join(options)
+            output.append(" ".join(fields))
+        else:
+            output.append(raw_line)
+    suffix = "\n" if content.endswith("\n") or output else ""
+    return "\n".join(output) + suffix
+
+
+def _identity_from_properties(properties: Mapping[str, str]) -> tuple[str, str]:
+    for field in ("ID_WWN_WITH_EXTENSION", "ID_SERIAL_SHORT", "ID_WWN", "ID_SERIAL"):
+        value = properties.get(field)
+        if isinstance(value, str) and value:
+            return field, _udev_escape(value)
+    raise QuarantineError(
+        "managed_identity_unstable",
+        "A managed filesystem could not be bound to a stable hardware identity.",
+    )
+
+
+def managed_identity_from_device(device: Mapping[str, Any]) -> tuple[str, str]:
+    """Translate a reviewed detector identity to an exact udev match."""
+    identity = device.get("identity") if isinstance(device.get("identity"), Mapping) else {}
+    serial = identity.get("serial")
+    if isinstance(serial, str) and serial:
+        return "ID_SERIAL_SHORT", _udev_escape(serial)
+    for field in ("wwn", "nguid", "eui64"):
+        raw = identity.get(field)
+        if not isinstance(raw, str) or not raw:
+            continue
+        normalized = raw.casefold()
+        for prefix in ("wwn:", "naa.", "eui.", "nguid.", "0x"):
+            normalized = normalized.removeprefix(prefix)
+        if re.fullmatch(r"[0-9a-f]{16,128}", normalized) is not None:
+            return "ID_WWN_WITH_EXTENSION", f"0x{normalized}"
+    raise QuarantineError(
+        "managed_identity_unstable",
+        "A managed drive could not be bound to a stable udev identity.",
+    )
+
+
+def _load_managed_identities(path: Path) -> set[tuple[str, str]]:
+    if not path.exists():
+        return set()
+    details = path.stat(follow_symlinks=False)
+    expected_uid = os.geteuid() if hasattr(os, "geteuid") else details.st_uid
+    if not stat.S_ISREG(details.st_mode) or (
+        os.name != "nt" and (details.st_uid != expected_uid or details.st_mode & 0o077)
+    ):
+        raise QuarantineError(
+            "managed_state_unsafe", "The managed-drive identity state has unsafe permissions."
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QuarantineError(
+            "managed_state_invalid", "The managed-drive identity state is invalid."
+        ) from exc
+    entries = document.get("identities") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != 1
+        or not isinstance(entries, list)
+    ):
+        raise QuarantineError(
+            "managed_state_invalid", "The managed-drive identity state is invalid."
+        )
+    result: set[tuple[str, str]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"field", "value"}:
+            raise QuarantineError(
+                "managed_state_invalid", "The managed-drive identity state is invalid."
+            )
+        field = entry.get("field")
+        value = entry.get("value")
+        if field not in {
+            "ID_WWN_WITH_EXTENSION",
+            "ID_SERIAL_SHORT",
+            "ID_WWN",
+            "ID_SERIAL",
+        } or not isinstance(value, str):
+            raise QuarantineError(
+                "managed_state_invalid", "The managed-drive identity state is invalid."
+            )
+        result.add((field, _udev_escape(value)))
+    return result
+
+
+def _managed_udev_policy(identities: Iterable[tuple[str, str]]) -> str:
+    lines = [
+        "# Managed by Hoardarr. Approved storage is systemd-ready but remains desktop-hidden.",
+        'SUBSYSTEM!="block", GOTO="hoardarr_managed_end"',
+        'ENV{DM_MULTIPATH_DEVICE_PATH}=="1", GOTO="hoardarr_managed_end"',
+    ]
+    for field, value in sorted(set(identities)):
+        lines.append(
+            f'ENV{{{field}}}=="{_udev_escape(value)}", ENV{{SYSTEMD_READY}}="1", '
+            'ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", GOTO="hoardarr_managed_end"'
+        )
+    lines.extend(['LABEL="hoardarr_managed_end"', ""])
+    return "\n".join(lines)
+
+
+def persist_managed_identities(
+    identities: Iterable[tuple[str, str]],
+    *,
+    state_path: Path = MANAGED_STORAGE_STATE,
+    rule_path: Path = MANAGED_UDEV_RULE,
+) -> list[tuple[str, str]]:
+    combined = _load_managed_identities(state_path)
+    combined.update((field, _udev_escape(value)) for field, value in identities)
+    ordered = sorted(combined)
+    atomic_json(
+        state_path,
+        {
+            "schema_version": 1,
+            "updated_at": time.time(),
+            "identities": [{"field": field, "value": value} for field, value in ordered],
+        },
+    )
+    atomic_text(rule_path, _managed_udev_policy(ordered), mode=0o644)
+    return ordered
+
+
+def reconcile_managed_storage(
+    *,
+    fstab_path: Path = FSTAB_PATH,
+    state_path: Path = MANAGED_STORAGE_STATE,
+    rule_path: Path = MANAGED_UDEV_RULE,
+    dev_by_uuid: Path = Path("/dev/disk/by-uuid"),
+    activate: bool = False,
+) -> dict[str, Any]:
+    """Release only Hoardarr-managed filesystems from deny-by-default quarantine."""
+    if not fstab_path.exists():
+        return {"managed_filesystems": 0, "activated_mounts": 0, "identities": []}
+    try:
+        original = fstab_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise QuarantineError(
+            "managed_fstab_unavailable", "The managed mount configuration is unavailable."
+        ) from exc
+    filesystem_uuids, targets = _managed_fstab_entries(original)
+    if not filesystem_uuids:
+        return {"managed_filesystems": 0, "activated_mounts": 0, "identities": []}
+
+    identities: set[tuple[str, str]] = set()
+    trigger_names: set[str] = set()
+    for filesystem_uuid in filesystem_uuids:
+        alias = dev_by_uuid / filesystem_uuid
+        try:
+            device = alias.resolve(strict=True)
+        except OSError as exc:
+            raise QuarantineError(
+                "managed_filesystem_missing",
+                "A Hoardarr-managed filesystem is not currently available.",
+            ) from exc
+        parent_name = _command(
+            ["lsblk", "--noheadings", "--output", "PKNAME", os.fspath(device)]
+        ).strip()
+        if parent_name:
+            if _BLOCK_NAME_RE.fullmatch(parent_name) is None:
+                raise QuarantineError(
+                    "managed_identity_invalid", "A managed block-device parent is invalid."
+                )
+            parent = Path("/dev") / parent_name
+        else:
+            parent = device
+        identities.add(_identity_from_properties(_udev_properties(os.fspath(parent))))
+        trigger_names.update({os.fspath(parent), os.fspath(device)})
+
+    ordered = persist_managed_identities(
+        identities,
+        state_path=state_path,
+        rule_path=rule_path,
+    )
+    normalized = _with_mergerfs_dependencies(original)
+    atomic_text(fstab_path, normalized, mode=0o644)
+    for target in targets:
+        Path(target).mkdir(parents=True, exist_ok=True, mode=0o750)
+    _command(["udevadm", "control", "--reload-rules"])
+    for name in sorted(trigger_names):
+        _command(["udevadm", "trigger", "--action=change", "--settle", f"--name-match={name}"])
+
+    activated = 0
+    if activate:
+        _command(["systemctl", "daemon-reload"])
+        for target in targets:
+            unit = _command(["systemd-escape", "--path", "--suffix=mount", target]).strip()
+            if not unit or "\n" in unit:
+                raise QuarantineError(
+                    "managed_mount_unit_invalid", "A managed mount unit name is invalid."
+                )
+            _command(["systemctl", "reset-failed", unit])
+            _command(["systemctl", "start", unit], timeout=180)
+            activated += 1
+    return {
+        "managed_filesystems": len(filesystem_uuids),
+        "activated_mounts": activated,
+        "identities": [{"field": field, "value": value} for field, value in ordered],
+    }
+
+
 def recover_incomplete_preparations(state_root: Path) -> list[str]:
     recovered: list[str] = []
     if not state_root.exists():
@@ -520,17 +802,25 @@ def prepare_quarantine(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare deny-by-default drive quarantine")
-    parser.add_argument("prepare", nargs="?")
+    parser.add_argument("command", choices=("prepare", "reconcile-managed"))
     parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--activate", action="store_true")
     parser.add_argument(
         "--marker",
         type=Path,
         default=Path("/var/lib/hoardarr/storage-executor/quarantine.json"),
     )
     args = parser.parse_args()
-    if args.prepare != "prepare" or not args.yes:
-        raise SystemExit("use: hoardarr-storage-quarantine prepare --yes")
-    result = prepare_quarantine(marker=args.marker)
+    if not args.yes:
+        raise SystemExit(
+            "use: hoardarr-storage-quarantine {prepare|reconcile-managed} --yes [--activate]"
+        )
+    if args.command == "prepare":
+        if args.activate:
+            raise SystemExit("--activate is only valid with reconcile-managed")
+        result = prepare_quarantine(marker=args.marker)
+    else:
+        result = reconcile_managed_storage(activate=args.activate)
     print(json.dumps(result, sort_keys=True))
 
 

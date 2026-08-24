@@ -699,16 +699,15 @@ apply_release() {
     install -d -o root -g root -m 0755 "${CLI_ROOT}"
     install -d -o root -g root -m 0700 "${STATE_ROOT}"
     chown -R root:root "${STATE_ROOT}"
-    # The storage executor's systemd sandbox can only make paths writable when
-    # they exist before the service mount namespace is created.
+    # Storage state and presentation roots must exist before storage services
+    # reconcile persisted mounts. The executor intentionally shares the host
+    # mount namespace so its approved mounts are visible to applications.
     install -d -o root -g root -m 0700 "${STATE_ROOT}/storage-executor"
     install -d -o root -g root -m 0700 "${STATE_ROOT}/storage-executor/transactions"
     install -d -o root -g root -m 0700 "${STATE_ROOT}/connectivity"
-    # ProtectSystem=strict gives the storage executor a private mount namespace.
-    # ReadWritePaths can only expose paths that already exist when that namespace
-    # is created, so create every supported presentation root before systemd
-    # starts (or restarts) the executor.  In particular, Ubuntu does not provide
-    # /data by default.
+    # Create every supported presentation root before systemd starts (or
+    # restarts) the executor. In particular, Ubuntu does not provide /data by
+    # default.
     install -d -o root -g root -m 0755 /data /mnt /srv
     install -d -o root -g root -m 0755 \
         /etc/samba /etc/snapraid /etc/multipath/conf.d /etc/systemd/system
@@ -747,6 +746,14 @@ apply_release() {
     atomic_symlink "current/packaging/hardware" "${LIB_ROOT}/hardware"
     install_runtime_wrapper "${CLI_LINK}" cli
     install_runtime_wrapper "${QUARANTINE_CLI_LINK}" storage-quarantine
+    # Direct-to-latest upgrades may already contain Hoardarr-managed fstab
+    # blocks created before managed drives were released from startup
+    # quarantine. Reconcile only those exact blocks, add explicit mergerFS
+    # member dependencies, and activate their generated mount units.
+    if ! "${QUARANTINE_CLI_LINK}" reconcile-managed --yes --activate; then
+        restore_previous_release "${previous_release}" || true
+        die "managed storage could not be reconciled; the previous runtime was restored"
+    fi
     systemctl enable hoardarr-migrate.service hoardarr-api.service hoardarr-worker.service hoardarr-account-executor.service hoardarr-storage-executor.service hoardarr-storage-status.service
 
     if [[ "${DEFER_SERVICE_START}" == "true" ]]; then

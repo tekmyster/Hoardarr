@@ -98,6 +98,20 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertIn("systemctl enable --now lldpd.service", installer)
         self.assertIn('Environment="DAEMON_ARGS=-c"', drop_in)
 
+    def test_release_installer_reconciles_managed_mounts_before_runtime_start(self):
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+
+        reconcile = '"${QUARANTINE_CLI_LINK}" reconcile-managed --yes --activate'
+        self.assertIn(reconcile, installer)
+        self.assertLess(
+            installer.index(reconcile),
+            installer.rindex("systemctl start hoardarr-account-executor.service"),
+        )
+        self.assertIn(
+            "managed storage could not be reconciled; the previous runtime was restored",
+            installer,
+        )
+
     def test_media_account_executor_allows_samba_interface_discovery(self):
         unit = (
             ROOT / "packaging" / "systemd" / "hoardarr-account-executor.service"

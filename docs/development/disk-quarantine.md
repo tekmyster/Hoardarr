@@ -95,6 +95,24 @@ No provider or add-on may bypass this policy by invoking raw `mdadm`, `pvscan`,
 `vgchange`, `bcache-register`, `multipath`, `iscsiadm`, or `nvme connect`
 arguments.
 
+## Managed-drive release and boot ordering
+
+Completing an approved storage plan persistently releases only the selected
+stable hardware identities from the generic `SYSTEMD_READY=0` quarantine. The
+later `98-hoardarr-managed-storage.rules` policy uses exact udev identities,
+keeps managed disks hidden from desktop automounters, and never overrides a
+device that DM-Multipath has identified as a path member. The executor reloads
+and retriggers udev only after the reviewed filesystems and durable mount
+configuration have been created.
+
+Direct-to-latest upgrades run `hoardarr-storage-quarantine reconcile-managed
+--yes --activate`. It reads only exact `# BEGIN HOARDARR ...` fstab blocks,
+resolves their filesystem UUIDs to stable parent-device identities, repairs
+file modes, and activates the generated mount units. Managed mergerFS entries
+carry explicit `x-systemd.requires=` dependencies for every member mount so a
+pool cannot come online over empty branch directories during boot. Unmanaged
+disks remain quarantined throughout this reconciliation.
+
 ## Release gates
 
 Runtime `apply` may be enabled only after all of the following pass on Ubuntu
