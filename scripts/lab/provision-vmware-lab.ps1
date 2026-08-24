@@ -64,7 +64,7 @@ function Ensure-LabNetwork {
     }
     if (-not $target -and $adapters.Count -gt 0) {
         $target = Set-NetworkAdapter -NetworkAdapter $adapters[0] -Portgroup $Portgroup `
-            -Type Vmxnet3 -StartConnected -Confirm:$false
+            -Type Vmxnet3 -StartConnected $true -Confirm:$false
     }
     if (-not $target) {
         $target = New-NetworkAdapter -VM $Vm -Portgroup $Portgroup -Type Vmxnet3 `
@@ -137,7 +137,7 @@ try {
                     -Confirm:$false | Out-Null
             } else {
                 Set-CDDrive -CD $cd -IsoPath $datastoreIso -StartConnected `
-                    -Confirm:$false | Out-Null
+                    $true -Confirm:$false | Out-Null
             }
         }
         if ($AttachDataDisks -and $vm -and $PSCmdlet.ShouldProcess($name, 'Attach thin lab VMDKs')) {
