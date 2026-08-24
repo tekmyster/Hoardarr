@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from hoardarr.api.backup_schemas import (
     BackupConfirmationRequest,
+    BackupCredentialRotationRequest,
     BackupRestoreValidationRequest,
     BackupScheduleRequest,
     BackupTargetCreateRequest,
@@ -210,6 +211,65 @@ def update_schedule(
         target_type="remote_backup_target",
         target_id=target.id,
         details=target.schedule_json,
+    )
+    session.flush()
+    return target_document(target)
+
+
+@router.put("/targets/{target_id}/credentials")
+def rotate_credentials(
+    target_id: str,
+    payload: BackupCredentialRotationRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("admin")),
+    session: Session = Depends(database_session),
+    secret_box: SecretBox = Depends(secret_box_from_request),
+) -> dict[str, object]:
+    target = _target(session, target_id)
+    active = session.scalar(
+        select(Operation.id).where(
+            Operation.resource_type == "remote_backup_target",
+            Operation.resource_id == target.id,
+            Operation.status.in_(("queued", "running")),
+        )
+    )
+    if active:
+        raise Problem(
+            409,
+            "backup_target_busy",
+            "Backup target busy",
+            "Wait for the active backup operation before replacing credentials.",
+        )
+    ciphertext, fingerprint = encrypt_credentials(
+        secret_box,
+        target.id,
+        access_key_id=payload.access_key_id.get_secret_value(),
+        secret_access_key=payload.secret_access_key.get_secret_value(),
+        session_token=(payload.session_token.get_secret_value() if payload.session_token else None),
+    )
+    previous_fingerprint = target.credential_fingerprint
+    target.secret_ciphertext = ciphertext
+    target.credential_fingerprint = fingerprint
+    target.status = "not_tested"
+    target.last_tested_at = None
+    target.error_json = None
+    target.schedule_json = {
+        **target.schedule_json,
+        "enabled": False,
+    }
+    record_audit(
+        session,
+        principal=principal,
+        action="backup.target.credentials.rotate",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="remote_backup_target",
+        target_id=target.id,
+        details={
+            "previous_fingerprint": previous_fingerprint,
+            "credential_fingerprint": fingerprint,
+            "automatic_backup_disabled": True,
+        },
     )
     session.flush()
     return target_document(target)

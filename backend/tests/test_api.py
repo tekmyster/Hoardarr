@@ -2674,6 +2674,64 @@ def test_remote_backup_target_rejects_unapproved_private_or_insecure_endpoints(
     assert insecure.status_code == 422
 
 
+def test_remote_backup_credential_rotation_invalidates_connection_proof(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    endpoint = "/api/v1/backups/targets"
+    document = {
+        "name": "Rotating MinIO",
+        "provider": "minio",
+        "endpoint_url": "https://127.0.0.1:9000",
+        "bucket": "hoardarr-backups",
+        "access_key_id": "original-access-key",
+        "secret_access_key": "original-secret-key",
+        "force_path_style": True,
+        "allow_private_network": True,
+    }
+    csrf = _claim_owner(client, setup_token)
+    created = client.post(endpoint, headers=_state_headers(csrf), json=document)
+    assert created.status_code == 201, created.text
+    target_id = created.json()["id"]
+    with app.state.session_factory() as session, session.begin():
+        target = session.get(RemoteBackupTarget, target_id)
+        assert target is not None
+        target.status = "available"
+        target.last_tested_at = datetime.now(UTC)
+        target.schedule_json = {"enabled": True, "interval_hours": 24}
+        previous_fingerprint = target.credential_fingerprint
+
+    payload = {
+        "access_key_id": "replacement-access-key",
+        "secret_access_key": "replacement-secret-key",
+    }
+    unauthorized = client.put(f"{endpoint}/{target_id}/credentials", json=payload)
+    assert unauthorized.status_code == 403
+    rotated = client.put(
+        f"{endpoint}/{target_id}/credentials",
+        headers=_state_headers(csrf),
+        json=payload,
+    )
+    assert rotated.status_code == 200, rotated.text
+    response = rotated.json()
+    assert response["status"] == "not_tested"
+    assert response["last_tested_at"] is None
+    assert response["schedule"]["enabled"] is False
+    assert response["credential_fingerprint"] != previous_fingerprint
+    assert "replacement" not in rotated.text
+    with app.state.session_factory() as session:
+        target = session.get(RemoteBackupTarget, target_id)
+        assert target is not None
+        assert b"replacement-secret-key" not in target.secret_ciphertext
+        audit = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "backup.target.credentials.rotate"
+            )
+        )
+        assert audit is not None
+        assert "replacement-secret-key" not in json.dumps(audit.details_json)
+
+
 def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: Any) -> None:
     client, app, setup_token, secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

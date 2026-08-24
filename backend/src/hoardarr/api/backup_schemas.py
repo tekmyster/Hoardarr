@@ -110,3 +110,14 @@ class BackupScheduleRequest(StrictModel):
         if not 1 <= value <= 720:
             raise ValueError("backup interval must be 1-720 hours")
         return value
+
+
+class BackupCredentialRotationRequest(StrictModel):
+    access_key_id: SecretStr
+    secret_access_key: SecretStr
+    session_token: SecretStr | None = None
+
+    @field_validator("access_key_id", "secret_access_key", "session_token")
+    @classmethod
+    def validate_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        return BackupTargetCreateRequest.validate_secret(value)

@@ -12,6 +12,8 @@ Custom endpoints are resolved before use. Private, loopback, link-local, and oth
 
 Saving a target does not make it ready. `Test connection` writes a target-specific marker, verifies its length and Hoardarr SHA-256 metadata, then removes that exact marker. A backup cannot start and an automatic schedule cannot be enabled until this succeeds.
 
+Credentials can be replaced without returning either the old or new secret. Rotation is refused while the target has active work, invalidates the previous connection proof, and turns off automatic scheduling until a new marker test succeeds.
+
 ## Backup contents
 
 A control-plane archive contains:
@@ -43,7 +45,7 @@ Settings → Remote backups provides honest empty/loading/failure states, target
 ## Validation
 
 - `backend/tests/test_backups.py` covers endpoint policy, secret exclusion, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, and failed-run reconciliation.
-- backup-focused API tests cover authentication, scopes, redaction, idempotency, readiness gates, schedule persistence, and durable run creation.
-- `frontend/src/components/RemoteBackupsPanel.test.tsx` covers empty states, secret removal from the DOM, readiness gating, scheduling, and validation actions.
+- backup-focused API tests cover authentication, scopes, redaction, credential rotation, idempotency, readiness gates, schedule persistence, and durable run creation.
+- `frontend/src/components/RemoteBackupsPanel.test.tsx` covers empty states, secret removal from the DOM after creation and rotation, readiness gating, scheduling, and validation actions.
 - the Playwright production-shell scenario exercises the visible create → prove connection → enable backup workflow.
 - `tests/integration/minio_control_plane_backup.py` exercises the production boto3/worker path against a live disposable MinIO server in Ubuntu CI and emits sanitized evidence.

@@ -1248,6 +1248,16 @@ class HoardarrApi {
     });
   }
 
+  async rotateBackupTargetCredentials(
+    targetId: string,
+    input: { access_key_id: string; secret_access_key: string; session_token?: string },
+  ): Promise<RemoteBackupTargetDocument> {
+    return this.request<RemoteBackupTargetDocument>(
+      `/backups/targets/${encodeURIComponent(targetId)}/credentials`,
+      { method: "PUT", body: JSON.stringify(input) },
+    );
+  }
+
   async testBackupTarget(targetId: string): Promise<OperationDocument> {
     const result = await this.request<{ operation: OperationDocument }>(
       `/backups/targets/${encodeURIComponent(targetId)}/test`,

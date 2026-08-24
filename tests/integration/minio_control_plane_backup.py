@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Exercise Hoardarr's real control-plane backup path against a live MinIO server."""
 
 from __future__ import annotations

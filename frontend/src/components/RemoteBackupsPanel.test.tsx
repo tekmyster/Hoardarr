@@ -110,4 +110,26 @@ describe("RemoteBackupsPanel", () => {
     await waitFor(() => expect(update).toHaveBeenCalledWith("target-1", { enabled: true, interval_hours: 24 }));
     expect(await screen.findByText("Automatic: Every 24 hours")).toBeInTheDocument();
   });
+
+  it("replaces credentials without retaining them and requires a new connection test", async () => {
+    vi.spyOn(api, "backupTargets").mockResolvedValue([target()]);
+    vi.spyOn(api, "backupRuns").mockResolvedValue([]);
+    const rotate = vi.spyOn(api, "rotateBackupTargetCredentials").mockResolvedValue({
+      ...target("untested"),
+      last_tested_at: null,
+      schedule: { enabled: false },
+      credential_fingerprint: "replacement-fingerprint",
+    });
+    render(<RemoteBackupsPanel />);
+    await userEvent.click(await screen.findByRole("button", { name: "Replace credentials" }));
+    await userEvent.type(screen.getByLabelText("Replacement access key"), "replacement-access");
+    await userEvent.type(screen.getByLabelText("Replacement secret key"), "replacement-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Replace and require retest" }));
+    await waitFor(() => expect(rotate).toHaveBeenCalledWith("target-1", {
+      access_key_id: "replacement-access",
+      secret_access_key: "replacement-secret",
+    }));
+    expect(screen.queryByDisplayValue("replacement-secret")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back up now" })).toBeDisabled();
+  });
 });

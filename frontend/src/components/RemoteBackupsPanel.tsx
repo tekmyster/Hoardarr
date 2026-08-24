@@ -57,6 +57,9 @@ export function RemoteBackupsPanel() {
   const [secretKey, setSecretKey] = useState("");
   const [privateNetwork, setPrivateNetwork] = useState(false);
   const [insecureHttp, setInsecureHttp] = useState(false);
+  const [rotatingTarget, setRotatingTarget] = useState<string | null>(null);
+  const [replacementAccessKey, setReplacementAccessKey] = useState("");
+  const [replacementSecretKey, setReplacementSecretKey] = useState("");
 
   const refresh = useCallback(async () => {
     const [nextTargets, nextRuns] = await Promise.all([api.backupTargets(), api.backupRuns()]);
@@ -172,6 +175,26 @@ export function RemoteBackupsPanel() {
     }
   }
 
+  async function rotateCredentials(event: FormEvent<HTMLFormElement>, targetId: string): Promise<void> {
+    event.preventDefault();
+    setBusy(`credentials:${targetId}`);
+    setError(null);
+    try {
+      const updated = await api.rotateBackupTargetCredentials(targetId, {
+        access_key_id: replacementAccessKey,
+        secret_access_key: replacementSecretKey,
+      });
+      setTargets((items) => items.map((item) => item.id === updated.id ? updated : item));
+      setReplacementAccessKey("");
+      setReplacementSecretKey("");
+      setRotatingTarget(null);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <Card title="Remote backups" description="Back up Hoardarr's database and non-secret configuration to an S3-compatible target.">
       <Notice tone="info" title="Control-plane backup">
@@ -225,7 +248,18 @@ export function RemoteBackupsPanel() {
               <button className="button button-secondary" type="button" disabled={busy !== null} onClick={() => void startAction("test", target.id)}>{busy === `test:${target.id}` ? "Testing…" : "Test connection"}</button>
               <button className="button button-secondary" type="button" disabled={busy !== null || !["available", "degraded"].includes(target.status)} onClick={() => void changeSchedule(target)}>{target.schedule.enabled === true ? "Turn off automatic backup" : "Back up every 24 hours"}</button>
               <button className="button button-primary" type="button" disabled={busy !== null || !["available", "degraded"].includes(target.status)} onClick={() => void startAction("backup", target.id)}>{busy === `backup:${target.id}` ? "Starting…" : "Back up now"}</button>
+              <button className="button button-secondary" type="button" disabled={busy !== null} onClick={() => { setRotatingTarget((current) => current === target.id ? null : target.id); setReplacementAccessKey(""); setReplacementSecretKey(""); }}>
+                {rotatingTarget === target.id ? "Cancel credential replacement" : "Replace credentials"}
+              </button>
             </div>
+            {rotatingTarget === target.id && (
+              <form className="api-key-create" onSubmit={(event) => void rotateCredentials(event, target.id)}>
+                <Notice tone="warning" title="Connection proof required again">Automatic backups will be turned off until the replacement credentials pass a new connection test.</Notice>
+                <Field label="Replacement access key"><input required autoComplete="off" minLength={8} value={replacementAccessKey} onChange={(event) => setReplacementAccessKey(event.target.value)} /></Field>
+                <Field label="Replacement secret key"><input required autoComplete="new-password" type="password" minLength={8} value={replacementSecretKey} onChange={(event) => setReplacementSecretKey(event.target.value)} /></Field>
+                <button className="button button-primary" type="submit" disabled={busy !== null}>{busy === `credentials:${target.id}` ? "Replacing…" : "Replace and require retest"}</button>
+              </form>
+            )}
           </article>
         ))}
       </div>
