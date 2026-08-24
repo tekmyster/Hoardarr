@@ -124,6 +124,7 @@ jobs:
             dist/validation/zfs-replacement.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and (.activation_performed | not) and (.mutation_performed_during_preview | not) and .profiles.linux_md.completeness.state == "complete" and .profiles.lvm.completeness.state == "complete" and .profiles.zfs.mountability.state == "not_reported"' \
             dist/validation/foreign-stack-preview.json
+          jq -e '.classification == "VERIFIED IN ISOLATION" and .identified_roles.data == "identified" and .identified_roles.parity == "identified" and .matched_assignments == 2 and .without_assignment_role == "parity" and .without_assignment_classification == "suspected" and (.parity_reuse_supported | not) and (.mutation_performed_by_classification | not)' \
             dist/validation/unraid-classification.json
       - uses: actions/upload-artifact@v4
         with:
@@ -131,6 +132,7 @@ jobs:
           path: |
             dist/validation/foreign-readonly-inspection.json
             dist/validation/foreign-stack-preview.json
+            dist/validation/unraid-classification.json
             dist/validation/snapraid-expansion.json
             dist/validation/snapraid-replacement.json
             dist/validation/md-replacement.json

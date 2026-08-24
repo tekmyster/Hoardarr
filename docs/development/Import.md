@@ -107,12 +107,23 @@ attempts to detach the private root-owned mount in `finally`; detach failure is
 or persistent adoption state is created. The report and real phase progress
 remain in Activity after the mount is gone.
 
+The latest successful bounded report is also joined back to its foreign
+candidate on later assessments. The Storage UI therefore shows files, bytes,
+largest file, extension distribution, collision counts, errors, filesystem,
+and completion time after a browser or service restart; it does not depend on
+browser memory. A report records the hardware-snapshot digest used by its
+immutable plan. If discovery changes afterward, Hoardarr retains the report for
+audit but labels it **refresh required** and will not treat it as current input
+to migration planning. Candidate health remains **Not reported** because
+filesystem signatures do not prove physical-drive or inactive-pool health.
+
 MD/LVM/ZFS member groups remain non-activating. Their metadata preview can
 identify stack membership and provider-supported completeness, but Hoardarr
 does not activate those stacks until a separate read-only assembly executor is
-implemented and reviewed. Unraid role classification is implemented, while
-multi-disk selection/inventory, copy intake, adoption, and other NAS-origin
-adapters remain later tasks and are not implied by either preview.
+implemented and reviewed. Unraid independent data disks can be inspected one
+at a time with persisted reports before copy selection. Multi-disk copy
+selection, collision planning, verified intake, adoption, and other NAS-origin
+adapters remain separate operations and are not implied by either preview.
 
 ## Principles
 

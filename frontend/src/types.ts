@@ -925,13 +925,39 @@ export interface ForeignStorageAssessment {
     filesystems: string[];
     signature_types: string[];
     capacity_bytes: number | null;
+    health: { quality: string; state: string | null; reason: string };
     warnings: string[];
     blockers: string[];
     modes: Array<{ id: string; available: boolean; reason: string }>;
     unraid?: UnraidRoleClassification | null;
+    latest_inventory: ForeignInventoryReport | null;
     mutation_performed: false;
   }>;
   unrecognized_device_count: number;
+}
+
+export interface ForeignInventoryReport {
+  operation_id: string;
+  completed_at: string;
+  hardware_snapshot_sha256: string;
+  current_snapshot_match: boolean;
+  filesystem: { type: string; uuid: string | null; label: string | null } | null;
+  inventory: {
+    file_count: number;
+    directory_count?: number;
+    total_bytes: number;
+    largest_file: { path: string; bytes: number } | null;
+    oldest_mtime_unix: number | null;
+    newest_mtime_unix: number | null;
+    extension_distribution: Array<{ extension: string; files: number }>;
+    case_collision_count: number;
+    unicode_collision_count: number;
+    read_errors: Array<unknown>;
+    truncated: boolean;
+  };
+  access: "read_only";
+  persistent_mount: false;
+  mutation_performed: false;
 }
 
 export interface UnraidRoleClassification {

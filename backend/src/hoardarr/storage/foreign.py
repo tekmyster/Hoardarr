@@ -4,10 +4,10 @@ import shutil
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import ForeignImportEvidence, HardwareSnapshot, StorageBackend
+from hoardarr.db.models import ForeignImportEvidence, HardwareSnapshot, Operation, StorageBackend
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.maintenance import IDENTITY_FIELDS, reviewed_device
 
@@ -126,6 +126,58 @@ def _active_unraid_evidence(session: Session) -> ForeignImportEvidence | None:
         .order_by(ForeignImportEvidence.created_at.desc())
         .limit(1)
     )
+
+
+def _latest_inspection_reports(
+    session: Session, candidate_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return one bounded durable report per candidate, newest first."""
+
+    if not candidate_ids:
+        return {}
+    reports: dict[str, dict[str, Any]] = {}
+    ranked = (
+        select(
+            Operation.id.label("operation_id"),
+            func.row_number()
+            .over(partition_by=Operation.resource_id, order_by=Operation.created_at.desc())
+            .label("candidate_rank"),
+        )
+        .where(
+            Operation.kind == "storage.foreign.inspect",
+            Operation.status == "succeeded",
+            Operation.resource_type == "foreign_storage",
+            Operation.resource_id.in_(candidate_ids),
+            Operation.result_json.is_not(None),
+        )
+        .subquery()
+    )
+    operations = session.scalars(
+        select(Operation)
+        .join(ranked, ranked.c.operation_id == Operation.id)
+        .where(ranked.c.candidate_rank == 1)
+        .limit(256)
+    )
+    for operation in operations:
+        candidate_id = operation.resource_id
+        result = operation.result_json
+        if not candidate_id or candidate_id in reports or not isinstance(result, dict):
+            continue
+        inventory = result.get("inventory")
+        plan = operation.request_json.get("plan")
+        if not isinstance(inventory, dict) or not isinstance(plan, dict):
+            continue
+        reports[candidate_id] = {
+            "operation_id": operation.id,
+            "completed_at": operation.updated_at.isoformat(),
+            "hardware_snapshot_sha256": plan.get("hardware_snapshot_sha256"),
+            "filesystem": result.get("filesystem"),
+            "inventory": inventory,
+            "access": result.get("access"),
+            "persistent_mount": result.get("persistent_mount"),
+            "mutation_performed": result.get("mutation_performed"),
+        }
+    return reports
 
 
 def _assignment_matches(member: dict[str, Any], assignment: dict[str, Any]) -> bool:
@@ -470,6 +522,14 @@ def _candidate_document(
         "filesystems": filesystems,
         "signature_types": signature_types,
         "capacity_bytes": capacity,
+        "health": {
+            "quality": "not_reported",
+            "state": None,
+            "reason": (
+                "Foreign filesystem signatures do not prove current drive or pool health. "
+                "Review physical-drive health and provider metadata separately."
+            ),
+        },
         "warnings": warnings,
         "blockers": blockers,
         "modes": [
@@ -910,6 +970,21 @@ def assess_foreign_storage(
                 tool=tool,
             )
         )
+
+    inspection_reports = _latest_inspection_reports(
+        session, [str(candidate["id"]) for candidate in candidates]
+    )
+    for candidate in candidates:
+        report = inspection_reports.get(str(candidate["id"]))
+        if report is not None:
+            candidate["latest_inventory"] = {
+                **report,
+                "current_snapshot_match": (
+                    report["hardware_snapshot_sha256"] == snapshot.sha256
+                ),
+            }
+        else:
+            candidate["latest_inventory"] = None
 
     return {
         "snapshot": {

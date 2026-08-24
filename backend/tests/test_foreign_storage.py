@@ -126,6 +126,57 @@ def test_inspection_plan_binds_source_identity_signature_and_limits() -> None:
     assert plan["mutation_performed"] is False
 
 
+def test_completed_inventory_is_returned_with_snapshot_freshness() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        snapshot = _snapshot(session, [_disk("wwn:archive", "ext4", signature_uuid="fs-1")])
+        candidate_id = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]["id"]
+        plan = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
+        session.add(
+            Operation(
+                kind="storage.foreign.inspect",
+                status="succeeded",
+                actor_type="user",
+                actor_id="owner",
+                resource_type="foreign_storage",
+                resource_id=candidate_id,
+                request_sha256=document_hash(plan),
+                request_json={"plan": plan},
+                result_json={
+                    "filesystem": {"type": "ext4", "uuid": "fs-1", "label": "Media"},
+                    "inventory": {
+                        "file_count": 42,
+                        "total_bytes": 123_456,
+                        "largest_file": {"path": "Movies/Feature.mkv", "bytes": 100_000},
+                        "oldest_mtime_unix": 1_700_000_000,
+                        "newest_mtime_unix": 1_710_000_000,
+                        "extension_distribution": [{"extension": ".mkv", "files": 12}],
+                        "case_collision_count": 0,
+                        "unicode_collision_count": 0,
+                        "read_errors": [],
+                        "truncated": False,
+                    },
+                    "access": "read_only",
+                    "persistent_mount": False,
+                    "mutation_performed": False,
+                },
+            )
+        )
+        session.flush()
+        current = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]
+
+        changed_disk = _disk("wwn:archive", "ext4", signature_uuid="fs-2")
+        changed_snapshot = _snapshot(session, [changed_disk])
+        stale = assess_foreign_storage(session, snapshot=changed_snapshot)["candidates"][0]
+
+    assert current["latest_inventory"]["current_snapshot_match"] is True
+    assert current["latest_inventory"]["inventory"]["file_count"] == 42
+    assert current["latest_inventory"]["access"] == "read_only"
+    assert current["latest_inventory"]["mutation_performed"] is False
+    assert stale["latest_inventory"]["current_snapshot_match"] is False
+
+
 def test_inspection_plan_rejects_tampering() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

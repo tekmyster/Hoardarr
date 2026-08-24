@@ -44,9 +44,11 @@ const assessment: ForeignStorageAssessment = {
     filesystems: ["XFS"],
     signature_types: ["xfs"],
     capacity_bytes: 8_000_000_000,
+    health: { quality: "not_reported", state: null, reason: "Filesystem metadata does not prove drive health." },
     warnings: ["A fresh fingerprint is required."],
     blockers: [],
     modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
+    latest_inventory: null,
     mutation_performed: false,
   }],
   unrecognized_device_count: 0,
@@ -116,6 +118,44 @@ describe("ForeignStoragePanel", () => {
     await user.click(screen.getByRole("button", { name: "INSPECT READ ONLY" }));
     expect(await screen.findByText("Read-only inventory completed")).toBeInTheDocument();
     expect(screen.getByText(/12 files/)).toBeInTheDocument();
+  });
+
+  it("shows the durable inventory on reload and marks an older snapshot stale", async () => {
+    vi.spyOn(api, "foreignStorage").mockResolvedValue({
+      ...assessment,
+      candidates: [{
+        ...assessment.candidates[0],
+        latest_inventory: {
+          operation_id: "operation-1",
+          completed_at: "2026-08-23T20:15:00Z",
+          hardware_snapshot_sha256: "b".repeat(64),
+          current_snapshot_match: false,
+          filesystem: { type: "xfs", uuid: "fs-1", label: "Archive" },
+          inventory: {
+            file_count: 4_020,
+            total_bytes: 4_100_000_000,
+            largest_file: { path: "Movies/Feature.mkv", bytes: 2_000_000_000 },
+            oldest_mtime_unix: 1_700_000_000,
+            newest_mtime_unix: 1_710_000_000,
+            extension_distribution: [{ extension: ".mkv", files: 2_018 }],
+            case_collision_count: 1,
+            unicode_collision_count: 2,
+            read_errors: [{ path: "Unreadable.mkv" }],
+            truncated: false,
+          },
+          access: "read_only",
+          persistent_mount: false,
+          mutation_performed: false,
+        },
+      }],
+    });
+    render(<ForeignStoragePanel />);
+
+    expect(await screen.findByText("Earlier inspection report")).toBeInTheDocument();
+    expect(screen.getByText("Discovery changed after this inventory")).toBeInTheDocument();
+    expect(screen.getByText("4,020")).toBeInTheDocument();
+    expect(screen.getByText(/Movies\/Feature.mkv/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh read-only inventory" })).toBeEnabled();
   });
 
   it("keeps unknown media honest rather than calling it empty", async () => {

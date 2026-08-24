@@ -156,10 +156,12 @@ async function storageLifecycleServer(page: Page) {
         filesystems: ["XFS"],
         signature_types: ["xfs"],
         capacity_bytes: 8_000_000_000,
+        health: { quality: "not_reported", state: null, reason: "Filesystem metadata does not prove drive health." },
         warnings: [],
         blockers: [],
         modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
         unraid: unraidEvidenceLoaded ? { role: "data", classification: "identified", slot: "disk1", reason: "The loaded assignment export matches this device by serial and WWN.", evidence_sha256: "1".repeat(64), parity_reuse_supported: false } : { role: "data", classification: "suspected", slot: null, reason: "A supported independently readable filesystem is compatible with an Unraid data disk, but does not prove its origin.", evidence_sha256: null, parity_reuse_supported: false },
+        latest_inventory: foreignInspectionStarted ? { operation_id: "foreign-operation", completed_at: now, hardware_snapshot_sha256: "d".repeat(64), current_snapshot_match: true, filesystem: { type: "xfs", uuid: "archive-fs", label: "Archive" }, inventory: { file_count: 24, total_bytes: 8192, largest_file: { path: "Movies/Feature.mkv", bytes: 4096 }, oldest_mtime_unix: 1_700_000_000, newest_mtime_unix: 1_710_000_000, extension_distribution: [{ extension: ".mkv", files: 1 }], case_collision_count: 0, unicode_collision_count: 0, read_errors: [], truncated: false }, access: "read_only", persistent_mount: false, mutation_performed: false } : null,
         mutation_performed: false,
       }, {
         id: "foreign:1234567890abcdef12345678",
@@ -175,12 +177,14 @@ async function storageLifecycleServer(page: Page) {
         filesystems: [],
         signature_types: ["linux_raid_member"],
         capacity_bytes: 2_000_000_000,
+        health: { quality: "not_reported", state: null, reason: "Inactive array labels do not prove health." },
         warnings: [],
         blockers: [],
         modes: [
           { id: "inspect_read_only", available: false, reason: "The stack is not a standalone filesystem." },
           { id: "preview_stack", available: true, reason: "Provider labels can be reviewed without assembly." },
         ],
+        latest_inventory: null,
         mutation_performed: false,
       }],
       unrecognized_device_count: 0,
@@ -341,7 +345,7 @@ test("reviews and completes a bounded read-only foreign inventory in the real St
   await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
   await page.getByText("Inspect storage from another system").click();
   await expect(page.getByText("Standalone filesystem")).toBeVisible();
-  await expect(page.getByText("Not reported")).toBeVisible();
+  await expect(page.getByText("Not reported").first()).toBeVisible();
   await page.getByRole("button", { name: "Review read-only inspection" }).click();
   await expect(page.getByText("No storage configuration will change")).toBeVisible();
   await expect(page.getByText("100,000 entries")).toBeVisible();
@@ -351,6 +355,10 @@ test("reviews and completes a bounded read-only foreign inventory in the real St
   await expect(page.getByText(/24 files/)).toBeVisible();
   expect(observed.foreignInspectionStarted()).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("foreign-readonly-completed.png"), fullPage: true });
+  await page.getByRole("button", { name: "Close report" }).click();
+  await expect(page.getByText("Current inspection report")).toBeVisible();
+  await expect(page.getByText("Movies/Feature.mkv", { exact: false })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("foreign-readonly-persisted-report.png"), fullPage: true });
 });
 
 test("reviews inactive storage-stack metadata without activating it", async ({ page }, testInfo) => {
