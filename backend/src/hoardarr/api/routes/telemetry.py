@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from hoardarr.api.dependencies import (
@@ -72,6 +72,13 @@ class AlertRuleInput(BaseModel):
             if self.critical_value is not None and self.critical_value > self.warning_value:
                 raise ValueError("critical_value must be at or below warning_value")
         return self
+
+
+class AlertSuppressionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minutes: int = Field(ge=5, le=10_080)
+    reason: str = Field(min_length=1, max_length=256)
 
 
 def _entitlements(request: Request, session: Session) -> Any:
@@ -659,7 +666,9 @@ def top_metrics(
 
 @router.get("/alerts")
 def alerts(
-    state: Literal["active", "resolved", "all"] = "active",
+    state: Literal[
+        "active", "acknowledged", "suppressed", "cleared", "resolved", "all"
+    ] = "active",
     limit: int = Query(default=100, ge=1, le=1000),
     _principal: Principal = Depends(authenticated_principal),
     session: Session = Depends(database_session),
@@ -670,8 +679,21 @@ def alerts(
         .order_by(MetricAlert.started_at.desc())
         .limit(limit)
     )
-    if state != "all":
-        statement = statement.where(MetricAlert.state == state)
+    now = datetime.now(UTC)
+    if state == "active":
+        statement = statement.where(MetricAlert.state == "active")
+    elif state in {"cleared", "resolved"}:
+        statement = statement.where(MetricAlert.state == "resolved")
+    elif state == "acknowledged":
+        statement = statement.where(
+            MetricAlert.state == "active",
+            MetricAlert.acknowledged_at.is_not(None),
+            or_(MetricAlert.suppressed_until.is_(None), MetricAlert.suppressed_until <= now),
+        )
+    elif state == "suppressed":
+        statement = statement.where(
+            MetricAlert.state == "active", MetricAlert.suppressed_until > now
+        )
     return {
         "items": [alert_document(alert, entity) for alert, entity in session.execute(statement)]
     }
@@ -805,6 +827,7 @@ def delete_alert_rule(
 @router.post("/alerts/{alert_id}/acknowledge")
 def acknowledge_alert(
     alert_id: str,
+    request: Request,
     principal: Principal = Depends(require_state_scope("operate")),
     session: Session = Depends(database_session),
 ) -> dict[str, Any]:
@@ -814,11 +837,91 @@ def acknowledge_alert(
     if alert.acknowledged_at is None:
         alert.acknowledged_at = datetime.now(UTC)
         alert.acknowledged_by = principal.user_id
+        record_audit(
+            session,
+            principal=principal,
+            action="telemetry.alert.acknowledge",
+            outcome="completed",
+            correlation_id=request.state.request_id,
+            target_type="metric_alert",
+            target_id=alert.id,
+            details={"metric_id": alert.metric_id},
+        )
     entity = session.get(MetricEntity, alert.entity_id)
     if entity is None:
         raise Problem(
             409, "alert_entity_missing", "Alert unavailable", "The alert entity no longer exists."
         )
+    return alert_document(alert, entity)
+
+
+@router.post("/alerts/{alert_id}/suppress")
+def suppress_alert(
+    alert_id: str,
+    body: AlertSuppressionInput,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, Any]:
+    alert = session.get(MetricAlert, alert_id)
+    if alert is None:
+        raise Problem(404, "alert_not_found", "Alert not found", "The alert does not exist.")
+    if alert.state != "active":
+        raise Problem(
+            409,
+            "alert_not_active",
+            "Alert already cleared",
+            "Only an active alert can be suppressed.",
+        )
+    alert.suppressed_until = datetime.now(UTC) + timedelta(minutes=body.minutes)
+    alert.suppressed_by = principal.user_id
+    alert.suppression_reason = body.reason.strip()
+    entity = session.get(MetricEntity, alert.entity_id)
+    if entity is None:
+        raise Problem(
+            409, "alert_entity_missing", "Alert unavailable", "The alert entity no longer exists."
+        )
+    record_audit(
+        session,
+        principal=principal,
+        action="telemetry.alert.suppress",
+        outcome="completed",
+        correlation_id=request.state.request_id,
+        target_type="metric_alert",
+        target_id=alert.id,
+        details={"minutes": body.minutes, "metric_id": alert.metric_id},
+    )
+    return alert_document(alert, entity)
+
+
+@router.post("/alerts/{alert_id}/unsuppress")
+def unsuppress_alert(
+    alert_id: str,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, Any]:
+    alert = session.get(MetricAlert, alert_id)
+    if alert is None:
+        raise Problem(404, "alert_not_found", "Alert not found", "The alert does not exist.")
+    alert.suppressed_until = None
+    alert.suppressed_by = None
+    alert.suppression_reason = None
+    entity = session.get(MetricEntity, alert.entity_id)
+    if entity is None:
+        raise Problem(
+            409, "alert_entity_missing", "Alert unavailable", "The alert entity no longer exists."
+        )
+    record_audit(
+        session,
+        principal=principal,
+        action="telemetry.alert.unsuppress",
+        outcome="completed",
+        correlation_id=request.state.request_id,
+        target_type="metric_alert",
+        target_id=alert.id,
+        details={"metric_id": alert.metric_id},
+    )
     return alert_document(alert, entity)
 
 

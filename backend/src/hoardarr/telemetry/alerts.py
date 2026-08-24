@@ -330,6 +330,17 @@ def rule_document(rule: MetricAlertRule) -> dict[str, Any]:
 
 
 def alert_document(alert: MetricAlert, entity: MetricEntity) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    suppressed_until = aware(alert.suppressed_until) if alert.suppressed_until else None
+    lifecycle_state = (
+        "cleared"
+        if alert.state == "resolved"
+        else "suppressed"
+        if suppressed_until is not None and suppressed_until > now
+        else "acknowledged"
+        if alert.acknowledged_at is not None
+        else "active"
+    )
     return {
         "id": alert.id,
         "rule_id": alert.rule_id,
@@ -337,6 +348,7 @@ def alert_document(alert: MetricAlert, entity: MetricEntity) -> dict[str, Any]:
         "metric_id": alert.metric_id,
         "severity": alert.severity,
         "state": alert.state,
+        "lifecycle_state": lifecycle_state,
         "trigger_value": alert.trigger_value,
         "threshold": alert.threshold_json,
         "topology": alert.topology_json,
@@ -346,4 +358,7 @@ def alert_document(alert: MetricAlert, entity: MetricEntity) -> dict[str, Any]:
         "resolved_at": aware(alert.resolved_at) if alert.resolved_at else None,
         "acknowledged_at": aware(alert.acknowledged_at) if alert.acknowledged_at else None,
         "acknowledged_by": alert.acknowledged_by,
+        "suppressed_until": suppressed_until,
+        "suppressed_by": alert.suppressed_by,
+        "suppression_reason": alert.suppression_reason,
     }

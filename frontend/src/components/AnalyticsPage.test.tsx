@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { MetricCatalogDocument, MetricEntity, MetricSampleDocument } from "../types";
+import type { MetricAlertDocument, MetricCatalogDocument, MetricEntity, MetricSampleDocument } from "../types";
 import { AnalyticsPage } from "./AnalyticsPage";
 
 afterEach(() => {
@@ -93,6 +93,27 @@ const historySettings = {
   extended_history: { entitled: false, capability: "metrics.history.extended" },
 };
 
+const activeAlert: MetricAlertDocument = {
+  id: "alert-1",
+  entity,
+  metric_id: "drive.temperature",
+  severity: "warning",
+  state: "active",
+  lifecycle_state: "active",
+  trigger_value: 66,
+  threshold: { warning: 60 },
+  topology: {},
+  details: { condition: "excess_temperature" },
+  started_at: "2026-08-22T11:00:00Z",
+  last_seen_at: "2026-08-22T11:00:00Z",
+  resolved_at: null,
+  acknowledged_at: null,
+  acknowledged_by: null,
+  suppressed_until: null,
+  suppressed_by: null,
+  suppression_reason: null,
+};
+
 describe("AnalyticsPage", () => {
   it("renders only real API readings and explains licensed state", async () => {
     vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
@@ -122,6 +143,32 @@ describe("AnalyticsPage", () => {
     render(<AnalyticsPage />);
     expect(await screen.findByText("Not reported")).toBeInTheDocument();
     expect(screen.getByText("No stored readings are available for this selection.")).toBeInTheDocument();
+  });
+
+  it("acknowledges and temporarily suppresses a real backend alert", async () => {
+    vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
+    vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: "2026-08-22T11:00:00Z", items: [sample], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([activeAlert]);
+    vi.spyOn(api, "metricHistory").mockResolvedValue({ entity, metric_id: sample.metric_id, unit: sample.unit, resolution: "raw", start: "2026-08-22T10:00:00Z", end: "2026-08-22T11:00:00Z", points: [] });
+    const acknowledged = { ...activeAlert, lifecycle_state: "acknowledged" as const, acknowledged_at: "2026-08-22T11:05:00Z", acknowledged_by: "owner" };
+    const suppressed = { ...acknowledged, lifecycle_state: "suppressed" as const, suppressed_until: "2026-08-22T12:05:00Z", suppressed_by: "owner", suppression_reason: "Temporarily suppressed from Storage Analytics" };
+    const acknowledge = vi.spyOn(api, "acknowledgeMetricAlert").mockResolvedValue(acknowledged);
+    const suppress = vi.spyOn(api, "suppressMetricAlert").mockResolvedValue(suppressed);
+
+    render(<AnalyticsPage />);
+    expect(await screen.findByText("Enterprise SSD")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
+    await waitFor(() => expect(acknowledge).toHaveBeenCalledWith("alert-1"));
+    expect(screen.getByText(/acknowledged · Started/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Suppress for 1 hour" }));
+    await waitFor(() => expect(suppress).toHaveBeenCalledWith(
+      "alert-1",
+      60,
+      "Temporarily suppressed from Storage Analytics",
+    ));
+    expect(screen.getByText(/suppressed · Started/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "End suppression" })).toBeInTheDocument();
   });
 
   it("passes automated accessibility checks with live and unavailable data", async () => {

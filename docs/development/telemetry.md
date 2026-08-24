@@ -94,7 +94,7 @@ Live Overview and Storage graphs use fixed-size 60-sample windows. Analytics rep
 
 Basic alerts remain active without a license: critical device health, NVMe critical warnings, degraded/faulted health, capacity thresholds, temperature thresholds, and Hoardarr telemetry-provider failures. Built-in thresholds use clear values to prevent flapping.
 
-The `metrics.alerting.advanced` capability enables user-defined numeric threshold rules. Rules support warning/critical values, sustained-condition windows, entity scope, enable/disable, and a separate clear value for hysteresis. Alert events are durable, acknowledgeable, and preserve related topology.
+The `metrics.alerting.advanced` capability enables user-defined numeric threshold rules. Rules support warning/critical values, sustained-condition windows, entity scope, enable/disable, and a separate clear value for hysteresis. Alert events are durable and preserve related topology. Informational, warning, and critical events share the same lifecycle: active, acknowledged, temporarily suppressed, and cleared. Suppression is bounded to 5 minutes through 7 days, requires an operator reason, expires automatically without deleting the alert, and is recorded in the audit trail. Acknowledgement and suppression do not change or manufacture the underlying metric state.
 
 ## Entitlements
 

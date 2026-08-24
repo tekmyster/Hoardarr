@@ -985,6 +985,11 @@ class MetricAlert(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     acknowledged_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    suppressed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    suppressed_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    suppression_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 class MetricAlertRule(Base):

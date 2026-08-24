@@ -301,8 +301,8 @@ These task families extend—rather than replace—the original 120 rows. Status
 | AUTO-02 | P2 | Home Assistant summary | Add a stable read-only summary endpoint consistent with the current API without making HA the control plane. | SOFTWARE VERIFIED — `/api/v1/integrations/home-assistant/summary` accepts Monitor only tokens, caps drives/jobs/alerts, excludes requests and secrets, reports persisted-source timestamps, is documented in Settings/OpenAPI, and passes auth/schema/redaction tests |
 | AUTO-03 | P2 | Webhooks | Deliver signed/bounded events with retry, deduplication, redaction, and test delivery. | QUEUED |
 | AUTO-04 | P2 | Prometheus integration | Preserve stable metric names, bounded labels, authentication policy, and no secrets. | QUEUED |
-| AUTO-05 | P2 | Alert lifecycle | Implement Critical/Warning/Info with active, acknowledged, suppressed, and cleared states. | QUEUED |
-| AUTO-06 | P2 | Alert deduplication, routing, and suppression | Add windows, webhook/AppRise-compatible routing, runbook links, and flapping control. | QUEUED |
+| AUTO-05 | P2 | Alert lifecycle | Implement Critical/Warning/Info with active, acknowledged, suppressed, and cleared states. | SOFTWARE VERIFIED — informational, warning and critical presentation plus durable active/acknowledged/bounded-suppressed/cleared lifecycle are enforced by authenticated operate-scope APIs, audited, exposed in Analytics, and covered by state/filter/expiry/error/UI tests |
+| AUTO-06 | P2 | Alert deduplication, routing, and suppression | Add windows, webhook/AppRise-compatible routing, runbook links, and flapping control. | IN PROGRESS — durable rule/entity deduplication, hysteresis, sustained windows, path-flap detection and bounded operator suppression are implemented; signed webhook/AppRise routing and runbook links remain |
 | AUTO-07 | P2 | Evidence-aware operational runbooks | Provide plain-language CRC, pending-sector, path, SnapRAID, ZFS, and related guidance without false certainty. | QUEUED |
 | AUTO-08 | P2 | Automation integration tests | Test token scope, schema stability, webhook replay/outage, Prometheus cardinality, alert lifecycle, and redaction. | QUEUED |
 

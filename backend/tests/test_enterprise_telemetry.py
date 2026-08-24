@@ -899,6 +899,103 @@ def test_basic_alert_hysteresis_and_acknowledgement_state(tmp_path: Path) -> Non
     engine.dispose()
 
 
+def test_alert_lifecycle_api_acknowledges_suppresses_and_restores(
+    tmp_path: Path,
+) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    now = datetime.now(UTC).replace(microsecond=0)
+    with factory() as session, session.begin():
+        token = issue_setup_token(session)
+        ingest(session, [reading("drive.temperature", 66, now)])
+        sample = session.scalar(select(MetricSample))
+        assert sample is not None
+        assert evaluate_basic_alerts(session, [sample]) == {"opened": 1, "resolved": 0}
+        session.flush()
+        alert = session.scalar(select(MetricAlert))
+        assert alert is not None
+        alert_id = alert.id
+
+    with TestClient(create_app(settings), base_url="http://testserver") as client:
+        assert client.post(f"/api/v1/telemetry/alerts/{alert_id}/acknowledge").status_code == 401
+        csrf = claim(client, token)
+        headers = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+
+        acknowledged = client.post(
+            f"/api/v1/telemetry/alerts/{alert_id}/acknowledge", headers=headers
+        )
+        assert acknowledged.status_code == 200
+        assert acknowledged.json()["lifecycle_state"] == "acknowledged"
+        assert acknowledged.json()["acknowledged_by"] is not None
+
+        suppressed = client.post(
+            f"/api/v1/telemetry/alerts/{alert_id}/suppress",
+            json={"minutes": 60, "reason": "Maintenance window"},
+            headers=headers,
+        )
+        assert suppressed.status_code == 200
+        assert suppressed.json()["lifecycle_state"] == "suppressed"
+        assert suppressed.json()["suppression_reason"] == "Maintenance window"
+        assert client.get("/api/v1/telemetry/alerts?state=suppressed").json()["items"][0][
+            "id"
+        ] == alert_id
+        assert client.get("/api/v1/telemetry/alerts?state=acknowledged").json()["items"] == []
+
+        restored = client.post(
+            f"/api/v1/telemetry/alerts/{alert_id}/unsuppress", headers=headers
+        )
+        assert restored.status_code == 200
+        assert restored.json()["lifecycle_state"] == "acknowledged"
+        assert restored.json()["suppression_reason"] is None
+
+        invalid = client.post(
+            f"/api/v1/telemetry/alerts/{alert_id}/suppress",
+            json={"minutes": 1, "reason": "Too short"},
+            headers=headers,
+        )
+        assert invalid.status_code == 422
+        with factory() as session, session.begin():
+            alert = session.get(MetricAlert, alert_id)
+            assert alert is not None
+            alert.suppressed_until = now - timedelta(minutes=1)
+            alert.suppressed_by = "owner"
+            alert.suppression_reason = "Expired maintenance window"
+        expired = client.get("/api/v1/telemetry/alerts?state=acknowledged")
+        assert expired.status_code == 200
+        assert expired.json()["items"][0]["lifecycle_state"] == "acknowledged"
+    engine.dispose()
+
+
+def test_cleared_alert_cannot_be_suppressed(tmp_path: Path) -> None:
+    settings, engine, factory = runtime(tmp_path)
+    now = datetime.now(UTC).replace(microsecond=0)
+    with factory() as session, session.begin():
+        token = issue_setup_token(session)
+        ingest(session, [reading("drive.temperature", 66, now)])
+        hot = session.scalar(select(MetricSample).order_by(MetricSample.id.desc()))
+        assert evaluate_basic_alerts(session, [hot]) == {"opened": 1, "resolved": 0}
+        session.flush()
+        ingest(session, [reading("drive.temperature", 50, now + timedelta(seconds=5))])
+        cool = session.scalar(select(MetricSample).order_by(MetricSample.id.desc()))
+        assert evaluate_basic_alerts(session, [cool]) == {"opened": 0, "resolved": 1}
+        alert = session.scalar(select(MetricAlert))
+        assert alert is not None
+        alert_id = alert.id
+
+    with TestClient(create_app(settings), base_url="http://testserver") as client:
+        csrf = claim(client, token)
+        response = client.post(
+            f"/api/v1/telemetry/alerts/{alert_id}/suppress",
+            json={"minutes": 60, "reason": "Not valid for cleared alerts"},
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 409
+        assert response.json()["type"].endswith("alert_not_active")
+        cleared = client.get("/api/v1/telemetry/alerts?state=cleared")
+        assert cleared.status_code == 200
+        assert cleared.json()["items"][0]["lifecycle_state"] == "cleared"
+    engine.dispose()
+
+
 def test_custom_alert_uses_sustained_window_and_hysteresis(tmp_path: Path) -> None:
     _settings, engine, factory = runtime(tmp_path)
     now = datetime.now(UTC).replace(microsecond=0)

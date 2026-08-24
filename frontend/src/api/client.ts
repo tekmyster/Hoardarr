@@ -763,9 +763,30 @@ class HoardarrApi {
     return this.request<EntitlementDocument>("/telemetry/entitlements");
   }
 
-  async metricAlerts(state: "active" | "resolved" | "all" = "active", signal?: AbortSignal): Promise<MetricAlertDocument[]> {
+  async metricAlerts(state: "active" | "acknowledged" | "suppressed" | "cleared" | "resolved" | "all" = "active", signal?: AbortSignal): Promise<MetricAlertDocument[]> {
     const result = await this.request<{ items: MetricAlertDocument[] }>(`/telemetry/alerts?state=${state}`, { signal });
     return result.items;
+  }
+
+  async acknowledgeMetricAlert(alertId: string): Promise<MetricAlertDocument> {
+    return this.request<MetricAlertDocument>(
+      `/telemetry/alerts/${encodeURIComponent(alertId)}/acknowledge`,
+      { method: "POST" },
+    );
+  }
+
+  async suppressMetricAlert(alertId: string, minutes: number, reason: string): Promise<MetricAlertDocument> {
+    return this.request<MetricAlertDocument>(
+      `/telemetry/alerts/${encodeURIComponent(alertId)}/suppress`,
+      { method: "POST", body: JSON.stringify({ minutes, reason }) },
+    );
+  }
+
+  async unsuppressMetricAlert(alertId: string): Promise<MetricAlertDocument> {
+    return this.request<MetricAlertDocument>(
+      `/telemetry/alerts/${encodeURIComponent(alertId)}/unsuppress`,
+      { method: "POST" },
+    );
   }
 
   async topMetrics(metricId: string, direction: "highest" | "lowest" = "highest", signal?: AbortSignal): Promise<MetricSampleDocument[]> {

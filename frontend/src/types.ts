@@ -1681,8 +1681,9 @@ export interface MetricAlertDocument {
   id: string;
   entity: MetricEntity;
   metric_id: string;
-  severity: "warning" | "critical";
+  severity: "info" | "warning" | "critical";
   state: "active" | "resolved";
+  lifecycle_state: "active" | "acknowledged" | "suppressed" | "cleared";
   trigger_value: number | null;
   threshold: Record<string, unknown>;
   topology: Record<string, string>;
@@ -1691,6 +1692,10 @@ export interface MetricAlertDocument {
   last_seen_at: string;
   resolved_at: string | null;
   acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  suppressed_until: string | null;
+  suppressed_by: string | null;
+  suppression_reason: string | null;
 }
 
 export interface TelemetryForecastDocument {

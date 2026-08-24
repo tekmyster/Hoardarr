@@ -54,6 +54,7 @@
 .graph-diagnostics dd, .analytics-policy dd { margin: 0; overflow-wrap: anywhere; }
 .analytics-alert-list, .capability-grid { display: grid; gap: .5rem; }
 .analytics-alert { display: grid; grid-template-columns: minmax(10rem, 1fr) 2fr auto; gap: .75rem; padding: .65rem; border-left: 3px solid var(--warning); background: var(--surface-soft); }
+.analytics-alert.info { border-left-color: var(--accent); }
 .analytics-alert.critical { border-left-color: var(--danger); }
 .capability-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .capability-grid > div { display: flex; align-items: center; gap: .6rem; padding: .55rem; background: var(--surface-soft); }
