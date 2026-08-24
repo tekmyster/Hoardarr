@@ -41,6 +41,7 @@ from hoardarr.db.models import (
     StorageEntity,
     StorageGroup,
     StoragePath,
+    StorageVolume,
     User,
 )
 from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
@@ -93,6 +94,41 @@ def _claim_owner(client: TestClient, setup_token: str) -> str:
 
 def _state_headers(csrf: str, **extra: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf, **extra}
+
+
+def test_storage_volume_inventory_requires_authentication_and_returns_provider_identity(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    assert client.get("/api/v1/storage/volumes").status_code == 401
+    _claim_owner(client, setup_token)
+    factory = app.state.session_factory
+    with factory() as session, session.begin():
+        session.add(
+            StorageVolume(
+                stable_identity="filesystem:filesystem:uuid-media",
+                provider="filesystem",
+                resource_type="filesystem",
+                provider_resource_id="uuid-media",
+                name="Media filesystem",
+                presentation="file",
+                mountpoint="/srv/media",
+                device_path="/dev/mapper/media",
+                filesystem_type="xfs",
+                filesystem_uuid="uuid-media",
+                size_bytes=8_000_000_000,
+                allocated_bytes=2_000_000_000,
+                lifecycle_state="active",
+                config_json={},
+            )
+        )
+
+    response = client.get("/api/v1/storage/volumes")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["stable_identity"] == "filesystem:filesystem:uuid-media"
+    assert item["mountpoint"] == "/srv/media"
+    assert item["presentation"] == "file"
 
 
 def test_expected_topology_api_persists_drift_history_and_requires_csrf(api_runtime: Any) -> None:
@@ -2726,9 +2762,7 @@ def test_remote_backup_credential_rotation_invalidates_connection_proof(
         assert target is not None
         assert b"replacement-secret-key" not in target.secret_ciphertext
         audit = session.scalar(
-            select(AuditEvent).where(
-                AuditEvent.action == "backup.target.credentials.rotate"
-            )
+            select(AuditEvent).where(AuditEvent.action == "backup.target.credentials.rotate")
         )
         assert audit is not None
         assert "replacement-secret-key" not in json.dumps(audit.details_json)
@@ -2889,9 +2923,7 @@ def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: An
     assert normalized_expiry.hour == 7
     pat_headers = {"Authorization": f"Bearer {pat}"}
     assert client.get("/api/v1/integrations", headers=pat_headers).status_code == 200
-    home_assistant = client.get(
-        "/api/v1/integrations/home-assistant/summary", headers=pat_headers
-    )
+    home_assistant = client.get("/api/v1/integrations/home-assistant/summary", headers=pat_headers)
     assert home_assistant.status_code == 200, home_assistant.text
     summary = home_assistant.json()
     assert summary["schema_version"] == 1

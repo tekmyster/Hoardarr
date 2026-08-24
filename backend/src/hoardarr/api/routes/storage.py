@@ -111,6 +111,7 @@ from hoardarr.storage.snapraid import (
 )
 from hoardarr.storage.telemetry import storage_telemetry
 from hoardarr.storage.tiering import TieringError, plan_transfer, transfer_queue_summary
+from hoardarr.storage.volumes import volume_documents
 
 router = APIRouter(prefix="/storage", tags=["storage"])
 
@@ -923,6 +924,16 @@ def logical_storage_inventory(
     return {
         "items": storage_documents(session, snapshot.payload_json if snapshot is not None else None)
     }
+
+
+@router.get("/volumes")
+def storage_volume_inventory(
+    _principal: Principal = Depends(authenticated_principal),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """List provider-backed datasets, filesystem volumes, block volumes, and LUNs."""
+
+    return {"items": volume_documents(session)}
 
 
 @router.post("/redundancy/preview")

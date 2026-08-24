@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -411,6 +412,49 @@ class StorageEntity(Base):
     physical_sector_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     topology_state: Mapped[str] = mapped_column(String(32), nullable=False, default="single_path")
     provider: Mapped[str] = mapped_column(String(64), nullable=False, default="scsi")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class StorageVolume(Base):
+    """A provider-backed dataset, filesystem volume, block volume, or LUN."""
+
+    __tablename__ = "storage_volumes"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_resource_id", name="uq_storage_volume_provider_resource"
+        ),
+        CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="ck_volume_size"),
+        CheckConstraint(
+            "allocated_bytes IS NULL OR allocated_bytes >= 0", name="ck_volume_allocated"
+        ),
+        Index("ix_storage_volumes_parent", "parent_storage_entity_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    stable_identity: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_resource_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    presentation: Mapped[str] = mapped_column(String(16), nullable=False)
+    parent_storage_entity_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("storage_entities.id", ondelete="SET NULL"), nullable=True
+    )
+    mountpoint: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    device_path: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    filesystem_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    filesystem_uuid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    allocated_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lifecycle_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active", index=True
+    )
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
