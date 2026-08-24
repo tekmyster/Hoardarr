@@ -7,7 +7,8 @@ param(
     [string]$PortgroupName = 'Data Vlan 200',
     [string]$FolderName = 'Hoardarr Development',
     [string]$ApplianceIso,
-    [switch]$AttachDataDisks
+    [switch]$AttachDataDisks,
+    [switch]$PowerOn
 )
 
 $ErrorActionPreference = 'Stop'
@@ -145,6 +146,9 @@ try {
                 throw "$name must be powered off before attaching lab data disks."
             }
             Ensure-VirtualDataDisks -Vm $vm -Datastore $datastore
+        }
+        if ($PowerOn -and $vm -and $vm.PowerState -ne 'PoweredOn' -and $PSCmdlet.ShouldProcess($name, 'Power on persistent lab VM')) {
+            Start-VM -VM $vm -Confirm:$false | Out-Null
         }
     }
 
