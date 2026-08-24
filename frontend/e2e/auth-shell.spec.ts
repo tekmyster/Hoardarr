@@ -115,8 +115,9 @@ async function storageWizardServer(page: Page, options: { firstDriveContainsData
   const snapshot = { id: "snap-storage", captured_at: now, sha256: "c".repeat(64), hardware: { disks: drives } };
   let revision = 0;
   let applied = false;
+  let completed = false;
   let answers: Record<string, unknown> = {};
-  const wizard = () => ({ id: "wizard-storage", revision, mode: "guided", status: applied ? "applied" : "review", current_step: "storage", hardware_snapshot_id: snapshot.id, answers, plan_id: "plan-storage", created_at: now, updated_at: now });
+  const wizard = () => ({ id: "wizard-storage", revision, mode: "guided", status: completed ? "completed" : applied ? "applied" : "review", current_step: "storage", hardware_snapshot_id: snapshot.id, answers, plan_id: "plan-storage", created_at: now, updated_at: now });
   const planTemplate = {
     id: "plan-storage",
     revision: 4,
@@ -226,7 +227,10 @@ async function storageWizardServer(page: Page, options: { firstDriveContainsData
       applied = true;
       return route.fulfill({ status: 202, json: { operation: { id: "op-storage", kind: "storage.apply", status: "queued", resource: { type: "wizard_session", id: "wizard-storage" } } } });
     }
-    if (pathname.endsWith("/complete")) return route.fulfill({ json: { ...wizard(), status: "completed" } });
+    if (pathname.endsWith("/complete")) {
+      completed = true;
+      return route.fulfill({ json: wizard() });
+    }
     if (pathname.endsWith("/plan")) {
       const plan = currentPlan();
       return route.fulfill({ status: route.request().method() === "POST" ? 201 : 200, json: route.request().method() === "POST" ? { plan } : plan });
@@ -697,11 +701,13 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100");
     await page.reload();
     const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
-    await recoveredDialog.getByRole("button", { name: "Create access credential" }).click();
-    await recoveredDialog.getByRole("button", { name: "Show generated password" }).click();
-    await recoveredDialog.getByRole("button", { name: "I saved this password" }).click();
-    await recoveredDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(recoveredDialog.getByRole("button", { name: "Create access credential" })).toBeVisible();
+    await recoveredDialog.getByRole("button", { name: "Close storage change" }).click();
+    await expect(recoveredDialog).toBeHidden();
     await expect(page.getByText("Storage is ready at /data.")).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("dialog", { name: "Add storage" })).toBeHidden();
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
     await expect(page.getByText("Media", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("/data/media", { exact: true }).first()).toBeVisible();
   });
