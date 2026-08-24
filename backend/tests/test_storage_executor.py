@@ -675,6 +675,141 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
     assert result["mountpoint"] == str(public_combined)
 
 
+def test_storage_resume_checkpoints_post_layout_work_without_progress_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    combined = tmp_path / "managed" / "data"
+    new_member = tmp_path / "mounts" / document_hash(DEVICE_ID)[:16]
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        fstab=tmp_path / "fstab",
+        mount_root=tmp_path / "mounts",
+        managed_udev_rule=tmp_path / "managed.rules",
+        managed_storage_state=tmp_path / "managed.json",
+    )
+    paths.fstab.write_text(
+        f"/mnt/member-a:/mnt/member-b {combined} fuse.mergerfs "
+        "category.create=mfs,category.search=ff,use_ino,nofail 0 0\n",
+        encoding="utf-8",
+    )
+    live = {
+        **_live_disk(),
+        "partitions": [
+            {
+                "kernel_path": "/dev/sdz1",
+                "filesystem": {"type": "ext4", "uuid": "member-uuid"},
+                "mountpoints": [str(new_member)],
+            }
+        ],
+    }
+    document = {
+        "presentation_root": "/data",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "mergerfs",
+            "selected_devices": [_selected_device()],
+            "actions": [
+                {
+                    "action_id": "storage-layout",
+                    "type": "storage.layout.ensure",
+                    "topology": "mergerfs",
+                    "device_ids": [DEVICE_ID],
+                    "purpose": "media",
+                    "destructive": False,
+                }
+            ],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "mergerfs": {
+                "mode": "existing",
+                "instance_id": "mergerfs:0123456789abcdef",
+                "name": "data",
+                "mountpoint": "/data",
+            },
+        },
+    }
+    journal = {
+        "completed_steps": 0,
+        "total_steps": 6,
+        "completed_actions": [],
+        "notices": [],
+    }
+    commands: list[list[str]] = []
+    fail_trigger = True
+
+    def run(command: list[str], _timeout: int) -> None:
+        nonlocal fail_trigger
+        commands.append(command)
+        if fail_trigger and command[:2] == ["udevadm", "trigger"]:
+            fail_trigger = False
+            raise ExecutorFailure("storage_tool_failed", "trigger failed", needs_attention=True)
+
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: live})
+    monkeypatch.setattr(executor, "_resume_revalidate", lambda *_args: {DEVICE_ID: live})
+    monkeypatch.setattr(
+        executor,
+        "_safe_mountpoint",
+        lambda value: tmp_path / "managed" / value.lstrip("/"),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_blkid_value",
+        lambda _partition, field: "ext4" if field == "TYPE" else "member-uuid",
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    monkeypatch.setattr(
+        executor,
+        "mergerfs_expand_commands",
+        lambda _mountpoint, _branches: [CommandSpec(("setfattr", "runtime"), 120, "expand")],
+    )
+    monkeypatch.setattr(
+        executor,
+        "discover_mergerfs",
+        lambda **_kwargs: {
+            "items": [
+                {
+                    "id": "mergerfs:0123456789abcdef",
+                    "mountpoint": str(combined),
+                    "source": "/mnt/member-a:/mnt/member-b",
+                    "branches": ["/mnt/member-a", "/mnt/member-b"],
+                    "options": ["category.create=mfs", "category.search=ff", "use_ino"],
+                    "active": True,
+                    "configured": True,
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ExecutorFailure, match="trigger failed"):
+        executor._execute_actions(
+            operation_id=operation_id,
+            document=document,
+            paths=paths,
+            inventory_provider=lambda: {"disks": [live]},
+            runner=run,
+            journal=journal,
+        )
+    assert journal["completed_steps"] == 5
+    assert journal["completed_steps"] <= journal["total_steps"]
+    assert "runtime:fstab" in journal["completed_actions"]
+    assert "runtime:managed-drive-allowlist" not in journal["completed_actions"]
+    assert [command[0] for command in commands].count("setfattr") == 1
+
+    result = executor._execute_actions(
+        operation_id=operation_id,
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": [live]},
+        runner=run,
+        journal=journal,
+        resume=True,
+    )
+    assert result["replayed"] is False
+    assert journal["completed_steps"] == journal["total_steps"]
+    assert "runtime:managed-drive-allowlist" in journal["completed_actions"]
+    assert [command[0] for command in commands].count("setfattr") == 1
+
+
 @pytest.mark.parametrize(
     ("role", "fail_command"),
     [("data", None), ("parity", None), ("data", "status"), ("data", "sync")],

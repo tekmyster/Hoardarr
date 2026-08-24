@@ -4,6 +4,7 @@ import json
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from hoardarr.api.dependencies import (
@@ -50,6 +51,26 @@ def visible_operation(session: Session, operation_id: str, principal: Principal)
     if operation is None or (not principal.is_admin and operation.actor_id != principal.user_id):
         raise Problem(404, "operation_not_found", "Not found", "Operation was not found.")
     return operation
+
+
+def writable_operation(session: Session, operation_id: str, principal: Principal) -> Operation:
+    """Start a short serialized SQLite mutation after releasing read snapshots."""
+
+    session.commit()
+    try:
+        bind = session.get_bind()
+        if bind.dialect.name == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    except OperationalError as exc:
+        session.rollback()
+        raise Problem(
+            503,
+            "operation_update_busy",
+            "Storage activity is busy",
+            "Hoardarr could not reserve the activity record for this change. Try again; "
+            "the storage operation was not modified.",
+        ) from exc
+    return visible_operation(session, operation_id, principal)
 
 
 def drain_progress_document(job: StorageDrainJob, operation: Operation) -> dict[str, object]:
@@ -315,7 +336,7 @@ def pause_operation(
     principal: Principal = Depends(require_state_scope("operate")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
-    operation = visible_operation(session, operation_id, principal)
+    operation = writable_operation(session, operation_id, principal)
     try:
         if operation.kind == "storage.foreign.migrate":
             request_foreign_migration_pause(session, operation)
@@ -332,6 +353,7 @@ def pause_operation(
         target_type="operation",
         target_id=operation.id,
     )
+    session.commit()
     return operation_document(operation)
 
 
@@ -344,25 +366,26 @@ def resume_operation(
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
     operation = visible_operation(session, operation_id, principal)
+    checkpoint_state = None
+    if operation.kind == "storage.apply" and operation.status == "failed":
+        try:
+            checkpoint = storage_operation_status(
+                settings.storage_status_socket,
+                operation_id=operation.id,
+                timeout_seconds=min(5.0, settings.storage_executor_timeout_seconds),
+            )
+        except StorageExecutorError as exc:
+            raise Problem(
+                503,
+                exc.code,
+                "Storage checkpoint unavailable",
+                "Hoardarr could not verify whether this legacy failed operation has a "
+                "safe executor checkpoint.",
+            ) from exc
+        checkpoint_state = str(checkpoint.get("state", ""))
+    operation = writable_operation(session, operation_id, principal)
     try:
         if operation.kind == "storage.apply":
-            checkpoint_state = None
-            if operation.status == "failed":
-                try:
-                    checkpoint = storage_operation_status(
-                        settings.storage_status_socket,
-                        operation_id=operation.id,
-                        timeout_seconds=min(5.0, settings.storage_executor_timeout_seconds),
-                    )
-                except StorageExecutorError as exc:
-                    raise Problem(
-                        503,
-                        exc.code,
-                        "Storage checkpoint unavailable",
-                        "Hoardarr could not verify whether this legacy failed operation has a "
-                        "safe executor checkpoint.",
-                    ) from exc
-                checkpoint_state = str(checkpoint.get("state", ""))
             resume_storage_apply(
                 session,
                 operation,
@@ -385,6 +408,7 @@ def resume_operation(
         target_type="operation",
         target_id=operation.id,
     )
+    session.commit()
     return operation_document(operation)
 
 
@@ -395,7 +419,7 @@ def cancel_operation(
     principal: Principal = Depends(require_state_scope("operate")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
-    operation = visible_operation(session, operation_id, principal)
+    operation = writable_operation(session, operation_id, principal)
     try:
         request_cancellation(session, operation)
     except OperationConflict as exc:
@@ -414,4 +438,5 @@ def cancel_operation(
         target_type="operation",
         target_id=operation.id,
     )
+    session.commit()
     return operation_document(operation)

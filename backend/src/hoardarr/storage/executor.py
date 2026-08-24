@@ -277,6 +277,11 @@ def _run(command: list[str], timeout_seconds: int) -> None:
             needs_attention=True,
         ) from exc
     except subprocess.CalledProcessError as exc:
+        LOGGER.warning(
+            "Storage command failed tool=%s exit_code=%s",
+            Path(command[0]).name,
+            exc.returncode,
+        )
         raise ExecutorFailure(
             "storage_tool_failed",
             "A storage tool reported a failure. The operation stopped and requires inspection.",
@@ -2342,6 +2347,22 @@ def _execute_actions(
         item for item in journal.get("completed_actions", []) if isinstance(item, str)
     ]
 
+    def complete_checkpoint(checkpoint_id: str) -> None:
+        if checkpoint_id not in completed:
+            completed.append(checkpoint_id)
+        journal["completed_actions"] = list(completed)
+        journal["completed_steps"] = len(completed)
+        total_steps = journal.get("total_steps")
+        if isinstance(total_steps, int) and total_steps >= 0:
+            journal["completed_steps"] = min(int(journal["completed_steps"]), total_steps)
+        journal["current_action"] = None
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+
+    # Older executors advanced this counter again while replaying idempotent
+    # post-layout work. The durable checkpoint identifiers are authoritative.
+    journal["completed_steps"] = len(completed)
+
     def smart_progress(progress: dict[str, Any]) -> None:
         current = journal.get("current_action")
         if isinstance(current, dict):
@@ -2452,12 +2473,7 @@ def _execute_actions(
             raise ExecutorFailure(
                 "plan_invalid", "The layout action does not match the storage plan."
             )
-        completed.append(action["action_id"])
-        journal["completed_actions"] = list(completed)
-        journal["completed_steps"] = int(journal["completed_steps"]) + 1
-        journal["current_action"] = None
-        journal["updated_at"] = time.time()
-        atomic_json(_journal_path(paths, operation_id), journal)
+        complete_checkpoint(str(action["action_id"]))
 
     if topology == "test":
         return {
@@ -2568,20 +2584,20 @@ def _execute_actions(
         fstab_lines.append(
             f"UUID={filesystem_uuid} {mountpoint} {filesystem_type} {option_text} 0 2"
         )
-        journal["completed_steps"] = max(
-            int(journal["completed_steps"]), len(completed) + mount_index + 1
-        )
-        journal["current_action"] = None
-        journal["updated_at"] = time.time()
-        atomic_json(_journal_path(paths, operation_id), journal)
+        complete_checkpoint(f"runtime:mount:{identifier}")
 
     presentation_root = _safe_mountpoint(str(document["presentation_root"]))
-    journal["phase"] = "Building the selected storage layout"
-    journal["current_action"] = {"id": "layout", "type": "storage.layout.apply"}
-    journal["updated_at"] = time.time()
-    atomic_json(_journal_path(paths, operation_id), journal)
+    layout_checkpoint = "runtime:layout"
+    layout_is_persisted = layout_checkpoint in completed and "runtime:fstab" in completed
+    if not layout_is_persisted:
+        journal["phase"] = "Building the selected storage layout"
+        journal["current_action"] = {"id": "layout", "type": "storage.layout.apply"}
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
     presentation_root.mkdir(parents=True, exist_ok=True, mode=0o750)
-    if topology in {"individual", "cache", "block", "import"}:
+    if layout_is_persisted:
+        pass
+    elif topology in {"individual", "cache", "block", "import"}:
         if len(disk_mounts) != 1:
             raise ExecutorFailure(
                 "individual_layout_ambiguous",
@@ -3106,38 +3122,44 @@ def _execute_actions(
                     runner=runner,
                 )
 
-    journal["completed_steps"] = int(journal["completed_steps"]) + 1
-    journal["phase"] = "Creating media and download folders"
-    journal["current_action"] = {"id": "directories", "type": "directory.ensure"}
-    journal["updated_at"] = time.time()
-    atomic_json(_journal_path(paths, operation_id), journal)
-
+    complete_checkpoint(layout_checkpoint)
     account = storage.get("service_account", {})
-    _ensure_storage_directory_access(
-        presentation_root,
-        document.get("actions", {}).get("directories", []),
-        str(account.get("username")),
-    )
-    if topology in {"mergerfs", "snapraid", "mixed"} and document.get("actions", {}).get(
-        "directories"
+    directories_checkpoint = "runtime:directories"
+    if directories_checkpoint not in completed:
+        journal["phase"] = "Creating media and download folders"
+        journal["current_action"] = {"id": "directories", "type": "directory.ensure"}
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+        _ensure_storage_directory_access(
+            presentation_root,
+            document.get("actions", {}).get("directories", []),
+            str(account.get("username")),
+        )
+        if topology in {"mergerfs", "snapraid", "mixed"} and document.get("actions", {}).get(
+            "directories"
+        ):
+            _ensure_mergerfs_branch_traversal(paths.mount_root, str(account.get("username")))
+        complete_checkpoint(directories_checkpoint)
+
+    fstab_checkpoint = "runtime:fstab"
+    if fstab_checkpoint not in completed:
+        journal["phase"] = "Saving automatic mount configuration"
+        journal["current_action"] = {"id": "fstab", "type": "mount.configuration.save"}
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+        _append_fstab(
+            paths,
+            operation_id,
+            fstab_lines,
+            mergerfs_update=mergerfs_fstab_update,
+        )
+        complete_checkpoint(fstab_checkpoint)
+    quarantine_checkpoint = "runtime:managed-drive-allowlist"
+    if (
+        paths.managed_udev_rule is not None
+        and paths.managed_storage_state is not None
+        and quarantine_checkpoint not in completed
     ):
-        _ensure_mergerfs_branch_traversal(paths.mount_root, str(account.get("username")))
-    journal["completed_steps"] = int(journal["completed_steps"]) + 1
-    journal["phase"] = "Saving automatic mount configuration"
-    journal["current_action"] = {"id": "fstab", "type": "mount.configuration.save"}
-    journal["updated_at"] = time.time()
-    atomic_json(_journal_path(paths, operation_id), journal)
-    _append_fstab(
-        paths,
-        operation_id,
-        fstab_lines,
-        mergerfs_update=mergerfs_fstab_update,
-    )
-    journal["completed_steps"] = int(journal["completed_steps"]) + 1
-    journal["current_action"] = None
-    journal["updated_at"] = time.time()
-    atomic_json(_journal_path(paths, operation_id), journal)
-    if paths.managed_udev_rule is not None and paths.managed_storage_state is not None:
         journal["phase"] = "Releasing approved drives from startup quarantine"
         journal["current_action"] = {
             "id": "managed-drive-allowlist",
@@ -3151,9 +3173,7 @@ def _execute_actions(
             rule_path=paths.managed_udev_rule,
         )
         runner([_tool("udevadm"), "control", "--reload-rules"], 60)
-        trigger_paths = {
-            os.fspath(_kernel_path(device)) for device in devices.values()
-        }
+        trigger_paths = {os.fspath(_kernel_path(device)) for device in devices.values()}
         trigger_paths.update(os.fspath(partition) for partition in partitions.values())
         for kernel_path in sorted(trigger_paths):
             runner(
@@ -3166,12 +3186,10 @@ def _execute_actions(
                 ],
                 120,
             )
-        journal["completed_steps"] = int(journal["completed_steps"]) + 1
-        journal["current_action"] = None
-        journal["updated_at"] = time.time()
-        atomic_json(_journal_path(paths, operation_id), journal)
+        complete_checkpoint(quarantine_checkpoint)
     connectivity_actions = document.get("actions", {}).get("connectivity", [])
-    if connectivity_actions:
+    connectivity_checkpoint = "runtime:smb-shares"
+    if connectivity_actions and connectivity_checkpoint not in completed:
         journal["phase"] = "Configuring file access"
         journal["current_action"] = {"id": "smb-shares", "type": "smb.share.ensure"}
         journal["updated_at"] = time.time()
@@ -3183,10 +3201,7 @@ def _execute_actions(
             str(account.get("username")),
             runner,
         )
-        journal["completed_steps"] = int(journal["completed_steps"]) + 1
-        journal["current_action"] = None
-        journal["updated_at"] = time.time()
-        atomic_json(_journal_path(paths, operation_id), journal)
+        complete_checkpoint(connectivity_checkpoint)
     return {
         "operation_id": operation_id,
         "topology": topology,
