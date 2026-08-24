@@ -131,7 +131,14 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertTrue(central_unit.is_file())
         text = central_unit.read_text(encoding="utf-8")
         self.assertIn("User=hoardarr-fleet", text)
-        self.assertIn("ExecStart=/usr/lib/hoardarr-fleet/venv/bin/hoardarr-fleet-ingestion", text)
+        self.assertIn(
+            "ExecStartPre=/usr/lib/hoardarr-fleet/venv/bin/hoardarr-fleet-ingestion migrate",
+            text,
+        )
+        self.assertIn(
+            "ExecStart=/usr/lib/hoardarr-fleet/venv/bin/hoardarr-fleet-ingestion serve",
+            text,
+        )
 
 
 class ManifestTests(unittest.TestCase):

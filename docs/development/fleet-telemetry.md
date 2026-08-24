@@ -81,3 +81,10 @@ state directory, and has no storage-management privileges. Invalid client data n
 local appliance metric. An administrator controlling an appliance can fabricate its telemetry;
 authentication provides transit integrity, replay resistance, and installation attribution—not
 trusted hardware attestation.
+
+The central database has its own Alembic history under
+`hoardarr/fleet/migrations`; it is intentionally independent from the appliance database. The
+systemd unit executes `hoardarr-fleet-ingestion migrate` before `serve`. The receiver refuses to
+start against an empty or stale schema, so a deployment cannot silently create a partial schema
+from whichever model definitions happen to be installed. Migration execution must remain a
+single deployment step; concurrent service instances may start only after it completes.

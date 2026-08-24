@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from hoardarr.core.secrets import SecretBox
+from hoardarr.fleet.migrate import central_database_is_current
 from hoardarr.fleet.service import canonical_json
 
 SUPPORTED_SCHEMAS = frozenset({1})
@@ -641,7 +642,11 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
         {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
     )
     engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
-    CentralBase.metadata.create_all(engine)
+    if not central_database_is_current(engine, settings.database_url):
+        engine.dispose()
+        raise RuntimeError(
+            "fleet database migrations are not current; run hoardarr-fleet-ingestion migrate"
+        )
     sessions = sessionmaker(engine, expire_on_commit=False)
     secret_box = SecretBox.from_file(settings.secret_key_file, create=True)
     app = FastAPI(title="Hoardarr Fleet Ingestion", version="1.0")

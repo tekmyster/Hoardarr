@@ -8,8 +8,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import create_engine, func, inspect, select
 
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
@@ -22,6 +23,11 @@ from hoardarr.fleet.central import (
     create_central_app,
     run_retention,
 )
+from hoardarr.fleet.migrate import (
+    central_database_is_current,
+    current_central_database_revision,
+    upgrade_central_database,
+)
 from hoardarr.fleet.service import (
     canonical_json,
     deliver_batch,
@@ -33,14 +39,42 @@ from hoardarr.fleet.service import (
 
 def _central(tmp_path: Path) -> TestClient:
     database = tmp_path / "central.db"
+    database_url = f"sqlite:///{database.as_posix()}"
+    upgrade_central_database(database_url)
     app = create_central_app(
         FleetCentralSettings(
-            database_url=f"sqlite:///{database.as_posix()}",
+            database_url=database_url,
             secret_key_file=tmp_path / "central.key",
             admin_token="test-admin-token-that-is-long",
         )
     )
     return TestClient(app)
+
+
+def test_central_schema_is_versioned_and_startup_fails_closed(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'schema.db').as_posix()}"
+    settings = FleetCentralSettings(
+        database_url=database_url,
+        secret_key_file=tmp_path / "schema.key",
+        admin_token="test-admin-token-that-is-long",
+    )
+    engine = create_engine(database_url)
+    assert not central_database_is_current(engine, database_url)
+    with pytest.raises(RuntimeError, match="migrations are not current"):
+        create_central_app(settings)
+
+    upgrade_central_database(database_url)
+    assert central_database_is_current(engine, database_url)
+    assert current_central_database_revision(database_url) == "0001"
+    tables = set(inspect(engine).get_table_names())
+    assert "fleet_installations" in tables
+    assert "fleet_ingested_records" in tables
+    assert "fleet_central_maintenance" in tables
+
+    upgrade_central_database(database_url)
+    with TestClient(create_central_app(settings)) as client:
+        assert client.get("/healthz").status_code == 200
+    engine.dispose()
 
 
 def _register(client: TestClient, installation_id: str) -> str:
@@ -295,24 +329,12 @@ def test_admin_aggregates_memory_capacity_app_combinations_and_upgrades(
         assert response.status_code == 200
         summary = response.json()
         assert summary["versions"] == [{"version": "0.3.12", "installations": 1}]
-        assert summary["hardware"]["installed_memory"] == [
-            {"value": "16_to_32_GiB", "count": 1}
-        ]
-        assert summary["hardware"]["platform_vendors"] == [
-            {"value": "Virtual Lab", "count": 1}
-        ]
-        assert summary["hardware"]["controllers"] == [
-            {"value": "scsi:Virtual HBA", "count": 1}
-        ]
-        assert summary["hardware"]["enclosures"] == [
-            {"value": "Virtual Shelf", "count": 1}
-        ]
-        assert summary["drives"]["capacities"] == [
-            {"value": "1_to_4_TiB", "count": 1}
-        ]
-        assert summary["storage"]["logical_capacity"] == [
-            {"value": "4_to_8_TiB", "count": 1}
-        ]
+        assert summary["hardware"]["installed_memory"] == [{"value": "16_to_32_GiB", "count": 1}]
+        assert summary["hardware"]["platform_vendors"] == [{"value": "Virtual Lab", "count": 1}]
+        assert summary["hardware"]["controllers"] == [{"value": "scsi:Virtual HBA", "count": 1}]
+        assert summary["hardware"]["enclosures"] == [{"value": "Virtual Shelf", "count": 1}]
+        assert summary["drives"]["capacities"] == [{"value": "1_to_4_TiB", "count": 1}]
+        assert summary["storage"]["logical_capacity"] == [{"value": "4_to_8_TiB", "count": 1}]
         assert summary["storage"]["free_space_percent"] == [
             {"value": "10_to_25_percent", "count": 1}
         ]
@@ -455,6 +477,7 @@ def test_central_retention_is_data_class_specific_and_bounded(tmp_path: Path) ->
         heartbeat_retention_days=30,
         retention_batch_size=10,
     )
+    upgrade_central_database(settings.database_url)
     app = create_central_app(settings)
     with TestClient(app) as client:
         installation_id = str(uuid.uuid4())

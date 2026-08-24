@@ -63,5 +63,6 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/hoardarr/db/migrations/versions/*.py" = ["E501"]
+"src/hoardarr/fleet/migrations/versions/*.py" = ["E501"]
 "src/hoardarr/api/*.py" = ["B008"]
 "src/hoardarr/api/routes/*.py" = ["B008"]
