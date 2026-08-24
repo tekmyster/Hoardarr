@@ -6,8 +6,8 @@ The CSV is authoritative for per-task execution fields; the roadmap remains auth
 ## Queue summary
 
 - Total tasks: 253
-- IN PROGRESS: 2
-- NOT STARTED: 102
+- IN PROGRESS: 3
+- NOT STARTED: 101
 - PHYSICAL VALIDATION PENDING: 1
 - VERIFIED: 89
 - VERIFIED IN ISOLATION: 59

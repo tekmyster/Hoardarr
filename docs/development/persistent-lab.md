@@ -4,6 +4,13 @@ Hoardarr-A and Hoardarr-B are persistent VMware development appliances. They com
 CI: CI proves reproducibility, while the lab exposes stable completed increments for owner review.
 Both nodes run Ubuntu 24.04, Python 3.12, systemd and the same release-candidate artifact.
 
+The current audited artifact is commit `077cdaa531b2` (0.3.11 Beta 1). Hoardarr-A exposes a real
+three-VMDK mergerFS pool and the `Media Library` Storage Group at `/data`, attached and activated
+through the production Web UI with the logical backend in `preferred_write`. Hoardarr-B runs the
+same artifact but is not presented as having the same pool merely because the software is present.
+Provider constructs on each node must be reported from that node's actual Linux and persisted
+Hoardarr state.
+
 The lab provisioner accepts vCenter credentials only from an external key/value environment file.
 It creates two 2-vCPU, 2-GiB VMs with thin 24-GiB OS VMDKs. After installation, the optional data
 disk phase attaches four thin virtual disks to each node (12, 12, 12 and 8 GiB). It cannot map an
