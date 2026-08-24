@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { OperationDocument, StorageInventory, StorageVolumeDocument, StorageVolumePlan, StorageVolumeSnapshotPlan } from "../types";
+import type { OperationDocument, StorageInventory, StorageVolumeCapacityPlan, StorageVolumeDocument, StorageVolumePlan, StorageVolumeSnapshotPlan } from "../types";
 import { StorageVolumesPanel } from "./StorageVolumesPanel";
 
 const pools: StorageInventory["pools"]["items"] = [{
@@ -39,6 +39,13 @@ const snapshotPlan: StorageVolumeSnapshotPlan = {
   target_resource_id: null, target_mountpoint: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "b".repeat(64),
 };
 
+const capacityPlan: StorageVolumeCapacityPlan = {
+  schema_version: 1, kind: "storage.volume.capacity",
+  volume: { id: "volume-1", stable_identity: "zfs:dataset:tank/media", name: "media", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media", provider_guid: "123456789" },
+  target: { quota_bytes: 20 * 1024 ** 3, reservation_bytes: 2 * 1024 ** 3, thin_provisioned: null }, properties: { quota: String(20 * 1024 ** 3), reservation: String(2 * 1024 ** 3) },
+  confirmation: "APPLY CAPACITY LIMITS", risk: "A quota can cause future writes to fail.", plan_sha256: "c".repeat(64),
+};
+
 const volume: StorageVolumeDocument = {
   id: "volume-1", stable_identity: "zfs:dataset:tank/media", name: "media", provider: "zfs",
   resource_type: "dataset", provider_resource_id: "tank/media", presentation: "file",
@@ -47,6 +54,8 @@ const volume: StorageVolumeDocument = {
   lifecycle_state: "active", config: {}, capabilities_detected_at: "2026-08-24T14:01:00Z",
   capabilities: {
     snapshot: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+    quota: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+    reservation: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
     qos: { support: "unsupported", availability: "unsupported", source: "provider_baseline", constraints: {} },
   },
   created_at: "2026-08-24T14:00:00Z", updated_at: "2026-08-24T14:01:00Z",
@@ -66,6 +75,8 @@ describe("StorageVolumesPanel", () => {
     vi.spyOn(api, "previewStorageVolumeSnapshot").mockResolvedValue(snapshotPlan);
     vi.spyOn(api, "applyStorageVolumeSnapshot").mockResolvedValue(snapshotOperation);
     vi.spyOn(api, "saveStorageVolumeSnapshotSchedule").mockResolvedValue({ enabled: true, interval_hours: 12, retention_count: 8, prefix: "media-auto", next_run_at: "2026-08-25T02:00:00Z", last_run_at: null });
+    vi.spyOn(api, "previewStorageVolumeCapacity").mockResolvedValue(capacityPlan);
+    vi.spyOn(api, "applyStorageVolumeCapacity").mockResolvedValue({ ...operation, id: "33333333-3333-4333-8333-333333333333", kind: "storage.volume.capacity" });
   });
 
   it("shows an honest empty state and completes the real guided review flow", async () => {
@@ -123,7 +134,7 @@ describe("StorageVolumesPanel", () => {
     const dialog = await screen.findByRole("dialog", { name: "media" });
     expect(dialog).toHaveTextContent("zfs:dataset:tank/media");
     expect(screen.getByRole("cell", { name: "snapshot" })).toBeInTheDocument();
-    expect(screen.getAllByRole("cell", { name: "available" })).toHaveLength(1);
+    expect(screen.getAllByRole("cell", { name: "available" })).toHaveLength(3);
     expect(screen.getByRole("cell", { name: "qos" })).toBeInTheDocument();
     expect(screen.getAllByRole("cell", { name: "unsupported" })).toHaveLength(2);
     expect(dialog).toHaveTextContent("storage volume create");
@@ -153,5 +164,22 @@ describe("StorageVolumesPanel", () => {
     await user.type(screen.getByLabelText("Name prefix"), "media-auto");
     await user.click(screen.getByRole("button", { name: "Save snapshot schedule" }));
     await waitFor(() => expect(api.saveStorageVolumeSnapshotSchedule).toHaveBeenCalledWith("volume-1", { enabled: true, interval_hours: 12, retention_count: 8, prefix: "media-auto" }));
+  });
+
+  it("reviews and starts a provider-enforced dataset quota and reservation", async () => {
+    vi.mocked(api.storageVolumes).mockResolvedValue([volume]);
+    const user = userEvent.setup();
+    render(<StorageVolumesPanel pools={pools} />);
+    await user.click(await screen.findByRole("button", { name: "Manage" }));
+    expect(await screen.findByText("Capacity and allocation")).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Dataset quota in GiB"));
+    await user.type(screen.getByLabelText("Dataset quota in GiB"), "20");
+    await user.clear(screen.getByLabelText("Dataset reservation in GiB"));
+    await user.type(screen.getByLabelText("Dataset reservation in GiB"), "2");
+    await user.click(screen.getByRole("button", { name: "Review capacity change" }));
+    await waitFor(() => expect(api.previewStorageVolumeCapacity).toHaveBeenCalledWith("volume-1", { quota_bytes: 20 * 1024 ** 3, reservation_bytes: 2 * 1024 ** 3 }));
+    expect(await screen.findByText("Review provider capacity change")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Apply capacity limits" }));
+    await waitFor(() => expect(api.applyStorageVolumeCapacity).toHaveBeenCalledWith("volume-1", capacityPlan));
   });
 });

@@ -10,11 +10,13 @@ from pathlib import Path
 
 from hoardarr.operations.service import document_hash
 from hoardarr.storage import executor
+from hoardarr.storage.capacity_plans import build_capacity_plan
 from hoardarr.storage.executor import (
     Paths,
     _live_zfs_resource_state,
     _live_zfs_snapshot_state,
     _run,
+    apply_storage_volume_capacity,
     apply_storage_volume_snapshot,
 )
 from hoardarr.storage.snapshot_plans import build_snapshot_plan
@@ -25,6 +27,26 @@ def execute(plan: dict[str, object], paths: Paths) -> tuple[dict[str, object], d
     result = apply_storage_volume_snapshot(
         {
             "operation": "apply_storage_volume_snapshot",
+            "operation_id": operation_id,
+            "plan_sha256": plan["plan_sha256"],
+            "plan": plan,
+            "confirmation_sha256": document_hash({"confirmation": plan["confirmation"]}),
+        },
+        paths=paths,
+    )
+    journal = json.loads(
+        (paths.transaction_root / f"{operation_id}.json").read_text(encoding="utf-8")
+    )
+    return result, journal
+
+
+def execute_capacity(
+    plan: dict[str, object], paths: Paths
+) -> tuple[dict[str, object], dict[str, object]]:
+    operation_id = str(uuid.uuid4())
+    result = apply_storage_volume_capacity(
+        {
+            "operation": "apply_storage_volume_capacity",
             "operation_id": operation_id,
             "plan_sha256": plan["plan_sha256"],
             "plan": plan,
@@ -68,6 +90,7 @@ def main() -> None:
     original_quarantine = executor.validate_quarantine
     executor.validate_quarantine = lambda _marker: {"ready": True}
     journals: list[dict[str, object]] = []
+    capacity_journals: list[dict[str, object]] = []
     clone_resource = f"{args.dataset.split('/', 1)[0]}/hoardarr-snapshot-clone"
     try:
         create_plan = build_snapshot_plan(
@@ -121,6 +144,34 @@ def main() -> None:
         deleted = _live_zfs_snapshot_state(
             str(snapshot["provider_snapshot_id"])
         ) is None
+
+        capacity_plan = build_capacity_plan(
+            volume=volume,
+            provider_guid=provider_guid,
+            quota_bytes=64 * 1024**2,
+            reservation_bytes=8 * 1024**2,
+        )
+        capacity_result, journal = execute_capacity(capacity_plan, paths)
+        capacity_journals.append(journal)
+        limited = _live_zfs_resource_state(args.dataset)
+        limits_verified = (
+            capacity_result["capacity_limits"]["quota_bytes"] == 64 * 1024**2
+            and capacity_result["capacity_limits"]["reservation_bytes"] == 8 * 1024**2
+            and str(limited["quota"]) == str(64 * 1024**2)
+            and str(limited["reservation"]) == str(8 * 1024**2)
+        )
+        clear_plan = build_capacity_plan(
+            volume=volume,
+            provider_guid=provider_guid,
+            quota_bytes=0,
+            reservation_bytes=0,
+        )
+        clear_result, journal = execute_capacity(clear_plan, paths)
+        capacity_journals.append(journal)
+        limits_cleared = (
+            clear_result["capacity_limits"]["quota_bytes"] == 0
+            and clear_result["capacity_limits"]["reservation_bytes"] == 0
+        )
     finally:
         executor.validate_quarantine = original_quarantine
         try:
@@ -140,6 +191,9 @@ def main() -> None:
         "clone_verified": clone_verified,
         "delete_verified": deleted,
         "journal_states": [item["state"] for item in journals],
+        "capacity_limits_verified": limits_verified,
+        "capacity_limits_cleared": limits_cleared,
+        "capacity_journal_states": [item["state"] for item in capacity_journals],
         "production_executor_used": True,
         "physical_hardware_used": False,
     }
@@ -150,6 +204,9 @@ def main() -> None:
         and evidence["clone_verified"]
         and evidence["delete_verified"]
         and evidence["journal_states"] == ["succeeded"] * 4
+        and evidence["capacity_limits_verified"]
+        and evidence["capacity_limits_cleared"]
+        and evidence["capacity_journal_states"] == ["succeeded"] * 2
     ):
         raise SystemExit(f"snapshot lifecycle validation failed: {evidence}")
     args.evidence.parent.mkdir(parents=True, exist_ok=True)

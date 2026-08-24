@@ -23,6 +23,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from hoardarr.operations.service import document_hash
+from hoardarr.storage.capacity_plans import (
+    CapacityPlanError,
+    capacity_command,
+    validate_capacity_plan,
+)
 from hoardarr.storage.foreign import (
     ForeignStorageError,
     validate_inspection_plan,
@@ -490,7 +495,7 @@ def _live_zfs_resource_state(resource_name: str) -> dict[str, Any]:
                 "-Hp",
                 "-o",
                 "property,value",
-                "guid,type,mountpoint,volsize",
+                "guid,type,mountpoint,volsize,quota,reservation,refreservation,used,available",
                 resource_name,
             ],
             check=True,
@@ -516,7 +521,17 @@ def _live_zfs_resource_state(resource_name: str) -> dict[str, Any]:
     values: dict[str, str] = {}
     for line in result.stdout.splitlines():
         parts = line.split("\t", 1)
-        if len(parts) == 2 and parts[0] in {"guid", "type", "mountpoint", "volsize"}:
+        if len(parts) == 2 and parts[0] in {
+            "guid",
+            "type",
+            "mountpoint",
+            "volsize",
+            "quota",
+            "reservation",
+            "refreservation",
+            "used",
+            "available",
+        }:
             values[parts[0]] = parts[1]
     if not valid_pool_guid(values.get("guid")) or values.get("type") not in {
         "filesystem",
@@ -3037,6 +3052,27 @@ def apply_storage_volume(
         "size_bytes": plan["size_bytes"],
         "lifecycle_state": "active",
         "config": {"purpose": plan["purpose"], "provider_guid": resource["guid"], **properties},
+        "capabilities": {
+            "snapshot": {"support": "supported", "availability": "available"},
+            "quota": {"support": "supported", "availability": "available"},
+            "reservation": {"support": "supported", "availability": "available"},
+            "clone": {"support": "supported", "availability": "available"},
+            **(
+                {
+                    "thin_provisioning": {
+                        "support": "supported",
+                        "availability": "available",
+                    }
+                }
+                if plan["resource_type"] == "zvol"
+                else {}
+            ),
+            "replication": {
+                "support": "supported",
+                "availability": "temporarily_unavailable",
+                "constraints": {"reason": "No replication target is configured."},
+            },
+        },
     }
     result = {
         "operation_id": operation_id,
@@ -3237,6 +3273,171 @@ def apply_storage_volume_snapshot(
         {
             "state": "succeeded",
             "phase": "Snapshot action completed",
+            "completed_steps": 2,
+            "current_action": None,
+            "result": result,
+            "updated_at": time.time(),
+        }
+    )
+    atomic_json(journal_path, journal)
+    return result
+
+
+def _zfs_bytes(value: object) -> int:
+    text = str(value or "").strip().lower()
+    if text in {"none", "-", "0"}:
+        return 0
+    if not text.isdigit():
+        raise ExecutorFailure(
+            "volume_capacity_verification_failed",
+            "The provider returned a malformed capacity property.",
+            needs_attention=True,
+        )
+    return int(text)
+
+
+def apply_storage_volume_capacity(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    runner: CommandRunner = _run,
+    zfs_resource_provider: ZfsResourceProvider = _live_zfs_resource_state,
+) -> dict[str, Any]:
+    expected = {"operation", "operation_id", "plan_sha256", "plan", "confirmation_sha256"}
+    operation_id = request.get("operation_id")
+    plan_sha = request.get("plan_sha256")
+    raw_plan = request.get("plan")
+    if (
+        set(request) != expected
+        or request.get("operation") != "apply_storage_volume_capacity"
+        or not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(plan_sha, str)
+        or not SHA256_RE.fullmatch(plan_sha)
+        or not isinstance(raw_plan, dict)
+        or raw_plan.get("plan_sha256") != plan_sha
+    ):
+        raise ExecutorFailure("volume_capacity_request_invalid", "The capacity request is invalid.")
+    try:
+        plan = validate_capacity_plan(raw_plan)
+        command = capacity_command(plan)
+    except CapacityPlanError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+    if request.get("confirmation_sha256") != document_hash(
+        {"confirmation": plan["confirmation"]}
+    ):
+        raise ExecutorFailure(
+            "volume_capacity_confirmation_missing", "Exact capacity confirmation is required."
+        )
+
+    paths = paths or Paths()
+    validate_quarantine(paths.quarantine_marker)
+    try:
+        paths.transaction_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = paths.transaction_root.lstat()
+    except OSError as exc:
+        raise ExecutorFailure(
+            "transaction_journal_unavailable",
+            "Capacity activity tracking could not be prepared. No provider action was started.",
+        ) from exc
+    if not stat.S_ISDIR(details.st_mode) or (
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
+    ):
+        raise ExecutorFailure(
+            "transaction_journal_unsafe",
+            "Capacity activity tracking is unsafe. No provider action was started.",
+        )
+    journal_path = _journal_path(paths, operation_id)
+    prior = _load_prior_journal(journal_path, plan_sha)
+    if prior is not None:
+        return {**prior, "replayed": True}
+
+    volume = plan["volume"]
+    current = zfs_resource_provider(str(volume["provider_resource_id"]))
+    expected_type = "filesystem" if volume["resource_type"] == "dataset" else "volume"
+    if current.get("guid") != volume["provider_guid"] or current.get("type") != expected_type:
+        raise ExecutorFailure(
+            "volume_capacity_identity_changed",
+            "The provider storage identity changed after review. No capacity setting was changed.",
+        )
+    journal: dict[str, Any] = {
+        "schema_version": 1,
+        "operation_id": operation_id,
+        "plan_sha256": plan_sha,
+        "state": "running",
+        "phase": "Applying provider capacity limits",
+        "completed_steps": 0,
+        "total_steps": 2,
+        "current_action": {"id": "capacity:set", "type": "zfs.set"},
+        "started_at": time.time(),
+        "updated_at": time.time(),
+    }
+    atomic_json(journal_path, journal)
+    try:
+        runner([_tool(command[0]), *command[1:]], 300)
+        journal.update(
+            {
+                "phase": "Verifying provider capacity limits",
+                "completed_steps": 1,
+                "current_action": {"id": "capacity:verify", "type": "zfs.get"},
+                "updated_at": time.time(),
+            }
+        )
+        atomic_json(journal_path, journal)
+        observed = zfs_resource_provider(str(volume["provider_resource_id"]))
+        if observed.get("guid") != volume["provider_guid"] or observed.get("type") != expected_type:
+            raise ExecutorFailure(
+                "volume_capacity_identity_changed",
+                "The provider storage identity changed during capacity verification.",
+                needs_attention=True,
+            )
+        if volume["resource_type"] == "dataset":
+            quota = _zfs_bytes(observed.get("quota"))
+            reservation = _zfs_bytes(observed.get("reservation"))
+            if (
+                quota != plan["target"]["quota_bytes"]
+                or reservation != plan["target"]["reservation_bytes"]
+            ):
+                raise ExecutorFailure(
+                    "volume_capacity_verification_failed",
+                    "The provider did not apply the reviewed quota and reservation.",
+                    needs_attention=True,
+                )
+            limits = {
+                "quota_bytes": quota,
+                "reservation_bytes": reservation,
+                "thin_provisioned": None,
+            }
+        else:
+            reserved = _zfs_bytes(observed.get("refreservation"))
+            thin = reserved == 0
+            if thin != plan["target"]["thin_provisioned"]:
+                raise ExecutorFailure(
+                    "volume_capacity_verification_failed",
+                    "The provider did not apply the reviewed allocation mode.",
+                    needs_attention=True,
+                )
+            limits = {
+                "quota_bytes": None,
+                "reservation_bytes": reserved,
+                "thin_provisioned": thin,
+            }
+    except Exception:
+        journal.update({"state": "needs_attention", "updated_at": time.time()})
+        atomic_json(journal_path, journal)
+        raise
+    result = {
+        "operation_id": operation_id,
+        "provider_resource_id": volume["provider_resource_id"],
+        "capacity_limits": limits,
+        "allocated_bytes": _zfs_bytes(observed.get("used")),
+        "available_bytes": _zfs_bytes(observed.get("available")),
+        "replayed": False,
+    }
+    journal.update(
+        {
+            "state": "succeeded",
+            "phase": "Provider capacity limits verified",
             "completed_steps": 2,
             "current_action": None,
             "result": result,
@@ -5356,6 +5557,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = apply_storage_volume(request, paths=paths)
         elif request.get("operation") == "apply_storage_volume_snapshot":
             result = apply_storage_volume_snapshot(request, paths=paths)
+        elif request.get("operation") == "apply_storage_volume_capacity":
+            result = apply_storage_volume_capacity(request, paths=paths)
         else:
             result = apply_storage_plan(request, paths=paths)
         response = {"ok": True, "result": result}

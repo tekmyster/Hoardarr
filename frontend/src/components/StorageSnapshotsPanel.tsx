@@ -7,6 +7,7 @@ import type {
   StorageVolumeSnapshotInventory,
   StorageVolumeSnapshotPlan,
 } from "../types";
+import { StorageCapacityPanel } from "./StorageCapacityPanel";
 import { Notice, StatusBadge } from "./ui";
 
 type SnapshotAction = StorageVolumeSnapshotPlan["action"];
@@ -102,12 +103,13 @@ export function StorageSnapshotsPanel({ volume }: { volume: StorageVolumeDocumen
     finally { setScheduleSaving(false); }
   };
 
-  if (loading) return <p role="status">Loading snapshots and schedule…</p>;
-  if (!inventory) return <Notice tone="danger" title="Snapshots unavailable">{error ?? "The provider did not return snapshot state."}</Notice>;
+  const capacity = ((volume.resource_type === "dataset" && volume.capabilities.quota?.availability === "available" && volume.capabilities.reservation?.availability === "available") || (volume.resource_type === "zvol" && volume.capabilities.thin_provisioning?.availability === "available")) ? <StorageCapacityPanel volume={volume} /> : null;
+  if (loading) return <>{capacity}<p role="status">Loading snapshots and schedule…</p></>;
+  if (!inventory) return <>{capacity}<Notice tone="danger" title="Snapshots unavailable">{error ?? "The provider did not return snapshot state."}</Notice></>;
   const available = inventory.items.filter((item) => item.state === "available");
   const updateSchedule = (patch: Partial<StorageVolumeSnapshotInventory["schedule"]>) => setInventory({ ...inventory, schedule: { ...inventory.schedule, ...patch } });
 
-  return <section aria-labelledby="storage-snapshots-title">
+  return <>{capacity}<section aria-labelledby="storage-snapshots-title">
     <h3 id="storage-snapshots-title">Snapshots and clones</h3>
     <p>Provider snapshots are real ZFS recovery points. Hoardarr records only provider-confirmed results; a clone becomes another managed storage area.</p>
     {error && <Notice tone="danger" title="Snapshot action needs attention">{error}</Notice>}
@@ -123,5 +125,5 @@ export function StorageSnapshotsPanel({ volume }: { volume: StorageVolumeDocumen
     <div className="settings-grid"><label className="toggle-row"><input type="checkbox" checked={inventory.schedule.enabled} onChange={(event) => updateSchedule({ enabled: event.target.checked })} /><span><strong>Keep automatic recovery points</strong><small>Executed by the durable worker even when no browser is connected.</small></span></label><label>Every (hours)<input type="number" min={1} max={8760} value={inventory.schedule.interval_hours} onChange={(event) => updateSchedule({ interval_hours: Number(event.target.value) })} /></label><label>Keep latest<input type="number" min={1} max={1024} value={inventory.schedule.retention_count} onChange={(event) => updateSchedule({ retention_count: Number(event.target.value) })} /></label><label>Name prefix<input value={inventory.schedule.prefix} maxLength={32} onChange={(event) => updateSchedule({ prefix: event.target.value.toLowerCase() })} /></label></div>
     <dl className="review-list"><div><dt>Next run</dt><dd>{inventory.schedule.next_run_at ?? "Disabled"}</dd></div><div><dt>Last run</dt><dd>{inventory.schedule.last_run_at ?? "Never"}</dd></div><div><dt>History source</dt><dd>{inventory.source.replaceAll("_", " ")}</dd></div></dl>
     <button className="button button-secondary" type="button" disabled={scheduleSaving} onClick={() => void saveSchedule()}>{scheduleSaving ? "Saving…" : "Save snapshot schedule"}</button>
-  </section>;
+  </section></>;
 }

@@ -434,6 +434,17 @@ export interface StorageVolumeSnapshotPlan {
   plan_sha256: string;
 }
 
+export interface StorageVolumeCapacityPlan {
+  schema_version: 1;
+  kind: "storage.volume.capacity";
+  volume: { id: string; stable_identity: string; name: string; provider: "zfs"; resource_type: "dataset" | "zvol"; provider_resource_id: string; provider_guid: string };
+  target: { quota_bytes: number | null; reservation_bytes: number | null; thin_provisioned: boolean | null };
+  properties: Record<string, string>;
+  confirmation: "APPLY CAPACITY LIMITS";
+  risk: string;
+  plan_sha256: string;
+}
+
 export type ConnectivityProtocol = "smb" | "nfs" | "iscsi" | "fcoe";
 
 export interface ConnectivityCapabilities {

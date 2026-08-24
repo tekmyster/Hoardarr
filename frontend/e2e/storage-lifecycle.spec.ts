@@ -22,9 +22,11 @@ async function storageLifecycleServer(page: Page) {
   let guidedVolumeCreated = false;
   let snapshotCreated = false;
   let snapshotScheduleSaved = false;
+  let capacityApplied = false;
   let advancedVolumePreviewed = false;
   const volumeOperationId = "88888888-8888-4888-8888-888888888888";
   const snapshotOperationId = "99999999-9999-4999-8999-999999999999";
+  const capacityOperationId = "77777777-7777-4777-8777-777777777777";
   const volumePlan = {
     schema_version: 1, kind: "storage.volume.create", mode: "guided", name: "media-library",
     purpose: "media", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library",
@@ -341,6 +343,10 @@ async function storageLifecycleServer(page: Page) {
       snapshotCreated = true;
       return json({ id: snapshotOperationId, kind: "storage.volume.snapshot", status: "succeeded", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: { snapshot_id: "snapshot-manual" }, error: null, created_at: now, updated_at: now });
     }
+    if (pathname.endsWith(`/operations/${capacityOperationId}`)) {
+      capacityApplied = true;
+      return json({ id: capacityOperationId, kind: "storage.volume.capacity", status: "succeeded", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: { capacity_limits: { quota_bytes: 21474836480, reservation_bytes: 2147483648, thin_provisioned: null } }, error: null, created_at: now, updated_at: now });
+    }
     if (pathname.endsWith("/operations")) return json({ items: operationStatus ? [operation()] : [] });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
     if (pathname.endsWith("/storage/transfers/summary")) return json({ active: 0, pending: 0, failed: 0, completed: 0, bytes_moved: 0, current_throughput_bytes_per_second: 0, estimated_drain_seconds: null, hardlink_rate: null, copy_rate: null, seeding_retained_bytes: 0, recoverable_bytes: 0 });
@@ -368,6 +374,17 @@ async function storageLifecycleServer(page: Page) {
         target_resource_id: null, target_mountpoint: null, confirmation: "CREATE SNAPSHOT", risk: "The live storage is not modified.", plan_sha256: "a".repeat(64),
       };
       return json({ plan: snapshotPlan, plan_sha256: snapshotPlan.plan_sha256 });
+    }
+    if (pathname.endsWith("/storage/volumes/volume-media-library/capacity/preview")) {
+      const body = request.postDataJSON() as { quota_bytes: number; reservation_bytes: number };
+      expect(body).toEqual({ quota_bytes: 20 * 1024 ** 3, reservation_bytes: 2 * 1024 ** 3 });
+      const capacityPlan = { schema_version: 1, kind: "storage.volume.capacity", volume: { id: "volume-media-library", stable_identity: "zfs:dataset:tank/media-library", name: "media-library", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library", provider_guid: "123456789" }, target: { quota_bytes: 20 * 1024 ** 3, reservation_bytes: 2 * 1024 ** 3, thin_provisioned: null }, properties: { quota: String(20 * 1024 ** 3), reservation: String(2 * 1024 ** 3) }, confirmation: "APPLY CAPACITY LIMITS", risk: "A quota can cause future writes to fail when the limit is reached.", plan_sha256: "b".repeat(64) };
+      return json({ plan: capacityPlan, plan_sha256: capacityPlan.plan_sha256 });
+    }
+    if (pathname.endsWith("/storage/volumes/volume-media-library/capacity") && request.method() === "POST") {
+      const body = request.postDataJSON() as { confirmation: string };
+      expect(body.confirmation).toBe("APPLY CAPACITY LIMITS");
+      return json({ operation: { id: capacityOperationId, kind: "storage.volume.capacity", status: "queued", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: null, error: null, created_at: now, updated_at: now }, replayed: false }, 202);
     }
     if (pathname.endsWith("/storage/volumes/volume-media-library/snapshots") && request.method() === "POST") {
       const body = request.postDataJSON() as { confirmation: string };
@@ -401,6 +418,8 @@ async function storageLifecycleServer(page: Page) {
         capabilities: {
           snapshot: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
           clone: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+          quota: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
+          reservation: { support: "supported", availability: "available", source: "provider_observation", constraints: {} },
           qos: { support: "unsupported", availability: "unsupported", source: "provider_baseline", constraints: {} },
         },
         capabilities_detected_at: now, created_at: now, updated_at: now,
@@ -439,6 +458,7 @@ async function storageLifecycleServer(page: Page) {
     advancedVolumePreviewed: () => advancedVolumePreviewed,
     snapshotCreated: () => snapshotCreated,
     snapshotScheduleSaved: () => snapshotScheduleSaved,
+    capacityApplied: () => capacityApplied,
   };
 }
 
@@ -510,6 +530,13 @@ test("creates a real provider-backed media area through the Guided Storage UI", 
   await expect(detail.getByRole("cell", { name: "snapshot" })).toBeVisible();
   await expect(detail.getByText("storage volume create")).toBeVisible();
   await expect(detail.getByText("No provider snapshots")).toBeVisible();
+  await detail.getByLabel("Dataset quota in GiB").fill("20");
+  await detail.getByLabel("Dataset reservation in GiB").fill("2");
+  await detail.getByRole("button", { name: "Review capacity change" }).click();
+  await expect(detail.getByText("Review provider capacity change")).toBeVisible();
+  await detail.getByRole("button", { name: "Apply capacity limits" }).click();
+  await expect.poll(observed.capacityApplied).toBe(true);
+  await expect(detail.getByText(/Provider settings were applied and verified/)).toBeVisible();
   await detail.getByRole("button", { name: "Review snapshot" }).click();
   await expect(detail.getByText("Review create")).toBeVisible();
   await detail.getByRole("button", { name: "CREATE SNAPSHOT" }).click();

@@ -41,6 +41,8 @@ from hoardarr.api.schemas import (
     StorageRedundancyApplyRequest,
     StorageRedundancyPreviewRequest,
     StorageVolumeApplyRequest,
+    StorageVolumeCapacityApplyRequest,
+    StorageVolumeCapacityPreviewRequest,
     StorageVolumePreviewRequest,
     StorageVolumeSnapshotApplyRequest,
     StorageVolumeSnapshotPreviewRequest,
@@ -66,6 +68,11 @@ from hoardarr.db.models import (
     StorageVolumeSnapshotSchedule,
 )
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
+from hoardarr.storage.capacity_plans import (
+    CapacityPlanError,
+    build_capacity_plan,
+    validate_capacity_plan,
+)
 from hoardarr.storage.client import StorageExecutorError, preview_foreign_stack
 from hoardarr.storage.drain import DrainPlanError, build_drain_plan, validate_drain_plan
 from hoardarr.storage.expansion import build_expansion_assessment
@@ -141,6 +148,24 @@ from hoardarr.storage.volume_plans import (
 from hoardarr.storage.volumes import canonical_volume_identity, volume_document, volume_documents
 
 router = APIRouter(prefix="/storage", tags=["storage"])
+
+
+def _require_capacity_capability(volume: StorageVolume) -> None:
+    required = (
+        ("quota", "reservation") if volume.resource_type == "dataset" else ("thin_provisioning",)
+    )
+    for name in required:
+        capability = volume.capabilities_json.get(name, {})
+        if capability.get("support") != "supported":
+            raise CapacityPlanError(
+                "volume_capacity_provider_unsupported",
+                f"The provider does not support {name.replace('_', ' ')} for this resource.",
+            )
+        if capability.get("availability") != "available":
+            raise CapacityPlanError(
+                "volume_capacity_capability_unavailable",
+                f"The provider cannot currently apply {name.replace('_', ' ')}.",
+            )
 
 
 def _group_problem(exc: StorageGroupError) -> Problem:
@@ -1090,6 +1115,100 @@ def storage_volume_snapshots(
         "schedule": schedule_document(schedule),
         "source": "durable_provider_operations",
     }
+
+
+@router.post("/volumes/{volume_id}/capacity/preview")
+def preview_storage_volume_capacity(
+    volume_id: str,
+    payload: StorageVolumeCapacityPreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    try:
+        _require_capacity_capability(volume)
+        plan = build_capacity_plan(
+            volume=volume_document(volume),
+            provider_guid=provider_guid(volume),
+            **payload.model_dump(),
+        )
+    except (CapacityPlanError, SnapshotLifecycleError) as exc:
+        raise Problem(409, exc.code, "Capacity plan rejected", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": plan["plan_sha256"]}
+
+
+@router.post("/volumes/{volume_id}/capacity", status_code=202)
+def apply_storage_volume_capacity_plan(
+    volume_id: str,
+    payload: StorageVolumeCapacityApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    volume = session.get(StorageVolume, volume_id)
+    if volume is None:
+        raise Problem(
+            404,
+            "volume_not_found",
+            "Storage area not found",
+            "The storage area does not exist.",
+        )
+    try:
+        plan = validate_capacity_plan(payload.plan)
+        _require_capacity_capability(volume)
+        if (
+            payload.plan_sha256 != plan["plan_sha256"]
+            or plan["volume"]["id"] != volume.id
+            or plan["volume"]["stable_identity"] != volume.stable_identity
+            or plan["volume"]["provider_guid"] != provider_guid(volume)
+        ):
+            raise CapacityPlanError(
+                "volume_capacity_plan_changed",
+                "The provider-backed storage identity changed after review.",
+            )
+        if payload.confirmation != plan["confirmation"]:
+            raise CapacityPlanError(
+                "volume_capacity_confirmation_missing",
+                "Enter the exact capacity-limit confirmation.",
+            )
+    except (CapacityPlanError, SnapshotLifecycleError) as exc:
+        raise Problem(409, exc.code, "Capacity request rejected", str(exc)) from exc
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.volume.capacity",
+            principal=principal,
+            request={
+                "plan": plan,
+                "plan_sha256": plan["plan_sha256"],
+                "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
+            },
+            idempotency_key=key,
+            resource_type="storage_volume",
+            resource_id=volume.stable_identity,
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.volume.capacity.apply",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="storage_volume",
+            target_id=volume.stable_identity,
+            details={"plan_sha256": plan["plan_sha256"], "target": plan["target"]},
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
 
 
 @router.post("/volumes/{volume_id}/snapshots/preview")

@@ -46,6 +46,7 @@ from hoardarr.db.models import (
     RemoteBackupTarget,
     StorageDrainJob,
     StorageGroup,
+    StorageVolume,
     UpdateState,
     WizardSession,
     utc_now,
@@ -89,6 +90,7 @@ from hoardarr.operations.service import (
     mark_cancelled_resource,
     recover_stale_operations,
 )
+from hoardarr.storage.capacity_plans import CapacityPlanError, validate_capacity_plan
 from hoardarr.storage.client import (
     StorageExecutorError,
     apply_array_replacement,
@@ -98,6 +100,7 @@ from hoardarr.storage.client import (
     apply_storage_plan,
     apply_storage_redundancy,
     apply_storage_volume,
+    apply_storage_volume_capacity,
     apply_storage_volume_snapshot,
     storage_operation_status,
 )
@@ -166,6 +169,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.redundancy.apply",
         "storage.volume.create",
         "storage.volume.snapshot",
+        "storage.volume.capacity",
         "storage.drain",
         "connectivity.apply",
         "connectivity.remove",
@@ -1679,6 +1683,38 @@ def _execute_work(
                 needs_attention=getattr(exc, "needs_attention", False),
             ) from exc
         return MaintenanceExecution(result=result)
+    if item.kind == "storage.volume.capacity":
+        raw_plan = item.request.get("plan")
+        if (
+            not isinstance(raw_plan, dict)
+            or raw_plan.get("plan_sha256") != item.request.get("plan_sha256")
+            or item.resource_type != "storage_volume"
+        ):
+            raise WorkFailure("volume_capacity_plan_changed", "The capacity request is invalid")
+        try:
+            plan = validate_capacity_plan(raw_plan)
+            if item.request.get("confirmation_sha256") != document_hash(
+                {"confirmation": plan["confirmation"]}
+            ):
+                raise CapacityPlanError(
+                    "volume_capacity_confirmation_missing",
+                    "Exact capacity confirmation is required.",
+                )
+            result = apply_storage_volume_capacity(
+                settings.storage_executor_socket,
+                operation_id=item.operation_id,
+                plan_sha256=str(item.request["plan_sha256"]),
+                plan=plan,
+                confirmation_sha256=str(item.request["confirmation_sha256"]),
+                timeout_seconds=settings.storage_executor_timeout_seconds,
+            )
+        except (StorageExecutorError, CapacityPlanError) as exc:
+            raise WorkFailure(
+                exc.code,
+                str(exc),
+                needs_attention=getattr(exc, "needs_attention", False),
+            ) from exc
+        return MaintenanceExecution(result=result)
     if item.kind == "storage.transfer":
         value = item.request.get("plan")
         if not isinstance(value, dict) or document_hash(value) != item.request.get("plan_sha256"):
@@ -2053,6 +2089,47 @@ def _finalize_success(
                     return
                 complete_operation(session, operation, result)
                 return
+            if item.kind == "storage.volume.capacity":
+                raw_plan = operation.request_json.get("plan")
+                limits = execution.result.get("capacity_limits")
+                raw_volume = raw_plan.get("volume") if isinstance(raw_plan, dict) else None
+                if (
+                    not isinstance(raw_plan, dict)
+                    or not isinstance(raw_volume, dict)
+                    or not isinstance(limits, dict)
+                ):
+                    fail_operation(
+                        session,
+                        operation,
+                        code="volume_capacity_result_invalid",
+                        message="The capacity result could not be reconciled safely",
+                        needs_attention=True,
+                    )
+                    return
+                volume = session.get(StorageVolume, str(raw_volume.get("id")))
+                if (
+                    volume is None
+                    or volume.stable_identity != raw_volume.get("stable_identity")
+                    or volume.provider_resource_id != execution.result.get("provider_resource_id")
+                ):
+                    fail_operation(
+                        session,
+                        operation,
+                        code="volume_capacity_identity_changed",
+                        message="The managed storage identity changed during reconciliation",
+                        needs_attention=True,
+                    )
+                    return
+                volume.config_json = {**volume.config_json, "capacity_limits": limits}
+                allocated = execution.result.get("allocated_bytes")
+                if (
+                    isinstance(allocated, int)
+                    and not isinstance(allocated, bool)
+                    and allocated >= 0
+                ):
+                    volume.allocated_bytes = allocated
+                complete_operation(session, operation, execution.result)
+                return
             complete_operation(session, operation, execution.result)
             return
 
@@ -2170,6 +2247,7 @@ def _finalize_failure(
             "storage.redundancy.apply",
             "storage.volume.create",
             "storage.volume.snapshot",
+            "storage.volume.capacity",
             "storage.transfer",
             "storage.transfer.cleanup",
             "hardware.locate",
@@ -2480,6 +2558,7 @@ def recover_abandoned_operations(
                             "storage.redundancy.apply",
                             "storage.volume.create",
                             "storage.volume.snapshot",
+                            "storage.volume.capacity",
                         )
                     ),
                     Operation.lease_owner.is_not(None),
@@ -2577,6 +2656,7 @@ def recover_abandoned_operations(
                 "storage.redundancy.apply": storage_max_age,
                 "storage.volume.create": storage_max_age,
                 "storage.volume.snapshot": storage_max_age,
+                "storage.volume.capacity": storage_max_age,
                 "connectivity.apply": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "connectivity.remove": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "backup.control_plane": 900,

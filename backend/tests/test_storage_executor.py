@@ -11,6 +11,7 @@ import pytest
 
 from hoardarr.operations.service import document_hash
 from hoardarr.storage import executor
+from hoardarr.storage.capacity_plans import build_capacity_plan
 from hoardarr.storage.executor import (
     ExecutorFailure,
     Paths,
@@ -21,6 +22,7 @@ from hoardarr.storage.executor import (
     _validate_plan,
     apply_storage_plan,
     apply_storage_volume,
+    apply_storage_volume_capacity,
     apply_storage_volume_snapshot,
     storage_operation_status,
 )
@@ -273,6 +275,171 @@ def test_snapshot_execution_refuses_snapshot_identity_drift(
             zfs_snapshot_provider=lambda _name: {"guid": "different"},
         )
     assert raised.value.code == "snapshot_identity_changed"
+
+
+def test_dataset_capacity_execution_revalidates_applies_verifies_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_capacity_plan(
+        volume={
+            "id": "volume-1",
+            "stable_identity": "zfs:dataset:tank/movies",
+            "name": "movies",
+            "provider": "zfs",
+            "resource_type": "dataset",
+            "provider_resource_id": "tank/movies",
+        },
+        provider_guid="1111222233334444",
+        quota_bytes=20 * 1024**3,
+        reservation_bytes=2 * 1024**3,
+    )
+    request = {
+        "operation": "apply_storage_volume_capacity",
+        "operation_id": "66666666-6666-4666-8666-666666666666",
+        "plan_sha256": plan["plan_sha256"],
+        "plan": plan,
+        "confirmation_sha256": document_hash({"confirmation": "APPLY CAPACITY LIMITS"}),
+    }
+    observed = iter(
+        [
+            {"guid": "1111222233334444", "type": "filesystem"},
+            {
+                "guid": "1111222233334444",
+                "type": "filesystem",
+                "quota": str(20 * 1024**3),
+                "reservation": str(2 * 1024**3),
+                "used": "4096",
+                "available": str(18 * 1024**3),
+            },
+        ]
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        quarantine_marker=tmp_path / "quarantine.json",
+    )
+
+    result = apply_storage_volume_capacity(
+        request,
+        paths=paths,
+        runner=lambda command, _timeout: commands.append(command),
+        zfs_resource_provider=lambda _name: next(observed),
+    )
+
+    assert commands == [[
+        "/usr/sbin/zfs",
+        "set",
+        f"quota={20 * 1024**3}",
+        f"reservation={2 * 1024**3}",
+        "tank/movies",
+    ]]
+    assert result["capacity_limits"] == {
+        "quota_bytes": 20 * 1024**3,
+        "reservation_bytes": 2 * 1024**3,
+        "thin_provisioned": None,
+    }
+    replay = apply_storage_volume_capacity(
+        request,
+        paths=paths,
+        runner=lambda *_args: pytest.fail("a replay must not run zfs set again"),
+    )
+    assert replay["replayed"] is True
+
+
+def test_capacity_execution_refuses_identity_drift_before_provider_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_capacity_plan(
+        volume={
+            "id": "volume-1",
+            "stable_identity": "zfs:zvol:tank/vm",
+            "name": "vm",
+            "provider": "zfs",
+            "resource_type": "zvol",
+            "provider_resource_id": "tank/vm",
+        },
+        provider_guid="1111222233334444",
+        thin_provisioned=True,
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+
+    with pytest.raises(ExecutorFailure) as raised:
+        apply_storage_volume_capacity(
+            {
+                "operation": "apply_storage_volume_capacity",
+                "operation_id": "77777777-7777-4777-8777-777777777777",
+                "plan_sha256": plan["plan_sha256"],
+                "plan": plan,
+                "confirmation_sha256": document_hash(
+                    {"confirmation": "APPLY CAPACITY LIMITS"}
+                ),
+            },
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                quarantine_marker=tmp_path / "quarantine.json",
+            ),
+            runner=lambda *_args: pytest.fail("identity drift must fail before zfs set"),
+            zfs_resource_provider=lambda _name: {
+                "guid": "9999000011112222",
+                "type": "volume",
+            },
+        )
+    assert raised.value.code == "volume_capacity_identity_changed"
+
+
+def test_capacity_execution_fails_safe_on_malformed_provider_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_capacity_plan(
+        volume={
+            "id": "volume-1",
+            "stable_identity": "zfs:dataset:tank/media",
+            "name": "media",
+            "provider": "zfs",
+            "resource_type": "dataset",
+            "provider_resource_id": "tank/media",
+        },
+        provider_guid="1111222233334444",
+        quota_bytes=1024,
+        reservation_bytes=0,
+    )
+    observed = iter(
+        [
+            {"guid": "1111222233334444", "type": "filesystem"},
+            {
+                "guid": "1111222233334444",
+                "type": "filesystem",
+                "quota": "not-a-number",
+                "reservation": "0",
+            },
+        ]
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+
+    with pytest.raises(ExecutorFailure) as raised:
+        apply_storage_volume_capacity(
+            {
+                "operation": "apply_storage_volume_capacity",
+                "operation_id": "88888888-8888-4888-8888-888888888888",
+                "plan_sha256": plan["plan_sha256"],
+                "plan": plan,
+                "confirmation_sha256": document_hash(
+                    {"confirmation": "APPLY CAPACITY LIMITS"}
+                ),
+            },
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                quarantine_marker=tmp_path / "quarantine.json",
+            ),
+            runner=lambda *_args: None,
+            zfs_resource_provider=lambda _name: next(observed),
+        )
+    assert raised.value.code == "volume_capacity_verification_failed"
+    assert raised.value.needs_attention is True
 
 
 @pytest.mark.parametrize(

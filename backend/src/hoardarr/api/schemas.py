@@ -587,6 +587,18 @@ class StorageVolumeSnapshotScheduleRequest(StrictModel):
     prefix: str = Field(min_length=1, max_length=32)
 
 
+class StorageVolumeCapacityPreviewRequest(StrictModel):
+    quota_bytes: int | None = Field(default=None, ge=0, le=2**60)
+    reservation_bytes: int | None = Field(default=None, ge=0, le=2**60)
+    thin_provisioned: bool | None = None
+
+
+class StorageVolumeCapacityApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["APPLY CAPACITY LIMITS"]
+
+
 class HAConfigurationRequest(StrictModel):
     local_node_id: str = Field(min_length=1, max_length=128)
     local_name: str = Field(min_length=1, max_length=128)

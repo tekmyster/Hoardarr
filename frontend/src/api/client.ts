@@ -58,6 +58,7 @@ import type {
   StorageExpansionAssessment,
   StorageGroupDocument,
   StorageVolumeDocument,
+  StorageVolumeCapacityPlan,
   StorageVolumeDetailDocument,
   StorageVolumeSnapshotInventory,
   StorageVolumeSnapshotPlan,
@@ -462,6 +463,16 @@ class HoardarrApi {
 
   async storageVolumeSnapshots(id: string, signal?: AbortSignal): Promise<StorageVolumeSnapshotInventory> {
     return this.request<StorageVolumeSnapshotInventory>(`/storage/volumes/${encodeURIComponent(id)}/snapshots`, { signal });
+  }
+
+  async previewStorageVolumeCapacity(id: string, input: { quota_bytes?: number | null; reservation_bytes?: number | null; thin_provisioned?: boolean | null }): Promise<StorageVolumeCapacityPlan> {
+    const result = await this.request<{ plan: StorageVolumeCapacityPlan }>(`/storage/volumes/${encodeURIComponent(id)}/capacity/preview`, { method: "POST", body: JSON.stringify(input) });
+    return result.plan;
+  }
+
+  async applyStorageVolumeCapacity(id: string, plan: StorageVolumeCapacityPlan): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>(`/storage/volumes/${encodeURIComponent(id)}/capacity`, { method: "POST", headers: { "Idempotency-Key": createIdempotencyKey() }, body: JSON.stringify({ plan, plan_sha256: plan.plan_sha256, confirmation: plan.confirmation }) });
+    return result.operation;
   }
 
   async previewStorageVolumeSnapshot(id: string, input: {

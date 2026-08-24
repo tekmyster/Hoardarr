@@ -43,6 +43,7 @@ NON_CANCELLABLE_AFTER_START = frozenset(
         "storage.redundancy.apply",
         "storage.volume.create",
         "storage.volume.snapshot",
+        "storage.volume.capacity",
         "storage.transfer",
         "hardware.locate",
         "connectivity.apply",

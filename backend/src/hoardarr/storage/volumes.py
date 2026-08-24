@@ -71,7 +71,6 @@ _PROVIDER_SUPPORT: dict[tuple[str, str], dict[str, str]] = {
             "allocation",
             "block_presentation",
             "snapshot",
-            "quota",
             "reservation",
             "thin_provisioning",
             "clone",
@@ -79,6 +78,7 @@ _PROVIDER_SUPPORT: dict[tuple[str, str], dict[str, str]] = {
         ),
         "filesystem": "unsupported",
         "file_presentation": "unsupported",
+        "quota": "unsupported",
         "qos": "unsupported",
     },
     ("lvm", "logical_volume"): {

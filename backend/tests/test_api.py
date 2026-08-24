@@ -42,6 +42,7 @@ from hoardarr.db.models import (
     StorageEntity,
     StorageGroup,
     StoragePath,
+    StorageVolume,
     StorageVolumeSnapshot,
     User,
 )
@@ -350,6 +351,101 @@ def test_snapshot_api_enforces_capability_confirmation_schedule_and_identity(
     )
     assert changed.status_code == 409
     assert changed.json()["code"] == "snapshot_identity_changed"
+
+
+def test_capacity_api_enforces_capability_bounds_confirmation_and_identity(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    factory = app.state.session_factory
+    with factory() as session, session.begin():
+        volume, _created = register_volume(
+            session,
+            {
+                "provider": "zfs",
+                "resource_type": "dataset",
+                "provider_resource_id": "tank/media",
+                "name": "media",
+                "presentation": "file",
+                "mountpoint": "/srv/media",
+                "filesystem_type": "zfs",
+                "filesystem_uuid": "123456789",
+                "lifecycle_state": "active",
+                "config": {"provider_guid": "123456789"},
+                "capabilities": {
+                    "quota": {"support": "supported", "availability": "available"},
+                    "reservation": {
+                        "support": "supported",
+                        "availability": "available",
+                    },
+                },
+            },
+        )
+        volume_id = volume.id
+
+    assert client.post(
+        f"/api/v1/storage/volumes/{volume_id}/capacity/preview",
+        json={"quota_bytes": 10_000, "reservation_bytes": 1_000},
+    ).status_code == 403
+    invalid = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/capacity/preview",
+        headers=_state_headers(csrf),
+        json={"quota_bytes": 1_000, "reservation_bytes": 10_000},
+    )
+    assert invalid.status_code == 409
+    assert invalid.json()["code"] == "volume_capacity_invalid"
+
+    preview = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/capacity/preview",
+        headers=_state_headers(csrf),
+        json={"quota_bytes": 20 * 1024**3, "reservation_bytes": 2 * 1024**3},
+    )
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()["plan"]
+    assert plan["properties"] == {
+        "quota": str(20 * 1024**3),
+        "reservation": str(2 * 1024**3),
+    }
+    headers = _state_headers(csrf, **{"Idempotency-Key": "capacity-media"})
+    accepted = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/capacity",
+        headers=headers,
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "APPLY CAPACITY LIMITS",
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["operation"]["kind"] == "storage.volume.capacity"
+    replay = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/capacity",
+        headers=headers,
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "APPLY CAPACITY LIMITS",
+        },
+    )
+    assert replay.status_code == 202
+    assert replay.json()["replayed"] is True
+
+    with factory() as session, session.begin():
+        current = session.get(StorageVolume, volume_id)
+        assert current is not None
+        current.config_json = {**current.config_json, "provider_guid": "987654321"}
+    changed = client.post(
+        f"/api/v1/storage/volumes/{volume_id}/capacity",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "capacity-stale"}),
+        json={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation": "APPLY CAPACITY LIMITS",
+        },
+    )
+    assert changed.status_code == 409
+    assert changed.json()["code"] == "volume_capacity_plan_changed"
 
 
 def test_ha_peer_configuration_and_heartbeat_are_persistent_and_identity_bound(

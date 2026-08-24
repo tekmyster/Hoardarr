@@ -52,6 +52,24 @@ remains unsupported rather than being simulated.
 Advanced creation for other provider geometries is tracked separately. The capability catalog is
 not permission to offer a decorative control for an unavailable provider.
 
+ZFS datasets and zvols expose provider-native lifecycle controls in **Manage** only when the live
+provider observation reports them available. Snapshot operations create immutable plans bound to
+the dataset/zvol GUID, execute as durable operations, and read the exact snapshot or clone back
+before recording success. Manual create, restore, clone and delete use fixed argument vectors;
+bounded automatic schedules retain only Hoardarr-owned snapshots. Dataset clones receive a safe
+managed mount path, while zvol clones remain block devices.
+
+Capacity controls use `POST /api/v1/storage/volumes/{id}/capacity/preview` followed by the durable
+apply endpoint at the same path. For a dataset, `quota=0` means no maximum and `reservation=0`
+means no reserved pool space; a nonzero reservation cannot exceed a nonzero quota. Hoardarr sends
+both properties in one fixed-argument `zfs set` invocation. For a zvol, thin allocation maps to
+`refreservation=none` and fully reserved allocation maps to `refreservation=auto`; zvol quota is
+correctly reported as unsupported because its `volsize` is the size boundary. The executor checks
+the provider GUID and resource type immediately before mutation, reads the numeric properties back,
+and stores only verified limits. A quota may make future writes fail, and thin allocation may fail
+future writes if the backing pool fills; the review UI states those consequences without implying
+data deletion.
+
 Advanced ZFS creation is exposed behind **Customize ZFS settings**. It changes the immutable
 provider plan and resulting command, rather than merely saving UI preferences. Experts may choose
 dataset versus zvol, a bounded ZFS compression algorithm, dataset record size and access-time

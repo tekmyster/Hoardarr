@@ -41,8 +41,10 @@ from hoardarr.operations.worker import (
     refresh_servarr_activity,
     run_once,
 )
+from hoardarr.storage.capacity_plans import build_capacity_plan
 from hoardarr.storage.tiering import plan_transfer
 from hoardarr.storage.volume_plans import build_guided_volume_plan
+from hoardarr.storage.volumes import register_volume, volume_document
 
 
 def _runtime(tmp_path: Path):
@@ -90,6 +92,8 @@ def test_running_host_mutation_cannot_be_recorded_as_cancelled(tmp_path: Path) -
         "storage.apply",
         "storage.transfer",
         "storage.foreign.inspect",
+        "storage.volume.snapshot",
+        "storage.volume.capacity",
         "connectivity.apply",
         "connectivity.remove",
     ):
@@ -178,6 +182,77 @@ def test_volume_worker_persists_executor_result_under_stable_provider_identity(
         assert volume.stable_identity == "zfs:dataset:tank/movies"
         assert operation.result_json is not None
         assert operation.result_json["volume_id"] == volume.id
+
+
+def test_capacity_worker_reconciles_verified_provider_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    with session_factory() as session, session.begin():
+        volume, _created = register_volume(
+            session,
+            {
+                "provider": "zfs",
+                "resource_type": "dataset",
+                "provider_resource_id": "tank/media",
+                "name": "media",
+                "presentation": "file",
+                "mountpoint": "/srv/media",
+                "filesystem_type": "zfs",
+                "lifecycle_state": "active",
+                "config": {"provider_guid": "123456789"},
+            },
+        )
+        volume_id = volume.id
+        stable_identity = volume.stable_identity
+        plan = build_capacity_plan(
+            volume=volume_document(volume),
+            provider_guid="123456789",
+            quota_bytes=20 * 1024**3,
+            reservation_bytes=2 * 1024**3,
+        )
+    operation_id = _enqueue(
+        session_factory,
+        kind="storage.volume.capacity",
+        resource_type="storage_volume",
+        resource_id=stable_identity,
+        request={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation_sha256": document_hash(
+                {"confirmation": "APPLY CAPACITY LIMITS"}
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        "hoardarr.operations.worker.apply_storage_volume_capacity",
+        lambda *_args, **_kwargs: {
+            "operation_id": operation_id,
+            "provider_resource_id": "tank/media",
+            "capacity_limits": {
+                "quota_bytes": 20 * 1024**3,
+                "reservation_bytes": 2 * 1024**3,
+                "thin_provisioned": None,
+            },
+            "allocated_bytes": 4096,
+            "available_bytes": 18 * 1024**3,
+            "replayed": False,
+        },
+    )
+
+    assert run_once(
+        session_factory=session_factory,
+        settings=settings,
+        secret_box=SecretBox(b"c" * 32),
+        worker_id="capacity-worker",
+    )
+    with session_factory() as session:
+        operation = session.get(Operation, operation_id)
+        volume = session.get(StorageVolume, volume_id)
+        assert operation is not None and operation.status == "succeeded"
+        assert volume is not None
+        assert volume.config_json["capacity_limits"]["quota_bytes"] == 20 * 1024**3
+        assert volume.allocated_bytes == 4096
 
 
 def test_hardware_scan_creates_an_immutable_snapshot(tmp_path: Path) -> None:
