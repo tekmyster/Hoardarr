@@ -10,7 +10,6 @@ from pathlib import Path
 
 import boto3
 from botocore.client import Config
-
 from hoardarr.auth.service import Principal
 from hoardarr.backups.service import (
     apply_fresh_control_plane_restore,
