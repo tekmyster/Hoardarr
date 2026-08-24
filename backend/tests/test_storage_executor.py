@@ -593,11 +593,18 @@ def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_so
     }
     commands: list[list[str]] = []
     expansion_targets: list[str] = []
+
+    def safe_test_mountpoint(value: str) -> Path:
+        candidate = Path(value)
+        if candidate.is_absolute() and candidate.is_relative_to(tmp_path):
+            return candidate
+        return tmp_path / "managed" / value.lstrip("/")
+
     monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: live})
     monkeypatch.setattr(
         executor,
         "_safe_mountpoint",
-        lambda value: tmp_path / "managed" / value.lstrip("/"),
+        safe_test_mountpoint,
     )
     monkeypatch.setattr(
         executor,
