@@ -34,6 +34,7 @@ from hoardarr.db.models import (
     StorageGroup,
     StorageLifecycleEvent,
     StoragePath,
+    WizardSession,
     utc_now,
 )
 
@@ -263,6 +264,19 @@ def _safe_drive(drive: dict[str, Any]) -> dict[str, Any] | None:
             "power_on_hours": health.get("power_on_hours"),
             "percentage_used": health.get("percentage_used"),
             "lifetime_host_writes_bytes": health.get("lifetime_host_writes_bytes"),
+            "health_summary": {
+                key: health.get(key)
+                for key in (
+                    "critical_warning",
+                    "reallocated_sectors",
+                    "pending_sectors",
+                    "uncorrectable_sectors",
+                    "media_data_integrity_errors",
+                    "interface_crc_errors",
+                    "command_timeouts",
+                )
+                if health.get(key) is not None
+            },
         }
     )
 
@@ -361,22 +375,50 @@ def inventory_payload(session: Session, state: FleetTelemetryState) -> dict[str,
         select(StorageController).order_by(StorageController.id).limit(256)
     ).all()
     paths = session.scalars(select(StoragePath).order_by(StoragePath.id).limit(2048)).all()
-    successful_kinds = sorted(
-        {
-            kind
-            for kind in session.scalars(
-                select(Operation.kind)
-                .where(Operation.status == "succeeded", Operation.kind.in_(FEATURE_OPERATION_KINDS))
-                .distinct()
-            )
-        }
-    )
+    successful_kinds = {
+        kind
+        for kind in session.scalars(
+            select(Operation.kind)
+            .where(Operation.status == "succeeded", Operation.kind.in_(FEATURE_OPERATION_KINDS))
+            .distinct()
+        )
+    }
+    completed_modes = {
+        mode
+        for mode in session.scalars(
+            select(WizardSession.mode)
+            .where(WizardSession.status == "completed")
+            .distinct()
+        )
+        if mode in {"guided", "advanced"}
+    }
     backend_types = sorted(
         {
             str(value)[:64]
             for backend in backends
             for key in ("backend_kind", "storage_kind", "filesystem")
             if (value := backend.config_json.get(key)) is not None
+        }
+    )
+    feature_usage = successful_kinds | {f"wizard.{mode}" for mode in completed_modes}
+    feature_usage.update(f"storage.backend.{value}" for value in backend_types)
+    if any(entity.topology_state == "fully_redundant" for entity in entities):
+        feature_usage.add("storage.controller_redundancy")
+    if any(group.purpose in {"cache", "download", "landing"} for group in groups):
+        feature_usage.add("storage.landing_tier")
+    protection_modes = sorted(
+        {
+            str(value)[:64]
+            for backend in backends
+            for key in ("level", "vdev_type", "protection", "parity_count")
+            if (value := backend.config_json.get(key)) is not None
+        }
+    )
+    filesystem_types = sorted(
+        {
+            str(value)[:64]
+            for backend in backends
+            if (value := backend.config_json.get("filesystem")) is not None
         }
     )
     controller_models = sorted(
@@ -410,6 +452,8 @@ def inventory_payload(session: Session, state: FleetTelemetryState) -> dict[str,
             "purposes": sorted({group.purpose for group in groups}),
             "backend_roles": sorted({backend.role for backend in backends}),
             "backend_types": backend_types,
+            "filesystem_types": filesystem_types,
+            "protection_modes": protection_modes,
             "logical_storage_kinds": sorted({entity.storage_kind for entity in entities}),
             "logical_capacity_bytes": sum(entity.capacity_bytes for entity in entities),
             "raw_capacity_bytes": sum(
@@ -431,7 +475,7 @@ def inventory_payload(session: Session, state: FleetTelemetryState) -> dict[str,
         },
         "controller_observations": {"models": controller_models, "count": len(controllers)},
         "applications_detected": applications,
-        "feature_usage": successful_kinds,
+        "feature_usage": sorted(feature_usage),
         "country_code": state.country_code if state.location_confirmed else None,
         "timezone": state.timezone if state.location_confirmed else None,
     }

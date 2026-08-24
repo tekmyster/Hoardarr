@@ -20,6 +20,7 @@ from hoardarr.db.models import (
     PhysicalDisk,
     StorageGroup,
     StorageLifecycleEvent,
+    WizardSession,
     utc_now,
 )
 from hoardarr.fleet.service import (
@@ -79,7 +80,12 @@ def _snapshot(session: Session) -> None:
                 "capacity_bytes": 1_000_000_000,
                 "identity": {"wwn": "5000c500aabbccdd"},
                 "connection": {"protocol": "sas", "enclosure_model": "Shelf"},
-                "health": {"overall": "healthy", "temperature_celsius": 31},
+                "health": {
+                    "overall": "healthy",
+                    "temperature_celsius": 31,
+                    "interface_crc_errors": 2,
+                    "command_timeouts": 0,
+                },
                 "api_key": "must-never-leave",
             }
         ],
@@ -140,6 +146,14 @@ def test_drive_pseudonym_is_cross_installation_and_serial_is_never_transmitted()
     factory, settings, _box = _runtime()
     with factory() as session, session.begin():
         _snapshot(session)
+        session.add(
+            WizardSession(
+                workflow="storage_setup",
+                mode="guided",
+                status="completed",
+                current_step="complete",
+            )
+        )
         enqueue_inventory(session, settings)
         encoded = json.dumps(pending_payloads(session), default=str, ensure_ascii=False).encode()
         assert b"PRIVATE-SERIAL" not in encoded
@@ -150,6 +164,12 @@ def test_drive_pseudonym_is_cross_installation_and_serial_is_never_transmitted()
         assert system["logical_threads"]
         assert system["installed_memory_bytes"] > 0
         assert "hostname" not in system
+        payload = pending_payloads(session)[0]["payload"]
+        assert payload["storage_hardware"][0]["health_summary"] == {
+            "interface_crc_errors": 2,
+            "command_timeouts": 0,
+        }
+        assert "wizard.guided" in payload["feature_usage"]
 
 
 def test_opt_out_remains_distinct_from_required_heartbeat() -> None:

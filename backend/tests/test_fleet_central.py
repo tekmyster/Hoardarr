@@ -219,6 +219,114 @@ def test_cross_installation_drive_lifecycle_and_admin_aggregate(tmp_path: Path) 
         assert "manufacturer failure-rate" in summary.json()["methodology"]
 
 
+def test_admin_aggregates_memory_capacity_app_combinations_and_upgrades(
+    tmp_path: Path,
+) -> None:
+    with _central(tmp_path) as client:
+        installation_id = str(uuid.uuid4())
+        credential = _register(client, installation_id)
+        observed = datetime.now(UTC).isoformat()
+        inventory = {
+            "installation_id": installation_id,
+            "schema_version": 1,
+            "observed_at": observed,
+            "system": {
+                "cpu_vendor": "GenuineIntel",
+                "installed_memory_bytes": 24 * 1024**3,
+                "platform_vendor": "Virtual Lab",
+            },
+            "storage_hardware": [
+                {
+                    "drive_id": hashlib.sha256(b"aggregate-drive").hexdigest(),
+                    "drive_identity_version": 1,
+                    "vendor": "Virtual",
+                    "model": "SSD",
+                    "media_type": "ssd",
+                    "capacity_bytes": 2 * 1024**4,
+                    "enclosure_model": "Virtual Shelf",
+                }
+            ],
+            "storage_configuration": {
+                "backend_types": ["mergerfs", "snapraid"],
+                "logical_capacity_bytes": 6 * 1024**4,
+                "usable_capacity_bytes": 5 * 1024**4,
+                "free_percent": 20.0,
+                "controller_redundant_count": 1,
+            },
+            "controller_observations": {"models": ["scsi:Virtual HBA"], "count": 1},
+            "applications_detected": ["Plex", "Radarr", "Sonarr"],
+            "feature_usage": [],
+        }
+        first_heartbeat = {
+            "installation_id": installation_id,
+            "hoardarr_version": "0.3.11",
+            "schema_version": 1,
+            "platform_family": "linux",
+            "heartbeat_at": observed,
+        }
+        assert (
+            _send(
+                client,
+                credential,
+                _batch(
+                    installation_id,
+                    1,
+                    [_record("heartbeat", first_heartbeat), _record("inventory", inventory)],
+                ),
+            ).status_code
+            == 200
+        )
+        upgraded = dict(first_heartbeat)
+        upgraded["hoardarr_version"] = "0.3.12"
+        upgraded["heartbeat_at"] = datetime.now(UTC).isoformat()
+        assert (
+            _send(
+                client,
+                credential,
+                _batch(installation_id, 2, [_record("heartbeat", upgraded)]),
+            ).status_code
+            == 200
+        )
+
+        response = client.get(
+            "/api/admin/v1/fleet/summary",
+            headers={"X-Hoardarr-Admin-Token": "test-admin-token-that-is-long"},
+        )
+        assert response.status_code == 200
+        summary = response.json()
+        assert summary["versions"] == [{"version": "0.3.12", "installations": 1}]
+        assert summary["hardware"]["installed_memory"] == [
+            {"value": "16_to_32_GiB", "count": 1}
+        ]
+        assert summary["hardware"]["platform_vendors"] == [
+            {"value": "Virtual Lab", "count": 1}
+        ]
+        assert summary["hardware"]["controllers"] == [
+            {"value": "scsi:Virtual HBA", "count": 1}
+        ]
+        assert summary["hardware"]["enclosures"] == [
+            {"value": "Virtual Shelf", "count": 1}
+        ]
+        assert summary["drives"]["capacities"] == [
+            {"value": "1_to_4_TiB", "count": 1}
+        ]
+        assert summary["storage"]["logical_capacity"] == [
+            {"value": "4_to_8_TiB", "count": 1}
+        ]
+        assert summary["storage"]["free_space_percent"] == [
+            {"value": "10_to_25_percent", "count": 1}
+        ]
+        assert summary["storage"]["controller_redundancy_installations"] == 1
+        assert summary["application_combinations"] == [
+            {"value": "Plex + Radarr + Sonarr", "count": 1}
+        ]
+        assert summary["upgrade_adoption"] == {
+            "installations_with_observed_upgrade": 1,
+            "sampled_installations": 1,
+            "transitions": [{"transition": "0.3.11 → 0.3.12", "installations": 1}],
+        }
+
+
 def test_schema_and_body_limits_fail_closed(tmp_path: Path) -> None:
     with _central(tmp_path) as client:
         registration = client.post(

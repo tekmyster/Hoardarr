@@ -19,6 +19,7 @@ import { actionDestructiveLabel, detectedFilesystems, driveMayContainData, exact
 import type {
   Drive,
   DaylightSavingMode,
+  FleetTelemetrySettingsDocument,
   HardwareSnapshot,
   IntegrationDocument,
   IntegrationProduct,
@@ -116,6 +117,9 @@ export default function App() {
   const [storageProgress, setStorageProgress] = useState<StorageOperationProgress | null>(null);
   const [storageEvents, setStorageEvents] = useState<OperationEvent[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationDocument[]>([]);
+  const [fleetSettings, setFleetSettings] = useState<FleetTelemetrySettingsDocument | null>(null);
+  const [fleetCountry, setFleetCountry] = useState("");
+  const [fleetHardwareEnabled, setFleetHardwareEnabled] = useState(true);
 
   const [serverName, setServerName] = useState("hoardarr");
   const [timezone, setTimezone] = useState(INITIAL_TIMEZONE);
@@ -347,7 +351,7 @@ export default function App() {
   }
 
   async function loadAuthenticatedData(firstRun: boolean): Promise<void> {
-    const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundWizards, foundOperations, foundIntegrations] = await Promise.all([
+    const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundWizards, foundOperations, foundIntegrations, foundFleetSettings] = await Promise.all([
         api.onboarding(),
         api.networkInterfaces(),
         api.networkingStatus(),
@@ -357,6 +361,7 @@ export default function App() {
         api.listWizards(),
         api.listOperations(),
         api.integrations(),
+        api.fleetTelemetrySettings(),
     ]);
     const defaults = uiDefaultsFromOnboarding(onboarding);
     setMode((current) => current === "advanced" ? current : defaults.experience);
@@ -445,6 +450,9 @@ export default function App() {
     setMergerFsInventory(foundMergerFs);
     setStorageInventory(foundStorage);
     setIntegrations(foundIntegrations);
+    setFleetSettings(foundFleetSettings);
+    setFleetCountry(foundFleetSettings.country_code ?? "");
+    setFleetHardwareEnabled(foundFleetSettings.hardware_enabled);
     const recoverableStorage = foundOperations.find((item) => {
       if (item.kind !== "storage.apply" || !["queued", "running", "succeeded"].includes(item.status)) return false;
       const related = foundWizards.find((candidate) => candidate.id === item.resource?.id);
@@ -909,6 +917,17 @@ export default function App() {
       if (activeStep === 0) {
         const validationMessage = serverSettingsError(serverName, timezone, ntpServers);
         if (validationMessage) throw new Error(validationMessage);
+        if (firstRunSetup && fleetSettings) {
+          const savedFleetSettings = await api.saveFleetTelemetrySettings({
+            hardware_enabled: fleetHardwareEnabled,
+            enhanced_enabled: false,
+            content_enabled: false,
+            country_code: fleetCountry.trim().toUpperCase() || null,
+            timezone,
+          });
+          setFleetSettings(savedFleetSettings);
+          setFleetCountry(savedFleetSettings.country_code ?? "");
+        }
         setNetworkPlan(null);
       } else if (activeStep === 1) {
         validateInterfaceSelection();
@@ -1696,6 +1715,15 @@ export default function App() {
             <Field label="NTP Server" source="Hoardarr recommended" hint="The default is ready to use. Separate multiple server names or addresses with commas."><input autoComplete="off" spellCheck={false} value={ntpServers} onChange={(event) => setNtpServers(event.target.value)} /></Field>
           </div>
         </Card>
+        {firstRunSetup && fleetSettings && <Card title="Help improve Hoardarr" description="Review the anonymous product telemetry used to understand real home-storage hardware and improve compatibility.">
+          <Notice tone="info" title="A minimal anonymous heartbeat is always sent">It contains a random installation ID, Hoardarr version, telemetry schema, platform family, and time. It does not contain disks, applications, paths, filenames, or hardware identity.</Notice>
+          <label className="check-line"><input type="checkbox" checked={fleetHardwareEnabled} onChange={(event) => setFleetHardwareEnabled(event.target.checked)} /><span><strong>Share hardware and product telemetry</strong><small>Recommended and enabled by default. Sends hardware models, capacities, health summaries, storage layouts, and detected product names. It never sends full serials, paths, URLs, usernames, passwords, or file contents.</small></span></label>
+          <div className="form-grid two-columns">
+            <Field label="Country / Region" source={fleetSettings.location_confirmed ? "Previously confirmed" : "Suggested from server timezone"} hint="Optional two-letter code. Leave blank if the suggestion is uncertain."><input aria-label="Telemetry country or region" value={fleetCountry} maxLength={2} onChange={(event) => setFleetCountry(event.target.value.replace(/[^A-Za-z]/g, "").toUpperCase())} /></Field>
+            <Field label="Telemetry timezone" source="Server setup"><input value={timezone} disabled /></Field>
+          </div>
+          <p className="settings-help">You can inspect every queued payload, opt out of hardware telemetry, or reset the random identity later under Settings → Telemetry &amp; Privacy.</p>
+        </Card>}
       </>
     );
   }

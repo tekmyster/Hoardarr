@@ -281,6 +281,8 @@ async function unconfiguredServer(page: Page): Promise<void> {
   await authenticatedEmptyServer(page);
   await page.unroute("**/*");
   let claimed = false;
+  let fleetHardwareEnabled = true;
+  let fleetCountry: string | null = "US";
   await page.route("**/*", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const json = (value: unknown) => route.fulfill({ json: value });
@@ -288,6 +290,39 @@ async function unconfiguredServer(page: Page): Promise<void> {
     if (pathname.endsWith("/setup/claim")) {
       claimed = true;
       return route.fulfill({ status: 201, json: { csrf_token: "browser-csrf" } });
+    }
+    if (pathname.endsWith("/fleet-telemetry/settings")) {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as {
+          hardware_enabled: boolean;
+          country_code: string | null;
+        };
+        fleetHardwareEnabled = body.hardware_enabled;
+        fleetCountry = body.country_code;
+      }
+      return json({
+        anonymous_heartbeat: { required: true, enabled: true },
+        hardware_enabled: fleetHardwareEnabled,
+        enhanced_enabled: false,
+        content_enabled: false,
+        installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        endpoint: "https://hoardarr.com/api/telemetry/v1",
+        connection_status: "not_registered",
+        credential_fingerprint: null,
+        last_successful_upload: null,
+        last_attempted_upload: null,
+        last_error: null,
+        schema_version: 1,
+        country_code: fleetCountry,
+        timezone: "America/New_York",
+        location_detection_method: "os_timezone",
+        location_confirmed: route.request().method() === "PUT",
+        queued_records: 0,
+        queued_bytes: 0,
+        dead_letter_records: 0,
+        by_status: {},
+        limitations: "Local administrators can modify collected data.",
+      });
     }
     if (pathname.endsWith("/onboarding")) return json({
       version: 1,
@@ -431,6 +466,9 @@ test.describe("production sign-in shell", () => {
 
     await expect(page.getByRole("dialog", { name: "Set up Hoardarr" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Name this server" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Help improve Hoardarr" })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: /Share hardware and product telemetry/ })).toBeChecked();
+    await expect(page.getByLabel("Telemetry country or region")).toHaveValue("US");
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(page.getByRole("heading", { name: "Connect to the network" })).toBeVisible();
     await page.getByRole("button", { name: "Continue" }).click();

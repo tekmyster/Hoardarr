@@ -6,6 +6,7 @@ import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -359,6 +360,12 @@ def _project_record(
     payload: dict[str, Any],
 ) -> None:
     if message_type == "heartbeat":
+        installation = session.get(Installation, installation_id)
+        if installation is not None:
+            installation.version = str(payload.get("hoardarr_version", "unknown"))[:64]
+            installation.platform_family = str(
+                payload.get("platform_family", "unknown")
+            )[:64]
         session.add(
             InstallationHeartbeat(
                 installation_id=installation_id,
@@ -823,6 +830,45 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                 layouts_by_installation.setdefault(
                     observation.installation_id, observation.details_json
                 )
+            recent_capacities = session.scalars(
+                select(CapacityObservation)
+                .order_by(CapacityObservation.observed_at.desc())
+                .limit(10_000)
+            ).all()
+            capacities_by_installation: dict[str, dict[str, Any]] = {}
+            for observation in recent_capacities:
+                capacities_by_installation.setdefault(
+                    observation.installation_id, observation.details_json
+                )
+            recent_controllers = session.scalars(
+                select(ControllerObservation)
+                .order_by(ControllerObservation.observed_at.desc())
+                .limit(10_000)
+            ).all()
+            controllers_by_installation: dict[str, dict[str, Any]] = {}
+            for observation in recent_controllers:
+                controllers_by_installation.setdefault(
+                    observation.installation_id, observation.details_json
+                )
+            application_rows = session.execute(
+                select(ApplicationObservation.installation_id, ApplicationObservation.product)
+                .where(ApplicationObservation.observed_at >= cutoff)
+                .order_by(ApplicationObservation.installation_id, ApplicationObservation.product)
+                .limit(100_000)
+            ).all()
+            version_rows = session.execute(
+                select(
+                    VersionObservation.installation_id,
+                    VersionObservation.version,
+                    VersionObservation.observed_at,
+                )
+                .order_by(
+                    VersionObservation.installation_id,
+                    VersionObservation.observed_at,
+                    VersionObservation.id,
+                )
+                .limit(100_000)
+            ).all()
 
         def distribution(values: list[str | None]) -> list[dict[str, int | str]]:
             counts: dict[str, int] = {}
@@ -833,6 +879,60 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                 {"value": value, "count": count}
                 for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
             ]
+
+        def byte_distribution(
+            values: list[int | None], boundaries: tuple[tuple[int, str], ...]
+        ) -> list[dict[str, int | str]]:
+            labels: list[str] = []
+            for value in values:
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    labels.append("not_reported")
+                    continue
+                label = boundaries[-1][1]
+                for upper, candidate in boundaries:
+                    if value < upper:
+                        label = candidate
+                        break
+                labels.append(label)
+            return distribution(labels)
+
+        application_sets: dict[str, set[str]] = {}
+        for installation_id, product in application_rows:
+            application_sets.setdefault(installation_id, set()).add(str(product))
+        application_combinations = distribution(
+            [" + ".join(sorted(products)) for products in application_sets.values()]
+        )
+
+        observed_versions: dict[str, list[str]] = {}
+        for installation_id, version, _observed_at in version_rows:
+            sequence = observed_versions.setdefault(installation_id, [])
+            if not sequence or sequence[-1] != version:
+                sequence.append(str(version))
+        transition_counts: dict[str, int] = {}
+        for sequence in observed_versions.values():
+            for previous, current in pairwise(sequence):
+                transition = f"{previous} → {current}"
+                transition_counts[transition] = transition_counts.get(transition, 0) + 1
+
+        gib = 1024**3
+        tib = 1024**4
+        ram_boundaries = (
+            (4 * gib, "under_4_GiB"),
+            (8 * gib, "4_to_8_GiB"),
+            (16 * gib, "8_to_16_GiB"),
+            (32 * gib, "16_to_32_GiB"),
+            (64 * gib, "32_to_64_GiB"),
+            (128 * gib, "64_to_128_GiB"),
+            (2**63, "128_GiB_or_more"),
+        )
+        capacity_boundaries = (
+            (1 * tib, "under_1_TiB"),
+            (4 * tib, "1_to_4_TiB"),
+            (8 * tib, "4_to_8_TiB"),
+            (16 * tib, "8_to_16_TiB"),
+            (64 * tib, "16_to_64_TiB"),
+            (2**63, "64_TiB_or_more"),
+        )
 
         drive_values = list(drives_by_id.values())
         system_values = list(systems_by_installation.values())
@@ -871,6 +971,39 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                             for item in system_values
                         ]
                     ),
+                    "platform_vendors": distribution(
+                        [
+                            str(item.get("platform_vendor"))
+                            if item.get("platform_vendor")
+                            else None
+                            for item in system_values
+                        ]
+                    ),
+                    "installed_memory": byte_distribution(
+                        [
+                            item.get("installed_memory_bytes")
+                            if isinstance(item.get("installed_memory_bytes"), int)
+                            else None
+                            for item in system_values
+                        ],
+                        ram_boundaries,
+                    ),
+                    "controllers": distribution(
+                        [
+                            str(model)
+                            for item in controllers_by_installation.values()
+                            for model in item.get("models", [])
+                            if isinstance(model, str)
+                        ]
+                    ),
+                    "enclosures": distribution(
+                        [
+                            str(item.get("enclosure_model"))
+                            if item.get("enclosure_model")
+                            else None
+                            for item in drive_values
+                        ]
+                    ),
                     "sampled_installations": len(system_values),
                 },
                 "drives": {
@@ -898,6 +1031,15 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                             for item in drive_values
                         ]
                     ),
+                    "capacities": byte_distribution(
+                        [
+                            item.get("capacity_bytes")
+                            if isinstance(item.get("capacity_bytes"), int)
+                            else None
+                            for item in drive_values
+                        ],
+                        capacity_boundaries,
+                    ),
                     "sampled_drives": len(drive_values),
                 },
                 "storage": {
@@ -918,10 +1060,52 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                         ]
                     ),
                     "sampled_installations": len(layout_values),
+                    "controller_redundancy_installations": sum(
+                        1
+                        for item in layout_values
+                        if isinstance(item.get("controller_redundant_count"), int)
+                        and item["controller_redundant_count"] > 0
+                    ),
+                    "logical_capacity": byte_distribution(
+                        [
+                            item.get("logical_capacity_bytes")
+                            if isinstance(item.get("logical_capacity_bytes"), int)
+                            else None
+                            for item in capacities_by_installation.values()
+                        ],
+                        capacity_boundaries,
+                    ),
+                    "free_space_percent": distribution(
+                        [
+                            "under_10_percent"
+                            if value < 10
+                            else "10_to_25_percent"
+                            if value < 25
+                            else "25_to_50_percent"
+                            if value < 50
+                            else "50_percent_or_more"
+                            for item in capacities_by_installation.values()
+                            if isinstance((value := item.get("free_percent")), (int, float))
+                            and not isinstance(value, bool)
+                        ]
+                    ),
                 },
                 "applications": [
                     {"product": product, "installations": count} for product, count in applications
                 ],
+                "application_combinations": application_combinations,
+                "upgrade_adoption": {
+                    "installations_with_observed_upgrade": sum(
+                        1 for sequence in observed_versions.values() if len(sequence) > 1
+                    ),
+                    "sampled_installations": len(observed_versions),
+                    "transitions": [
+                        {"transition": transition, "installations": count}
+                        for transition, count in sorted(
+                            transition_counts.items(), key=lambda item: (-item[1], item[0])
+                        )
+                    ],
+                },
                 "feature_usage": [
                     {"feature": feature, "installations": count} for feature, count in features
                 ],
@@ -929,6 +1113,10 @@ def create_central_app(settings: FleetCentralSettings) -> FastAPI:
                     "hardware_observations": 10_000,
                     "drive_observations": 50_000,
                     "storage_observations": 10_000,
+                    "capacity_observations": 10_000,
+                    "controller_observations": 10_000,
+                    "application_observations": 100_000,
+                    "version_observations": 100_000,
                 },
                 "methodology": (
                     "Latest retained observation per installation or drive; observed in Hoardarr "
