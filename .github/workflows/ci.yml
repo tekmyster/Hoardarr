@@ -255,7 +255,7 @@ jobs:
           printf '%s\n' "$passphrase" | sudo env "${source_env[@]}" \
             /usr/local/bin/hoardarr export-control-plane --output "$archive" \
             --encrypt-secrets > /tmp/hoardarr-export-report.json
-          artifact_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
+          artifact_sha256="$(sudo sha256sum "$archive" | cut -d' ' -f1)"
           grep -F '"credential_mode": "encrypted_secret_key"' /tmp/hoardarr-export-report.json
 
           services=(
