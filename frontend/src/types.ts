@@ -1681,6 +1681,45 @@ export interface TelemetrySettingsDocument {
   extended_history: { entitled: boolean; capability: string };
 }
 
+export interface FleetTelemetrySettingsDocument {
+  anonymous_heartbeat: { required: true; enabled: true };
+  hardware_enabled: boolean;
+  enhanced_enabled: boolean;
+  content_enabled: boolean;
+  installation_id: string;
+  endpoint: string;
+  connection_status: string;
+  credential_fingerprint: string | null;
+  last_successful_upload: string | null;
+  last_attempted_upload: string | null;
+  last_error: { code?: string; message?: string } | null;
+  schema_version: number;
+  country_code: string | null;
+  timezone: string;
+  location_detection_method: "os_timezone" | "locale" | "network" | "manual";
+  queued_records: number;
+  queued_bytes: number;
+  dead_letter_records: number;
+  by_status: Record<string, { records: number; bytes: number }>;
+  limitations: string;
+}
+
+export interface FleetPendingDocument {
+  schema_version: number;
+  field_groups: Record<string, string>;
+  items: Array<{
+    id: string;
+    message_type: "heartbeat" | "inventory" | "event" | "observation";
+    telemetry_level: 0 | 1 | 2 | 3;
+    schema_version: number;
+    payload: Record<string, unknown>;
+    status: "queued" | "retrying" | "dead_letter";
+    attempt_count: number;
+    last_error: { code?: string; message?: string } | null;
+    created_at: string;
+  }>;
+}
+
 export interface MetricAlertDocument {
   id: string;
   entity: MetricEntity;

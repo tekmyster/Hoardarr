@@ -50,6 +50,17 @@ from hoardarr.db.models import (
     WizardSession,
     utc_now,
 )
+from hoardarr.fleet.service import (
+    deliver_batch as deliver_fleet_batch,
+)
+from hoardarr.fleet.service import (
+    enqueue_heartbeat,
+    enqueue_inventory,
+    register_installation,
+)
+from hoardarr.fleet.service import (
+    ensure_state as ensure_fleet_state,
+)
 from hoardarr.hardware.locate import LocateError, execute_locate_plan, validate_locate_plan
 from hoardarr.hardware.maintenance import enrich_maintenance_capabilities
 from hoardarr.hardware.service import HardwareScanError, run_hardware_detector
@@ -2452,6 +2463,7 @@ def run_forever(
     servarr_activity_discoverer: ServarrActivityDiscoverer = discover_servarr_activity,
     media_discoverer: ServarrDiscoverer = discover_media_server,
     servarr_transport: httpx.BaseTransport | None = None,
+    fleet_transport: httpx.BaseTransport | None = None,
 ) -> None:
     """Recover abandoned leases periodically, then process work until stopped."""
 
@@ -2464,6 +2476,7 @@ def run_forever(
         next_servarr_activity = time.monotonic()
         next_media_refresh = time.monotonic()
         next_backup_schedule = time.monotonic()
+        next_fleet_sync = time.monotonic()
         while stop_event is None or not stop_event.is_set():
             try:
                 collect_for_worker(session_factory, settings, telemetry_service)
@@ -2507,6 +2520,32 @@ def run_forever(
                 except Exception as exc:
                     LOGGER.warning("Remote backup scheduling failed (%s)", type(exc).__name__)
                 next_backup_schedule = time.monotonic() + 60.0
+            if time.monotonic() >= next_fleet_sync and not (
+                settings.environment == "test" and fleet_transport is None
+            ):
+                try:
+                    with session_factory() as session, session.begin():
+                        fleet_state = ensure_fleet_state(session)
+                        needs_registration = fleet_state.credential_ciphertext is None
+                        enqueue_heartbeat(session, settings)
+                        enqueue_inventory(session, settings)
+                    if needs_registration:
+                        register_installation(
+                            session_factory,
+                            settings,
+                            secret_box,
+                            transport=fleet_transport,
+                        )
+                    deliver_fleet_batch(
+                        session_factory,
+                        settings,
+                        secret_box,
+                        transport=fleet_transport,
+                    )
+                except Exception as exc:
+                    # Fleet delivery is store-and-forward and cannot stop local work.
+                    LOGGER.warning("Fleet telemetry delivery deferred (%s)", type(exc).__name__)
+                next_fleet_sync = time.monotonic() + settings.fleet_heartbeat_interval_seconds
             if time.monotonic() >= next_recovery:
                 recover_abandoned_operations(session_factory=session_factory, settings=settings)
                 next_recovery = time.monotonic() + recovery_interval

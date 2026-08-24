@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     telemetry_cleanup_batch_size: int = Field(default=10000, ge=1000, le=100000)
     telemetry_rollup_percentile_samples: int = Field(default=20000, ge=100, le=100000)
     telemetry_collector_workers: int = Field(default=4, ge=1, le=16)
+    fleet_telemetry_endpoint: str = "https://hoardarr.com/api/telemetry/v1"
+    fleet_queue_max_records: int = Field(default=10_000, ge=100, le=100_000)
+    fleet_queue_max_bytes: int = Field(
+        default=64 * 1024 * 1024, ge=1024 * 1024, le=1024 * 1024 * 1024
+    )
+    fleet_queue_max_age_days: int = Field(default=90, ge=1, le=730)
+    fleet_batch_max_records: int = Field(default=100, ge=1, le=1000)
+    fleet_batch_max_bytes: int = Field(default=512 * 1024, ge=16 * 1024, le=4 * 1024 * 1024)
+    fleet_heartbeat_interval_seconds: int = Field(default=21_600, ge=900, le=86_400)
 
     @field_validator("environment")
     @classmethod
@@ -150,6 +159,16 @@ class Settings(BaseSettings):
         if parts.scheme != "https" or parts.hostname != "github.com" or parts.username:
             raise ValueError("update metadata must use the configured GitHub HTTPS origin")
         return value
+
+    @field_validator("fleet_telemetry_endpoint")
+    @classmethod
+    def validate_fleet_endpoint(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+            raise ValueError("fleet telemetry endpoint must be an authenticated HTTPS origin")
+        if parts.query or parts.fragment:
+            raise ValueError("fleet telemetry endpoint cannot contain a query or fragment")
+        return value.rstrip("/")
 
     @property
     def session_cookie_name(self) -> str:

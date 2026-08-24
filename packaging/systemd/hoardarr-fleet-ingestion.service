@@ -1,0 +1,26 @@
+[Unit]
+Description=Hoardarr.com fleet telemetry ingestion service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hoardarr-fleet
+Group=hoardarr-fleet
+EnvironmentFile=/etc/hoardarr/fleet-ingestion.env
+ExecStart=/usr/lib/hoardarr/current/venv/bin/hoardarr-fleet-ingestion
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hoardarr-fleet
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

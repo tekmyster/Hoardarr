@@ -916,6 +916,71 @@ class WebhookDelivery(Base):
     )
 
 
+class FleetTelemetryState(Base):
+    """Persistent privacy choices and installation-scoped fleet identity."""
+
+    __tablename__ = "fleet_telemetry_state"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="system")
+    installation_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    hardware_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enhanced_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    content_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    country_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(128), nullable=False, default="UTC")
+    location_detection_method: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="os_timezone"
+    )
+    credential_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    credential_fingerprint: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    registration_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unregistered"
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class FleetTelemetryQueue(Base):
+    """Bounded durable outbound queue; the browser never owns delivery state."""
+
+    __tablename__ = "fleet_telemetry_queue"
+    __table_args__ = (
+        Index("ix_fleet_telemetry_queue_due", "status", "next_attempt_at"),
+        Index("ix_fleet_telemetry_queue_priority_created", "priority", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    telemetry_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    last_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

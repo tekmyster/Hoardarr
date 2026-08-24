@@ -1085,3 +1085,39 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .media-library-grid code {
   overflow-wrap: anywhere;
 }
+
+.telemetry-privacy-levels {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.telemetry-privacy-levels label {
+  align-items: flex-start;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.85rem;
+}
+
+.telemetry-privacy-levels label span {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.telemetry-privacy-levels small {
+  color: var(--muted);
+}
+
+.telemetry-payload-viewer pre {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  max-height: 28rem;
+  overflow: auto;
+  padding: 1rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

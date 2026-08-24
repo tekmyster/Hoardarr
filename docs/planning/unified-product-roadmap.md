@@ -108,41 +108,41 @@ Every row includes the complete scope and acceptance requirements in its linked 
 
 | ID | Priority | Source requirement | Scope/acceptance | Status |
 |---|---|---|---|---|
-| FLEET-01 | P1 | 1. Telemetry levels | Implement and prove every requirement in [FLEET §1](specs/fleet-telemetry-hardware-lifecycle.md#1-telemetrylevels). | QUEUED |
-| FLEET-02 | P1 | 2. Enhanced diagnostics — explicit opt-in | Implement and prove every requirement in [FLEET §2](specs/fleet-telemetry-hardware-lifecycle.md#2-enhanceddiagnosticsexplicitopt-in). | QUEUED |
-| FLEET-03 | P1 | 3. Content diagnostics — separate explicit opt-in | Implement and prove every requirement in [FLEET §3](specs/fleet-telemetry-hardware-lifecycle.md#3-contentdiagnosticsseparateexplicitopt-in). | QUEUED |
-| FLEET-04 | P1 | 4. Never transmitted | Implement and prove every requirement in [FLEET §4](specs/fleet-telemetry-hardware-lifecycle.md#4-nevertransmitted). | QUEUED |
-| FLEET-05 | P1 | 5. Country/timezone detection during installation | Implement and prove every requirement in [FLEET §5](specs/fleet-telemetry-hardware-lifecycle.md#5-countrytimezonedetectionduringinstallation). | QUEUED |
-| FLEET-06 | P1 | 6. Installation identity | Implement and prove every requirement in [FLEET §6](specs/fleet-telemetry-hardware-lifecycle.md#6-installationidentity). | QUEUED |
-| FLEET-07 | P1 | 7. Cross-system pseudonymous drive identity | Implement and prove every requirement in [FLEET §7](specs/fleet-telemetry-hardware-lifecycle.md#7-cross-systempseudonymousdriveidentity). | QUEUED |
-| FLEET-08 | P1 | 8. Partial serials | Implement and prove every requirement in [FLEET §8](specs/fleet-telemetry-hardware-lifecycle.md#8-partialserials). | QUEUED |
-| FLEET-09 | P1 | 9. Cross-system lifecycle | Implement and prove every requirement in [FLEET §9](specs/fleet-telemetry-hardware-lifecycle.md#9-cross-systemlifecycle). | QUEUED |
-| FLEET-10 | P1 | 10. Heartbeats, snapshots, and events | Implement and prove every requirement in [FLEET §10](specs/fleet-telemetry-hardware-lifecycle.md#10-heartbeatssnapshotsandevents). | QUEUED |
-| FLEET-11 | P1 | 11. hoardarr.com ingestion API | Implement and prove every requirement in [FLEET §11](specs/fleet-telemetry-hardware-lifecycle.md#11-hoardarrcomingestionapi). | QUEUED |
-| FLEET-12 | P1 | 12. HTTPS only | Implement and prove every requirement in [FLEET §12](specs/fleet-telemetry-hardware-lifecycle.md#12-httpsonly). | QUEUED |
-| FLEET-13 | P1 | 13. Installation registration credential | Implement and prove every requirement in [FLEET §13](specs/fleet-telemetry-hardware-lifecycle.md#13-installationregistrationcredential). | QUEUED |
-| FLEET-14 | P1 | 14. Authenticated telemetry envelopes | Implement and prove every requirement in [FLEET §14](specs/fleet-telemetry-hardware-lifecycle.md#14-authenticatedtelemetryenvelopes). | QUEUED |
-| FLEET-15 | P1 | 15. Client-controlled limitation | Implement and prove every requirement in [FLEET §15](specs/fleet-telemetry-hardware-lifecycle.md#15-client-controlledlimitation). | QUEUED |
-| FLEET-16 | P1 | 16. Durable offline queue | Implement and prove every requirement in [FLEET §16](specs/fleet-telemetry-hardware-lifecycle.md#16-durableofflinequeue). | QUEUED |
-| FLEET-17 | P1 | 17. Store-and-forward behavior | Implement and prove every requirement in [FLEET §17](specs/fleet-telemetry-hardware-lifecycle.md#17-store-and-forwardbehavior). | QUEUED |
-| FLEET-18 | P1 | 18. Queue bounding | Implement and prove every requirement in [FLEET §18](specs/fleet-telemetry-hardware-lifecycle.md#18-queuebounding). | QUEUED |
-| FLEET-19 | P1 | 19. Retry behavior | Implement and prove every requirement in [FLEET §19](specs/fleet-telemetry-hardware-lifecycle.md#19-retrybehavior). | QUEUED |
-| FLEET-20 | P1 | 20. Dead-letter behavior | Implement and prove every requirement in [FLEET §20](specs/fleet-telemetry-hardware-lifecycle.md#20-dead-letterbehavior). | QUEUED |
-| FLEET-21 | P1 | 21. Settings → Telemetry & Privacy | Implement and prove every requirement in [FLEET §21](specs/fleet-telemetry-hardware-lifecycle.md#21-settingstelemetryprivacy). | QUEUED |
-| FLEET-22 | P1 | 22. View exactly what is sent | Implement and prove every requirement in [FLEET §22](specs/fleet-telemetry-hardware-lifecycle.md#22-viewexactlywhatissent). | QUEUED |
-| FLEET-23 | P1 | 23. Central data model | Implement and prove every requirement in [FLEET §23](specs/fleet-telemetry-hardware-lifecycle.md#23-centraldatamodel). | QUEUED |
-| FLEET-24 | P2 | 24. Aggregate analytics | Implement and prove every requirement in [FLEET §24](specs/fleet-telemetry-hardware-lifecycle.md#24-aggregateanalytics). | QUEUED |
+| FLEET-01 | P1 | 1. Telemetry levels | Implement and prove every requirement in [FLEET §1](specs/fleet-telemetry-hardware-lifecycle.md#1-telemetrylevels). | IN PROGRESS — level boundaries and consent are enforced; complete remaining Level 1 inventory fields and automatic product-event hooks. |
+| FLEET-02 | P1 | 2. Enhanced diagnostics — explicit opt-in | Implement and prove every requirement in [FLEET §2](specs/fleet-telemetry-hardware-lifecycle.md#2-enhanceddiagnosticsexplicitopt-in). | VERIFIED IN ISOLATION — separate off-by-default Level 2 consent and hierarchical enforcement are covered by fleet API/service tests. |
+| FLEET-03 | P1 | 3. Content diagnostics — separate explicit opt-in | Implement and prove every requirement in [FLEET §3](specs/fleet-telemetry-hardware-lifecycle.md#3-contentdiagnosticsseparateexplicitopt-in). | VERIFIED IN ISOLATION — separate off-by-default Level 3 consent cannot be enabled without Level 2; file contents remain prohibited. |
+| FLEET-04 | P1 | 4. Never transmitted | Implement and prove every requirement in [FLEET §4](specs/fleet-telemetry-hardware-lifecycle.md#4-nevertransmitted). | VERIFIED IN ISOLATION — recursive bounded sanitization and secret-key fixtures prove passwords, API keys, tokens, CHAP, SNMP and key material are removed. |
+| FLEET-05 | P1 | 5. Country/timezone detection during installation | Implement and prove every requirement in [FLEET §5](specs/fleet-telemetry-hardware-lifecycle.md#5-countrytimezonedetectionduringinstallation). | IN PROGRESS — IANA timezone detection, validation, manual confirmation and persistence exist; country suggestion during first-run remains. |
+| FLEET-06 | P1 | 6. Installation identity | Implement and prove every requirement in [FLEET §6](specs/fleet-telemetry-hardware-lifecycle.md#6-installationidentity). | VERIFIED IN ISOLATION — persistent random UUID, restart retention and explicit destructive reset are covered by API/service tests. |
+| FLEET-07 | P1 | 7. Cross-system pseudonymous drive identity | Implement and prove every requirement in [FLEET §7](specs/fleet-telemetry-hardware-lifecycle.md#7-cross-systempseudonymousdriveidentity). | VERIFIED IN ISOLATION — versioned strongest-identifier hashing and A/B client ingestion prove the same virtual drive maps centrally without raw serial transmission. |
+| FLEET-08 | P1 | 8. Partial serials | Implement and prove every requirement in [FLEET §8](specs/fleet-telemetry-hardware-lifecycle.md#8-partialserials). | VERIFIED IN ISOLATION — only an ellipsized terminal fragment is emitted and fixtures prove the full serial is absent. |
+| FLEET-09 | P1 | 9. Cross-system lifecycle | Implement and prove every requirement in [FLEET §9](specs/fleet-telemetry-hardware-lifecycle.md#9-cross-systemlifecycle). | VERIFIED IN ISOLATION — normalized drive observations preserve one pseudonymous drive across two independent client installations; physical movement validation remains separate. |
+| FLEET-10 | P1 | 10. Heartbeats, snapshots, and events | Implement and prove every requirement in [FLEET §10](specs/fleet-telemetry-hardware-lifecycle.md#10-heartbeatssnapshotsandevents). | IN PROGRESS — distinct durable message types, heartbeat coalescing and inventory cadence exist; complete automatic lifecycle/product-event emission. |
+| FLEET-11 | P1 | 11. hoardarr.com ingestion API | Implement and prove every requirement in [FLEET §11](specs/fleet-telemetry-hardware-lifecycle.md#11-hoardarrcomingestionapi). | VERIFIED IN ISOLATION — versioned registration/batch endpoints and health check ingest two independent real Hoardarr clients in executed tests. |
+| FLEET-12 | P1 | 12. HTTPS only | Implement and prove every requirement in [FLEET §12](specs/fleet-telemetry-hardware-lifecycle.md#12-httpsonly). | VERIFIED IN ISOLATION — configuration rejects non-HTTPS endpoints and the client forces certificate verification with no bypass setting. |
+| FLEET-13 | P1 | 13. Installation registration credential | Implement and prove every requirement in [FLEET §13](specs/fleet-telemetry-hardware-lifecycle.md#13-installationregistrationcredential). | VERIFIED IN ISOLATION — unique random per-installation credential is returned once and AES-GCM protected at both boundaries; silent reissue is rejected. |
+| FLEET-14 | P1 | 14. Authenticated telemetry envelopes | Implement and prove every requirement in [FLEET §14](specs/fleet-telemetry-hardware-lifecycle.md#14-authenticatedtelemetryenvelopes). | VERIFIED IN ISOLATION — canonical HMAC envelope, sequence, UUID batch, digests, size/schema validation and replay rejection pass receiver tests. |
+| FLEET-15 | P1 | 15. Client-controlled limitation | Implement and prove every requirement in [FLEET §15](specs/fleet-telemetry-hardware-lifecycle.md#15-client-controlledlimitation). | VERIFIED — Settings UI and architecture documentation state that authentication is not trusted hardware attestation. |
+| FLEET-16 | P1 | 16. Durable offline queue | Implement and prove every requirement in [FLEET §16](specs/fleet-telemetry-hardware-lifecycle.md#16-durableofflinequeue). | VERIFIED IN ISOLATION — SQLite queue survives engine/client restart and does not depend on API or browser lifetime. |
+| FLEET-17 | P1 | 17. Store-and-forward behavior | Implement and prove every requirement in [FLEET §17](specs/fleet-telemetry-hardware-lifecycle.md#17-store-and-forwardbehavior). | VERIFIED IN ISOLATION — executed outage→persist→restart→retry→server acknowledgement→local deletion workflow passes. |
+| FLEET-18 | P1 | 18. Queue bounding | Implement and prove every requirement in [FLEET §18](specs/fleet-telemetry-hardware-lifecycle.md#18-queuebounding). | VERIFIED IN ISOLATION — record, byte and age caps, priority pruning and heartbeat coalescing are covered by deterministic tests. |
+| FLEET-19 | P1 | 19. Retry behavior | Implement and prove every requirement in [FLEET §19](specs/fleet-telemetry-hardware-lifecycle.md#19-retrybehavior). | IMPLEMENTED — bounded exponential backoff/jitter and temporary/permanent/credential response classes exist; broaden transport-failure matrix before verification. |
+| FLEET-20 | P1 | 20. Dead-letter behavior | Implement and prove every requirement in [FLEET §20](specs/fleet-telemetry-hardware-lifecycle.md#20-dead-letterbehavior). | VERIFIED IN ISOLATION — permanent rejection becomes bounded inspectable dead-letter state rather than retrying forever. |
+| FLEET-21 | P1 | 21. Settings → Telemetry & Privacy | Implement and prove every requirement in [FLEET §21](specs/fleet-telemetry-hardware-lifecycle.md#21-settingstelemetryprivacy). | VERIFIED IN ISOLATION — real Settings panel, save/send/clear/reset actions, status and loading/error behavior pass component/API/accessibility tests. |
+| FLEET-22 | P1 | 22. View exactly what is sent | Implement and prove every requirement in [FLEET §22](specs/fleet-telemetry-hardware-lifecycle.md#22-viewexactlywhatissent). | VERIFIED IN ISOLATION — authenticated pending-payload API and exact JSON viewer/export expose each record and telemetry level. |
+| FLEET-23 | P1 | 23. Central data model | Implement and prove every requirement in [FLEET §23](specs/fleet-telemetry-hardware-lifecycle.md#23-centraldatamodel). | IMPLEMENTED — portable normalized central receiver models and projections exist and pass SQLite isolation tests; production database migration/deployment remains. |
+| FLEET-24 | P2 | 24. Aggregate analytics | Implement and prove every requirement in [FLEET §24](specs/fleet-telemetry-hardware-lifecycle.md#24-aggregateanalytics). | IN PROGRESS — authenticated active-installation, version and cross-system-drive aggregates exist; remaining hardware/layout/application distributions remain. |
 | FLEET-25 | P2 | 25. Drive lifecycle analytics | Implement and prove every requirement in [FLEET §25](specs/fleet-telemetry-hardware-lifecycle.md#25-drivelifecycleanalytics). | QUEUED |
 | FLEET-26 | P2 | 26. Purchase metadata — optional | Implement and prove every requirement in [FLEET §26](specs/fleet-telemetry-hardware-lifecycle.md#26-purchasemetadataoptional). | QUEUED |
 | FLEET-27 | P2 | 27. Affiliate analytics boundary | Implement and prove every requirement in [FLEET §27](specs/fleet-telemetry-hardware-lifecycle.md#27-affiliateanalyticsboundary). | QUEUED |
 | FLEET-28 | P2 | 28. Internal hoardarr.com admin dashboard | Implement and prove every requirement in [FLEET §28](specs/fleet-telemetry-hardware-lifecycle.md#28-internalhoardarrcomadmindashboard). | QUEUED |
-| FLEET-29 | P1 | 29. Telemetry schema evolution | Implement and prove every requirement in [FLEET §29](specs/fleet-telemetry-hardware-lifecycle.md#29-telemetryschemaevolution). | QUEUED |
+| FLEET-29 | P1 | 29. Telemetry schema evolution | Implement and prove every requirement in [FLEET §29](specs/fleet-telemetry-hardware-lifecycle.md#29-telemetryschemaevolution). | IN PROGRESS — schema identifiers and unsupported-version rejection exist; add compatibility/migration fixtures before verification. |
 | FLEET-30 | P1 | 30. Central retention | Implement and prove every requirement in [FLEET §30](specs/fleet-telemetry-hardware-lifecycle.md#30-centralretention). | QUEUED |
-| FLEET-31 | P1 | 31. Source IP | Implement and prove every requirement in [FLEET §31](specs/fleet-telemetry-hardware-lifecycle.md#31-sourceip). | QUEUED |
-| FLEET-32 | P1 | 32. End-to-end cross-system drive test | Implement and prove every requirement in [FLEET §32](specs/fleet-telemetry-hardware-lifecycle.md#32-end-to-endcross-systemdrivetest). | QUEUED |
-| FLEET-33 | P1 | 33. Offline queue end-to-end test | Implement and prove every requirement in [FLEET §33](specs/fleet-telemetry-hardware-lifecycle.md#33-offlinequeueend-to-endtest). | QUEUED |
-| FLEET-34 | P1 | 34. Secret filtering tests | Implement and prove every requirement in [FLEET §34](specs/fleet-telemetry-hardware-lifecycle.md#34-secretfilteringtests). | QUEUED |
-| FLEET-35 | P1 | 35. Completion requirements | Implement and prove every requirement in [FLEET §35](specs/fleet-telemetry-hardware-lifecycle.md#35-completionrequirements). | QUEUED |
+| FLEET-31 | P1 | 31. Source IP | Implement and prove every requirement in [FLEET §31](specs/fleet-telemetry-hardware-lifecycle.md#31-sourceip). | VERIFIED IN ISOLATION — receiver never projects request IP into analytics or raw telemetry records. |
+| FLEET-32 | P1 | 32. End-to-end cross-system drive test | Implement and prove every requirement in [FLEET §32](specs/fleet-telemetry-hardware-lifecycle.md#32-end-to-endcross-systemdrivetest). | VERIFIED IN ISOLATION — two independent client databases submit the same sanitized virtual WWN and central analytics records one cross-system drive. |
+| FLEET-33 | P1 | 33. Offline queue end-to-end test | Implement and prove every requirement in [FLEET §33](specs/fleet-telemetry-hardware-lifecycle.md#33-offlinequeueend-to-endtest). | VERIFIED IN ISOLATION — actual client and receiver execute registration, simulated outage, persistence, restart, reconnect, acknowledgement and deletion. |
+| FLEET-34 | P1 | 34. Secret filtering tests | Implement and prove every requirement in [FLEET §34](specs/fleet-telemetry-hardware-lifecycle.md#34-secretfilteringtests). | VERIFIED IN ISOLATION — malicious nested hardware/provider fixture confirms never-transmitted fields and full serial/path values are absent. |
+| FLEET-35 | P1 | 35. Completion requirements | Implement and prove every requirement in [FLEET §35](specs/fleet-telemetry-hardware-lifecycle.md#35-completionrequirements). | IN PROGRESS — client, receiver, privacy UI and A/B isolation paths exist; remaining Level 1 fields, central retention, production staging and event hooks prevent completion. |
 
 ## COMM — Community profiles and leaderboards
 
@@ -322,6 +322,51 @@ These task families extend—rather than replace—the original 120 rows. Status
 | MEDIA-10 | P1 | Torrent and Usenet state models | Separate incomplete/complete/seeding from download/repair/unpack/import/cleanup semantics. | SOFTWARE VERIFIED — torrent download-complete/seeding retention/manual cleanup and Usenet download/repair/unpack/verify/import/cleanup prerequisites are distinct planner states with immutable plans, durable execution, restart-safe staging, source identity revalidation, and UI explanations |
 | MEDIA-11 | P1 | Tier occupancy and migration UX | Show real configured membership, capacity, queued moves, seeding retention, drain estimates, and failures. | SOFTWARE VERIFIED — the Storage UI reads capacity only from configured cache/landing Storage Group backends, shows exact durable queued/running byte totals, retained seeding bytes and failures, and reports drain time only after at least three measured copy/move rates; hardlinks are excluded from rate history and insufficient evidence remains Not reported |
 
+### VOLUME — Logical volumes, datasets, LUNs, and data services
+
+| ID | Priority | Task | Acceptance | Status |
+|---|---|---|---|---|
+| VOLUME-01 | P1 | Canonical logical-storage abstraction | Persist a backend-aware volume/dataset/LUN identity above pools and below Storage Groups without promising unsupported semantics. | NOT STARTED |
+| VOLUME-02 | P1 | Capability and constraint model | Normalize size, allocation, filesystem, block/file presentation, snapshot, quota, reservation, thin-provisioning, clone, QoS, and replication capabilities with honest unsupported states. | NOT STARTED |
+| VOLUME-03 | P1 | Guided volume creation | Create plain-language media, download, backup, and VM-storage choices using detected backend capabilities and safe defaults. | NOT STARTED |
+| VOLUME-04 | P1 | Advanced volume creation | Expose exact ZFS dataset/zvol, LVM LV, filesystem, and LUN geometry only where the corresponding provider is implemented. | NOT STARTED |
+| VOLUME-05 | P2 | Snapshot and clone lifecycle | Implement durable create/list/restore/delete, schedules, retention, and clone behavior for providers that expose those operations. | NOT STARTED |
+| VOLUME-06 | P2 | Quotas, reservations, and thin provisioning | Apply and read back provider-native capacity limits without simulating them on unsupported backends. | NOT STARTED |
+| VOLUME-07 | P2 | Storage QoS and IO limits | Apply provider/cgroup/native limits only where supported and show actual effective configuration. | NOT STARTED |
+| VOLUME-08 | P2 | Replication targets and schedules | Configure backend-aware remote replication, credentials, schedules, resumability, lag, and failure history. | NOT STARTED |
+| VOLUME-09 | P2 | Replication telemetry | Persist last success, lag, transferred bytes, destination state, recovery point, and honest unavailable values. | NOT STARTED |
+| VOLUME-10 | P2 | Hot-spare and rolling replacement policies | Model provider-native spares and maintenance replacement without conflating parity, replicas, or generic copies. | NOT STARTED |
+| VOLUME-11 | P2 | Logical-storage UI and Activity | Provide navigation, list/detail, wizard, capability matrix, history, loading/empty/error states, and durable operation progress. | NOT STARTED |
+| VOLUME-12 | P2 | Disposable Linux integration | Execute capability, creation, snapshot, restore, quota, LUN, and replication tests only against purpose-created virtual storage. | NOT STARTED |
+
+### HA — Active/passive storage ownership maturity
+
+| ID | Priority | Task | Acceptance | Status |
+|---|---|---|---|---|
+| HA-01 | P1 | HA-1 controller/path redundancy traceability | Preserve the existing proven multipath lifecycle as a separate maturity level. | VERIFIED IN ISOLATION — controller/path failover and identity preservation are covered by the existing multipath lifecycle evidence |
+| HA-02 | P1 | HA-2 controlled ownership handoff | Preserve and productize explicit single-writer storage ownership handoff between two nodes. | VERIFIED IN ISOLATION — two-node virtual workflow proved controlled handoff; persistent product settings and UI remain HA-03/HA-08 work |
+| HA-03 | P1 | HA-3 persistent peer awareness | Persist local/peer identity, FQDN/IP presentation, reachability, role, current owner, readiness, synchronization, and history. | NOT STARTED |
+| HA-04 | P2 | HA-4 replicated control-plane state | Replicate only defined control-plane state with schema/version checks, conflict handling, secret boundaries, and recovery proof. | NOT STARTED |
+| HA-05 | P2 | HA-5 floating service endpoint | Configure and verify a stable service IP/endpoint without changing application storage paths. | NOT STARTED |
+| HA-06 | P2 | HA-6 automatic active/passive failover | Detect failure, preserve single-writer ownership, transition services/storage, record cause/duration, and support configured failback. | NOT STARTED |
+| HA-07 | P2 | HA-7 fencing and split-brain protection | Require a tested fencing/quorum mechanism before automatic shared-storage ownership changes. | NOT STARTED |
+| HA-08 | P1 | Advanced HA settings and status UI | Expose configured mode, nodes, addresses, roles, owner, readiness, endpoint, sync, failover/failback history, and only controls that affect runtime. | NOT STARTED |
+| HA-09 | P2 | HA telemetry and graph annotations | Persist serving node, storage availability, transition cause/duration, CPU/IO behavior, and recovery annotations. | NOT STARTED |
+| HA-10 | P2 | Active/passive A/B fault-injection validation | Execute failure, restart, handoff, endpoint, fencing, integrity, and failback scenarios in the persistent virtual lab. | NOT STARTED |
+
+### LAB — Persistent development and owner-auditable validation environment
+
+| ID | Priority | Task | Acceptance | Status |
+|---|---|---|---|---|
+| LAB-01 | P1 | Persistent Hoardarr-A and Hoardarr-B nodes | Maintain two owner-auditable Ubuntu 24.04/Python 3.12/systemd nodes separately from disposable CI. | NOT STARTED |
+| LAB-02 | P1 | Protected physical-disk boundary | Positively exclude the four Cisco SSDs and use only purpose-created virtual storage unless separately authorized. | VERIFIED — beta inventory is read-only and no saved plan has been applied |
+| LAB-03 | P1 | Real virtual managed storage | Create actual mergerFS/SnapRAID, ZFS, Linux MD, landing-tier, and shared multipath constructs through Hoardarr-supported paths. | NOT STARTED |
+| LAB-04 | P1 | Visible beta/lab state | Show real groups, pools, tiers, jobs, topology, graphs, peers, and failover history for owner inspection without frontend fixtures. | NOT STARTED |
+| LAB-05 | P1 | Store-and-forward fleet validation | Demonstrate offline queue, reconnect, authenticated batch, acknowledgement, and deletion on both persistent nodes. | NOT STARTED |
+| LAB-06 | P1 | Cross-system virtual-drive lifecycle | Move one virtual stable drive identity from A to B and preserve pseudonymous lifecycle without claiming ownership transfer. | NOT STARTED |
+| LAB-07 | P2 | Persistent lab rebuild and drift automation | Document and automate safe recreation, snapshot, health, backup, and drift checks without treating the lab as CI. | NOT STARTED |
+| LAB-08 | P2 | Persona and live-product QA | Run Guided/ARR/data-hoarder/storage-expert scenarios against real lab state and retain browser evidence. | NOT STARTED |
+
 ### ARCH — Architecture reconciliations
 
 | ID | Priority | Task | Acceptance | Status |
@@ -356,7 +401,7 @@ LIFE-01 through LIFE-12 and DRAIN-01 through DRAIN-12. Establish durable Storage
 
 ### Wave 2 — P1 hardware, expansion, and media workflow
 
-HW-01 through HW-15, EXPAND-01 through EXPAND-08, and MEDIA-01 through MEDIA-11. Productize disk health, topology evidence, bay confidence, Guided recommendations, ARR-aware scheduling, download tiers, and telemetry UX.
+HW-01 through HW-15, EXPAND-01 through EXPAND-08, MEDIA-01 through MEDIA-11, VOLUME-01 through VOLUME-04, HA-01 through HA-03 and HA-08, and LAB-01 through LAB-06. Productize disk health, topology evidence, Guided recommendations, ARR-aware scheduling, download tiers, telemetry UX, logical-storage truth, persistent peer awareness, and an owner-auditable virtual lab.
 
 ### Wave 3 — P2 foreign storage and archive intake
 
@@ -396,7 +441,7 @@ WEB-07 and EDGE-01 through EDGE-30. Edge protections required by a public ingest
 - EDGE source tasks: 30
 - FLEET source tasks: 35
 - COMM source tasks: 36
-- Core lifecycle tasks: 12
+- Core lifecycle tasks: 14
 - Drain/evacuate tasks: 12
 - Expansion-planning tasks: 8
 - Foreign-storage/archive tasks: 12
@@ -404,8 +449,11 @@ WEB-07 and EDGE-01 through EDGE-30. Edge protections required by a public ingest
 - Backup tasks: 9
 - Automation/alerting tasks: 8
 - Media/ARR/graph tasks: 11
+- Logical volume/dataset/LUN tasks: 12
+- Active/passive HA maturity tasks: 10
+- Persistent development-lab tasks: 8
 - Architecture-reconciliation tasks: 6
 - Cross-cutting validation tasks: 6
-- Total tracked tasks: 221
+- Total tracked tasks: 253
 
 Implementation follows the dependency waves above. Production deployment, destructive physical-disk use, and public launch remain separately gated.

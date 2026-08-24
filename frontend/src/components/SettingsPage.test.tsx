@@ -10,6 +10,33 @@ describe("SettingsPage updates and add-ons", () => {
     vi.spyOn(api, "backupRuns").mockResolvedValue([]);
     vi.spyOn(api, "webhookEndpoints").mockResolvedValue([]);
     vi.spyOn(api, "webhookEventTypes").mockResolvedValue([]);
+    vi.spyOn(api, "fleetTelemetrySettings").mockResolvedValue({
+      anonymous_heartbeat: { required: true, enabled: true },
+      hardware_enabled: true,
+      enhanced_enabled: false,
+      content_enabled: false,
+      installation_id: "11111111-1111-4111-8111-111111111111",
+      endpoint: "https://hoardarr.com/api/telemetry/v1",
+      connection_status: "unregistered",
+      credential_fingerprint: null,
+      last_successful_upload: null,
+      last_attempted_upload: null,
+      last_error: null,
+      schema_version: 1,
+      country_code: "US",
+      timezone: "America/New_York",
+      location_detection_method: "manual",
+      queued_records: 0,
+      queued_bytes: 0,
+      dead_letter_records: 0,
+      by_status: {},
+      limitations: "Local administrators can alter collected data.",
+    });
+    vi.spyOn(api, "fleetPendingPayloads").mockResolvedValue({
+      schema_version: 1,
+      field_groups: {},
+      items: [],
+    });
   });
 
   afterEach(() => {

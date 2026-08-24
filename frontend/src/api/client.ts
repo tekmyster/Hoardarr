@@ -7,6 +7,8 @@ import type {
   IntegrationProduct,
   CurrentMetricsDocument,
   EntitlementDocument,
+  FleetPendingDocument,
+  FleetTelemetrySettingsDocument,
   ConnectivityCapabilities,
   ConnectivityServiceDocument,
   ConnectivityServiceInput,
@@ -759,6 +761,46 @@ class HoardarrApi {
 
   async telemetrySettings(signal?: AbortSignal): Promise<TelemetrySettingsDocument> {
     return this.request<TelemetrySettingsDocument>("/telemetry/settings", { signal });
+  }
+
+  async fleetTelemetrySettings(): Promise<FleetTelemetrySettingsDocument> {
+    return this.request<FleetTelemetrySettingsDocument>("/fleet-telemetry/settings");
+  }
+
+  async saveFleetTelemetrySettings(input: {
+    hardware_enabled: boolean;
+    enhanced_enabled: boolean;
+    content_enabled: boolean;
+    country_code: string | null;
+    timezone: string;
+  }): Promise<FleetTelemetrySettingsDocument> {
+    return this.request<FleetTelemetrySettingsDocument>("/fleet-telemetry/settings", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async fleetPendingPayloads(): Promise<FleetPendingDocument> {
+    return this.request<FleetPendingDocument>("/fleet-telemetry/pending");
+  }
+
+  async sendFleetTelemetryNow(): Promise<FleetTelemetrySettingsDocument> {
+    return this.request<FleetTelemetrySettingsDocument>("/fleet-telemetry/send-now", {
+      method: "POST",
+    });
+  }
+
+  async clearOptionalFleetTelemetry(): Promise<FleetTelemetrySettingsDocument> {
+    return this.request<FleetTelemetrySettingsDocument>("/fleet-telemetry/clear-optional", {
+      method: "POST",
+    });
+  }
+
+  async resetFleetTelemetryIdentity(): Promise<FleetTelemetrySettingsDocument> {
+    return this.request<FleetTelemetrySettingsDocument>("/fleet-telemetry/reset-identity", {
+      method: "POST",
+      body: JSON.stringify({ confirmation: "RESET TELEMETRY IDENTITY" }),
+    });
   }
 
   async telemetryEntitlements(): Promise<EntitlementDocument> {
