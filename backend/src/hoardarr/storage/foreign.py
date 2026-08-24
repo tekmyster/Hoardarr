@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import HardwareSnapshot, StorageBackend
+from hoardarr.db.models import ForeignImportEvidence, HardwareSnapshot, StorageBackend
 from hoardarr.operations.service import document_hash
 from hoardarr.storage.maintenance import IDENTITY_FIELDS, reviewed_device
 
@@ -36,10 +36,229 @@ def _text(value: Any, *, limit: int = 512) -> str | None:
     return normalized[:limit] if normalized else None
 
 
+def _identity_text(value: Any) -> str | None:
+    text = _text(value, limit=256)
+    return text.casefold() if text is not None else None
+
+
 class ForeignStorageError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+def persist_unraid_evidence(
+    session: Session,
+    *,
+    document: dict[str, Any],
+    created_by: str,
+) -> ForeignImportEvidence:
+    """Persist a bounded assignment snapshot; it contains identity metadata, never credentials."""
+
+    normalized_assignments = []
+    for item in document["assignments"]:
+        normalized_assignments.append(
+            {
+                "slot": str(item["slot"]),
+                "role": str(item["role"]),
+                "serial": str(item["serial"]).strip(),
+                "wwn": _text(item.get("wwn"), limit=256),
+                "eui64": _text(item.get("eui64"), limit=256),
+                "nguid": _text(item.get("nguid"), limit=256),
+                "capacity_bytes": item.get("capacity_bytes"),
+                "filesystem_type": _text(item.get("filesystem_type"), limit=64),
+            }
+        )
+    normalized = {
+        "schema_version": 1,
+        "source": "unraid_runtime_state",
+        "captured_at": str(document["captured_at"]),
+        "unraid_version": _text(document.get("unraid_version"), limit=64),
+        "assignments": sorted(normalized_assignments, key=lambda item: str(item["slot"])),
+    }
+    digest = document_hash(normalized)
+    for previous in session.scalars(
+        select(ForeignImportEvidence).where(
+            ForeignImportEvidence.source_type == "unraid_runtime_state",
+            ForeignImportEvidence.active.is_(True),
+        )
+    ):
+        previous.active = False
+    evidence = session.scalar(
+        select(ForeignImportEvidence).where(ForeignImportEvidence.document_sha256 == digest)
+    )
+    if evidence is None:
+        evidence = ForeignImportEvidence(
+            source_type="unraid_runtime_state",
+            document_sha256=digest,
+            evidence_json=normalized,
+            active=True,
+            created_by=created_by,
+        )
+        session.add(evidence)
+    else:
+        evidence.active = True
+    session.flush()
+    return evidence
+
+
+def clear_unraid_evidence(session: Session) -> int:
+    cleared = 0
+    for evidence in session.scalars(
+        select(ForeignImportEvidence).where(
+            ForeignImportEvidence.source_type == "unraid_runtime_state",
+            ForeignImportEvidence.active.is_(True),
+        )
+    ):
+        evidence.active = False
+        cleared += 1
+    session.flush()
+    return cleared
+
+
+def _active_unraid_evidence(session: Session) -> ForeignImportEvidence | None:
+    return session.scalar(
+        select(ForeignImportEvidence)
+        .where(
+            ForeignImportEvidence.source_type == "unraid_runtime_state",
+            ForeignImportEvidence.active.is_(True),
+        )
+        .order_by(ForeignImportEvidence.created_at.desc())
+        .limit(1)
+    )
+
+
+def _assignment_matches(member: dict[str, Any], assignment: dict[str, Any]) -> bool:
+    device = member["reviewed_device"]
+    matched = False
+    for field in ("serial", "wwn", "eui64", "nguid"):
+        expected = _identity_text(assignment.get(field))
+        observed = _identity_text(device.get(field))
+        if expected is None or observed is None:
+            continue
+        if expected != observed:
+            return False
+        matched = True
+    expected_capacity = assignment.get("capacity_bytes")
+    observed_capacity = device.get("capacity_bytes")
+    if isinstance(expected_capacity, int) and isinstance(observed_capacity, int):
+        tolerance = max(1_048_576, expected_capacity // 10_000)
+        if abs(expected_capacity - observed_capacity) > tolerance:
+            return False
+    return matched
+
+
+def _unraid_classification(
+    session: Session,
+    members: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    evidence = _active_unraid_evidence(session)
+    classifications: dict[str, dict[str, Any]] = {}
+    matched_assignments: set[str] = set()
+    ambiguous_assignments: list[str] = []
+    if evidence is not None:
+        for assignment in evidence.evidence_json.get("assignments", [])[:30]:
+            if not isinstance(assignment, dict):
+                continue
+            matches = [item for item in members if _assignment_matches(item, assignment)]
+            slot = str(assignment.get("slot") or "unknown")
+            if len(matches) != 1:
+                if len(matches) > 1:
+                    ambiguous_assignments.append(slot)
+                continue
+            member = matches[0]
+            matched_assignments.add(slot)
+            role = str(assignment["role"])
+            classifications[member["device_id"]] = {
+                "role": role,
+                "classification": "identified",
+                "slot": slot,
+                "reason": (
+                    f"Stable identity matches the persisted Unraid {slot} assignment."
+                ),
+                "evidence_sha256": evidence.document_sha256,
+                "parity_reuse_supported": False,
+            }
+
+    recognized_data_capacities = [
+        item["capacity_bytes"]
+        for item in members
+        if any(
+            str(signature["type"]).casefold() in SUPPORTED_FILESYSTEMS
+            for signature in item["signatures"]
+        )
+        and isinstance(item["capacity_bytes"], int)
+    ]
+    largest_data = max(recognized_data_capacities, default=None)
+    for member in members:
+        if member["device_id"] in classifications or member["system_device"]:
+            continue
+        supported_filesystem = any(
+            str(signature["type"]).casefold() in SUPPORTED_FILESYSTEMS
+            for signature in member["signatures"]
+        )
+        scan_complete = member["signature_scan"]["status"] == "complete"
+        capacity = member["capacity_bytes"]
+        if supported_filesystem:
+            classifications[member["device_id"]] = {
+                "role": "data",
+                "classification": "suspected",
+                "slot": None,
+                "reason": (
+                    "This independently readable filesystem is compatible with an Unraid data "
+                    "disk, but its format does not prove the source system."
+                ),
+                "evidence_sha256": None,
+                "parity_reuse_supported": False,
+            }
+        elif (
+            scan_complete
+            and isinstance(capacity, int)
+            and isinstance(largest_data, int)
+            and capacity >= largest_data
+        ):
+            classifications[member["device_id"]] = {
+                "role": "parity",
+                "classification": "suspected",
+                "slot": None,
+                "reason": (
+                    "A complete scan found no filesystem and capacity is not smaller than the "
+                    "largest readable data disk. This is compatible with Unraid parity, but it "
+                    "could also be blank, unsupported, or damaged."
+                ),
+                "evidence_sha256": None,
+                "parity_reuse_supported": False,
+            }
+        else:
+            classifications[member["device_id"]] = {
+                "role": "unknown",
+                "classification": "unknown",
+                "slot": None,
+                "reason": (
+                    "Available evidence cannot safely assign this disk a data or parity role."
+                ),
+                "evidence_sha256": None,
+                "parity_reuse_supported": False,
+            }
+    summary = None
+    if evidence is not None:
+        assignments = evidence.evidence_json.get("assignments", [])
+        summary = {
+            "id": evidence.id,
+            "source": evidence.source_type,
+            "document_sha256": evidence.document_sha256,
+            "captured_at": evidence.evidence_json.get("captured_at"),
+            "unraid_version": evidence.evidence_json.get("unraid_version"),
+            "assignment_count": len(assignments) if isinstance(assignments, list) else 0,
+            "matched_assignment_count": len(matched_assignments),
+            "unmatched_slots": sorted(
+                str(item.get("slot"))
+                for item in assignments
+                if isinstance(item, dict) and str(item.get("slot")) not in matched_assignments
+            ),
+            "ambiguous_slots": sorted(ambiguous_assignments),
+        }
+    return classifications, summary
 
 
 def _signature_documents(disk: dict[str, Any]) -> list[dict[str, Any]]:
@@ -199,7 +418,6 @@ def _candidate_document(
     if tool is not None and shutil.which(tool) is None:
         blockers.append(f"The required read-only {tool} provider is not installed on this host.")
 
-    safety_blocked = bool(blockers)
     inspection_available = False
     stack_preview_available = False
     if profile == "standalone_filesystem" and not blockers and filesystems:
@@ -218,6 +436,7 @@ def _candidate_document(
             blockers.append("Automatic inspection requires one unambiguous filesystem source path.")
     elif profile in {"linux_md", "lvm", "zfs"} and not blockers:
         stack_preview_available = True
+    safety_blocked = bool(blockers)
     state = (
         "ready"
         if inspection_available or stack_preview_available
@@ -608,6 +827,9 @@ def assess_foreign_storage(
         else []
     )
     members = [_member(item) for item in disks]
+    unraid_classifications, unraid_evidence = _unraid_classification(session, members)
+    for member in members:
+        member["unraid"] = unraid_classifications.get(member["device_id"])
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for member in members:
@@ -627,19 +849,53 @@ def assess_foreign_storage(
         ]
         if filesystem_items:
             grouped[("standalone_filesystem", str(member["device_id"]))].append(member)
+        elif not signatures and not member["system_device"]:
+            grouped[("unraid_unknown", str(member["device_id"]))].append(member)
 
     candidates: list[dict[str, Any]] = []
     for (profile, _identity), candidate_members in sorted(grouped.items()):
-        if profile == "standalone_filesystem":
-            candidates.append(
-                _candidate_document(
+        if profile in {"standalone_filesystem", "unraid_unknown"}:
+            candidate = _candidate_document(
                     profile=profile,
-                    name="Standalone filesystem",
+                    name=(
+                        "Standalone filesystem"
+                        if profile == "standalone_filesystem"
+                        else "Unrecognized foreign disk"
+                    ),
                     members=candidate_members,
                     managed_identities=managed_identities,
                     tool=None,
                 )
-            )
+            classification = candidate_members[0].get("unraid")
+            candidate["unraid"] = classification
+            if (
+                isinstance(classification, dict)
+                and classification["classification"] == "identified"
+            ):
+                candidate["origin"] = {
+                    "name": "Unraid",
+                    "confidence": "high",
+                    "reason": classification["reason"],
+                }
+                if classification["role"] == "parity":
+                    candidate["profile_name"] = "Identified Unraid parity disk"
+                    candidate["warnings"].append(
+                        "The original parity assignment is identified, but parity reuse is not "
+                        "supported or claimed by this read-only import workflow."
+                    )
+                else:
+                    candidate["profile_name"] = "Identified Unraid data disk"
+            elif (
+                isinstance(classification, dict)
+                and classification["classification"] == "suspected"
+            ):
+                candidate["profile_name"] = (
+                    "Suspected Unraid parity disk"
+                    if classification["role"] == "parity"
+                    else "Possible Unraid data disk"
+                )
+                candidate["warnings"].append(classification["reason"])
+            candidates.append(candidate)
             continue
         signature_type = next(
             item for item, details in STACK_SIGNATURES.items() if details[0] == profile
@@ -667,6 +923,7 @@ def assess_foreign_storage(
             "automatic_assembly": False,
             "mutation_performed": False,
         },
+        "unraid_evidence": unraid_evidence,
         "candidates": candidates,
         "unrecognized_device_count": sum(
             1 for member in members if not member["signatures"] and not member["system_device"]

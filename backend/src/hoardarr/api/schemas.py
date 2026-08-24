@@ -373,6 +373,52 @@ class ForeignStackPreviewRequest(StrictModel):
     candidate_id: str = Field(pattern=r"^foreign:[0-9a-f]{24}$")
 
 
+class UnraidAssignmentEvidence(StrictModel):
+    slot: str = Field(pattern=r"^(?:parity2?|disk(?:[1-9]|1[0-9]|2[0-8]))$")
+    role: Literal["data", "parity"]
+    serial: str = Field(min_length=1, max_length=256)
+    wwn: str | None = Field(default=None, min_length=1, max_length=256)
+    eui64: str | None = Field(default=None, min_length=1, max_length=256)
+    nguid: str | None = Field(default=None, min_length=1, max_length=256)
+    capacity_bytes: int | None = Field(default=None, ge=1)
+    filesystem_type: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_slot_role(self) -> UnraidAssignmentEvidence:
+        expected = "parity" if self.slot.startswith("parity") else "data"
+        if self.role != expected:
+            raise ValueError(f"{self.slot} must have role {expected}")
+        if self.role == "parity" and self.filesystem_type is not None:
+            raise ValueError("parity evidence must not claim a filesystem")
+        return self
+
+
+class UnraidEvidenceRequest(StrictModel):
+    schema_version: Literal[1]
+    source: Literal["unraid_runtime_state"]
+    captured_at: datetime
+    unraid_version: str | None = Field(default=None, min_length=1, max_length=64)
+    assignments: list[UnraidAssignmentEvidence] = Field(min_length=1, max_length=30)
+
+    @model_validator(mode="after")
+    def validate_assignments(self) -> UnraidEvidenceRequest:
+        slots = [item.slot for item in self.assignments]
+        identities = [
+            (item.wwn or "").strip().casefold()
+            or (item.eui64 or "").strip().casefold()
+            or (item.nguid or "").strip().casefold()
+            or item.serial.strip().casefold()
+            for item in self.assignments
+        ]
+        if len(slots) != len(set(slots)):
+            raise ValueError("assignment slots must be unique")
+        if len(identities) != len(set(identities)):
+            raise ValueError("assignment identities must be unique")
+        if sum(item.role == "parity" for item in self.assignments) > 2:
+            raise ValueError("Unraid supports at most two parity assignments")
+        return self
+
+
 class ForeignInspectionApplyRequest(StrictModel):
     plan: dict[str, Any]
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
@@ -13,6 +13,7 @@ const assessment: ForeignStorageAssessment = {
     automatic_assembly: false,
     mutation_performed: false,
   },
+  unraid_evidence: null,
   candidates: [{
     id: "foreign:one",
     profile: "standalone_filesystem",
@@ -38,6 +39,7 @@ const assessment: ForeignStorageAssessment = {
       signature_scan: { status: "partial", source: "udev", reason: "Cached evidence" },
       confidence: "high",
       signatures: [{ type: "xfs", usage: "filesystem", uuid: "fs-1", label: null, source: "udev" }],
+      unraid: null,
     }],
     filesystems: ["XFS"],
     signature_types: ["xfs"],
@@ -50,7 +52,10 @@ const assessment: ForeignStorageAssessment = {
   unrecognized_device_count: 0,
 };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("ForeignStoragePanel", () => {
   it("shows persisted read-only evidence without claiming a source product", async () => {
@@ -123,6 +128,49 @@ describe("ForeignStoragePanel", () => {
 
     expect(await screen.findByText("No recognized foreign storage")).toBeInTheDocument();
     expect(screen.getByText(/2 non-system devices have insufficient signature evidence/i)).toBeInTheDocument();
+  });
+
+  it("loads assignment evidence and shows identified parity without claiming reuse", async () => {
+    const user = userEvent.setup();
+    const identified: ForeignStorageAssessment = {
+      ...assessment,
+      unraid_evidence: {
+        id: "evidence-1",
+        source: "unraid_runtime_state",
+        document_sha256: "d".repeat(64),
+        captured_at: "2026-08-23T20:00:00Z",
+        unraid_version: "7.2.0",
+        assignment_count: 1,
+        matched_assignment_count: 1,
+        unmatched_slots: [],
+        ambiguous_slots: [],
+      },
+      candidates: [{
+        ...assessment.candidates[0],
+        profile: "unraid_unknown",
+        profile_name: "Identified Unraid parity disk",
+        filesystems: [],
+        signature_types: [],
+        unraid: {
+          role: "parity",
+          classification: "identified",
+          slot: "parity",
+          reason: "Stable identity matches the persisted Unraid parity assignment.",
+          evidence_sha256: "d".repeat(64),
+          parity_reuse_supported: false,
+        },
+      }],
+    };
+    vi.spyOn(api, "foreignStorage").mockResolvedValueOnce(assessment).mockResolvedValue(identified);
+    const save = vi.spyOn(api, "saveUnraidEvidence").mockResolvedValue(identified.unraid_evidence!);
+    render(<ForeignStoragePanel />);
+
+    const input = await screen.findByLabelText("Load Unraid assignment export");
+    await user.upload(input, new File([JSON.stringify({ schema_version: 1 })], "unraid.json", { type: "application/json" }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(await screen.findByText("Identified Unraid parity disk")).toBeInTheDocument();
+    expect(screen.getByText(/Identified: parity/)).toBeInTheDocument();
+    expect(screen.getByText("assignment evidence loaded")).toBeInTheDocument();
   });
 
   it("previews inactive Linux MD metadata without claiming assembly or health", async () => {

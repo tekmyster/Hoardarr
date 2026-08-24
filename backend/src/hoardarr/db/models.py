@@ -162,6 +162,23 @@ class HardwareSnapshot(Base):
     )
 
 
+class ForeignImportEvidence(Base):
+    __tablename__ = "foreign_import_evidence"
+    __table_args__ = (
+        Index("ix_foreign_import_evidence_source_active", "source_type", "active", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class TopologyExpectation(Base):
     __tablename__ = "topology_expectations"
     __table_args__ = (Index("ix_topology_expectations_active_updated", "active", "updated_at"),)

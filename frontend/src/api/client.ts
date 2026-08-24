@@ -15,6 +15,8 @@ import type {
   ForeignStorageAssessment,
   ForeignInspectionPlan,
   ForeignStackPreviewResult,
+  UnraidEvidenceInput,
+  UnraidEvidenceSummary,
   HardwareSnapshot,
   MergerFsInventory,
   MetricAlertDocument,
@@ -441,6 +443,22 @@ class HoardarrApi {
 
   async foreignStorage(signal?: AbortSignal): Promise<ForeignStorageAssessment> {
     return this.request<ForeignStorageAssessment>("/storage/foreign", { signal });
+  }
+
+  async saveUnraidEvidence(document: UnraidEvidenceInput): Promise<UnraidEvidenceSummary> {
+    const result = await this.request<{ item: UnraidEvidenceSummary }>(
+      "/storage/foreign/unraid/evidence",
+      { method: "POST", body: JSON.stringify(document) },
+    );
+    return result.item;
+  }
+
+  async removeUnraidEvidence(): Promise<number> {
+    const result = await this.request<{ cleared: number }>(
+      "/storage/foreign/unraid/evidence",
+      { method: "DELETE" },
+    );
+    return result.cleared;
   }
 
   async previewForeignInspection(candidateId: string): Promise<ForeignInspectionPlan> {

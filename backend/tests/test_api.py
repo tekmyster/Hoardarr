@@ -1720,7 +1720,10 @@ def test_authenticated_hardware_worker_and_wizard_flow(
         "automatic_assembly": False,
         "mutation_performed": False,
     }
-    assert foreign.json()["candidates"] == []
+    assert len(foreign.json()["candidates"]) == 1
+    assert foreign.json()["candidates"][0]["profile"] == "unraid_unknown"
+    assert foreign.json()["candidates"][0]["unraid"]["classification"] == "unknown"
+    assert foreign.json()["candidates"][0]["state"] == "blocked"
     assert foreign.json()["unrecognized_device_count"] == 1
 
     wizard = client.post(
@@ -2198,6 +2201,105 @@ def test_foreign_stack_preview_is_authorized_audited_and_nonactivating(
             select(AuditEvent).where(AuditEvent.action == "storage.foreign.preview_stack")
         )
         assert audit is not None
+
+
+def test_unraid_assignment_evidence_is_persisted_audited_and_identity_bound(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    endpoint = "/api/v1/storage/foreign/unraid/evidence"
+    manifest = {
+        "schema_version": 1,
+        "source": "unraid_runtime_state",
+        "captured_at": "2026-08-23T20:00:00Z",
+        "unraid_version": "7.2.0",
+        "assignments": [
+            {
+                "slot": "parity",
+                "role": "parity",
+                "serial": "UNRAID-PARITY",
+                "wwn": "5000000000000099",
+                "capacity_bytes": 8_000_000_000,
+                "filesystem_type": None,
+            }
+        ],
+    }
+    assert client.post(endpoint, json=manifest).status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    hardware = {
+        "schema_version": 1,
+        "source": {"kind": "sysfs"},
+        "disks": [
+            {
+                "id": "wwn:unraid-parity",
+                "stable_identity": True,
+                "kernel_path": "/dev/sdz",
+                "identity": {
+                    "serial": "UNRAID-PARITY",
+                    "wwn": "5000000000000099",
+                    "eui64": None,
+                    "nguid": None,
+                },
+                "vendor": "TEST",
+                "model": "Unraid source",
+                "capacity_bytes": 8_000_000_000,
+                "sector_sizes": {"logical_bytes": 512, "physical_bytes": 4096},
+                "system_disk": False,
+                "read_only": False,
+                "mountpoints": [],
+                "partitions": [],
+                "signatures": [],
+                "signature_scan": {"status": "complete", "source": "wipefs", "reason": None},
+            }
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        scan = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=scan.id,
+                detector_schema_version=1,
+                source="sysfs",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
+
+    assert client.post(endpoint, json=manifest).status_code == 403
+    invalid = {**manifest, "assignments": [{**manifest["assignments"][0], "role": "data"}]}
+    assert client.post(endpoint, headers=_state_headers(csrf), json=invalid).status_code == 422
+    saved = client.post(endpoint, headers=_state_headers(csrf), json=manifest)
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["item"]["matched_assignment_count"] == 1
+    assessment = client.get("/api/v1/storage/foreign").json()
+    assert assessment["candidates"][0]["profile_name"] == "Identified Unraid parity disk"
+    assert assessment["candidates"][0]["unraid"]["classification"] == "identified"
+    assert assessment["candidates"][0]["unraid"]["parity_reuse_supported"] is False
+    removed = client.delete(endpoint, headers=_state_headers(csrf))
+    assert removed.status_code == 200
+    assert removed.json()["cleared"] == 1
+    assert client.get("/api/v1/storage/foreign").json()["unraid_evidence"] is None
+    with app.state.session_factory() as session:
+        actions = set(
+            session.scalars(
+                select(AuditEvent.action).where(
+                    AuditEvent.action.like("storage.foreign.unraid_evidence.%")
+                )
+            )
+        )
+    assert actions == {
+        "storage.foreign.unraid_evidence.save",
+        "storage.foreign.unraid_evidence.remove",
+    }
 
 
 def test_servarr_secret_is_encrypted_and_pat_scopes_are_enforced(api_runtime: Any) -> None:

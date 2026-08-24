@@ -16,6 +16,7 @@ async function storageLifecycleServer(page: Page) {
   let lastGroupLifecycle = "assigned";
   let released = false;
   let foreignInspectionStarted = false;
+  let unraidEvidenceLoaded = false;
   const group = () => ({
     id: groupId,
     name: "Media",
@@ -127,9 +128,23 @@ async function storageLifecycleServer(page: Page) {
       activation_performed: false,
       mutation_performed: false,
     } });
+    if (pathname.endsWith("/storage/foreign/unraid/evidence") && request.method() === "POST") {
+      const body = request.postDataJSON() as { source: string; assignments: Array<{ slot: string; role: string; serial: string }> };
+      expect(body.source).toBe("unraid_runtime_state");
+      expect(body.assignments).toEqual(expect.arrayContaining([
+        expect.objectContaining({ slot: "disk1", role: "data", serial: "ARCHIVE-DATA" }),
+      ]));
+      unraidEvidenceLoaded = true;
+      return json({ item: { id: "unraid-evidence", document_sha256: "1".repeat(64) } }, 201);
+    }
+    if (pathname.endsWith("/storage/foreign/unraid/evidence") && request.method() === "DELETE") {
+      unraidEvidenceLoaded = false;
+      return json({ removed: true });
+    }
     if (pathname.endsWith("/storage/foreign")) return json({
       snapshot: { id: "snapshot-foreign", captured_at: now, sha256: "d".repeat(64) },
       policy: { default_access: "read_only", automatic_mount: false, automatic_assembly: false, mutation_performed: false },
+      unraid_evidence: unraidEvidenceLoaded ? { id: "unraid-evidence", source: "unraid_runtime_state", document_sha256: "1".repeat(64), captured_at: now, unraid_version: "7.1.4", assignment_count: 1, matched_assignment_count: 1, unmatched_slots: [], ambiguous_slots: [] } : null,
       candidates: [{
         id: "foreign:archive",
         profile: "standalone_filesystem",
@@ -137,13 +152,14 @@ async function storageLifecycleServer(page: Page) {
         origin: { name: "Not reported", confidence: "unknown", reason: "Filesystem metadata cannot identify the previous system." },
         confidence: "high",
         state: "ready",
-        members: [{ device_id: "wwn:archive", kernel_path: "/dev/loop9", model: "Disposable archive disk", capacity_bytes: 8_000_000_000, stable_identity: true, system_device: false, read_only: false, removable: false, mounted: false, mountpoints: [], signature_scan: { status: "complete", source: "wipefs", reason: null }, confidence: "high", signatures: [{ type: "xfs", usage: "filesystem", uuid: "archive-fs", label: "Archive", source: "wipefs" }] }],
+        members: [{ device_id: "wwn:archive", kernel_path: "/dev/loop9", model: "Disposable archive disk", serial: "ARCHIVE-DATA", wwn: "archive", capacity_bytes: 8_000_000_000, stable_identity: true, system_device: false, read_only: false, removable: false, mounted: false, mountpoints: [], signature_scan: { status: "complete", source: "wipefs", reason: null }, confidence: "high", signatures: [{ type: "xfs", usage: "filesystem", uuid: "archive-fs", label: "Archive", source: "wipefs" }], unraid: unraidEvidenceLoaded ? { role: "data", classification: "identified", slot: "disk1", reason: "The loaded assignment export matches this device by serial and WWN.", evidence_sha256: "1".repeat(64), parity_reuse_supported: false } : null }],
         filesystems: ["XFS"],
         signature_types: ["xfs"],
         capacity_bytes: 8_000_000_000,
         warnings: [],
         blockers: [],
         modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
+        unraid: unraidEvidenceLoaded ? { role: "data", classification: "identified", slot: "disk1", reason: "The loaded assignment export matches this device by serial and WWN.", evidence_sha256: "1".repeat(64), parity_reuse_supported: false } : { role: "data", classification: "suspected", slot: null, reason: "A supported independently readable filesystem is compatible with an Unraid data disk, but does not prove its origin.", evidence_sha256: null, parity_reuse_supported: false },
         mutation_performed: false,
       }, {
         id: "foreign:1234567890abcdef12345678",
@@ -272,6 +288,7 @@ async function storageLifecycleServer(page: Page) {
     lastGroupLifecycle: () => lastGroupLifecycle,
     released: () => released,
     foreignInspectionStarted: () => foreignInspectionStarted,
+    unraidEvidenceLoaded: () => unraidEvidenceLoaded,
   };
 }
 
@@ -348,4 +365,32 @@ test("reviews inactive storage-stack metadata without activating it", async ({ p
   await expect(page.getByText("2 of 4")).toBeVisible();
   await expect(page.getByText("Inactive MD member metadata does not prove current array health.")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("foreign-stack-no-activation-preview.png"), fullPage: true });
+});
+
+test("loads stable Unraid assignment evidence and identifies a data disk in the real Storage UI", async ({ page }, testInfo) => {
+  const observed = await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await page.getByText("Inspect storage from another system").click();
+  await expect(page.getByText("No Unraid assignment export loaded")).toBeVisible();
+  await expect(page.getByText(/Suspected only: data/)).toBeVisible();
+
+  await page.getByLabel("Load Unraid assignment export").setInputFiles({
+    name: "unraid-assignments.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      schema_version: 1,
+      source: "unraid_runtime_state",
+      captured_at: "2026-08-23T16:00:00Z",
+      unraid_version: "7.1.4",
+      assignments: [{ slot: "disk1", role: "data", serial: "ARCHIVE-DATA", wwn: "archive", capacity_bytes: 8_000_000_000, filesystem_type: "xfs" }],
+    })),
+  });
+
+  await expect.poll(observed.unraidEvidenceLoaded).toBe(true);
+  await expect(page.getByText("assignment evidence loaded")).toBeVisible();
+  await expect(page.getByText("1 of 1")).toBeVisible();
+  await expect(page.getByText(/Identified: data/)).toBeVisible();
+  await expect(page.getByText(/Original slot: disk1/)).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("foreign-unraid-identified-data.png"), fullPage: true });
 });

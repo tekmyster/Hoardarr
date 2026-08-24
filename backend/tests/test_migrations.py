@@ -94,6 +94,7 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
         "topology_expectations",
         "topology_drift_events",
         "topology_plans",
+        "foreign_import_evidence",
     } <= set(inspect(engine).get_table_names())
     assert "not_before" in {column["name"] for column in inspect(engine).get_columns("operations")}
     assert {"expectation_id", "fingerprint", "state", "resolved_at"} <= {

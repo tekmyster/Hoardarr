@@ -17,13 +17,66 @@ signatures. Matching MD/LVM/ZFS member UUIDs are grouped for review, but no
 array, volume group, pool, or filesystem is activated. The assessment is bound
 to the snapshot ID and digest and records `mutation_performed: false`.
 
+Recognized inactive stacks can proceed to a provider metadata preview through
+`POST /api/v1/storage/foreign/stack-preview`. The reviewed document is bound to
+the same snapshot, every complete stable device identity, each source path, and
+the exact member signature. Immediately before the preview, the storage
+executor revalidates all identities, signatures, mounts, holders, and swap use.
+It then invokes only a bounded provider read path:
+
+- Linux MD: `mdadm --examine --export` on each member. Array UUID, geometry,
+  expected member count, unique member UUIDs, and event counters are retained.
+- LVM: `pvs` and `vgs` with `--readonly`, `--foreign`, and an exact `--devices`
+  allowlist. No volume group or logical volume is activated.
+- ZFS: offline `zdb -l` label reads. No pool import is attempted.
+
+MD and LVM completeness is derived only when the provider reports the expected
+number of unique members with one consistent stack identity. Offline ZFS labels
+do not prove the expected topology or importability, so those fields remain
+**Not reported**. An inactive stack preview never claims current health. The
+API requires the `operate` scope, writes an audit record, returns no raw command
+error or secret, and exposes no assemble, activate, import, or mount action.
+
 Cached udev evidence is explicitly partial. It can identify a likely signature
 but cannot prove that no other on-media signature exists. System storage,
 mounted sources, unstable identities, already-managed devices, missing provider
 tools, and stack-member uncertainty block automatic inspection. Filesystem and
-volume metadata alone never assigns an Unraid, Synology, QNAP, or other product
-origin; the UI shows **Not reported** until a reviewed adapter has stronger
-evidence.
+volume metadata alone never assigns a Synology, QNAP, or other product origin.
+Unraid is identified only when a persisted assignment export matches current
+stable serial/WWN identity; otherwise origin remains **Not reported**.
+
+### Unraid assignment evidence
+
+Hoardarr includes `scripts/export-unraid-assignments.php`, a read-only exporter
+intended to run on the old Unraid server while emhttp's cached assignment state
+is available. It reads only `disks.ini`, `lsblk` identity, and the Unraid
+version. It does not query SMART, mount a disk, or start, stop, or change the
+array. The JSON contains at most 30 data/parity assignments and no credential
+or hostname.
+
+The Storage UI accepts that bounded JSON through
+`POST /api/v1/storage/foreign/unraid/evidence`. The authenticated `operate`
+endpoint validates slot/role consistency, rejects duplicate slots and stable
+identities, persists a SHA-256 provenance record, audits replacement/removal,
+and re-assesses the latest hardware snapshot. A current disk is an
+**identified** Unraid data or parity member only when its reported stable
+serial/WWN/EUI/NGUID agrees with exactly one assignment and any supplied
+capacity is consistent. Same capacity or model never establishes identity.
+
+Without assignment evidence:
+
+- an independently readable supported filesystem is only a **possible data
+  disk** because Unraid stores each array data disk as its own filesystem;
+- a complete signature scan that finds no filesystem on a disk at least as
+  large as the largest readable member may be shown as **suspected parity**;
+  it may also be blank, unsupported, or damaged; and
+- incomplete or conflicting evidence remains **unknown**.
+
+Identified and suspected parity are deliberately separate. This workflow never
+claims parity is valid or reusable and exposes no parity activation/reuse
+operation. Official Unraid recovery guidance likewise treats the assignment
+configuration as authoritative and a filesystem-free disk only as a way to
+identify likely parity when configuration has been lost.
 
 Standalone filesystems with one unambiguous source path can proceed to a real
 read-only inspection. `POST /api/v1/storage/foreign/inspection/preview` binds an
@@ -54,11 +107,12 @@ attempts to detach the private root-owned mount in `finally`; detach failure is
 or persistent adoption state is created. The report and real phase progress
 remain in Activity after the mount is gone.
 
-MD/LVM/ZFS member groups remain assessment-only. Hoardarr does not activate
-those stacks until each provider has a reviewed no-activation completeness and
-health preview followed by its own read-only assembly executor. Copy intake,
-adoption, Unraid classification, and NAS-origin adapters remain later tasks and
-are not implied by standalone inspection.
+MD/LVM/ZFS member groups remain non-activating. Their metadata preview can
+identify stack membership and provider-supported completeness, but Hoardarr
+does not activate those stacks until a separate read-only assembly executor is
+implemented and reviewed. Unraid role classification is implemented, while
+multi-disk selection/inventory, copy intake, adoption, and other NAS-origin
+adapters remain later tasks and are not implied by either preview.
 
 ## Principles
 

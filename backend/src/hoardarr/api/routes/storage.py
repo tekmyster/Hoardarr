@@ -40,6 +40,7 @@ from hoardarr.api.schemas import (
     TierTransferApplyRequest,
     TierTransferCleanupRequest,
     TierTransferPreviewRequest,
+    UnraidEvidenceRequest,
 )
 from hoardarr.api.serializers import operation_document
 from hoardarr.audit.service import record_audit
@@ -61,6 +62,8 @@ from hoardarr.storage.foreign import (
     assess_foreign_storage,
     build_inspection_plan,
     build_stack_preview_plan,
+    clear_unraid_evidence,
+    persist_unraid_evidence,
     validate_inspection_plan,
 )
 from hoardarr.storage.groups import (
@@ -186,6 +189,58 @@ def foreign_storage_assessment(
     """Fingerprint persisted signatures without mounting or activating foreign storage."""
 
     return assess_foreign_storage(session, snapshot=_latest_hardware(session))
+
+
+@router.post("/foreign/unraid/evidence", status_code=201)
+def save_unraid_assignment_evidence(
+    payload: UnraidEvidenceRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Persist an assignment export; no source disk is opened or changed."""
+
+    evidence = persist_unraid_evidence(
+        session,
+        document=payload.model_dump(mode="json"),
+        created_by=principal.user_id,
+    )
+    assessment = assess_foreign_storage(session, snapshot=_latest_hardware(session))
+    summary = assessment["unraid_evidence"]
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.foreign.unraid_evidence.save",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="foreign_import_evidence",
+        target_id=evidence.id,
+        details={
+            "document_sha256": evidence.document_sha256,
+            "assignment_count": summary["assignment_count"] if summary else 0,
+            "matched_assignment_count": summary["matched_assignment_count"] if summary else 0,
+        },
+    )
+    return {"item": summary}
+
+
+@router.delete("/foreign/unraid/evidence")
+def remove_unraid_assignment_evidence(
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    cleared = clear_unraid_evidence(session)
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.foreign.unraid_evidence.remove",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="foreign_import_evidence",
+        details={"cleared_count": cleared},
+    )
+    return {"cleared": cleared}
 
 
 @router.post("/foreign/stack-preview")

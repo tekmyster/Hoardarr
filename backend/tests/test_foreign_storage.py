@@ -9,6 +9,7 @@ from hoardarr.storage.foreign import (
     ForeignStorageError,
     assess_foreign_storage,
     build_inspection_plan,
+    persist_unraid_evidence,
     validate_inspection_plan,
 )
 
@@ -57,6 +58,12 @@ def _disk(
         "stable_identity": True,
         "kernel_path": f"/dev/{identity.rsplit(':', 1)[-1]}",
         "model": "Archive disk",
+        "identity": {
+            "serial": f"SERIAL-{identity.rsplit(':', 1)[-1]}",
+            "wwn": identity.removeprefix("wwn:") if identity.startswith("wwn:") else None,
+            "eui64": None,
+            "nguid": None,
+        },
         "capacity_bytes": 8_000_000_000,
         "system_disk": system,
         "mountpoints": mountpoints or [],
@@ -228,7 +235,7 @@ def test_linux_md_members_group_by_reported_uuid_without_assembly(
     assert candidate["blockers"] == []
 
 
-def test_unrecognized_media_remains_unclassified_instead_of_being_called_empty() -> None:
+def test_unrecognized_media_remains_unknown_instead_of_being_called_empty() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
@@ -242,5 +249,110 @@ def test_unrecognized_media_remains_unclassified_instead_of_being_called_empty()
         snapshot = _snapshot(session, [disk])
         document = assess_foreign_storage(session, snapshot=snapshot)
 
-    assert document["candidates"] == []
+    assert len(document["candidates"]) == 1
+    assert document["candidates"][0]["profile"] == "unraid_unknown"
+    assert document["candidates"][0]["unraid"]["classification"] == "unknown"
+    assert document["candidates"][0]["unraid"]["role"] == "unknown"
     assert document["unrecognized_device_count"] == 1
+
+
+def test_unraid_assignment_evidence_identifies_data_and_parity_by_stable_identity() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        data = _disk("wwn:data-one", "xfs")
+        parity = _disk("wwn:parity-one", "ext4")
+        parity["signatures"] = []
+        parity["signature_scan"] = {"status": "complete", "source": "wipefs", "reason": None}
+        snapshot = _snapshot(session, [data, parity])
+        persist_unraid_evidence(
+            session,
+            created_by="owner",
+            document={
+                "schema_version": 1,
+                "source": "unraid_runtime_state",
+                "captured_at": "2026-08-23T20:00:00Z",
+                "unraid_version": "7.2.0",
+                "assignments": [
+                    {
+                        "slot": "disk1",
+                        "role": "data",
+                        "serial": "SERIAL-data-one",
+                        "wwn": "data-one",
+                        "capacity_bytes": 8_000_000_000,
+                        "filesystem_type": "xfs",
+                    },
+                    {
+                        "slot": "parity",
+                        "role": "parity",
+                        "serial": "SERIAL-parity-one",
+                        "wwn": "parity-one",
+                        "capacity_bytes": 8_000_000_000,
+                        "filesystem_type": None,
+                    },
+                ],
+            },
+        )
+        document = assess_foreign_storage(session, snapshot=snapshot)
+
+    assert document["unraid_evidence"]["matched_assignment_count"] == 2
+    classified = {item["unraid"]["role"]: item for item in document["candidates"]}
+    assert classified["data"]["origin"]["name"] == "Unraid"
+    assert classified["data"]["unraid"]["classification"] == "identified"
+    assert classified["parity"]["profile_name"] == "Identified Unraid parity disk"
+    assert classified["parity"]["unraid"]["parity_reuse_supported"] is False
+    assert not any(mode["available"] for mode in classified["parity"]["modes"])
+
+
+def test_signature_free_capacity_match_is_only_suspected_parity() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        data = _disk("wwn:data", "xfs")
+        possible_parity = _disk("wwn:unknown-large", "ext4")
+        possible_parity["signatures"] = []
+        possible_parity["signature_scan"] = {
+            "status": "complete",
+            "source": "wipefs",
+            "reason": None,
+        }
+        snapshot = _snapshot(session, [data, possible_parity])
+        document = assess_foreign_storage(session, snapshot=snapshot)
+
+    candidate = next(item for item in document["candidates"] if item["profile"] == "unraid_unknown")
+    assert candidate["unraid"]["role"] == "parity"
+    assert candidate["unraid"]["classification"] == "suspected"
+    assert candidate["origin"]["name"] == "Not reported"
+    assert "could also be blank" in candidate["unraid"]["reason"]
+
+
+def test_conflicting_wwn_prevents_serial_only_assignment_match() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        data = _disk("wwn:actual", "xfs")
+        snapshot = _snapshot(session, [data])
+        persist_unraid_evidence(
+            session,
+            created_by="owner",
+            document={
+                "schema_version": 1,
+                "source": "unraid_runtime_state",
+                "captured_at": "2026-08-23T20:00:00Z",
+                "unraid_version": None,
+                "assignments": [
+                    {
+                        "slot": "disk1",
+                        "role": "data",
+                        "serial": "SERIAL-actual",
+                        "wwn": "different-wwn",
+                    }
+                ],
+            },
+        )
+        document = assess_foreign_storage(session, snapshot=snapshot)
+
+    assert document["unraid_evidence"]["matched_assignment_count"] == 0
+    assert document["unraid_evidence"]["unmatched_slots"] == ["disk1"]
+    assert document["candidates"][0]["origin"]["name"] == "Not reported"
+    assert document["candidates"][0]["unraid"]["classification"] == "suspected"

@@ -11,7 +11,7 @@ jobs:
         with:
           version: 0.11.28
       - run: uv sync --project backend --locked --all-groups
-      - run: uv run --project backend --locked ruff check backend/src backend/tests scripts/benchmark-telemetry.py scripts/soak-telemetry.py tests/integration/mergerfs_persistent_telemetry.py
+      - run: uv run --project backend --locked ruff check backend/src backend/tests scripts/benchmark-telemetry.py scripts/soak-telemetry.py tests/integration/mergerfs_persistent_telemetry.py tests/integration/unraid_classification.py
       - run: uv run --project backend --locked pytest backend/tests -q
       - name: Run bounded-memory telemetry soak
         run: uv run --project backend --locked python scripts/soak-telemetry.py --drives 60 --cycles 100
@@ -55,10 +55,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv systemd
+      - run: sudo apt-get update && sudo apt-get install -y php-cli python3.12 python3.12-venv systemd
       - run: python3.12 -m unittest discover -s tests/bootstrap -p 'test_*.py'
       - run: bash -n scripts/install-release-bundle.sh scripts/build-appliance.sh
       - run: python3 scripts/detect-hardware.py --help
+      - name: Validate read-only Unraid assignment exporter
+        run: |
+          php -l scripts/export-unraid-assignments.php
+          php scripts/export-unraid-assignments.php \
+            --state tests/fixtures/unraid/disks.ini \
+            --lsblk-json tests/fixtures/unraid/lsblk.json \
+            --version-file tests/fixtures/unraid/unraid-version \
+            > /tmp/hoardarr-unraid-assignments.json
+          python3 tests/integration/verify-unraid-export.py \
+            /tmp/hoardarr-unraid-assignments.json
   release-bundle-systemd:
     runs-on: ubuntu-24.04
     steps:

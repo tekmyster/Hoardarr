@@ -1,0 +1,6 @@
+{
+  "blockdevices": [
+    {"name": "sdb", "serial": "SANITIZED-PARITY", "wwn": "0x5000000000000001", "size": 8000000000},
+    {"name": "sdc", "serial": "SANITIZED-DATA-1", "wwn": "0x5000000000000002", "size": 8000000000}
+  ]
+}

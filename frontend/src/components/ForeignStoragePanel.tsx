@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ChangeEvent } from "react";
 import { api } from "../api/client";
 import { humanCapacity } from "../policy";
-import type { ForeignInspectionPlan, ForeignStackPreviewResult, ForeignStorageAssessment, OperationDocument, StorageOperationProgress } from "../types";
+import type { ForeignInspectionPlan, ForeignStackPreviewResult, ForeignStorageAssessment, OperationDocument, StorageOperationProgress, UnraidEvidenceInput } from "../types";
 import { Card, Notice, Spinner, StatusBadge } from "./ui";
 
 function errorText(error: unknown): string {
@@ -10,6 +11,15 @@ function errorText(error: unknown): string {
 
 function confidenceLabel(value: string): string {
   return value === "high" ? "Confirmed evidence" : value === "medium" ? "Partial evidence" : value === "low" ? "Limited evidence" : "Not reported";
+}
+
+function readFileText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("The assignment export could not be read."));
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.readAsText(file);
+  });
 }
 
 export function ForeignStoragePanel() {
@@ -22,6 +32,7 @@ export function ForeignStoragePanel() {
   const [progress, setProgress] = useState<StorageOperationProgress | null>(null);
   const [stackPreview, setStackPreview] = useState<ForeignStackPreviewResult | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [evidenceBusy, setEvidenceBusy] = useState(false);
 
   const refresh = useCallback(() => setReload((value) => value + 1), []);
 
@@ -102,6 +113,40 @@ export function ForeignStoragePanel() {
     }
   };
 
+  const importUnraidEvidence = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError(null);
+    if (file.size > 262_144) {
+      setError("The Unraid assignment export exceeds the 256 KiB safety limit.");
+      return;
+    }
+    setEvidenceBusy(true);
+    try {
+      const parsed = JSON.parse(await readFileText(file)) as UnraidEvidenceInput;
+      await api.saveUnraidEvidence(parsed);
+      refresh();
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setEvidenceBusy(false);
+    }
+  };
+
+  const removeUnraidEvidence = async () => {
+    setEvidenceBusy(true);
+    setError(null);
+    try {
+      await api.removeUnraidEvidence();
+      refresh();
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setEvidenceBusy(false);
+    }
+  };
+
   const inventory = operation?.status === "succeeded" && operation.result && typeof operation.result.inventory === "object"
     ? operation.result.inventory as Record<string, unknown>
     : null;
@@ -113,6 +158,16 @@ export function ForeignStoragePanel() {
       {error && <Notice tone="danger" title="Foreign storage assessment unavailable"><p>{error}</p><button type="button" className="button button-secondary" onClick={refresh}>Try again</button></Notice>}
       {assessment && <>
         <Notice tone="info" title="Read-only is the default">Discovery did not mount, assemble, or modify anything. A reviewed inspection uses a private no-recovery read-only mount, records a bounded inventory in Activity, then detaches it without changing automatic mounts.</Notice>
+        <section className="foreign-evidence-panel" aria-labelledby="unraid-evidence-heading">
+          <div className="section-heading"><div><p className="eyebrow">OPTIONAL SOURCE EVIDENCE</p><h3 id="unraid-evidence-heading">Unraid disk assignments</h3></div>{assessment.unraid_evidence && <StatusBadge status="assignment evidence loaded" />}</div>
+          <p>Load the bounded JSON assignment export from the old Unraid server to identify data and parity roles by stable serial/WWN. Without it, Hoardarr labels compatible disks only as possible or suspected.</p>
+          {assessment.unraid_evidence ? <>
+            <dl className="review-list"><div><dt>Assignments matched</dt><dd>{assessment.unraid_evidence.matched_assignment_count} of {assessment.unraid_evidence.assignment_count}</dd></div><div><dt>Captured</dt><dd>{new Date(assessment.unraid_evidence.captured_at).toLocaleString()}</dd></div><div><dt>Unraid version</dt><dd>{assessment.unraid_evidence.unraid_version ?? "Not reported"}</dd></div><div><dt>Evidence SHA-256</dt><dd><code>{assessment.unraid_evidence.document_sha256}</code></dd></div></dl>
+            {assessment.unraid_evidence.unmatched_slots.length > 0 && <Notice tone="warning" title="Some assigned disks are not attached">Unmatched slots: {assessment.unraid_evidence.unmatched_slots.join(", ")}. Hoardarr will not substitute a same-size disk.</Notice>}
+            {assessment.unraid_evidence.ambiguous_slots.length > 0 && <Notice tone="danger" title="Ambiguous stable identity">These slots matched more than one current device and were not classified: {assessment.unraid_evidence.ambiguous_slots.join(", ")}.</Notice>}
+          </> : <Notice tone="info" title="No Unraid assignment export loaded">A readable XFS/Btrfs/ext4 disk may be compatible with Unraid, but the filesystem alone cannot prove where it came from. A disk without a filesystem is never treated as confirmed parity.</Notice>}
+          <div className="panel-actions"><label className="button button-secondary">{evidenceBusy ? "Loading…" : assessment.unraid_evidence ? "Replace assignment export" : "Load assignment export"}<input className="visually-hidden" type="file" accept="application/json,.json" disabled={evidenceBusy} aria-label="Load Unraid assignment export" onChange={(event) => void importUnraidEvidence(event)} /></label>{assessment.unraid_evidence && <button type="button" className="button button-secondary" disabled={evidenceBusy} onClick={() => void removeUnraidEvidence()}>Forget assignment evidence</button>}</div>
+        </section>
         {!assessment.candidates.length ? <div className="empty-state compact-empty"><h3>No recognized foreign storage</h3><p>{assessment.unrecognized_device_count > 0 ? `${assessment.unrecognized_device_count} non-system device${assessment.unrecognized_device_count === 1 ? " has" : "s have"} insufficient signature evidence. Hoardarr does not call them empty.` : "The latest persisted scan did not report an unassigned supported filesystem or storage stack."}</p></div> : <div className="foreign-candidate-list">{assessment.candidates.map((candidate) => {
           const inspectionMode = candidate.modes.find((item) => item.id === "inspect_read_only");
           const stackMode = candidate.modes.find((item) => item.id === "preview_stack");
@@ -122,6 +177,7 @@ export function ForeignStoragePanel() {
           <dl className="settings-list">
             <div><dt>Source system</dt><dd>{candidate.origin.name}<small>{candidate.origin.reason}</small></dd></div>
             <div><dt>Evidence</dt><dd>{confidenceLabel(candidate.confidence)}</dd></div>
+            {candidate.unraid && <div><dt>Unraid role</dt><dd>{candidate.unraid.classification === "identified" ? "Identified" : candidate.unraid.classification === "suspected" ? "Suspected only" : "Unknown"}: {candidate.unraid.role}<small>{candidate.unraid.slot ? `Original slot: ${candidate.unraid.slot}. ` : ""}{candidate.unraid.reason}</small></dd></div>}
             <div><dt>Members</dt><dd>{candidate.members.length}</dd></div>
             <div><dt>Raw member capacity</dt><dd>{candidate.capacity_bytes === null ? "Not reported" : humanCapacity(candidate.capacity_bytes)}</dd></div>
           </dl>

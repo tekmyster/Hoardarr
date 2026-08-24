@@ -74,6 +74,16 @@ jq -e '.classification == "VERIFIED IN ISOLATION" and .access == "read_only" and
 
 [[ "${HOARDARR_EXTENDED_STORAGE_TESTS:-0}" == "1" ]] || exit 0
 
+make_loop unraid-parity 2G
+unraid_parity="$created_loop"
+assert_test_loop "$unraid_parity"
+"$python" "$repo/tests/integration/unraid_classification.py" \
+  --data-loop "$loop" \
+  --parity-loop "$unraid_parity" \
+  --evidence "$repo/dist/validation/unraid-classification.json"
+jq -e '.classification == "VERIFIED IN ISOLATION" and .data_source_has_real_filesystem and .parity_source_has_no_filesystem_signature and .identified_roles.data == "identified" and .identified_roles.parity == "identified" and .matched_assignments == 2 and .without_assignment_role == "parity" and .without_assignment_classification == "suspected" and (.parity_reuse_supported | not) and (.mutation_performed_by_classification | not)' \
+  "$repo/dist/validation/unraid-classification.json"
+
 md_members=()
 for number in 1 2 3 4; do
   make_loop "md$number" 512M

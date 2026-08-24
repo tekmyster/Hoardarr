@@ -398,6 +398,9 @@ code { font: .9em/1.4 Consolas, "SFMono-Regular", monospace; overflow-wrap: anyw
 .choice-copy { display: grid; align-content: start; gap: 4px; }.choice-copy strong { color: #31444c; }.choice-copy > span { color: var(--muted); font-size: 13px; line-height: 1.4; }.choice-copy .choice-warning { color: var(--warning); font-weight: 600; margin-top: 3px; }
 .advanced-panel { margin-top: 17px; border: 1px solid #b5c5cd; background: #f2f6f8; padding: 15px; border-radius: 3px; display: grid; gap: 12px; }.advanced-panel h3 { margin: 0; font-size: 14px; }.advanced-hint { color: var(--muted); font-size: 13px; }
 .foreign-storage-panel > summary { cursor: pointer; font-weight: 700; }
+.foreign-evidence-panel { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 4px; display: grid; gap: 12px; margin: 14px 0; padding: 14px; }
+.foreign-evidence-panel > p { color: var(--muted); margin: 0; }
+.visually-hidden { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
 .foreign-candidate-list { display: grid; gap: 14px; margin-top: 14px; }
 .foreign-candidate { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 4px; display: grid; gap: 12px; padding: 14px; }
 .foreign-candidate > header, .foreign-candidate > footer, .panel-actions { align-items: center; display: flex; gap: 12px; justify-content: space-between; }

@@ -892,9 +892,10 @@ export interface ForeignStorageAssessment {
     automatic_assembly: false;
     mutation_performed: false;
   };
+  unraid_evidence: UnraidEvidenceSummary | null;
   candidates: Array<{
     id: string;
-    profile: "standalone_filesystem" | "linux_md" | "lvm" | "zfs";
+    profile: "standalone_filesystem" | "linux_md" | "lvm" | "zfs" | "unraid_unknown";
     profile_name: string;
     origin: { name: string; confidence: "unknown" | "low" | "medium" | "high"; reason: string };
     confidence: "unknown" | "low" | "medium" | "high";
@@ -919,6 +920,7 @@ export interface ForeignStorageAssessment {
         label: string | null;
         source: string;
       }>;
+      unraid: UnraidRoleClassification | null;
     }>;
     filesystems: string[];
     signature_types: string[];
@@ -926,9 +928,48 @@ export interface ForeignStorageAssessment {
     warnings: string[];
     blockers: string[];
     modes: Array<{ id: string; available: boolean; reason: string }>;
+    unraid?: UnraidRoleClassification | null;
     mutation_performed: false;
   }>;
   unrecognized_device_count: number;
+}
+
+export interface UnraidRoleClassification {
+  role: "data" | "parity" | "unknown";
+  classification: "identified" | "suspected" | "unknown";
+  slot: string | null;
+  reason: string;
+  evidence_sha256: string | null;
+  parity_reuse_supported: false;
+}
+
+export interface UnraidEvidenceSummary {
+  id: string;
+  source: "unraid_runtime_state";
+  document_sha256: string;
+  captured_at: string;
+  unraid_version: string | null;
+  assignment_count: number;
+  matched_assignment_count: number;
+  unmatched_slots: string[];
+  ambiguous_slots: string[];
+}
+
+export interface UnraidEvidenceInput {
+  schema_version: 1;
+  source: "unraid_runtime_state";
+  captured_at: string;
+  unraid_version?: string | null;
+  assignments: Array<{
+    slot: string;
+    role: "data" | "parity";
+    serial: string;
+    wwn?: string | null;
+    eui64?: string | null;
+    nguid?: string | null;
+    capacity_bytes?: number | null;
+    filesystem_type?: string | null;
+  }>;
 }
 
 export interface ForeignInspectionPlan {

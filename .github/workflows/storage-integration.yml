@@ -11,6 +11,8 @@ on:
       - backend/src/hoardarr/storage/**
       - backend/src/hoardarr/api/routes/storage.py
       - backend/src/hoardarr/api/routes/storage_groups.py
+      - backend/src/hoardarr/api/schemas.py
+      - backend/src/hoardarr/db/**
       - backend/src/hoardarr/worker.py
       - backend/src/hoardarr/models.py
       - backend/alembic/**
@@ -122,6 +124,7 @@ jobs:
             dist/validation/zfs-replacement.json
           jq -e '.classification == "VERIFIED IN ISOLATION" and (.activation_performed | not) and (.mutation_performed_during_preview | not) and .profiles.linux_md.completeness.state == "complete" and .profiles.lvm.completeness.state == "complete" and .profiles.zfs.mountability.state == "not_reported"' \
             dist/validation/foreign-stack-preview.json
+            dist/validation/unraid-classification.json
       - uses: actions/upload-artifact@v4
         with:
           name: storage-expansion-evidence
