@@ -18,6 +18,8 @@ class VmwareLabAssetTests(unittest.TestCase):
         self.assertIn("protected physical SSDs excluded", script)
         self.assertIn("At least 4 GiB", script)
         self.assertIn("At least 100 GiB", script)
+        self.assertIn("Ensure-LabNetwork", script)
+        self.assertIn("adapters.Count -ne 1", script)
         self.assertNotIn("-DeviceName", script)
         self.assertNotIn("RawPhysical", script)
         self.assertNotIn("Cisco", script)

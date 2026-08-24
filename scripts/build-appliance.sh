@@ -34,7 +34,9 @@ grub_maps=()
 for config in boot/grub/grub.cfg boot/grub/loopback.cfg; do
     destination="$work/$(basename -- "$config")"
     xorriso -osirrox on -indev "$base_iso" -extract "/$config" "$destination" >/dev/null 2>&1 || continue
-    sed -i -E '/^[[:space:]]*linux[[:space:]]/ s/[[:space:]]---/ autoinstall ds=nocloud\\;s=\/cdrom\/nocloud\/ console=ttyS0,115200n8 ---/' "$destination"
+    # Preserve serial diagnostics for headless CI, but make tty0 the primary
+    # interactive console for ordinary VMware and physical installations.
+    sed -i -E '/^[[:space:]]*linux[[:space:]]/ s/[[:space:]]---/ autoinstall ds=nocloud\\;s=\/cdrom\/nocloud\/ console=ttyS0,115200n8 console=tty0 ---/' "$destination"
     grep -q 'autoinstall ds=nocloud' "$destination" || {
         echo "could not enable NoCloud autoinstall in /$config" >&2
         exit 1

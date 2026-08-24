@@ -51,6 +51,32 @@ function Ensure-VirtualDataDisks {
     }
 }
 
+function Ensure-LabNetwork {
+    param(
+        [Parameter(Mandatory)]$Vm,
+        [Parameter(Mandatory)]$Portgroup
+    )
+
+    $adapters = @(Get-NetworkAdapter -VM $Vm)
+    $target = $adapters | Where-Object { $_.NetworkName -eq $Portgroup.Name } | Select-Object -First 1
+    if ((-not $target -or $adapters.Count -ne 1) -and $Vm.PowerState -ne 'PoweredOff') {
+        throw "$($Vm.Name) must be powered off before reconciling its lab network adapter."
+    }
+    if (-not $target -and $adapters.Count -gt 0) {
+        $target = Set-NetworkAdapter -NetworkAdapter $adapters[0] -Portgroup $Portgroup `
+            -Type Vmxnet3 -StartConnected -Confirm:$false
+    }
+    if (-not $target) {
+        $target = New-NetworkAdapter -VM $Vm -Portgroup $Portgroup -Type Vmxnet3 `
+            -StartConnected -Confirm:$false
+    }
+    foreach ($adapter in $adapters) {
+        if ($adapter.Id -ne $target.Id) {
+            Remove-NetworkAdapter -NetworkAdapter $adapter -Confirm:$false
+        }
+    }
+}
+
 $credentials = Read-KeyValueFile -Path $CredentialEnvFile
 $connection = $null
 try {
@@ -99,9 +125,10 @@ try {
                     'Persistent Hoardarr 0.3.11 Beta 1 development lab; virtual storage only; ' +
                     'protected physical SSDs excluded'
                 ) -Confirm:$false
-            New-NetworkAdapter -VM $vm -Portgroup $portgroup -Type Vmxnet3 `
-                -StartConnected -Confirm:$false | Out-Null
             Set-VM -VM $vm -MemoryHotAddEnabled $true -Confirm:$false | Out-Null
+        }
+        if ($vm -and $PSCmdlet.ShouldProcess($name, 'Reconcile lab network adapter')) {
+            Ensure-LabNetwork -Vm $vm -Portgroup $portgroup
         }
         if ($datastoreIso -and $vm -and $PSCmdlet.ShouldProcess($name, 'Attach appliance ISO')) {
             $cd = Get-CDDrive -VM $vm -ErrorAction SilentlyContinue

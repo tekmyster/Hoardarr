@@ -13,6 +13,8 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("sha256sum", script)
         self.assertIn("-boot_image any replay", script)
         self.assertIn("autoinstall ds=nocloud", script)
+        self.assertIn("console=ttyS0,115200n8 console=tty0", script)
+        self.assertLess(script.index("console=ttyS0,115200n8"), script.index("console=tty0"))
         self.assertIn("grub_maps", script)
         self.assertIn('"$release/scripts/install.sh" "$release"', user_data)
         self.assertIn("interactive-sections", user_data)
