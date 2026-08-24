@@ -26,7 +26,12 @@ ProtectSystem=strict
 # Do not prefix the executor state path with "-". If the installer has not
 # created it before sandbox setup, systemd must refuse to start the service
 # instead of silently leaving the path read-only.
-ReadWritePaths=/data /mnt /srv -/etc/fstab /etc/samba /etc/snapraid /etc/multipath/conf.d /etc/systemd/system /var/lib/hoardarr/storage-executor -/run/hoardarr -/run/mount
+# The executor atomically replaces reviewed configuration by creating a sibling
+# temporary file and renaming it over the target.  That requires write access to
+# the parent /etc directory; file-only exceptions make /etc/fstab writable but
+# make the atomic rename fail.  The process still has no network access and its
+# typed protocol does not expose arbitrary file or command operations.
+ReadWritePaths=/data /mnt /srv /etc /var/lib/hoardarr/storage-executor -/run/hoardarr -/run/mount
 ProtectHome=read-only
 ProtectClock=yes
 ProtectControlGroups=yes

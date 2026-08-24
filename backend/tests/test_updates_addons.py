@@ -381,6 +381,8 @@ def test_storage_executor_presentation_roots_exist_before_service_start() -> Non
 
     assert "install -d -o root -g root -m 0755 /data /mnt /srv" in installer
     assert "ReadWritePaths=/data /mnt /srv" in unit
+    assert "ReadWritePaths=/data /mnt /srv /etc " in unit
+    assert "-/etc/fstab" not in unit
     for path in (
         "/etc/samba",
         "/etc/snapraid",
@@ -388,5 +390,4 @@ def test_storage_executor_presentation_roots_exist_before_service_start() -> Non
         "/etc/systemd/system",
     ):
         assert path in installer
-        assert path in unit
     assert "ReadWritePaths=-/data" not in unit
