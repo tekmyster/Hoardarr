@@ -6,6 +6,10 @@ param(
 
     [switch]$PowerOn,
 
+    [switch]$ReuseUploadedIso,
+
+    [switch]$RecreateOsDisk,
+
     [string]$CredentialRoot = 'C:\Users\dmessana\Desktop\all servers',
 
     [string]$VCenterHost = 'cptnyc-vcsa01.vcenter.cptnyc.com'
@@ -80,6 +84,8 @@ try {
         CredentialEnvFile = $credentialFile
         AttachDataDisks = $AttachDataDisks
         PowerOn = $PowerOn
+        ReuseUploadedIso = $ReuseUploadedIso
+        RecreateOsDisk = $RecreateOsDisk
         Confirm = $false
         WhatIf = $WhatIfPreference
     }
