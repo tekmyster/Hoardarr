@@ -22,7 +22,11 @@ A control-plane archive contains:
 - non-secret regular files below the configured Hoardarr configuration root;
 - a manifest with version, file size, and SHA-256 evidence.
 
-Files whose names indicate credentials, passwords, private keys, secrets, or tokens are excluded. Symlinks and oversized configuration files are also excluded. API credentials and the Hoardarr secret-store key are not exported. The archive is not described as encrypted: operators must use provider-side encryption or an encrypted destination when encryption at rest is required. A future optional encrypted-secrets export remains a separate roadmap item.
+Files whose names indicate credentials, passwords, private keys, secrets, or tokens are excluded. Symlinks and oversized configuration files are also excluded. Secret-valued keys are removed from `hoardarr.env` while non-secret listener and appliance settings remain restorable.
+
+The SQLite copy is also made safe for a different installation key. Browser sessions, one-time setup claims, and API tokens are removed. ARR credentials, CHAP secrets, backup credentials, and webhook signing secrets are cleared; their non-secret endpoint/configuration rows remain disabled with `credentials_required` state so the owner can review and re-enter them. The manifest records the credential mode and row counts. This prevents a structurally valid fresh restore from containing permanently unreadable ciphertext or silently transferring live authentication sessions.
+
+The Hoardarr secret-store key is not exported. The archive is not described as encrypted: operators must use provider-side encryption or an encrypted destination when encryption at rest is required. A future optional encrypted-secrets export remains a separate roadmap item.
 
 ## Upload, recovery, and verification
 
@@ -44,7 +48,7 @@ Settings → Remote backups provides honest empty/loading/failure states, target
 
 ## Validation
 
-- `backend/tests/test_backups.py` covers endpoint policy, secret exclusion, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, transient-outage delayed resume, and failed-run reconciliation.
+- `backend/tests/test_backups.py` covers endpoint policy, filename and environment-key exclusion, database credential/session redaction, re-entry states, rate pacing, connection proof, multipart checkpoints, full SHA-256 verification, corruption rejection, scheduler idempotency, transient-outage delayed resume, and failed-run reconciliation.
 - backup-focused API tests cover authentication, scopes, redaction, credential rotation, idempotency, readiness gates, schedule persistence, and durable run creation.
 - `frontend/src/components/RemoteBackupsPanel.test.tsx` covers empty states, secret removal from the DOM after creation and rotation, readiness gating, scheduling, and validation actions.
 - the Playwright production-shell scenario exercises the visible create → prove connection → enable backup workflow.

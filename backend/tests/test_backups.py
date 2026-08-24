@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tarfile
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -32,7 +33,17 @@ from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.migrate import upgrade_database
-from hoardarr.db.models import Operation, RemoteBackupRun, RemoteBackupTarget
+from hoardarr.db.models import (
+    ApiToken,
+    AuthSession,
+    ConnectivityService,
+    IntegrationConnection,
+    Operation,
+    RemoteBackupRun,
+    RemoteBackupTarget,
+    User,
+    WebhookEndpoint,
+)
 from hoardarr.operations.service import create_operation, mark_failed_resource
 
 
@@ -218,6 +229,107 @@ def test_control_plane_artifact_excludes_secret_named_files_and_symlinks(tmp_pat
         assert "configuration/linked.conf" not in names
         manifest = json.load(archive.extractfile("manifest.json"))  # type: ignore[arg-type]
         assert manifest["database"]["sha256"]
+
+
+def test_default_artifact_removes_live_auth_and_requires_credential_reentry(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.configuration_root.mkdir()
+    (settings.configuration_root / "hoardarr.env").write_text(
+        "HOARDARR_BIND_HOST=127.0.0.1\n"
+        "HOARDARR_SETUP_TOKEN=must-not-leave-this-host\n",
+        encoding="utf-8",
+    )
+    secret_box = SecretBox.from_file(settings.secret_key_file, create=True)
+    factory = create_session_factory(create_database_engine(settings.database_url))
+    with factory() as session, session.begin():
+        session.add(User(id="owner", username="owner", password_hash="password-hash"))
+        session.flush()
+        session.add(
+            AuthSession(
+                id="session",
+                user_id="owner",
+                token_hash="session-hash",
+                csrf_hash="csrf-hash",
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+        session.add(
+            ApiToken(
+                id="api-token",
+                user_id="owner",
+                name="automation",
+                token_hash="api-token-hash",
+                scopes_json=["read"],
+            )
+        )
+        session.add(
+            IntegrationConnection(
+                id="sonarr",
+                name="Sonarr",
+                expected_product="sonarr",
+                base_url="http://sonarr.local:8989",
+                api_key_ciphertext=b"encrypted-api-key",
+            )
+        )
+        session.add(
+            ConnectivityService(
+                id="iscsi",
+                protocol="iscsi",
+                name="media-lun",
+                config_json={"target": "iqn.example:media"},
+                config_sha256="a" * 64,
+                secret_ciphertext=b"encrypted-chap-password",
+            )
+        )
+        session.add(_target(secret_box))
+        session.add(
+            WebhookEndpoint(
+                id="webhook",
+                name="Home automation",
+                url="http://automation.local/events",
+                secret_ciphertext=b"encrypted-signing-secret",
+                secret_fingerprint="fingerprint",
+                created_by="owner",
+            )
+        )
+
+    artifact, report = build_control_plane_artifact(settings, "redacted-artifact")
+    assert report["database"]["credential_mode"] == "redacted_reentry_required"
+    assert report["database"]["redacted_rows"]["auth_sessions"] == 1
+    assert report["database"]["redacted_rows"]["api_tokens"] == 1
+    assert report["configuration"]["redacted_keys"] == {
+        "hoardarr.env": ["HOARDARR_SETUP_TOKEN"]
+    }
+
+    extract_root = tmp_path / "restored"
+    with tarfile.open(artifact, "r:gz") as archive:
+        archive.extractall(extract_root, filter="data")
+    restored_env = (extract_root / "configuration" / "hoardarr.env").read_text()
+    assert restored_env == "HOARDARR_BIND_HOST=127.0.0.1\n"
+    assert "must-not-leave-this-host" not in artifact.read_bytes().decode(
+        "latin-1", errors="ignore"
+    )
+
+    database = sqlite3.connect(extract_root / "database" / "hoardarr.db")
+    try:
+        assert database.execute("SELECT count(*) FROM auth_sessions").fetchone() == (0,)
+        assert database.execute("SELECT count(*) FROM api_tokens").fetchone() == (0,)
+        assert database.execute(
+            "SELECT status, length(api_key_ciphertext) FROM integration_connections"
+        ).fetchone() == ("credentials_required", 0)
+        assert database.execute(
+            "SELECT status, secret_ciphertext FROM connectivity_services"
+        ).fetchone() == ("credentials_required", None)
+        assert database.execute(
+            "SELECT enabled, status, length(secret_ciphertext) FROM remote_backup_targets"
+        ).fetchone() == (0, "credentials_required", 0)
+        assert database.execute(
+            "SELECT enabled, status, length(secret_ciphertext) FROM webhook_endpoints"
+        ).fetchone() == (0, "credentials_required", 0)
+    finally:
+        database.close()
 
 
 def test_durable_control_plane_backup_multipart_upload_and_restore_validation(

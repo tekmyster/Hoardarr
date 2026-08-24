@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -395,6 +396,94 @@ def _database_backup(source: Path, destination: Path) -> None:
         source_connection.close()
 
 
+def _sanitize_database_backup(destination: Path) -> dict[str, int]:
+    """Remove live authentication state and make encrypted integrations re-keyable.
+
+    A default control-plane archive deliberately excludes the installation SecretBox
+    key.  Copying ciphertext without that key would leave a fresh restore looking
+    configured while every credential is permanently unreadable.  Preserve the
+    non-secret endpoint/configuration rows, but disable them and require the owner to
+    enter new credentials after recovery.
+    """
+
+    connection = sqlite3.connect(destination)
+    counts: dict[str, int] = {}
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+        def execute(name: str, statement: str) -> None:
+            if name not in tables:
+                return
+            cursor = connection.execute(statement)
+            counts[name] = max(0, int(cursor.rowcount))
+
+        execute("auth_sessions", "DELETE FROM auth_sessions")
+        execute("api_tokens", "DELETE FROM api_tokens")
+        execute("setup_claims", "DELETE FROM setup_claims")
+        execute(
+            "integration_connections",
+            "UPDATE integration_connections "
+            "SET api_key_ciphertext = X'', status = 'credentials_required'",
+        )
+        execute(
+            "connectivity_services",
+            "UPDATE connectivity_services "
+            "SET secret_ciphertext = NULL, status = CASE "
+            "WHEN secret_ciphertext IS NULL THEN status ELSE 'credentials_required' END",
+        )
+        execute(
+            "remote_backup_targets",
+            "UPDATE remote_backup_targets "
+            "SET secret_ciphertext = X'', enabled = 0, status = 'credentials_required', "
+            "schedule_json = '{\"enabled\":false}'",
+        )
+        execute(
+            "webhook_endpoints",
+            "UPDATE webhook_endpoints "
+            "SET secret_ciphertext = X'', enabled = 0, status = 'credentials_required'",
+        )
+        connection.commit()
+        if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+            raise BackupError(
+                "backup_database_invalid",
+                "The credential-redacted database failed its integrity check.",
+            )
+    finally:
+        connection.close()
+    return counts
+
+
+def _sanitized_environment_payload(path: Path) -> tuple[bytes, list[str]]:
+    """Return a restorable env file without secret-valued settings."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError as exc:
+        raise BackupError(
+            "backup_configuration_invalid",
+            "The Hoardarr environment file is not valid UTF-8.",
+        ) from exc
+    kept: list[str] = []
+    removed: list[str] = []
+    for line in lines:
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#") or "=" not in candidate:
+            kept.append(line)
+            continue
+        key = candidate.split("=", 1)[0].removeprefix("export ").strip()
+        lowered = key.casefold()
+        if any(fragment in lowered for fragment in EXCLUDED_NAME_FRAGMENTS):
+            removed.append(key)
+            continue
+        kept.append(line)
+    return "".join(kept).encode(), removed
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -418,20 +507,35 @@ def build_control_plane_artifact(
     artifact = operation_root / "hoardarr-control-plane.tar.gz"
     database_copy = operation_root / "hoardarr.db"
     _database_backup(database, database_copy)
+    database_redaction = _sanitize_database_backup(database_copy)
     included, excluded = _include_configuration(settings.configuration_root)
+    redacted_configuration: dict[str, list[str]] = {}
+    configuration_payloads: dict[str, bytes] = {}
+    for path in included:
+        relative = path.relative_to(settings.configuration_root).as_posix()
+        if relative == "hoardarr.env":
+            payload, removed = _sanitized_environment_payload(path)
+            configuration_payloads[relative] = payload
+            redacted_configuration[relative] = removed
     created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     manifest = {
         "schema_version": 1,
         "kind": "hoardarr_control_plane",
         "hoardarr_version": __version__,
         "created_at": created_at,
-        "database": {"path": "database/hoardarr.db", "sha256": _hash_file(database_copy)},
+        "database": {
+            "path": "database/hoardarr.db",
+            "sha256": _hash_file(database_copy),
+            "credential_mode": "redacted_reentry_required",
+            "redacted_rows": database_redaction,
+        },
         "configuration": {
             "included": [
                 path.relative_to(settings.configuration_root).as_posix() for path in included
             ],
             "excluded": excluded,
             "secrets_included": False,
+            "redacted_keys": redacted_configuration,
         },
     }
     manifest_path = operation_root / "manifest.json"
@@ -443,11 +547,16 @@ def build_control_plane_artifact(
         archive.add(manifest_path, arcname="manifest.json", recursive=False)
         archive.add(database_copy, arcname="database/hoardarr.db", recursive=False)
         for path in included:
-            archive.add(
-                path,
-                arcname=f"configuration/{path.relative_to(settings.configuration_root).as_posix()}",
-                recursive=False,
-            )
+            relative = path.relative_to(settings.configuration_root).as_posix()
+            if relative in configuration_payloads:
+                payload = configuration_payloads[relative]
+                info = tarfile.TarInfo(name=f"configuration/{relative}")
+                info.size = len(payload)
+                info.mode = 0o600
+                info.mtime = 0
+                archive.addfile(info, io.BytesIO(payload))
+            else:
+                archive.add(path, arcname=f"configuration/{relative}", recursive=False)
     os.chmod(artifact, 0o600)
     return artifact, {
         **manifest,
