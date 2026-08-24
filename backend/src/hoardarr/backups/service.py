@@ -5,6 +5,8 @@ import io
 import ipaddress
 import json
 import os
+import re
+import shutil
 import socket
 import sqlite3
 import tarfile
@@ -33,6 +35,7 @@ PROVIDERS = frozenset({"aws_s3", "minio", "cloudflare_r2", "wasabi", "backblaze_
 TARGET_RECORD_TYPE = "remote_backup_target"
 MULTIPART_PART_BYTES = 8 * 1024 * 1024
 MAX_CONFIG_FILE_BYTES = 1024 * 1024
+MAX_RESTORE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 EXCLUDED_NAME_FRAGMENTS = ("credential", "password", "private", "secret", "token")
 
 
@@ -425,6 +428,7 @@ def _sanitize_database_backup(destination: Path) -> dict[str, int]:
         execute("auth_sessions", "DELETE FROM auth_sessions")
         execute("api_tokens", "DELETE FROM api_tokens")
         execute("setup_claims", "DELETE FROM setup_claims")
+        execute("users", "DELETE FROM users")
         execute(
             "integration_connections",
             "UPDATE integration_connections "
@@ -814,47 +818,7 @@ def validate_remote_archive(
         finally:
             stream.close()
         extract_root = Path(directory) / "content"
-        extract_root.mkdir()
-        with tarfile.open(archive_path, "r:gz") as archive:
-            members = archive.getmembers()
-            if len(members) > 4096:
-                raise BackupError(
-                    "backup_restore_archive_invalid",
-                    "The backup archive contains too many entries.",
-                )
-            for member in members:
-                path = PurePosixPath(member.name)
-                if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
-                    raise BackupError(
-                        "backup_restore_archive_invalid",
-                        "The backup archive contains an unsafe path.",
-                    )
-            archive.extractall(extract_root, filter="data")
-        manifest_path = extract_root / "manifest.json"
-        database_path = extract_root / "database" / "hoardarr.db"
-        if not manifest_path.is_file() or not database_path.is_file():
-            raise BackupError(
-                "backup_restore_archive_invalid", "The control-plane archive is incomplete."
-            )
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("kind") != "hoardarr_control_plane" or manifest.get("schema_version") != 1:
-            raise BackupError(
-                "backup_restore_archive_invalid", "The control-plane manifest is unsupported."
-            )
-        if _hash_file(database_path) != manifest.get("database", {}).get("sha256"):
-            raise BackupError(
-                "backup_restore_database_mismatch",
-                "The restored database checksum does not match the manifest.",
-            )
-        connection = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
-        try:
-            if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-                raise BackupError(
-                    "backup_restore_database_invalid",
-                    "The restored database failed its integrity check.",
-                )
-        finally:
-            connection.close()
+        _extract_and_validate_archive(archive_path, extract_root)
     return {
         "object_key": object_key,
         "artifact_sha256": digest,
@@ -862,4 +826,219 @@ def validate_remote_archive(
         "database_integrity": "verified",
         "manifest_schema_version": 1,
         "restore_performed": False,
+    }
+
+
+def _extract_and_validate_archive(archive_path: Path, extract_root: Path) -> dict[str, Any]:
+    extract_root.mkdir(mode=0o700)
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = archive.getmembers()
+            if len(members) > 4096:
+                raise BackupError(
+                    "backup_restore_archive_invalid",
+                    "The backup archive contains too many entries.",
+                )
+            total_size = 0
+            for member in members:
+                path = PurePosixPath(member.name)
+                if (
+                    path.is_absolute()
+                    or ".." in path.parts
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise BackupError(
+                        "backup_restore_archive_invalid",
+                        "The backup archive contains an unsafe path.",
+                    )
+                total_size += max(0, int(member.size))
+                if total_size > MAX_RESTORE_UNCOMPRESSED_BYTES:
+                    raise BackupError(
+                        "backup_restore_archive_too_large",
+                        "The expanded backup exceeds the restore safety limit.",
+                    )
+            archive.extractall(extract_root, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        raise BackupError(
+            "backup_restore_archive_invalid", "The control-plane archive could not be read."
+        ) from exc
+    manifest_path = extract_root / "manifest.json"
+    database_path = extract_root / "database" / "hoardarr.db"
+    if not manifest_path.is_file() or not database_path.is_file():
+        raise BackupError(
+            "backup_restore_archive_invalid", "The control-plane archive is incomplete."
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BackupError(
+            "backup_restore_archive_invalid", "The control-plane manifest is invalid."
+        ) from exc
+    if manifest.get("kind") != "hoardarr_control_plane" or manifest.get("schema_version") != 1:
+        raise BackupError(
+            "backup_restore_archive_invalid", "The control-plane manifest is unsupported."
+        )
+    if _hash_file(database_path) != manifest.get("database", {}).get("sha256"):
+        raise BackupError(
+            "backup_restore_database_mismatch",
+            "The restored database checksum does not match the manifest.",
+        )
+    connection = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
+    try:
+        if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+            raise BackupError(
+                "backup_restore_database_invalid",
+                "The restored database failed its integrity check.",
+            )
+    finally:
+        connection.close()
+    return manifest
+
+
+def _fresh_database(path: Path) -> bool:
+    if not path.exists():
+        return True
+    try:
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "users" not in tables:
+                return True
+            return connection.execute("SELECT count(*) FROM users").fetchone() == (0,)
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise BackupError(
+            "backup_restore_destination_invalid",
+            "The destination database could not be inspected safely.",
+        ) from exc
+
+
+def apply_fresh_control_plane_restore(
+    settings: Settings,
+    archive_path: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Atomically apply a redacted archive to a fresh, offline appliance."""
+
+    archive = archive_path.resolve(strict=False)
+    if archive.is_symlink() or not archive.is_file():
+        raise BackupError("backup_restore_archive_missing", "The restore archive is unavailable.")
+    digest = expected_sha256.strip().casefold()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None or _hash_file(archive) != digest:
+        raise BackupError(
+            "backup_restore_checksum_mismatch",
+            "The local archive checksum does not match the supplied SHA-256 digest.",
+        )
+    destination_database = sqlite_database_path(settings.database_url)
+    if destination_database is None:
+        raise BackupError(
+            "backup_restore_database_unsupported", "Fresh restore requires a SQLite database."
+        )
+    destination_database = destination_database.resolve(strict=False)
+    if destination_database.is_symlink() or not _fresh_database(destination_database):
+        raise BackupError(
+            "backup_restore_destination_not_fresh",
+            "Fresh restore refuses to replace an appliance that already has an owner account.",
+        )
+    destination_database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    configuration_root = settings.configuration_root.resolve(strict=False)
+    if configuration_root.is_symlink():
+        raise BackupError(
+            "backup_restore_configuration_unsafe",
+            "The configuration root cannot be a symbolic link.",
+        )
+    configuration_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    rollback_root = settings.backup_artifact_root.resolve(strict=False)
+    rollback_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    rollback = rollback_root / f"restore-rollback-{digest[:12]}"
+    if rollback.exists() or rollback.is_symlink():
+        raise BackupError(
+            "backup_restore_rollback_exists",
+            "A rollback snapshot already exists for this archive.",
+        )
+    with tempfile.TemporaryDirectory(
+        prefix="hoardarr-fresh-restore-", dir=destination_database.parent
+    ) as directory:
+        staging = Path(directory)
+        extracted = staging / "archive"
+        manifest = _extract_and_validate_archive(archive, extracted)
+        if manifest.get("database", {}).get("credential_mode") != "redacted_reentry_required":
+            raise BackupError(
+                "backup_restore_credentials_unsafe",
+                "This archive does not prove that installation-bound credentials were removed.",
+            )
+        rollback.mkdir(mode=0o700)
+        source_database = extracted / "database" / "hoardarr.db"
+        staged_database = staging / "hoardarr.db"
+        shutil.copyfile(source_database, staged_database)
+        os.chmod(staged_database, 0o600)
+        existing_database = destination_database.exists()
+        if existing_database:
+            shutil.copy2(destination_database, rollback / "hoardarr.db")
+        restored_configuration: list[str] = []
+        configuration = extracted / "configuration"
+        try:
+            for source in sorted(configuration.rglob("*")) if configuration.is_dir() else []:
+                if not source.is_file() or source.is_symlink():
+                    continue
+                relative = source.relative_to(configuration)
+                candidate = configuration_root / relative
+                if candidate.is_symlink():
+                    raise BackupError(
+                        "backup_restore_configuration_unsafe",
+                        "A restored configuration target cannot be a symbolic link.",
+                    )
+                destination = candidate.resolve(strict=False)
+                try:
+                    destination.relative_to(configuration_root)
+                except ValueError as exc:
+                    raise BackupError(
+                        "backup_restore_configuration_unsafe",
+                        "A restored configuration path escapes the configuration root.",
+                    ) from exc
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if destination.exists():
+                    rollback_path = rollback / "configuration" / relative
+                    rollback_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    shutil.copy2(destination, rollback_path)
+                staged_config = staging / "configuration-stage" / relative
+                staged_config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copyfile(source, staged_config)
+                os.chmod(staged_config, 0o600)
+                os.replace(staged_config, destination)
+                restored_configuration.append(relative.as_posix())
+            os.replace(staged_database, destination_database)
+        except Exception:
+            for relative in reversed(restored_configuration):
+                destination = configuration_root / relative
+                rollback_path = rollback / "configuration" / relative
+                if rollback_path.is_file():
+                    shutil.copy2(rollback_path, destination)
+                else:
+                    destination.unlink(missing_ok=True)
+            if existing_database and (rollback / "hoardarr.db").is_file():
+                shutil.copy2(rollback / "hoardarr.db", destination_database)
+            raise
+    return {
+        "restore_performed": True,
+        "artifact_sha256": digest,
+        "source_version": manifest.get("hoardarr_version"),
+        "credential_mode": "redacted_reentry_required",
+        "configuration_files": restored_configuration,
+        "rollback_path": str(rollback),
+        "next_steps": [
+            "run database migrations",
+            "restart Hoardarr services",
+            "create a new owner account",
+            "re-enter integration credentials",
+            "reconcile disks by stable identity",
+        ],
     }

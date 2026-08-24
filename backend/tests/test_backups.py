@@ -19,6 +19,7 @@ from hoardarr.backups.scheduler import queue_due_control_plane_backups
 from hoardarr.backups.service import (
     BackupError,
     UploadRateLimiter,
+    apply_fresh_control_plane_restore,
     build_control_plane_artifact,
     encrypt_credentials,
     execute_control_plane_backup,
@@ -299,6 +300,7 @@ def test_default_artifact_removes_live_auth_and_requires_credential_reentry(
     assert report["database"]["credential_mode"] == "redacted_reentry_required"
     assert report["database"]["redacted_rows"]["auth_sessions"] == 1
     assert report["database"]["redacted_rows"]["api_tokens"] == 1
+    assert report["database"]["redacted_rows"]["users"] == 1
     assert report["configuration"]["redacted_keys"] == {
         "hoardarr.env": ["HOARDARR_SETUP_TOKEN"]
     }
@@ -316,6 +318,7 @@ def test_default_artifact_removes_live_auth_and_requires_credential_reentry(
     try:
         assert database.execute("SELECT count(*) FROM auth_sessions").fetchone() == (0,)
         assert database.execute("SELECT count(*) FROM api_tokens").fetchone() == (0,)
+        assert database.execute("SELECT count(*) FROM users").fetchone() == (0,)
         assert database.execute(
             "SELECT status, length(api_key_ciphertext) FROM integration_connections"
         ).fetchone() == ("credentials_required", 0)
@@ -328,6 +331,116 @@ def test_default_artifact_removes_live_auth_and_requires_credential_reentry(
         assert database.execute(
             "SELECT enabled, status, length(secret_ciphertext) FROM webhook_endpoints"
         ).fetchone() == (0, "credentials_required", 0)
+    finally:
+        database.close()
+
+
+def test_fresh_restore_applies_atomically_and_retains_rollback(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = _settings(source_root)
+    source.configuration_root.mkdir()
+    (source.configuration_root / "hoardarr.env").write_text(
+        "HOARDARR_BIND_HOST=10.0.0.10\nHOARDARR_SETUP_TOKEN=remove-me\n",
+        encoding="utf-8",
+    )
+    with (
+        create_session_factory(create_database_engine(source.database_url))() as session,
+        session.begin(),
+    ):
+        session.add(User(id="owner", username="owner", password_hash="restored-hash"))
+    artifact, artifact_report = build_control_plane_artifact(source, "fresh-restore-source")
+
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    target = _settings(target_root)
+    target.configuration_root.mkdir()
+    (target.configuration_root / "hoardarr.env").write_text(
+        "HOARDARR_BIND_HOST=127.0.0.1\n",
+        encoding="utf-8",
+    )
+    SecretBox.from_file(target.secret_key_file, create=True)
+    report = apply_fresh_control_plane_restore(
+        target, artifact, artifact_report["artifact_sha256"]
+    )
+
+    assert report["restore_performed"] is True
+    assert report["credential_mode"] == "redacted_reentry_required"
+    assert report["configuration_files"] == ["hoardarr.env"]
+    assert (target.configuration_root / "hoardarr.env").read_text() == (
+        "HOARDARR_BIND_HOST=10.0.0.10\n"
+    )
+    restored_database = sqlite3.connect(target_root / "hoardarr.db")
+    try:
+        assert restored_database.execute("SELECT count(*) FROM users").fetchone() == (0,)
+    finally:
+        restored_database.close()
+    rollback = Path(report["rollback_path"])
+    assert (rollback / "hoardarr.db").is_file()
+    assert (rollback / "configuration" / "hoardarr.env").read_text() == (
+        "HOARDARR_BIND_HOST=127.0.0.1\n"
+    )
+    with pytest.raises(BackupError, match="rollback snapshot already exists"):
+        apply_fresh_control_plane_restore(
+            target, artifact, artifact_report["artifact_sha256"]
+        )
+    with pytest.raises(BackupError, match="checksum"):
+        apply_fresh_control_plane_restore(target, artifact, "0" * 64)
+
+    occupied_root = tmp_path / "occupied"
+    occupied_root.mkdir()
+    occupied = _settings(occupied_root)
+    with (
+        create_session_factory(create_database_engine(occupied.database_url))() as session,
+        session.begin(),
+    ):
+        session.add(User(id="existing", username="existing", password_hash="hash"))
+    with pytest.raises(BackupError, match="already has an owner"):
+        apply_fresh_control_plane_restore(
+            occupied, artifact, artifact_report["artifact_sha256"]
+        )
+
+
+def test_fresh_restore_rolls_configuration_back_when_database_switch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = _settings(source_root)
+    source.configuration_root.mkdir()
+    (source.configuration_root / "hoardarr.env").write_text(
+        "HOARDARR_BIND_HOST=10.0.0.20\n", encoding="utf-8"
+    )
+    artifact, artifact_report = build_control_plane_artifact(source, "rollback-source")
+
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    target = _settings(target_root)
+    target.configuration_root.mkdir()
+    original_configuration = "HOARDARR_BIND_HOST=127.0.0.1\n"
+    (target.configuration_root / "hoardarr.env").write_text(
+        original_configuration, encoding="utf-8"
+    )
+    destination_database = target_root / "hoardarr.db"
+    original_replace = backup_service.os.replace
+
+    def fail_database_switch(source_path: Path, destination_path: Path) -> None:
+        if Path(destination_path) == destination_database:
+            raise OSError("injected database switch failure")
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(backup_service.os, "replace", fail_database_switch)
+    with pytest.raises(OSError, match="injected database switch failure"):
+        apply_fresh_control_plane_restore(
+            target, artifact, artifact_report["artifact_sha256"]
+        )
+    assert (target.configuration_root / "hoardarr.env").read_text() == (
+        original_configuration
+    )
+    database = sqlite3.connect(destination_database)
+    try:
+        assert database.execute("SELECT count(*) FROM users").fetchone() == (0,)
+        assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     finally:
         database.close()
 

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import logging
+import os
 import socket
+import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import uvicorn
@@ -16,6 +20,7 @@ from hoardarr.auth.service import (
     create_initial_owner,
     issue_setup_token,
 )
+from hoardarr.backups.service import BackupError, apply_fresh_control_plane_restore
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import (
@@ -106,6 +111,40 @@ def _setup_command(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     print(f"Open {site_url} and sign in. No setup code is required.")
 
 
+def _restore_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if not args.yes:
+        parser.error("fresh restore requires --yes")
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        parser.error("fresh restore must run as root")
+    if os.name == "posix":
+        active: list[str] = []
+        for unit in (
+            "hoardarr-api.service",
+            "hoardarr-worker.service",
+            "hoardarr-account-executor.service",
+            "hoardarr-storage-executor.service",
+            "hoardarr-storage-status.service",
+        ):
+            result = subprocess.run(
+                ["systemctl", "is-active", "--quiet", unit],
+                check=False,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                active.append(unit)
+        if active:
+            parser.error(
+                "stop Hoardarr services before restore; active: " + ", ".join(active)
+            )
+    try:
+        report = apply_fresh_control_plane_restore(
+            Settings(), Path(args.archive), args.sha256
+        )
+    except BackupError as exc:
+        parser.error(exc.safe_message)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="hoardarr", description="Manage this Hoardarr server")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -131,11 +170,24 @@ def main() -> None:
     )
     setup.add_argument("--ttl", type=int, default=900, help="browser link lifetime in seconds")
     setup.add_argument("--site-url", help="public Hoardarr URL shown after setup")
+    restore = commands.add_parser(
+        "restore-control-plane",
+        help="apply a credential-redacted archive to a fresh offline appliance",
+    )
+    restore.add_argument("--archive", required=True, help="local control-plane tar.gz archive")
+    restore.add_argument("--sha256", required=True, help="expected 64-character SHA-256 digest")
+    restore.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm replacing the empty appliance database and restorable configuration",
+    )
     args = parser.parse_args()
     if args.command == "setup":
         if not 60 <= args.ttl <= 3600:
             setup.error("--ttl must be between 60 and 3600 seconds")
         _setup_command(args, setup)
+    elif args.command == "restore-control-plane":
+        _restore_command(args, restore)
 
 
 def setup_token_main() -> None:

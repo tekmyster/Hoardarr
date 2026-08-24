@@ -24,7 +24,7 @@ A control-plane archive contains:
 
 Files whose names indicate credentials, passwords, private keys, secrets, or tokens are excluded. Symlinks and oversized configuration files are also excluded. Secret-valued keys are removed from `hoardarr.env` while non-secret listener and appliance settings remain restorable.
 
-The SQLite copy is also made safe for a different installation key. Browser sessions, one-time setup claims, and API tokens are removed. ARR credentials, CHAP secrets, backup credentials, and webhook signing secrets are cleared; their non-secret endpoint/configuration rows remain disabled with `credentials_required` state so the owner can review and re-enter them. The manifest records the credential mode and row counts. This prevents a structurally valid fresh restore from containing permanently unreadable ciphertext or silently transferring live authentication sessions.
+The SQLite copy is also made safe for a different installation key. User password verifiers, browser sessions, one-time setup claims, and API tokens are removed. ARR credentials, CHAP secrets, backup credentials, and webhook signing secrets are cleared; their non-secret endpoint/configuration rows remain disabled with `credentials_required` state so the owner can review and re-enter them. The manifest records the credential mode and row counts. This prevents a structurally valid fresh restore from containing permanently unreadable ciphertext, transferable authentication material, or live sessions.
 
 The Hoardarr secret-store key is not exported. The archive is not described as encrypted: operators must use provider-side encryption or an encrypted destination when encryption at rest is required. A future optional encrypted-secrets export remains a separate roadmap item.
 
@@ -40,7 +40,23 @@ Automatic schedules use a bounded 1–720 hour interval. The worker checks due t
 
 ## Restore boundary
 
-`Validate restore` downloads a successful remote archive into an isolated temporary directory, rejects unsafe archive paths and non-regular entries, checks the archive and manifest digests, and runs SQLite `PRAGMA integrity_check`. It never replaces the running database or configuration. Applying a validated archive to a fresh appliance, optional encrypted secret export, and stable-disk reconciliation remain distinct work; validation must not be presented as a completed restore.
+`Validate restore` downloads a successful remote archive into an isolated temporary directory, rejects unsafe archive paths and non-regular entries, enforces entry-count and expanded-size limits, checks the archive and manifest digests, and runs SQLite `PRAGMA integrity_check`. It never replaces the running database or configuration.
+
+An administrator can apply a downloaded, credential-redacted archive only to an offline fresh appliance:
+
+```console
+sudo systemctl stop hoardarr-api hoardarr-worker hoardarr-account-executor \
+  hoardarr-storage-executor hoardarr-storage-status
+sudo hoardarr restore-control-plane \
+  --archive /secure/path/hoardarr-control-plane.tar.gz \
+  --sha256 <verified-64-character-digest> \
+  --yes
+sudo hoardarr-migrate
+sudo systemctl start hoardarr-account-executor hoardarr-storage-executor \
+  hoardarr-storage-status hoardarr-worker hoardarr-api
+```
+
+The command requires root, refuses to run while a Hoardarr service is active, requires an independent expected SHA-256 value, refuses an appliance that already has an owner, rejects archives that do not prove credential redaction, atomically replaces the empty SQLite database, and retains the prior empty database/configuration under the reported rollback path. After migration, issue a new one-time setup link or create a new console owner before restarting normal access; then re-enter integration credentials and reconcile discovered disks by stable identity. Optional encrypted-secret export remains separate work; restore validation must not be presented as an applied restore.
 
 ## User interface and activity
 
@@ -52,4 +68,4 @@ Settings → Remote backups provides honest empty/loading/failure states, target
 - backup-focused API tests cover authentication, scopes, redaction, credential rotation, idempotency, readiness gates, schedule persistence, and durable run creation.
 - `frontend/src/components/RemoteBackupsPanel.test.tsx` covers empty states, secret removal from the DOM after creation and rotation, readiness gating, scheduling, and validation actions.
 - the Playwright production-shell scenario exercises the visible create → prove connection → enable backup workflow.
-- `tests/integration/minio_control_plane_backup.py` exercises the production boto3/worker path against a live disposable MinIO server in Ubuntu CI and emits sanitized evidence.
+- `tests/integration/minio_control_plane_backup.py` exercises the production boto3/worker path against a live disposable MinIO server in Ubuntu CI, downloads the verified object, applies it to a separate fresh SQLite/configuration root, proves authentication material is removed while non-secret target configuration survives in credential-reentry state, and emits sanitized evidence.

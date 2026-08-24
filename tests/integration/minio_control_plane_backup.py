@@ -10,8 +10,10 @@ from pathlib import Path
 
 import boto3
 from botocore.client import Config
+
 from hoardarr.auth.service import Principal
 from hoardarr.backups.service import (
+    apply_fresh_control_plane_restore,
     encrypt_credentials,
     target_fingerprint,
     validate_remote_archive,
@@ -23,7 +25,7 @@ from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.migrate import upgrade_database
-from hoardarr.db.models import Operation, RemoteBackupRun, RemoteBackupTarget
+from hoardarr.db.models import Operation, RemoteBackupRun, RemoteBackupTarget, User
 from hoardarr.operations.service import create_operation
 from hoardarr.operations.worker import run_once
 
@@ -99,6 +101,14 @@ def main() -> int:
             scopes=frozenset({"read", "operate", "admin"}),
         )
         with factory() as session, session.begin():
+            session.add(
+                User(
+                    id="integration-owner",
+                    username="integration-owner",
+                    password_hash="integration-password-hash",
+                )
+            )
+            session.flush()
             session.add(target)
             session.flush()
             operation, created = create_operation(
@@ -143,12 +153,47 @@ def main() -> int:
             operation = session.get(Operation, operation_id)
             assert operation is not None and operation.status == "succeeded"
             report = operation.result_json
+            archive_path = root / "downloaded-control-plane.tar.gz"
+            remote = s3.get_object(Bucket=bucket, Key=str(run.object_key))["Body"]
+            try:
+                archive_path.write_bytes(remote.read())
+            finally:
+                remote.close()
+            fresh_root = root / "fresh-appliance"
+            fresh_root.mkdir()
+            fresh_settings = Settings(
+                environment="test",
+                database_url=f"sqlite:///{(fresh_root / 'hoardarr.db').as_posix()}",
+                secret_key_file=fresh_root / "secret.key",
+                secure_cookies=False,
+                backup_artifact_root=fresh_root / "artifacts",
+                configuration_root=fresh_root / "config",
+            )
+            fresh_settings.configuration_root.mkdir()
+            (fresh_settings.configuration_root / "hoardarr.env").write_text(
+                "HOARDARR_ENVIRONMENT=test\n", encoding="utf-8"
+            )
+            upgrade_database(fresh_settings.database_url)
+            SecretBox.from_file(fresh_settings.secret_key_file, create=True)
+            fresh_restore = apply_fresh_control_plane_restore(
+                fresh_settings, archive_path, str(run.artifact_sha256)
+            )
+        restored_factory = create_session_factory(
+            create_database_engine(fresh_settings.database_url)
+        )
+        with restored_factory() as restored_session:
+            restored_target = restored_session.get(RemoteBackupTarget, target.id)
+            assert restored_session.get(User, "integration-owner") is None
+            assert restored_target is not None
+            assert restored_target.status == "credentials_required"
+            assert restored_target.enabled is False
         evidence = {
             "provider": "live MinIO",
             "endpoint": endpoint,
             "connection": connection,
             "backup": report,
             "restore_validation": validation,
+            "fresh_appliance_restore": fresh_restore,
             "operation_id": operation_id,
             "credentials_recorded": False,
         }
