@@ -34,6 +34,8 @@ from hoardarr.updates.service import (
     verify_release_metadata,
 )
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _release(artifact: Path) -> dict[str, object]:
     return {
@@ -367,3 +369,16 @@ def test_addon_compatibility_and_runtime_are_enforced(tmp_path: Path) -> None:
         "hoardarr-addon-netapp-shelf.service",
     ]
     assert runtime_unit(manifest, install_path) == content
+
+
+def test_storage_executor_presentation_roots_exist_before_service_start() -> None:
+    installer = (REPOSITORY_ROOT / "scripts" / "install-release-bundle.sh").read_text(
+        encoding="utf-8"
+    )
+    unit = (
+        REPOSITORY_ROOT / "packaging" / "systemd" / "hoardarr-storage-executor.service"
+    ).read_text(encoding="utf-8")
+
+    assert "install -d -o root -g root -m 0755 /data /mnt /srv" in installer
+    assert "ReadWritePaths=/data /mnt /srv" in unit
+    assert "ReadWritePaths=-/data" not in unit

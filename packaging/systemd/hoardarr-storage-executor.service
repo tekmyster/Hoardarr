@@ -26,7 +26,7 @@ ProtectSystem=strict
 # Do not prefix the executor state path with "-". If the installer has not
 # created it before sandbox setup, systemd must refuse to start the service
 # instead of silently leaving the path read-only.
-ReadWritePaths=-/data -/mnt -/srv -/etc/fstab /var/lib/hoardarr/storage-executor -/run/hoardarr -/run/mount
+ReadWritePaths=/data /mnt /srv -/etc/fstab /var/lib/hoardarr/storage-executor -/run/hoardarr -/run/mount
 ProtectHome=read-only
 ProtectClock=yes
 ProtectControlGroups=yes

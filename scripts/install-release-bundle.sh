@@ -704,6 +704,12 @@ apply_release() {
     install -d -o root -g root -m 0700 "${STATE_ROOT}/storage-executor"
     install -d -o root -g root -m 0700 "${STATE_ROOT}/storage-executor/transactions"
     install -d -o root -g root -m 0700 "${STATE_ROOT}/connectivity"
+    # ProtectSystem=strict gives the storage executor a private mount namespace.
+    # ReadWritePaths can only expose paths that already exist when that namespace
+    # is created, so create every supported presentation root before systemd
+    # starts (or restarts) the executor.  In particular, Ubuntu does not provide
+    # /data by default.
+    install -d -o root -g root -m 0755 /data /mnt /srv
 
     local expected_manifest previous_release
     expected_manifest="$(manifest_digest)"
