@@ -301,7 +301,7 @@ export default function App() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [storageOperation?.id]);
+  }, [storageOperation?.id, storageOperation?.status]);
 
   const drives = useMemo(() => snapshot ? drivesFromSnapshot(snapshot) : [], [snapshot]);
   const activeReservedDriveIds = useMemo(

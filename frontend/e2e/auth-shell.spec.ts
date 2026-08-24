@@ -77,7 +77,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
   });
 }
 
-async function storageWizardServer(page: Page, options: { firstDriveContainsData?: boolean } = {}): Promise<void> {
+async function storageWizardServer(page: Page, options: { firstDriveContainsData?: boolean; resumeAfterFailure?: boolean } = {}): Promise<void> {
   await authenticatedEmptyServer(page);
   const now = new Date().toISOString();
   const drives = Array.from({ length: 8 }, (_, index) => ({
@@ -116,6 +116,7 @@ async function storageWizardServer(page: Page, options: { firstDriveContainsData
   let revision = 0;
   let applied = false;
   let completed = false;
+  let resumed = options.resumeAfterFailure !== true;
   let answers: Record<string, unknown> = {};
   const wizard = () => ({ id: "wizard-storage", revision, mode: "guided", status: completed ? "completed" : applied ? "applied" : "review", current_step: "storage", hardware_snapshot_id: snapshot.id, answers, plan_id: "plan-storage", created_at: now, updated_at: now });
   const planTemplate = {
@@ -244,10 +245,27 @@ async function storageWizardServer(page: Page, options: { firstDriveContainsData
     }
     return route.fulfill({ json: wizard() });
   });
-  await page.route("**/api/v1/operations", (route) => route.fulfill({ json: { items: applied ? [{ id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: operationResult(), created_at: now, updated_at: now }] : [] } }));
-  await page.route("**/api/v1/operations/op-storage", (route) => route.fulfill({ json: { id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: operationResult(), created_at: now, updated_at: now } }));
-  await page.route("**/api/v1/operations/op-storage/progress", (route) => route.fulfill({ json: { operation_id: "op-storage", state: "succeeded", phase: "Storage build completed", completed_steps: 6, total_steps: 6, percent: 100, completed_actions: ["format", "mount"], notices: [], current_action: null, estimate: null, updated_at: Date.now() / 1000 } }));
-  await page.route("**/api/v1/operations/op-storage/events", (route) => route.fulfill({ json: { items: [{ sequence: 1, type: "operation.succeeded", message: "Storage build completed", data: {}, created_at: now }] } }));
+  const operationDocument = () => resumed
+    ? { id: "op-storage", kind: "storage.apply", status: "succeeded", resource: { type: "wizard_session", id: "wizard-storage" }, result: operationResult(), created_at: now, updated_at: now }
+    : { id: "op-storage", kind: "storage.apply", status: "needs_attention", resource: { type: "wizard_session", id: "wizard-storage" }, error: { code: "storage_tool_missing", message: "A required storage tool is unavailable: setfattr." }, created_at: now, updated_at: now };
+  await page.route("**/api/v1/operations", (route) => route.fulfill({ json: { items: applied ? [operationDocument()] : [] } }));
+  await page.route("**/api/v1/operations/op-storage", (route) => {
+    if (new URL(route.request().url()).pathname.endsWith("/resume")) {
+      resumed = true;
+      return route.fulfill({ status: 202, json: { ...operationDocument(), status: "queued", result: null } });
+    }
+    return route.fulfill({ json: operationDocument() });
+  });
+  await page.route("**/operations/op-storage/resume", (route) => {
+    resumed = true;
+    return route.fulfill({ status: 202, json: { ...operationDocument(), status: "queued", result: null } });
+  });
+  await page.route("**/api/v1/operations/op-storage/progress", (route) => route.fulfill({ json: resumed
+    ? { operation_id: "op-storage", state: "succeeded", phase: "Storage build completed", completed_steps: 6, total_steps: 6, percent: 100, completed_actions: ["format", "mount"], notices: [{ code: "storage_build_resumed", message: "Storage execution resumed from its durable checkpoint." }], current_action: null, estimate: null, updated_at: Date.now() / 1000 }
+    : { operation_id: "op-storage", state: "needs_attention", phase: "Building the selected storage layout", completed_steps: 4, total_steps: 6, percent: 66, completed_actions: ["format", "mount"], notices: [], current_action: { id: "layout", type: "storage.layout.apply" }, estimate: null, updated_at: Date.now() / 1000 } }));
+  await page.route("**/api/v1/operations/op-storage/events", (route) => route.fulfill({ json: { items: resumed
+    ? [{ sequence: 1, type: "operation.needs_attention", message: "setfattr was unavailable", data: {}, created_at: now }, { sequence: 2, type: "operation.resumed", message: "Storage build queued to resume from its durable checkpoint", data: {}, created_at: now }, { sequence: 3, type: "operation.succeeded", message: "Storage build completed", data: {}, created_at: now }]
+    : [{ sequence: 1, type: "operation.needs_attention", message: "setfattr was unavailable", data: {}, created_at: now }] } }));
   await page.route("**/api/v1/storage/groups", (route) => route.fulfill({ json: { items: applied ? [{
     id: "media",
     name: "Media",
@@ -698,7 +716,7 @@ test.describe("production sign-in shell", () => {
     await dialog.getByRole("button", { name: "Continue to consent" }).click();
     await dialog.getByLabel('Type “I AGREE”').fill("I AGREE");
     await dialog.getByRole("button", { name: "Apply settings" }).click();
-    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100");
+    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100", { timeout: 15_000 });
     await page.reload();
     const recoveredDialog = page.getByRole("dialog", { name: "Add storage" });
     await expect(recoveredDialog.getByRole("button", { name: "Create access credential" })).toBeVisible();
@@ -1230,6 +1248,26 @@ test.describe("production sign-in shell", () => {
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Storage", level: 1 })).toBeVisible();
+  });
+
+  test("resumes a storage build from its durable needs-attention checkpoint", async ({ page }) => {
+    await storageWizardServer(page, { resumeAfterFailure: true });
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByRole("button", { name: "Add storage", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await dialog.getByRole("checkbox", { name: /Select SSD-1TB serial SSD-1/ }).check();
+    for (let step = 0; step < 7; step += 1) await dialog.getByRole("button", { name: "Continue" }).click();
+    await dialog.getByRole("button", { name: "Continue to consent" }).click();
+    await dialog.getByLabel('Type “I AGREE”').fill("I AGREE");
+    await dialog.getByRole("button", { name: "Apply settings" }).click();
+
+    await expect(dialog.getByText("A required storage tool is unavailable: setfattr.").first()).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Resume from safe checkpoint" }).first()).toBeVisible();
+    await dialog.getByRole("button", { name: "Resume from safe checkpoint" }).first().click();
+    await expect(dialog.getByRole("progressbar", { name: "Storage build progress" })).toHaveAttribute("aria-valuenow", "100", { timeout: 15_000 });
+    await expect(dialog.getByText("Storage build completed", { exact: true }).first()).toBeVisible();
+    await expect(dialog.getByText("Storage execution resumed from its durable checkpoint.")).toBeVisible();
   });
 
   test("renders live storage analytics and explains the metric source", async ({ page }) => {
