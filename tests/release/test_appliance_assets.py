@@ -67,6 +67,7 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("allow-pw: false", template)
         self.assertEqual(template.count("__SSH_PUBLIC_KEY__"), 2)
         self.assertIn("workflow_dispatch", workflow)
+        self.assertIn("rc/0.3.11-validation", workflow)
         self.assertIn("LAB_SSH_PUBLIC_KEY", workflow)
         self.assertIn("placeholder count changed", workflow)
         self.assertNotIn("PRIVATE KEY", template + workflow)

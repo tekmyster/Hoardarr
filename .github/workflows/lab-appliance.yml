@@ -1,5 +1,17 @@
 name: Build persistent lab appliance
 on:
+  push:
+    branches:
+      - rc/0.3.11-validation
+    paths:
+      - .github/workflows/lab-appliance.yml
+      - packaging/appliance/lab-user-data.template
+      - scripts/build-appliance.sh
+      - scripts/build-release-bundle.py
+      - frontend/package.json
+      - frontend/package-lock.json
+      - backend/pyproject.toml
+      - backend/uv.lock
   workflow_dispatch:
     inputs:
       ssh_public_key:
@@ -16,7 +28,7 @@ jobs:
     env:
       BASE_ISO_URL: https://releases.ubuntu.com/noble/ubuntu-24.04.4-live-server-amd64.iso
       BASE_ISO_SHA256: e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433
-      LAB_SSH_PUBLIC_KEY: ${{ inputs.ssh_public_key }}
+      LAB_SSH_PUBLIC_KEY: ${{ inputs.ssh_public_key || vars.HOARDARR_LAB_SSH_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
