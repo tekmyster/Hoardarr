@@ -335,6 +335,78 @@ def main() -> None:
     if source_hash != destination_hash:
         raise SystemExit("source and destination hashes differ")
 
+    selected_destination = args.work_root / "foreign-selected-destination"
+    selected_destination.mkdir(mode=0o700)
+    with session_factory() as session, session.begin():
+        group = session.scalar(
+            select(StorageGroup).where(StorageGroup.name == "Managed media")
+        )
+        snapshot = session.get(HardwareSnapshot, snapshot_id)
+        assert group is not None and snapshot is not None
+        selected_backend = StorageBackend(
+            storage_group_id=group.id,
+            stable_identity=f"filesystem:{selected_destination.stat().st_dev}:selected",
+            namespace_path=str(selected_destination),
+            lifecycle_state="active",
+        )
+        session.add(selected_backend)
+        session.flush()
+        selected_plan = build_migration_plan(
+            session,
+            snapshot=snapshot,
+            candidate_id=candidate_id,
+            destination_backend_id=selected_backend.id,
+            verification_mode="accurate",
+            collision_policy="stop",
+            reserve_bytes=0,
+            selection={
+                "mode": "selected_folders",
+                "include_paths": ["Movies"],
+                "include_extensions": [],
+                "include_globs": [],
+                "exclude_globs": [],
+            },
+        )
+        selected_operation = Operation(
+            kind="storage.foreign.migrate",
+            status="running",
+            actor_type="system",
+            actor_id="integration",
+            resource_type="foreign_storage",
+            resource_id=candidate_id,
+            request_sha256=document_hash(selected_plan),
+            request_json={"plan": selected_plan},
+            heartbeat_at=utc_now(),
+        )
+        session.add(selected_operation)
+        session.flush()
+        session.add(
+            ForeignMigrationJob(
+                id=selected_operation.id,
+                candidate_id=candidate_id,
+                destination_backend_id=selected_backend.id,
+                plan_sha256=selected_plan["plan_sha256"],
+                verification_mode="accurate",
+                collision_policy="stop",
+                status="running",
+                phase="preflight",
+                report_json={},
+            )
+        )
+        selected_operation_id = selected_operation.id
+    selected_report = execute_foreign_migration(
+        session_factory, selected_operation_id, selected_plan
+    )
+    selected_files = sorted(
+        path.relative_to(selected_destination).as_posix()
+        for path in selected_destination.rglob("*")
+        if path.is_file()
+    )
+    if not selected_files or any(
+        not path.startswith("Movies/") for path in selected_files
+    ):
+        raise SystemExit("selected-folder migration copied an unreviewed source path")
+
     with session_factory() as session:
         entries = list(
             session.scalars(
@@ -412,6 +484,12 @@ def main() -> None:
         "destination_sha256": destination_hash,
         "entry_states": sorted({entry.status for entry in entries}),
         "source_unmounted_after": not bool(mounted_targets(args.loop)),
+        "selected_folder_execution": {
+            "mode": selected_report["selection"]["mode"],
+            "include_paths": selected_report["selection"]["include_paths"],
+            "files": selected_files,
+            "files_verified": selected_report["files_verified"],
+        },
     }
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
     args.evidence.write_text(

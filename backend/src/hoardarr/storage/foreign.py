@@ -35,6 +35,79 @@ STACK_SIGNATURES = {
     "lvm2_member": ("lvm", "Linux LVM", "pvs"),
     "zfs_member": ("zfs", "ZFS", "zdb"),
 }
+SELECTION_MODES = {"full", "selected_folders", "filtered"}
+
+
+def _selection_value(value: str, *, pattern: bool = False) -> str:
+    normalized = value.strip().replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or len(normalized) > 256
+        or normalized.startswith("/")
+        or "\0" in normalized
+        or any(ord(character) < 32 for character in normalized)
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or (not pattern and any(character in normalized for character in "*?[]"))
+    ):
+        raise ForeignStorageError(
+            "foreign_selection_invalid", "An archive selection path or pattern is invalid."
+        )
+    return normalized
+
+
+def normalize_archive_selection(value: object | None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {"mode": "full"}
+    if set(raw) - {"mode", "include_paths", "include_extensions", "include_globs", "exclude_globs"}:
+        raise ForeignStorageError("foreign_selection_invalid", "The archive selection is invalid.")
+    mode = raw.get("mode", "full")
+    lists: dict[str, list[str]] = {}
+    for field in ("include_paths", "include_extensions", "include_globs", "exclude_globs"):
+        items = raw.get(field, [])
+        if (
+            not isinstance(items, list)
+            or len(items) > 64
+            or not all(isinstance(item, str) for item in items)
+        ):
+            raise ForeignStorageError(
+                "foreign_selection_invalid", "The archive selection exceeds safe limits."
+            )
+        if field == "include_extensions":
+            normalized = []
+            for item in items:
+                extension = item.strip().casefold()
+                if (
+                    not extension.startswith(".")
+                    or len(extension) > 32
+                    or any(character in extension for character in "/\\\0*?[]")
+                ):
+                    raise ForeignStorageError(
+                        "foreign_selection_invalid", "An archive extension filter is invalid."
+                    )
+                normalized.append(extension)
+        else:
+            normalized = [_selection_value(item, pattern=field.endswith("globs")) for item in items]
+        lists[field] = sorted(set(normalized))
+    valid = (
+        mode in SELECTION_MODES
+        and (mode != "full" or not any(lists.values()))
+        and (
+            mode != "selected_folders"
+            or (
+                bool(lists["include_paths"])
+                and not any(
+                    lists[key] for key in ("include_extensions", "include_globs", "exclude_globs")
+                )
+            )
+        )
+        and (
+            mode != "filtered"
+            or bool(lists["include_extensions"] or lists["include_globs"] or lists["exclude_globs"])
+        )
+    )
+    if not valid:
+        raise ForeignStorageError("foreign_selection_invalid", "The archive selection is invalid.")
+    return {"mode": mode, **lists}
 
 
 def _text(value: Any, *, limit: int = 512) -> str | None:
@@ -401,6 +474,10 @@ def _member(disk: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(item, str) and item.startswith("/")
             )
     scan = disk.get("signature_scan")
+    connection = disk.get("connection") if isinstance(disk.get("connection"), dict) else {}
+    transport = _text(connection.get("transport"), limit=64)
+    protocol = _text(connection.get("protocol"), limit=64)
+    external = disk.get("removable") is True or transport in {"usb", "mmc", "sd", "firewire"}
     return {
         "device_id": _text(disk.get("id")) or "identity-not-reported",
         "kernel_path": _text(disk.get("kernel_path"), limit=4096),
@@ -412,6 +489,8 @@ def _member(disk: dict[str, Any]) -> dict[str, Any]:
         "system_device": disk.get("system_disk") is True or disk.get("system_device") is True,
         "read_only": disk.get("read_only") is True,
         "removable": disk.get("removable") is True,
+        "connection": {"transport": transport, "protocol": protocol},
+        "external": external,
         "mounted": bool(mountpoints),
         "mountpoints": sorted(mountpoints)[:256],
         "signature_scan": {
@@ -515,6 +594,16 @@ def _candidate_document(
         "id": f"foreign:{document_hash(fingerprint)[:24]}",
         "profile": profile,
         "profile_name": name,
+        "archive_intake": {
+            "state": "discovered_external" if any(item["external"] for item in members) else None,
+            "default_access": "read_only",
+            "reason": (
+                "The connection is reported as removable or external. Hoardarr will treat it "
+                "as archive intake and keep the source read-only."
+                if any(item["external"] for item in members)
+                else "This source is not reported as removable or externally attached."
+            ),
+        },
         "origin": {
             "name": "Not reported",
             "confidence": "unknown",
@@ -938,6 +1027,7 @@ def build_migration_plan(
     verification_mode: str,
     collision_policy: str,
     reserve_bytes: int,
+    selection: object | None = None,
 ) -> dict[str, Any]:
     """Bind a current foreign inventory to one managed destination without adopting the source."""
 
@@ -953,6 +1043,7 @@ def build_migration_plan(
         raise ForeignStorageError(
             "foreign_reserve_invalid", "The destination reserve is outside safe bounds."
         )
+    normalized_selection = normalize_archive_selection(selection)
     assessment = assess_foreign_storage(session, snapshot=snapshot)
     candidate = next(
         (item for item in assessment["candidates"] if item["id"] == candidate_id), None
@@ -1010,14 +1101,17 @@ def build_migration_plan(
             "foreign_inventory_invalid", "The persisted source inventory is invalid."
         )
     free_bytes = destination_usage.free
-    if free_bytes < total_bytes + reserve_bytes:
+    required_at_review = (
+        total_bytes + reserve_bytes if normalized_selection["mode"] == "full" else reserve_bytes
+    )
+    if free_bytes < required_at_review:
         raise ForeignStorageError(
             "foreign_destination_full",
             "The destination does not have enough free space plus the requested reserve.",
         )
     source_plan = build_inspection_plan(session, snapshot=snapshot, candidate_id=candidate_id)
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "foreign.migrate_files",
         "candidate_id": candidate_id,
         "hardware_snapshot_id": snapshot.id,
@@ -1038,6 +1132,13 @@ def build_migration_plan(
             "reserve_bytes": reserve_bytes,
         },
         "inventory": {"file_count": file_count, "total_bytes": total_bytes},
+        "selection": {
+            **normalized_selection,
+            "capacity_upper_bound_bytes": total_bytes,
+            "exact_selected_bytes_at_review": (
+                total_bytes if normalized_selection["mode"] == "full" else None
+            ),
+        },
         "verification": {
             "mode": verification_mode,
             "algorithm": "blake3" if verification_mode == "accurate" else "size_mtime",
@@ -1073,29 +1174,67 @@ def validate_migration_plan(value: object) -> dict[str, Any]:
     }
     source_path = source.get("kernel_path_at_preview") if isinstance(source, dict) else None
     source_type = str(source.get("filesystem_type")).casefold() if isinstance(source, dict) else ""
-    if (
-        set(value)
-        != {
-            "schema_version",
-            "operation",
-            "candidate_id",
-            "hardware_snapshot_id",
-            "hardware_snapshot_sha256",
-            "source_inventory_operation_id",
-            "source_inventory_sha256",
-            "device",
-            "device_binding_sha256",
-            "source",
-            "destination",
-            "inventory",
-            "verification",
-            "collision_policy",
-            "source_access",
-            "source_retained",
-            "parity_reuse_supported",
-            "plan_sha256",
+    schema_version = plan.get("schema_version")
+    expected_fields = {
+        "schema_version",
+        "operation",
+        "candidate_id",
+        "hardware_snapshot_id",
+        "hardware_snapshot_sha256",
+        "source_inventory_operation_id",
+        "source_inventory_sha256",
+        "device",
+        "device_binding_sha256",
+        "source",
+        "destination",
+        "inventory",
+        "verification",
+        "collision_policy",
+        "source_access",
+        "source_retained",
+        "parity_reuse_supported",
+        "plan_sha256",
+    }
+    if schema_version == 2:
+        expected_fields.add("selection")
+    raw_selection = plan.get("selection")
+    selection_input = (
+        {
+            key: value
+            for key, value in raw_selection.items()
+            if key not in {"capacity_upper_bound_bytes", "exact_selected_bytes_at_review"}
         }
-        or plan.get("schema_version") != 1
+        if isinstance(raw_selection, dict)
+        else raw_selection
+    )
+    try:
+        selection = (
+            normalize_archive_selection(selection_input)
+            if schema_version == 2
+            else normalize_archive_selection(None)
+        )
+    except ForeignStorageError:
+        selection = None
+    selection_valid = schema_version == 1 or (
+        isinstance(raw_selection, dict)
+        and selection is not None
+        and raw_selection
+        == {
+            **selection,
+            "capacity_upper_bound_bytes": inventory.get("total_bytes")
+            if isinstance(inventory, dict)
+            else None,
+            "exact_selected_bytes_at_review": (
+                inventory.get("total_bytes")
+                if isinstance(inventory, dict) and selection["mode"] == "full"
+                else None
+            ),
+        }
+    )
+    if (
+        set(value) != expected_fields
+        or schema_version not in {1, 2}
+        or not selection_valid
         or plan.get("operation") != "foreign.migrate_files"
         or plan.get("source_access") != "read_only"
         or plan.get("source_retained") is not True

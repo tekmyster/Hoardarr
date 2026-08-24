@@ -22,6 +22,10 @@ function readFileText(file: File): Promise<string> {
   });
 }
 
+function filterValues(value: string): string[] {
+  return [...new Set(value.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean))];
+}
+
 export function ForeignStoragePanel() {
   const [assessment, setAssessment] = useState<ForeignStorageAssessment | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +39,11 @@ export function ForeignStoragePanel() {
   const [migrationDestinationId, setMigrationDestinationId] = useState("");
   const [migrationVerification, setMigrationVerification] = useState<"fast" | "accurate">("accurate");
   const [migrationCollisionPolicy, setMigrationCollisionPolicy] = useState<"stop" | "reuse_identical">("stop");
+  const [migrationSelectionMode, setMigrationSelectionMode] = useState<"full" | "selected_folders" | "filtered">("full");
+  const [migrationSelectedPaths, setMigrationSelectedPaths] = useState<string[]>([]);
+  const [migrationExtensions, setMigrationExtensions] = useState("");
+  const [migrationIncludeGlobs, setMigrationIncludeGlobs] = useState("");
+  const [migrationExcludeGlobs, setMigrationExcludeGlobs] = useState("");
   const [migrationPlan, setMigrationPlan] = useState<ForeignMigrationPlan | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
@@ -126,6 +135,11 @@ export function ForeignStoragePanel() {
     setProgress(null);
     setPlan(null);
     setStackPreview(null);
+    setMigrationSelectionMode("full");
+    setMigrationSelectedPaths([]);
+    setMigrationExtensions("");
+    setMigrationIncludeGlobs("");
+    setMigrationExcludeGlobs("");
   };
 
   const previewMigration = async () => {
@@ -139,6 +153,13 @@ export function ForeignStoragePanel() {
         verification_mode: migrationVerification,
         collision_policy: migrationCollisionPolicy,
         reserve_bytes: 1_073_741_824,
+        selection: {
+          mode: migrationSelectionMode,
+          include_paths: migrationSelectionMode === "selected_folders" ? migrationSelectedPaths : [],
+          include_extensions: migrationSelectionMode === "filtered" ? filterValues(migrationExtensions) : [],
+          include_globs: migrationSelectionMode === "filtered" ? filterValues(migrationIncludeGlobs) : [],
+          exclude_globs: migrationSelectionMode === "filtered" ? filterValues(migrationExcludeGlobs) : [],
+        },
       }));
       setOperation(null);
       setProgress(null);
@@ -215,6 +236,11 @@ export function ForeignStoragePanel() {
   const inventory = operation?.status === "succeeded" && operation.result && typeof operation.result.inventory === "object"
     ? operation.result.inventory as Record<string, unknown>
     : null;
+  const migrationCandidate = assessment?.candidates.find((item) => item.id === migrationCandidateId);
+  const selectableEntries = migrationCandidate?.latest_inventory?.inventory.top_level_entries ?? [];
+  const migrationSelectionReady = migrationSelectionMode === "full"
+    || (migrationSelectionMode === "selected_folders" && migrationSelectedPaths.length > 0)
+    || (migrationSelectionMode === "filtered" && filterValues(`${migrationExtensions},${migrationIncludeGlobs},${migrationExcludeGlobs}`).length > 0);
 
   return <details className="advanced-panel foreign-storage-panel">
     <summary>Inspect storage from another system</summary>
@@ -239,7 +265,8 @@ export function ForeignStoragePanel() {
           const primaryMode = inspectionMode?.available ? inspectionMode : stackMode;
           const latestInventory = candidate.latest_inventory;
           return <article key={candidate.id} className="foreign-candidate">
-          <header><div><strong>{candidate.profile_name}</strong><span>{candidate.filesystems.length ? candidate.filesystems.join(", ") : candidate.signature_types.join(", ")}</span></div><StatusBadge status={candidate.state === "ready" ? "ready for read-only review" : candidate.state === "degraded-review" ? "review required" : "blocked"} /></header>
+          <header><div><strong>{candidate.profile_name}</strong><span>{candidate.filesystems.length ? candidate.filesystems.join(", ") : candidate.signature_types.join(", ")}</span></div><StatusBadge status={candidate.archive_intake?.state === "discovered_external" ? "discovered external" : candidate.state === "ready" ? "ready for read-only review" : candidate.state === "degraded-review" ? "review required" : "blocked"} /></header>
+          {candidate.archive_intake?.state === "discovered_external" && <Notice tone="info" title="Archive intake source detected">{candidate.archive_intake.reason} Formatting and automatic mounting remain disabled.</Notice>}
           <dl className="settings-list">
             <div><dt>Source system</dt><dd>{candidate.origin.name}<small>{candidate.origin.reason}</small></dd></div>
             <div><dt>Evidence</dt><dd>{confidenceLabel(candidate.confidence)}</dd></div>
@@ -251,9 +278,10 @@ export function ForeignStoragePanel() {
           {latestInventory && <section className="foreign-inventory-summary" aria-label={`${candidate.profile_name} latest read-only inventory`}>
             <div className="section-heading"><div><p className="eyebrow">READ-ONLY INVENTORY</p><h4>{latestInventory.current_snapshot_match ? "Current inspection report" : "Earlier inspection report"}</h4></div><StatusBadge status={latestInventory.current_snapshot_match ? "current" : "refresh required"} /></div>
             {!latestInventory.current_snapshot_match && <Notice tone="warning" title="Discovery changed after this inventory">The report remains available for audit, but it is not treated as current. Inspect this disk again before migration planning.</Notice>}
-            <dl className="review-list"><div><dt>Files</dt><dd>{latestInventory.inventory.file_count.toLocaleString()}</dd></div><div><dt>File bytes</dt><dd>{humanCapacity(latestInventory.inventory.total_bytes)}</dd></div><div><dt>Largest file</dt><dd>{latestInventory.inventory.largest_file ? `${latestInventory.inventory.largest_file.path} (${humanCapacity(latestInventory.inventory.largest_file.bytes)})` : "Not reported"}</dd></div><div><dt>Read/stat errors</dt><dd>{latestInventory.inventory.read_errors.length}</dd></div><div><dt>Name collisions</dt><dd>{latestInventory.inventory.case_collision_count} case · {latestInventory.inventory.unicode_collision_count} Unicode</dd></div><div><dt>Completed</dt><dd>{new Date(latestInventory.completed_at).toLocaleString()}</dd></div></dl>
+            <dl className="review-list"><div><dt>Files</dt><dd>{latestInventory.inventory.file_count.toLocaleString()}</dd></div><div><dt>File bytes</dt><dd>{humanCapacity(latestInventory.inventory.total_bytes)}</dd></div><div><dt>Largest file</dt><dd>{latestInventory.inventory.largest_file ? `${latestInventory.inventory.largest_file.path} (${humanCapacity(latestInventory.inventory.largest_file.bytes)})` : "Not reported"}</dd></div><div><dt>Oldest / newest</dt><dd>{latestInventory.inventory.oldest_mtime_unix === null ? "Not reported" : new Date(latestInventory.inventory.oldest_mtime_unix * 1000).toLocaleDateString()} · {latestInventory.inventory.newest_mtime_unix === null ? "Not reported" : new Date(latestInventory.inventory.newest_mtime_unix * 1000).toLocaleDateString()}</dd></div><div><dt>Read/stat errors</dt><dd>{latestInventory.inventory.read_errors.length}</dd></div><div><dt>Permission anomalies</dt><dd>{Object.values(latestInventory.inventory.permission_anomalies ?? {}).reduce((total, value) => total + value, 0)}</dd></div><div><dt>Name collisions</dt><dd>{latestInventory.inventory.case_collision_count} case · {latestInventory.inventory.unicode_collision_count} Unicode</dd></div><div><dt>Completed</dt><dd>{new Date(latestInventory.completed_at).toLocaleString()}</dd></div></dl>
             {latestInventory.inventory.truncated && <Notice tone="warning" title="Inventory reached its safety limit">The bounded report stopped at its configured entry/error limit. Increase nothing until the source and report are reviewed.</Notice>}
             {latestInventory.inventory.extension_distribution.length > 0 && <details><summary>File extension distribution</summary><ul className="compact-list">{latestInventory.inventory.extension_distribution.slice(0, 12).map((item) => <li key={item.extension}><code>{item.extension}</code> — {item.files.toLocaleString()} files</li>)}</ul></details>}
+            {(latestInventory.inventory.top_level_entries?.length ?? 0) > 0 && <details><summary>Top-level folders and files</summary><ul className="compact-list">{latestInventory.inventory.top_level_entries?.slice(0, 32).map((item) => <li key={`${item.type}:${item.name}`}><strong>{item.name}</strong> — {item.type}{item.bytes === undefined ? "" : ` · ${humanCapacity(item.bytes)}`}</li>)}</ul></details>}
           </section>}
           {candidate.warnings.map((warning) => <Notice key={warning} tone="warning" title="Review required">{warning}</Notice>)}
           {candidate.blockers.map((blocker) => <Notice key={blocker} tone="danger" title="Automatic inspection blocked">{blocker}</Notice>)}
@@ -286,13 +314,17 @@ export function ForeignStoragePanel() {
             <label>Destination<select value={migrationDestinationId} onChange={(event) => setMigrationDestinationId(event.target.value)}>{assessment.migration_destinations.map((destination) => <option key={destination.id} value={destination.id}>{destination.name} — {destination.path} — {humanCapacity(destination.free_bytes)} free</option>)}</select></label>
             <label>Verification<select value={migrationVerification} onChange={(event) => setMigrationVerification(event.target.value as "fast" | "accurate")}><option value="accurate">Accurate — BLAKE3 read verification</option><option value="fast">Fast — size and modified time</option></select></label>
             <label>Existing files<select value={migrationCollisionPolicy} onChange={(event) => setMigrationCollisionPolicy(event.target.value as "stop" | "reuse_identical")}><option value="stop">Stop before replacing anything</option><option value="reuse_identical">Reuse only byte-identical files</option></select></label>
+            <label>What to copy<select value={migrationSelectionMode} onChange={(event) => setMigrationSelectionMode(event.target.value as "full" | "selected_folders" | "filtered")}><option value="full">Everything in this source</option><option value="selected_folders">Selected top-level folders/files</option><option value="filtered">Custom include/exclude filters</option></select></label>
           </div>}
-          <div className="panel-actions"><button type="button" className="button button-secondary" onClick={() => setMigrationCandidateId(null)} disabled={actionBusy}>Cancel</button><button type="button" className="button button-primary" onClick={() => void previewMigration()} disabled={actionBusy || !migrationDestinationId}>{actionBusy ? "Checking…" : "Review copy plan"}</button></div>
+          {migrationSelectionMode === "selected_folders" && <fieldset className="settings-fieldset"><legend>Select source folders or files</legend>{selectableEntries.length === 0 ? <Notice tone="warning" title="Top-level selection unavailable">Refresh the read-only inventory with this Hoardarr version before selecting folders. Copy everything remains available.</Notice> : <div className="check-list">{selectableEntries.map((item) => <label key={`${item.type}:${item.name}`}><input type="checkbox" checked={migrationSelectedPaths.includes(item.name)} onChange={(event) => setMigrationSelectedPaths((current) => event.target.checked ? [...current, item.name] : current.filter((value) => value !== item.name))} /> <span><strong>{item.name}</strong><small>{item.type}{item.bytes === undefined ? "" : ` · ${humanCapacity(item.bytes)}`}</small></span></label>)}</div>}</fieldset>}
+          {migrationSelectionMode === "filtered" && <div className="settings-grid"><label>Include extensions<input value={migrationExtensions} onChange={(event) => setMigrationExtensions(event.target.value)} placeholder=".mkv, .mp4, .flac" /><small>Optional, comma-separated. Extension matching is case-insensitive.</small></label><label>Include path patterns<input value={migrationIncludeGlobs} onChange={(event) => setMigrationIncludeGlobs(event.target.value)} placeholder="Movies/*, Photos/2025/*" /><small>Paths are relative to the read-only source.</small></label><label>Exclude path patterns<input value={migrationExcludeGlobs} onChange={(event) => setMigrationExcludeGlobs(event.target.value)} placeholder="@eaDir/*, .Trash-*" /><small>Excluded files are never added to the migration manifest.</small></label></div>}
+          {migrationSelectionMode !== "full" && <Notice tone="info" title="Exact selected size is calculated before copying">The persisted inventory provides a safe full-source upper bound. The worker rebuilds the selected manifest, verifies destination capacity, and writes nothing until the selected files fit with the configured reserve.</Notice>}
+          <div className="panel-actions"><button type="button" className="button button-secondary" onClick={() => setMigrationCandidateId(null)} disabled={actionBusy}>Cancel</button><button type="button" className="button button-primary" onClick={() => void previewMigration()} disabled={actionBusy || !migrationDestinationId || !migrationSelectionReady}>{actionBusy ? "Checking…" : "Review copy plan"}</button></div>
         </section>}
         {migrationPlan && <section className="foreign-inspection-review" aria-live="polite">
-          <div className="section-heading"><div><p className="eyebrow">VERIFIED FILE MIGRATION</p><h3>{migrationPlan.inventory.file_count.toLocaleString()} files to {migrationPlan.destination.name}</h3></div><StatusBadge status={operation?.status ?? "ready"} /></div>
-          <Notice tone="success" title="Source data stays untouched">The source remains read-only and attached only to a private temporary mount. Hoardarr copies {humanCapacity(migrationPlan.inventory.total_bytes)}, preserves relative paths, and verifies the destination using {migrationPlan.verification.algorithm === "blake3" ? "BLAKE3" : "size and modified time"}.</Notice>
-          <dl className="review-list"><div><dt>Destination</dt><dd><code>{migrationPlan.destination.path}</code></dd></div><div><dt>Free at review</dt><dd>{humanCapacity(migrationPlan.destination.free_bytes_at_preview)}</dd></div><div><dt>Collision behavior</dt><dd>{migrationPlan.collision_policy === "stop" ? "Stop before replacing any existing file" : "Reuse only a byte-identical existing file"}</dd></div><div><dt>Source after completion</dt><dd>Retained unchanged</dd></div><div><dt>Parity reuse</dt><dd>Not supported or claimed</dd></div><div><dt>Plan SHA-256</dt><dd><code>{migrationPlan.plan_sha256}</code></dd></div></dl>
+          <div className="section-heading"><div><p className="eyebrow">VERIFIED FILE MIGRATION</p><h3>{migrationPlan.selection?.mode === "full" || !migrationPlan.selection ? `${migrationPlan.inventory.file_count.toLocaleString()} files` : "Selected archive files"} to {migrationPlan.destination.name}</h3></div><StatusBadge status={operation?.status ?? "ready"} /></div>
+          <Notice tone="success" title="Source data stays untouched">The source remains read-only and attached only to a private temporary mount. Hoardarr {migrationPlan.selection?.mode === "full" || !migrationPlan.selection ? `copies ${humanCapacity(migrationPlan.inventory.total_bytes)}` : `builds the exact selected manifest before copying (full-source upper bound ${humanCapacity(migrationPlan.inventory.total_bytes)})`}, preserves relative paths, and verifies the destination using {migrationPlan.verification.algorithm === "blake3" ? "BLAKE3" : "size and modified time"}.</Notice>
+          <dl className="review-list"><div><dt>Destination</dt><dd><code>{migrationPlan.destination.path}</code></dd></div><div><dt>Selection</dt><dd>{migrationPlan.selection?.mode === "selected_folders" ? `Selected: ${migrationPlan.selection.include_paths.join(", ")}` : migrationPlan.selection?.mode === "filtered" ? "Custom include/exclude filters" : "Everything"}</dd></div><div><dt>Free at review</dt><dd>{humanCapacity(migrationPlan.destination.free_bytes_at_preview)}</dd></div><div><dt>Collision behavior</dt><dd>{migrationPlan.collision_policy === "stop" ? "Stop before replacing any existing file" : "Reuse only a byte-identical existing file"}</dd></div><div><dt>Source after completion</dt><dd>Retained unchanged</dd></div><div><dt>Parity reuse</dt><dd>Not supported or claimed</dd></div><div><dt>Plan SHA-256</dt><dd><code>{migrationPlan.plan_sha256}</code></dd></div></dl>
           {!operation && <div className="panel-actions"><button type="button" className="button button-secondary" onClick={() => setMigrationPlan(null)} disabled={actionBusy}>Change options</button><button type="button" className="button button-primary" onClick={() => void startMigration()} disabled={actionBusy}>{actionBusy ? "Starting…" : "COPY AND VERIFY"}</button></div>}
           {operation && <>
             {["queued", "running", "paused"].includes(operation.status) && <><p>{progress?.phase ?? (operation.status === "paused" ? "Paused at a safe checkpoint" : "Waiting for the durable worker")}</p><div className="operation-progress-track" role="progressbar" aria-label="Foreign migration progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress?.percent ?? 0}><span style={{ width: `${progress?.percent ?? 0}%` }} /></div><p>{progress?.files ? `${progress.files.verified.toLocaleString()} of ${progress.files.total.toLocaleString()} files verified` : "Preparing durable checkpoints…"}</p><button type="button" className="button button-secondary" onClick={() => void toggleMigrationPause()} disabled={actionBusy || operation.status === "queued"}>{operation.status === "paused" ? "Resume copy" : "Pause safely"}</button></>}

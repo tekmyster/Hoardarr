@@ -7,6 +7,7 @@ import stat
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -50,6 +51,27 @@ class ForeignMigrationError(RuntimeError):
 
 def _translate(exc: DrainExecutionError) -> ForeignMigrationError:
     return ForeignMigrationError(exc.code, exc.safe_message, needs_attention=exc.needs_attention)
+
+
+def _selected(relative: str, plan: dict[str, Any]) -> bool:
+    selection = plan.get("selection")
+    if not isinstance(selection, dict) or selection.get("mode") == "full":
+        return True
+    if selection.get("mode") == "selected_folders":
+        return any(
+            relative == prefix or relative.startswith(f"{prefix}/")
+            for prefix in selection["include_paths"]
+        )
+    suffix = Path(relative).suffix.casefold()
+    extensions = selection["include_extensions"]
+    include_globs = selection["include_globs"]
+    exclude_globs = selection["exclude_globs"]
+    included = (
+        (not extensions and not include_globs)
+        or suffix in extensions
+        or any(fnmatchcase(relative, pattern) for pattern in include_globs)
+    )
+    return included and not any(fnmatchcase(relative, pattern) for pattern in exclude_globs)
 
 
 def _run(arguments: list[str], timeout: int = 120) -> str:
@@ -163,7 +185,10 @@ def _validate_live_binding(
         raise ForeignMigrationError(
             "foreign_destination_changed", "The destination filesystem identity changed."
         )
-    required = int(plan["inventory"]["total_bytes"]) + int(plan["destination"]["reserve_bytes"])
+    selection = plan.get("selection")
+    required = int(plan["destination"]["reserve_bytes"])
+    if not isinstance(selection, dict) or selection.get("mode") == "full":
+        required += int(plan["inventory"]["total_bytes"])
     if usage.f_bavail * usage.f_frsize < required:
         raise ForeignMigrationError(
             "foreign_destination_full", "The destination no longer has the reviewed free space."
@@ -218,8 +243,7 @@ def _read_only_source(operation_id: str, plan: dict[str, Any]) -> Iterator[Path]
                 and (
                     target_is_mount
                     or (
-                        target_details.st_uid == os.geteuid()
-                        and not target_details.st_mode & 0o077
+                        target_details.st_uid == os.geteuid() and not target_details.st_mode & 0o077
                     )
                 )
             )
@@ -351,7 +375,7 @@ def _inventory(
             delete(ForeignMigrationEntry).where(ForeignMigrationEntry.job_id == operation_id)
         )
     batch: list[ForeignMigrationEntry] = []
-    count = total = 0
+    source_count = source_total = selected_count = selected_total = 0
     for current, directories, files in os.walk(source_root, topdown=True, followlinks=False):
         directories.sort()
         files.sort()
@@ -367,12 +391,15 @@ def _inventory(
                 ) from exc
             if not stat.S_ISREG(details.st_mode):
                 continue
-            count += 1
-            if count > MAXIMUM_FILES:
+            source_count += 1
+            source_total += details.st_size
+            if source_count > MAXIMUM_FILES:
                 raise ForeignMigrationError(
                     "foreign_inventory_limit", "The source exceeds the reviewed inventory limit."
                 )
             relative = name if relative_parent == "." else f"{relative_parent}/{name}"
+            if not _selected(relative, plan):
+                continue
             batch.append(
                 ForeignMigrationEntry(
                     job_id=operation_id,
@@ -382,7 +409,8 @@ def _inventory(
                     status="pending",
                 )
             )
-            total += details.st_size
+            selected_count += 1
+            selected_total += details.st_size
             if len(batch) >= INVENTORY_BATCH_SIZE:
                 with session_factory() as session, session.begin():
                     session.add_all(batch)
@@ -391,9 +419,28 @@ def _inventory(
     if batch:
         with session_factory() as session, session.begin():
             session.add_all(batch)
-    if count != plan["inventory"]["file_count"] or total != plan["inventory"]["total_bytes"]:
+    if (
+        source_count != plan["inventory"]["file_count"]
+        or source_total != plan["inventory"]["total_bytes"]
+    ):
         raise ForeignMigrationError(
             "foreign_source_changed", "Source contents changed after the read-only inventory."
+        )
+    if selected_count == 0:
+        raise ForeignMigrationError(
+            "foreign_selection_empty", "The reviewed archive selection contains no regular files."
+        )
+    try:
+        usage = os.statvfs(str(plan["destination"]["path"]))
+    except OSError as exc:
+        raise ForeignMigrationError(
+            "foreign_destination_unavailable", "The managed destination is unavailable."
+        ) from exc
+    required = selected_total + int(plan["destination"]["reserve_bytes"])
+    if usage.f_bavail * usage.f_frsize < required:
+        raise ForeignMigrationError(
+            "foreign_destination_full",
+            "The selected archive files no longer fit with the requested reserve.",
         )
     with session_factory() as session, session.begin():
         job = session.get(ForeignMigrationJob, operation_id)
@@ -402,8 +449,8 @@ def _inventory(
             raise ForeignMigrationError(
                 "foreign_migration_job_missing", "The durable migration checkpoint is unavailable."
             )
-        job.files_total = count
-        job.bytes_total = total
+        job.files_total = selected_count
+        job.bytes_total = selected_total
         job.phase = "copying"
         job.updated_at = utc_now()
         append_event(
@@ -411,7 +458,11 @@ def _inventory(
             operation,
             "inventory",
             "Source inventory was revalidated",
-            {"files": count, "bytes": total},
+            {
+                "source_files": source_count,
+                "selected_files": selected_count,
+                "selected_bytes": selected_total,
+            },
         )
 
 
@@ -582,6 +633,14 @@ def execute_foreign_migration(
             "files_verified": job.files_verified,
             "files_reused": job.files_reused,
             "bytes_copied": job.bytes_copied,
+            "selection": plan.get("selection")
+            or {
+                "mode": "full",
+                "include_paths": [],
+                "include_extensions": [],
+                "include_globs": [],
+                "exclude_globs": [],
+            },
             "verification": plan["verification"],
             "collision_policy": plan["collision_policy"],
             "relative_paths_preserved": True,

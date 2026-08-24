@@ -383,6 +383,7 @@ def preview_foreign_migration(
             verification_mode=payload.verification_mode,
             collision_policy=payload.collision_policy,
             reserve_bytes=payload.reserve_bytes,
+            selection=payload.selection,
         )
     except ForeignStorageError as exc:
         raise Problem(422, exc.code, "Migration unavailable", str(exc)) from exc

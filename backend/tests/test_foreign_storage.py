@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -10,6 +11,7 @@ from hoardarr.storage.foreign import (
     assess_foreign_storage,
     build_inspection_plan,
     build_migration_plan,
+    normalize_archive_selection,
     persist_unraid_evidence,
     validate_inspection_plan,
     validate_migration_plan,
@@ -48,6 +50,8 @@ def _disk(
     scan_status: str = "complete",
     system: bool = False,
     mountpoints: list[str] | None = None,
+    removable: bool = False,
+    transport: str | None = None,
 ) -> dict[str, object]:
     signature = {
         "type": signature_type,
@@ -68,6 +72,8 @@ def _disk(
         },
         "capacity_bytes": 8_000_000_000,
         "system_disk": system,
+        "removable": removable,
+        "connection": {"transport": transport, "protocol": None},
         "mountpoints": mountpoints or [],
         "partitions": [],
         "signatures": [signature],
@@ -102,6 +108,28 @@ def test_standalone_filesystem_is_a_non_mutating_review_candidate() -> None:
     assert candidate["modes"][0]["available"] is True
     assert candidate["modes"][1]["available"] is False
     assert candidate["mutation_performed"] is False
+
+
+def test_external_filesystem_is_classified_as_read_only_archive_intake() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        snapshot = _snapshot(
+            session,
+            [_disk("wwn:usb-archive", "exfat", removable=True, transport="usb")],
+        )
+        candidate = assess_foreign_storage(session, snapshot=snapshot)["candidates"][0]
+
+    assert candidate["archive_intake"] == {
+        "state": "discovered_external",
+        "default_access": "read_only",
+        "reason": (
+            "The connection is reported as removable or external. Hoardarr will treat it "
+            "as archive intake and keep the source read-only."
+        ),
+    }
+    assert candidate["members"][0]["connection"]["transport"] == "usb"
+    assert candidate["modes"][0]["available"] is True
 
 
 def test_inspection_plan_binds_source_identity_signature_and_limits() -> None:
@@ -244,6 +272,42 @@ def test_migration_plan_binds_current_inventory_and_managed_destination() -> Non
     assert plan["verification"] == {"mode": "accurate", "algorithm": "blake3"}
     assert plan["source_retained"] is True
     assert plan["parity_reuse_supported"] is False
+    assert plan["schema_version"] == 2
+    assert plan["selection"] == {
+        "mode": "full",
+        "include_paths": [],
+        "include_extensions": [],
+        "include_globs": [],
+        "exclude_globs": [],
+        "capacity_upper_bound_bytes": inventory["total_bytes"],
+        "exact_selected_bytes_at_review": inventory["total_bytes"],
+    }
+
+
+def test_archive_selection_is_bounded_normalized_and_rejects_traversal() -> None:
+    assert normalize_archive_selection(
+        {
+            "mode": "filtered",
+            "include_paths": [],
+            "include_extensions": [".MKV", ".mkv"],
+            "include_globs": ["Movies/*"],
+            "exclude_globs": ["Movies/Samples/*"],
+        }
+    ) == {
+        "mode": "filtered",
+        "include_paths": [],
+        "include_extensions": [".mkv"],
+        "include_globs": ["Movies/*"],
+        "exclude_globs": ["Movies/Samples/*"],
+    }
+    for invalid in (
+        {"mode": "selected_folders", "include_paths": ["../etc"]},
+        {"mode": "full", "include_paths": ["Movies"]},
+        {"mode": "filtered"},
+    ):
+        with pytest.raises(ForeignStorageError) as failure:
+            normalize_archive_selection(invalid)
+        assert failure.value.code == "foreign_selection_invalid"
 
 
 def test_migration_plan_rejects_parity_and_tampering() -> None:

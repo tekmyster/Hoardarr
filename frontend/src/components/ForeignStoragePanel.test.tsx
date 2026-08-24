@@ -35,6 +35,8 @@ const assessment: ForeignStorageAssessment = {
       system_device: false,
       read_only: false,
       removable: true,
+      connection: { transport: "usb", protocol: "uas" },
+      external: true,
       mounted: false,
       mountpoints: [],
       signature_scan: { status: "partial", source: "udev", reason: "Cached evidence" },
@@ -46,6 +48,11 @@ const assessment: ForeignStorageAssessment = {
     signature_types: ["xfs"],
     capacity_bytes: 8_000_000_000,
     health: { quality: "not_reported", state: null, reason: "Filesystem metadata does not prove drive health." },
+    archive_intake: {
+      state: "discovered_external",
+      default_access: "read_only",
+      reason: "The connection is reported as removable or external. Hoardarr will treat it as archive intake and keep the source read-only.",
+    },
     warnings: ["A fresh fingerprint is required."],
     blockers: [],
     modes: [{ id: "inspect_read_only", available: true, reason: "A bounded read-only inventory can be reviewed and queued." }],
@@ -67,6 +74,7 @@ describe("ForeignStoragePanel", () => {
 
     expect(await screen.findByText("Standalone filesystem")).toBeInTheDocument();
     expect(screen.getByText("Read-only is the default")).toBeInTheDocument();
+    expect(screen.getByText("Archive intake source detected")).toBeInTheDocument();
     expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
     expect(screen.getByText("Confirmed evidence")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Review read-only inspection" })).toBeEnabled();
@@ -142,6 +150,11 @@ describe("ForeignStoragePanel", () => {
             case_collision_count: 1,
             unicode_collision_count: 2,
             read_errors: [{ path: "Unreadable.mkv" }],
+            permission_anomalies: { world_writable_files: 1 },
+            top_level_entries: [
+              { name: "Movies", type: "directory" },
+              { name: "catalog.txt", type: "file", bytes: 256 },
+            ],
             truncated: false,
           },
           access: "read_only",
@@ -156,6 +169,8 @@ describe("ForeignStoragePanel", () => {
     expect(screen.getByText("Discovery changed after this inventory")).toBeInTheDocument();
     expect(screen.getByText("4,020")).toBeInTheDocument();
     expect(screen.getByText(/Movies\/Feature.mkv/)).toBeInTheDocument();
+    expect(screen.getByText("Permission anomalies")).toBeInTheDocument();
+    expect(screen.getByText("Top-level folders and files")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh read-only inventory" })).toBeEnabled();
   });
 
@@ -191,6 +206,11 @@ describe("ForeignStoragePanel", () => {
             case_collision_count: 0,
             unicode_collision_count: 0,
             read_errors: [],
+            permission_anomalies: {},
+            top_level_entries: [
+              { name: "Movies", type: "directory" },
+              { name: "metadata.xml", type: "file", bytes: 96 },
+            ],
             truncated: false,
           },
           access: "read_only",
@@ -200,7 +220,7 @@ describe("ForeignStoragePanel", () => {
       }],
     };
     const migrationPlan = {
-      schema_version: 1,
+      schema_version: 2,
       operation: "foreign.migrate_files",
       candidate_id: "foreign:one",
       hardware_snapshot_id: "snapshot-1",
@@ -226,6 +246,15 @@ describe("ForeignStoragePanel", () => {
         reserve_bytes: 1_073_741_824,
       },
       inventory: { file_count: 2, total_bytes: 4096 },
+      selection: {
+        mode: "selected_folders",
+        include_paths: ["Movies"],
+        include_extensions: [],
+        include_globs: [],
+        exclude_globs: [],
+        capacity_upper_bound_bytes: 4096,
+        exact_selected_bytes_at_review: null,
+      },
       verification: { mode: "accurate", algorithm: "blake3" },
       collision_policy: "stop",
       source_access: "read_only",
@@ -250,13 +279,17 @@ describe("ForeignStoragePanel", () => {
 
     await user.click(await screen.findByRole("button", { name: "Plan verified copy" }));
     expect(await screen.findByText("This copies files; it does not adopt or erase the source")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("What to copy"), "selected_folders");
+    await user.click(screen.getByRole("checkbox", { name: /Movies/ }));
     await user.click(screen.getByRole("button", { name: "Review copy plan" }));
     expect(previewSpy).toHaveBeenCalledWith(expect.objectContaining({
       destination_backend_id: "backend-1",
       verification_mode: "accurate",
       collision_policy: "stop",
+      selection: expect.objectContaining({ mode: "selected_folders", include_paths: ["Movies"] }),
     }));
     expect(await screen.findByText("Source data stays untouched")).toBeInTheDocument();
+    expect(screen.getByText("Selected: Movies")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "COPY AND VERIFY" }));
     expect(await screen.findByText("Copy and verification completed")).toBeInTheDocument();
     expect(screen.getByText(/source stayed read-only and remains unchanged/i)).toBeInTheDocument();

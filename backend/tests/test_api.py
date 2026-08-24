@@ -2129,8 +2129,25 @@ def test_foreign_inspection_api_is_snapshot_bound_idempotent_and_durable(
         "verification_mode": "accurate",
         "collision_policy": "stop",
         "reserve_bytes": 0,
+        "selection": {
+            "mode": "selected_folders",
+            "include_paths": ["Movies"],
+            "include_extensions": [],
+            "include_globs": [],
+            "exclude_globs": [],
+        },
     }
     assert client.post(migration_preview_endpoint, json=migration_input).status_code == 403
+    invalid_selection = client.post(
+        migration_preview_endpoint,
+        headers=_state_headers(csrf),
+        json={
+            **migration_input,
+            "selection": {"mode": "selected_folders", "include_paths": ["../etc"]},
+        },
+    )
+    assert invalid_selection.status_code == 422
+    assert invalid_selection.json()["code"] == "foreign_selection_invalid"
     migration_preview = client.post(
         migration_preview_endpoint,
         headers=_state_headers(csrf),
@@ -2141,6 +2158,8 @@ def test_foreign_inspection_api_is_snapshot_bound_idempotent_and_durable(
     assert migration_plan["source_retained"] is True
     assert migration_plan["parity_reuse_supported"] is False
     assert migration_plan["verification"]["algorithm"] == "blake3"
+    assert migration_plan["selection"]["include_paths"] == ["Movies"]
+    assert migration_plan["selection"]["exact_selected_bytes_at_review"] is None
     migration_headers = _state_headers(csrf, **{"Idempotency-Key": "foreign-migration-api-0001"})
     wrong_migration_confirmation = client.post(
         "/api/v1/storage/foreign/migration",

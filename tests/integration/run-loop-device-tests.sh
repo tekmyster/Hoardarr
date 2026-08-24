@@ -69,7 +69,7 @@ umount "$work/mnt"
   --loop "$loop" \
   --work-root "$work" \
   --evidence "$repo/dist/validation/foreign-readonly-inspection.json"
-jq -e '.classification == "VERIFIED IN ISOLATION" and .access == "read_only" and (.persistent_mount | not) and (.mutation_performed | not) and .journal_state == "succeeded" and .private_mount_removed and .source_unmounted_after and .file_count >= 2 and .read_errors == 0' \
+jq -e '.classification == "VERIFIED IN ISOLATION" and .access == "read_only" and (.persistent_mount | not) and (.mutation_performed | not) and .journal_state == "succeeded" and .private_mount_removed and .source_unmounted_after and .file_count >= 2 and .read_errors == 0 and ([.top_level_entries[].name] | sort) == ["Movies", "TV"]' \
   "$repo/dist/validation/foreign-readonly-inspection.json"
 
 [[ "${HOARDARR_EXTENDED_STORAGE_TESTS:-0}" == "1" ]] || exit 0
@@ -88,7 +88,7 @@ jq -e '.classification == "VERIFIED IN ISOLATION" and .data_source_has_real_file
   --loop "$loop" \
   --work-root "$work" \
   --evidence "$repo/dist/validation/foreign-migration.json"
-jq -e '.classification == "VERIFIED IN ISOLATION" and .source_access == "read_only" and .source_retained and (.parity_reused | not) and .relative_paths_preserved and .pause_resume_executed and .restart_recovery_requeued and .stale_private_mount_recovered and .collision_failure_code == "destination_collision" and .source_sha256 == .destination_sha256 and .entry_states == ["verified"] and .source_unmounted_after' \
+jq -e '.classification == "VERIFIED IN ISOLATION" and .source_access == "read_only" and .source_retained and (.parity_reused | not) and .relative_paths_preserved and .pause_resume_executed and .restart_recovery_requeued and .stale_private_mount_recovered and .collision_failure_code == "destination_collision" and .source_sha256 == .destination_sha256 and .entry_states == ["verified"] and .source_unmounted_after and .selected_folder_execution.mode == "selected_folders" and .selected_folder_execution.include_paths == ["Movies"] and .selected_folder_execution.files_verified >= 1 and ([.selected_folder_execution.files[] | startswith("Movies/")] | all)' \
   "$repo/dist/validation/foreign-migration.json"
 
 md_members=()

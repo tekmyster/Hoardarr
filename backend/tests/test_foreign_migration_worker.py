@@ -21,10 +21,29 @@ from hoardarr.operations.service import document_hash, recover_stale_operations
 from hoardarr.storage.drain_worker import DrainPaused
 from hoardarr.storage.foreign_migration_worker import (
     ForeignMigrationError,
+    _selected,
     execute_foreign_migration,
     mark_foreign_migration_paused,
     resume_foreign_migration,
 )
+
+
+def test_archive_selection_keeps_folder_and_filter_semantics_distinct() -> None:
+    selected_folders = {"selection": {"mode": "selected_folders", "include_paths": ["Movies"]}}
+    assert _selected("Movies/Feature.mkv", selected_folders)
+    assert not _selected("TV/Episode.mkv", selected_folders)
+
+    filtered = {
+        "selection": {
+            "mode": "filtered",
+            "include_extensions": [".mkv"],
+            "include_globs": [],
+            "exclude_globs": ["Movies/Samples/*"],
+        }
+    }
+    assert _selected("Movies/Feature.MKV", filtered)
+    assert not _selected("Movies/Samples/trailer.mkv", filtered)
+    assert not _selected("Music/Track.flac", filtered)
 
 
 def _runtime(tmp_path: Path):
@@ -208,6 +227,32 @@ def test_foreign_migration_stops_on_collision_without_overwrite(tmp_path: Path) 
     assert failure.value.code == "destination_collision"
     assert (destination / "metadata.xml").read_text(encoding="utf-8") == "existing"
     assert (source / "metadata.xml").read_text(encoding="utf-8") == "<movie>safe</movie>"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative mover requires Linux")
+def test_foreign_migration_copies_only_reviewed_archive_selection(tmp_path: Path) -> None:
+    session_factory, operation_id, plan, source, destination = _seed(tmp_path)
+    plan["schema_version"] = 2
+    plan["selection"] = {
+        "mode": "selected_folders",
+        "include_paths": ["Movies"],
+        "include_extensions": [],
+        "include_globs": [],
+        "exclude_globs": [],
+        "capacity_upper_bound_bytes": plan["inventory"]["total_bytes"],
+        "exact_selected_bytes_at_review": None,
+    }
+    plan.pop("plan_sha256")
+    plan["plan_sha256"] = document_hash(plan)
+
+    report = execute_foreign_migration(
+        session_factory, operation_id, plan, source_root_override=source
+    )
+
+    assert report["files_total"] == 1
+    assert report["selection"]["mode"] == "selected_folders"
+    assert (destination / "Movies" / "feature.mkv").is_file()
+    assert not (destination / "metadata.xml").exists()
 
 
 def test_interrupted_foreign_migration_requeues_durable_checkpoint(tmp_path: Path) -> None:

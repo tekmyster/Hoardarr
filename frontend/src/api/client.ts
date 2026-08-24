@@ -492,6 +492,13 @@ class HoardarrApi {
     verification_mode: "fast" | "accurate";
     collision_policy: "stop" | "reuse_identical";
     reserve_bytes: number;
+    selection?: {
+      mode: "full" | "selected_folders" | "filtered";
+      include_paths: string[];
+      include_extensions: string[];
+      include_globs: string[];
+      exclude_globs: string[];
+    };
   }): Promise<ForeignMigrationPlan> {
     const result = await this.request<{ plan: ForeignMigrationPlan }>(
       "/storage/foreign/migration/preview",

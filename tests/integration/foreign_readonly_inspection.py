@@ -163,6 +163,10 @@ def main() -> None:
     inventory = result["inventory"]
     if inventory["file_count"] < 2 or inventory["read_errors"]:
         raise SystemExit("read-only inventory did not report the deterministic dataset")
+    if {item["name"] for item in inventory["top_level_entries"]} != {"Movies", "TV"}:
+        raise SystemExit(
+            "archive preview did not preserve the top-level source inventory"
+        )
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
     args.evidence.write_text(
         json.dumps(
@@ -179,6 +183,8 @@ def main() -> None:
                 "directory_count": inventory["directory_count"],
                 "total_bytes": inventory["total_bytes"],
                 "read_errors": len(inventory["read_errors"]),
+                "top_level_entries": inventory["top_level_entries"],
+                "permission_anomalies": inventory["permission_anomalies"],
                 "truncated": inventory["truncated"],
                 "journal_state": journal["state"],
                 "private_mount_removed": not (

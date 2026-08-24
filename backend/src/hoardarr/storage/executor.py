@@ -3179,9 +3179,7 @@ def _foreign_md_preview(sources: list[Path], probe: CommandProbe) -> dict[str, A
     if len(uuids) != 1 or len(levels) != 1 or len(expected) > 1:
         raise ExecutorFailure("foreign_provider_conflict", "Linux MD member metadata conflicts.")
     expected_count = next(iter(expected), None)
-    device_uuids = {
-        item["device_uuid"] for item in members if isinstance(item["device_uuid"], str)
-    }
+    device_uuids = {item["device_uuid"] for item in members if isinstance(item["device_uuid"], str)}
     complete = (
         expected_count is not None
         and len(members) == expected_count
@@ -3532,6 +3530,8 @@ def _inventory_foreign_tree(root: Path, limits: Mapping[str, int]) -> dict[str, 
     case_names: dict[tuple[str, str], str] = {}
     unicode_names: dict[tuple[str, str], str] = {}
     case_collisions = unicode_collisions = 0
+    permission_anomalies: Counter[str] = Counter()
+    top_level_entries: list[dict[str, Any]] = []
     truncated = False
 
     def record_error(path: str, exc: OSError) -> None:
@@ -3568,11 +3568,27 @@ def _inventory_foreign_tree(root: Path, limits: Mapping[str, int]) -> dict[str, 
                 continue
             if stat.S_ISDIR(details.st_mode):
                 directory_count += 1
+                if relative_parent == "." and len(top_level_entries) < 256:
+                    top_level_entries.append({"name": name[:255], "type": "directory"})
+                if details.st_mode & stat.S_IWOTH:
+                    permission_anomalies["world_writable_directories"] += 1
                 continue
             if not stat.S_ISREG(details.st_mode):
                 continue
             file_count += 1
             total_bytes += details.st_size
+            if relative_parent == "." and len(top_level_entries) < 256:
+                top_level_entries.append(
+                    {"name": name[:255], "type": "file", "bytes": details.st_size}
+                )
+            if details.st_mode & stat.S_ISUID:
+                permission_anomalies["setuid_files"] += 1
+            if details.st_mode & stat.S_ISGID:
+                permission_anomalies["setgid_files"] += 1
+            if details.st_mode & stat.S_IWOTH:
+                permission_anomalies["world_writable_files"] += 1
+            if not details.st_mode & stat.S_IRUSR:
+                permission_anomalies["owner_unreadable_files"] += 1
             oldest = details.st_mtime if oldest is None else min(oldest, details.st_mtime)
             newest = details.st_mtime if newest is None else max(newest, details.st_mtime)
             if largest is None or details.st_size > largest["bytes"]:
@@ -3596,6 +3612,8 @@ def _inventory_foreign_tree(root: Path, limits: Mapping[str, int]) -> dict[str, 
         "case_collision_count": case_collisions,
         "unicode_collision_count": unicode_collisions,
         "read_errors": errors,
+        "permission_anomalies": dict(sorted(permission_anomalies.items())),
+        "top_level_entries": top_level_entries,
         "truncated": truncated,
         "maximum_entries": maximum_entries,
     }

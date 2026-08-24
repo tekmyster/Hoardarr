@@ -267,6 +267,8 @@ def test_inventory_is_bounded_and_does_not_follow_symlinks(tmp_path: Path) -> No
     (source / "a.mkv").write_bytes(b"a" * 32)
     (source / "b.mkv").write_bytes(b"b" * 64)
     (source / "c.txt").write_bytes(b"c" * 128)
+    (source / "Photos").mkdir()
+    (source / "Photos").chmod(0o777)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "must-not-be-counted.bin").write_bytes(b"secret")
@@ -275,10 +277,16 @@ def test_inventory_is_bounded_and_does_not_follow_symlinks(tmp_path: Path) -> No
 
     report = _inventory_foreign_tree(
         source,
-        {"maximum_entries": 2, "maximum_extension_groups": 256, "maximum_errors": 100},
+        {"maximum_entries": 3, "maximum_extension_groups": 256, "maximum_errors": 100},
     )
 
     assert report["file_count"] == 2
     assert report["total_bytes"] == 96
     assert report["truncated"] is True
     assert all(item["extension"] != ".bin" for item in report["extension_distribution"])
+    assert {item["name"] for item in report["top_level_entries"]} == {
+        "Photos",
+        "a.mkv",
+        "b.mkv",
+    }
+    assert report["permission_anomalies"]["world_writable_directories"] == 1

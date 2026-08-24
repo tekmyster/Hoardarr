@@ -431,6 +431,7 @@ class ForeignMigrationPreviewRequest(StrictModel):
     verification_mode: Literal["fast", "accurate"] = "accurate"
     collision_policy: Literal["stop", "reuse_identical"] = "stop"
     reserve_bytes: int = Field(default=1_073_741_824, ge=0, le=10**15)
+    selection: dict[str, Any] | None = None
 
 
 class ForeignMigrationApplyRequest(StrictModel):

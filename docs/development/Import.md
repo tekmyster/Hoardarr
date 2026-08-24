@@ -117,6 +117,17 @@ audit but labels it **refresh required** and will not treat it as current input
 to migration planning. Candidate health remains **Not reported** because
 filesystem signatures do not prove physical-drive or inactive-pool health.
 
+Removable media and sources whose persisted connection evidence reports USB,
+MMC/SD, or FireWire are additionally labelled **DISCOVERED EXTERNAL**. This is
+an Archive Intake presentation state, not permission to write the device. The
+same read-only/no-recovery inspection is required, and automatic mounting and
+formatting remain disabled. Its durable preview includes the oldest and newest
+reported file timestamps, extension distribution, read/stat errors, case and
+Unicode collision counts, bounded top-level folder/file names, and counts of
+permission conditions that deserve review (set-ID files, world-writable items,
+and owner-unreadable files). These are evidence, not claims that the source is
+unsafe. Selection/filter planning remains a separate approval step.
+
 MD/LVM/ZFS member groups remain non-activating. Their metadata preview can
 identify stack membership and provider-supported completeness, but Hoardarr
 does not activate those stacks until a separate read-only assembly executor is
@@ -202,6 +213,17 @@ read-write. Unraid parity is not file content and is refused by this workflow;
 Hoardarr does not claim parity validity or reuse. The final Activity report
 records copied, reused, and verified counts, bytes, destination, verification
 method, source-retention state, and the explicit absence of parity reuse.
+
+Archive intake can copy everything, an explicit set of top-level folders/files,
+or a bounded custom filter made from extensions and relative include/exclude
+patterns. Selection paths are normalized, traversal/absolute paths and control
+characters are rejected, and at most 64 values are accepted per filter field.
+For a partial selection, the reviewed inventory is displayed as a full-source
+capacity upper bound. The worker rebuilds the complete source inventory,
+verifies it still matches the reviewed count and bytes, creates checkpoints
+only for matching regular files, then proves the exact selected bytes plus the
+reserve fit before copying begins. An empty selection fails safely. The final
+report records the immutable selection alongside the verified manifest totals.
 - ZFS pools from TrueNAS or another Linux/Unix host;
 - Linux MD RAID and LVM stacks used by common NAS distributions;
 - Synology and QNAP layouts where the complete stack can be identified safely;

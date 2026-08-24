@@ -910,6 +910,8 @@ export interface ForeignStorageAssessment {
       system_device: boolean;
       read_only: boolean;
       removable: boolean;
+      connection?: { transport: string | null; protocol: string | null };
+      external?: boolean;
       mounted: boolean;
       mountpoints: string[];
       signature_scan: { status: string | null; source: string | null; reason: string | null };
@@ -927,6 +929,11 @@ export interface ForeignStorageAssessment {
     signature_types: string[];
     capacity_bytes: number | null;
     health: { quality: string; state: string | null; reason: string };
+    archive_intake?: {
+      state: "discovered_external" | null;
+      default_access: "read_only";
+      reason: string;
+    };
     warnings: string[];
     blockers: string[];
     modes: Array<{ id: string; available: boolean; reason: string }>;
@@ -949,7 +956,7 @@ export interface ForeignMigrationDestination {
 }
 
 export interface ForeignMigrationPlan {
-  schema_version: 1;
+  schema_version: 1 | 2;
   operation: "foreign.migrate_files";
   candidate_id: string;
   hardware_snapshot_id: string;
@@ -965,6 +972,15 @@ export interface ForeignMigrationPlan {
     reserve_bytes: number;
   };
   inventory: { file_count: number; total_bytes: number };
+  selection?: {
+    mode: "full" | "selected_folders" | "filtered";
+    include_paths: string[];
+    include_extensions: string[];
+    include_globs: string[];
+    exclude_globs: string[];
+    capacity_upper_bound_bytes: number;
+    exact_selected_bytes_at_review: number | null;
+  };
   verification: { mode: "fast" | "accurate"; algorithm: "size_mtime" | "blake3" };
   collision_policy: "stop" | "reuse_identical";
   source_access: "read_only";
@@ -990,6 +1006,8 @@ export interface ForeignInventoryReport {
     case_collision_count: number;
     unicode_collision_count: number;
     read_errors: Array<unknown>;
+    permission_anomalies?: Record<string, number>;
+    top_level_entries?: Array<{ name: string; type: "directory" | "file"; bytes?: number }>;
     truncated: boolean;
   };
   access: "read_only";
