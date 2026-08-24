@@ -52,6 +52,25 @@ class ApplianceAssetsTests(unittest.TestCase):
         )
         self.assertIn('"${checksum_map[@]}"', builder)
 
+    def test_lab_appliance_is_separate_locked_key_only_automation(self) -> None:
+        builder = (ROOT / "scripts" / "build-appliance.sh").read_text(encoding="utf-8")
+        template = (ROOT / "packaging" / "appliance" / "lab-user-data.template").read_text(
+            encoding="utf-8"
+        )
+        workflow = (ROOT / ".github" / "workflows" / "lab-appliance.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[USER_DATA]", builder)
+        self.assertIn('user_data="$(realpath -- "${5:-packaging/appliance/user-data}")"', builder)
+        self.assertIn('password: "!"', template)
+        self.assertIn("lock_passwd: true", template)
+        self.assertIn("allow-pw: false", template)
+        self.assertEqual(template.count("__SSH_PUBLIC_KEY__"), 2)
+        self.assertIn("workflow_dispatch", workflow)
+        self.assertIn("LAB_SSH_PUBLIC_KEY", workflow)
+        self.assertIn("placeholder count changed", workflow)
+        self.assertNotIn("PRIVATE KEY", template + workflow)
+
     def test_ci_has_linux_installer_accessibility_and_isolated_storage_profiles(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         storage = (ROOT / ".github/workflows/storage-integration.yml").read_text(

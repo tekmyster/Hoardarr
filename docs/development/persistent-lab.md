@@ -29,3 +29,9 @@ off:
 The script emits a JSON inventory suitable for attaching to validation evidence. It never prints
 vCenter credentials. Lab setup credentials are chosen during the interactive Ubuntu installer and
 must not be embedded in the repository or appliance artifact.
+
+For the persistent virtual lab only, `.github/workflows/lab-appliance.yml` can render a separate
+unattended ISO from `lab-user-data.template`. The workflow accepts a bounded OpenSSH public key,
+locks password authentication, and retains no private key. Before booting this lab-only image,
+the operator must verify each powered-off VM has exactly one 24-GiB virtual OS disk and no RDM or
+host block device. Production appliance identity and storage selection remain interactive.

@@ -2,18 +2,20 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 BASE_ISO BASE_ISO_SHA256 RELEASE_BUNDLE OUTPUT_ISO" >&2
+    echo "usage: $0 BASE_ISO BASE_ISO_SHA256 RELEASE_BUNDLE OUTPUT_ISO [USER_DATA]" >&2
     exit 2
 }
 
-[[ $# -eq 4 ]] || usage
+[[ $# -ge 4 && $# -le 5 ]] || usage
 base_iso="$(realpath -- "$1")"
 expected_sha="$2"
 bundle="$(realpath -- "$3")"
 output="$(realpath -m -- "$4")"
+user_data="$(realpath -- "${5:-packaging/appliance/user-data}")"
 [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || usage
 [[ -f "$base_iso" && ! -L "$base_iso" ]] || { echo "base ISO must be a regular file" >&2; exit 1; }
 [[ -f "$bundle" && ! -L "$bundle" ]] || { echo "release bundle must be a regular file" >&2; exit 1; }
+[[ -f "$user_data" && ! -L "$user_data" ]] || { echo "user-data must be a regular file" >&2; exit 1; }
 [[ "$(sha256sum -- "$base_iso" | awk '{print $1}')" == "$expected_sha" ]] || {
     echo "base ISO digest mismatch" >&2
     exit 1
@@ -23,7 +25,7 @@ command -v xorriso >/dev/null || { echo "xorriso is required" >&2; exit 1; }
 work="$(mktemp -d -t hoardarr-appliance.XXXXXXXX)"
 cleanup() { rm -rf -- "$work"; }
 trap cleanup EXIT
-install -m 0644 packaging/appliance/user-data "$work/user-data"
+install -m 0644 "$user_data" "$work/user-data"
 install -m 0644 packaging/appliance/meta-data "$work/meta-data"
 install -m 0644 "$bundle" "$work/hoardarr-release.tar.gz"
 grub_maps=()

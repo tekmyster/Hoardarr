@@ -1,0 +1,75 @@
+name: Build persistent lab appliance
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: Public SSH key authorized for the locked lab administrator
+        required: true
+        type: string
+concurrency:
+  group: lab-appliance-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BASE_ISO_URL: https://releases.ubuntu.com/noble/ubuntu-24.04.4-live-server-amd64.iso
+      BASE_ISO_SHA256: e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433
+      LAB_SSH_PUBLIC_KEY: ${{ inputs.ssh_public_key }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y xorriso python3.12 python3.12-venv
+      - run: python3 scripts/build-release-bundle.py build --output-dir dist/releases
+      - name: Create deterministic release archive
+        run: |
+          release_dir="$(find dist/releases -mindepth 1 -maxdepth 1 -type d -name 'hoardarr-*' -print -quit)"
+          test -n "$release_dir"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            --use-compress-program='gzip -n' -cf dist/hoardarr-release.tar.gz \
+            -C "$(dirname "$release_dir")" "$(basename "$release_dir")"
+      - name: Render bounded lab-only NoCloud seed
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          key = os.environ["LAB_SSH_PUBLIC_KEY"].strip()
+          if not re.fullmatch(r"(?:ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [A-Za-z0-9_.@-]+)?", key):
+              raise SystemExit("ssh_public_key is not a bounded OpenSSH public key")
+          template = Path("packaging/appliance/lab-user-data.template").read_text()
+          if template.count("__SSH_PUBLIC_KEY__") != 2:
+              raise SystemExit("lab seed placeholder count changed")
+          Path("lab-user-data").write_text(template.replace("__SSH_PUBLIC_KEY__", key))
+          PY
+          ! grep -q '__SSH_PUBLIC_KEY__' lab-user-data
+      - name: Restore pinned Ubuntu base ISO cache
+        uses: actions/cache@v4
+        with:
+          path: ubuntu.iso
+          key: ubuntu-24.04-base-${{ env.BASE_ISO_SHA256 }}
+      - name: Download pinned Ubuntu base ISO when uncached
+        run: |
+          if [[ ! -f ubuntu.iso ]]; then
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              --connect-timeout 30 --retry 5 --retry-delay 5 --retry-all-errors \
+              --output ubuntu.iso "$BASE_ISO_URL"
+          fi
+      - name: Build lab-only unattended appliance
+        run: scripts/build-appliance.sh ubuntu.iso "$BASE_ISO_SHA256" dist/hoardarr-release.tar.gz hoardarr-lab.iso lab-user-data
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoardarr-lab-appliance
+          path: |
+            hoardarr-lab.iso
+            hoardarr-lab.iso.sha256
+          retention-days: 7
