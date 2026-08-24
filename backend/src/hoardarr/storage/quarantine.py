@@ -35,18 +35,20 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _apply_created_mode(descriptor: int, temporary: Path, mode: int) -> None:
+    """Apply the caller's explicit mode without allowing umask to narrow it."""
+    if hasattr(os, "fchmod"):
+        os.fchmod(descriptor, mode)
+    else:  # pragma: no cover - Windows compatibility path
+        os.chmod(temporary, mode)
+
+
 def atomic_json(path: Path, document: dict[str, Any], *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        # The executor service intentionally uses a restrictive umask for new
-        # state. Public system configuration such as fstab still needs the
-        # explicit reviewed mode passed by its caller.
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, mode)
-        else:  # pragma: no cover - Windows compatibility path
-            os.chmod(temporary, mode)
+        _apply_created_mode(descriptor, temporary, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(document, handle, sort_keys=True, separators=(",", ":"))
             handle.write("\n")
@@ -364,6 +366,7 @@ def atomic_text(path: Path, content: str, *, mode: int = 0o600) -> None:
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
+        _apply_created_mode(descriptor, temporary, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
