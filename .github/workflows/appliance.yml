@@ -71,37 +71,49 @@ jobs:
             -monitor tcp:127.0.0.1:45454,server,nowait &
           qemu_pid=$!
           trap 'kill "$qemu_pid" 2>/dev/null || true' EXIT
-          sleep 75
+          sleep 60
           python3 - <<'PY'
           import re
           import socket
           import time
           from pathlib import Path
 
+          def monitor_command(command: bytes) -> None:
+              with socket.create_connection(("127.0.0.1", 45454), timeout=2) as monitor:
+                  monitor.recv(4096)
+                  monitor.sendall(command + b"\n")
+                  time.sleep(1)
+
           for _ in range(30):
               try:
-                  with socket.create_connection(("127.0.0.1", 45454), timeout=2) as monitor:
-                      monitor.recv(4096)
-                      monitor.sendall(b"screendump qemu-installer.ppm\n")
-                      time.sleep(1)
+                  monitor_command(b"info status")
                   break
               except OSError:
                   time.sleep(1)
           else:
               raise SystemExit("QEMU monitor did not become available")
 
-          image = Path("qemu-installer.ppm").read_bytes()
-          header = re.match(rb"P6\s+(?:#[^\n]*\n\s*)*(\d+)\s+(\d+)\s+(\d+)\s", image)
-          if header is None:
-              raise SystemExit("QEMU installer screenshot is not a PPM image")
-          pixels = image[header.end():]
-          if len(set(pixels)) < 8 or not any(pixels):
-              raise SystemExit("QEMU installer console is blank")
+          # Installer startup timing varies under TCG. Wake the framebuffer and
+          # poll for a real visible console instead of trusting one instant.
+          for attempt in range(40):
+              monitor_command(b"sendkey ret")
+              monitor_command(b"screendump qemu-installer.ppm")
+              image = Path("qemu-installer.ppm").read_bytes()
+              header = re.match(rb"P6\s+(?:#[^\n]*\n\s*)*(\d+)\s+(\d+)\s+(\d+)\s", image)
+              if header is None:
+                  raise SystemExit("QEMU installer screenshot is not a PPM image")
+              pixels = image[header.end():]
+              if len(set(pixels)) >= 8 and any(pixels):
+                  break
+              time.sleep(3)
+          else:
+              raise SystemExit("QEMU installer console stayed blank after bounded wake retries")
           PY
           kill "$qemu_pid" 2>/dev/null || true
           wait "$qemu_pid" 2>/dev/null || true
           trap - EXIT
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: hoardarr-appliance
           path: |

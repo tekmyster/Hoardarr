@@ -34,7 +34,10 @@ class ApplianceAssetsTests(unittest.TestCase):
         self.assertIn("--sort=name", workflow)
         self.assertIn("qemu-system-x86_64", workflow)
         self.assertIn("qemu-serial.log", workflow)
-        self.assertIn("QEMU installer console is blank", workflow)
+        self.assertIn("QEMU installer console stayed blank after bounded wake retries", workflow)
+        self.assertIn("monitor_command(b\"sendkey ret\")", workflow)
+        self.assertIn("for attempt in range(40)", workflow)
+        self.assertIn("if: always()", workflow)
         self.assertNotIn("build-release-bundle.py --python", workflow)
         self.assertNotIn("${{ inputs.base_iso_url }}'", workflow)
 
