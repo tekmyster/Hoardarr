@@ -22,6 +22,7 @@ from hoardarr.db.models import (
     OperationEvent,
     PhysicalDisk,
     Plan,
+    StorageVolume,
     WizardSession,
     utc_now,
 )
@@ -41,6 +42,7 @@ from hoardarr.operations.worker import (
     run_once,
 )
 from hoardarr.storage.tiering import plan_transfer
+from hoardarr.storage.volume_plans import build_guided_volume_plan
 
 
 def _runtime(tmp_path: Path):
@@ -110,6 +112,72 @@ def test_running_host_mutation_cannot_be_recorded_as_cancelled(tmp_path: Path) -
             assert operation is not None
             assert operation.status == "running"
             assert operation.cancel_requested is False
+
+
+def test_volume_worker_persists_executor_result_under_stable_provider_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    plan = build_guided_volume_plan(
+        [
+            {
+                "id": "zfs:tank",
+                "name": "tank",
+                "type": "ZFS",
+                "status": "online",
+                "pool_guid": "1234567890123456789",
+                "free_bytes": 100_000_000_000,
+                "degraded": False,
+            }
+        ],
+        name="movies",
+        purpose="media",
+    )
+    operation_id = _enqueue(
+        session_factory,
+        kind="storage.volume.create",
+        resource_type="storage_volume",
+        resource_id="zfs:dataset:tank/movies",
+        request={
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmation_sha256": document_hash({"confirmation": "CREATE"}),
+        },
+    )
+
+    monkeypatch.setattr(
+        "hoardarr.operations.worker.apply_storage_volume",
+        lambda *_args, **_kwargs: {
+            "operation_id": operation_id,
+            "provider_resource_id": "tank/movies",
+            "volume": {
+                "provider": "zfs",
+                "resource_type": "dataset",
+                "provider_resource_id": "tank/movies",
+                "name": "movies",
+                "presentation": "file",
+                "mountpoint": "/srv/hoardarr/volumes/movies",
+                "filesystem_type": "zfs",
+                "lifecycle_state": "active",
+                "config": {"purpose": "media", "recordsize": "1M"},
+            },
+            "replayed": False,
+        },
+    )
+    assert run_once(
+        session_factory=session_factory,
+        settings=settings,
+        secret_box=SecretBox(b"v" * 32),
+        worker_id="volume-worker",
+    )
+    with session_factory() as session:
+        operation = session.get(Operation, operation_id)
+        volume = session.scalar(select(StorageVolume))
+        assert operation is not None and operation.status == "succeeded"
+        assert volume is not None
+        assert volume.stable_identity == "zfs:dataset:tank/movies"
+        assert operation.result_json is not None
+        assert operation.result_json["volume_id"] == volume.id
 
 
 def test_hardware_scan_creates_an_immutable_snapshot(tmp_path: Path) -> None:

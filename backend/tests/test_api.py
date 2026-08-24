@@ -133,6 +133,63 @@ def test_storage_volume_inventory_requires_authentication_and_returns_provider_i
     assert item["capabilities"]["snapshot"]["support"] == "unsupported"
 
 
+def test_guided_volume_preview_uses_live_pool_identity_and_requires_operate_scope(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _app, setup_token, _secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    monkeypatch.setattr(
+        storage_routes,
+        "discover_storage_inventory",
+        lambda: {
+            "pools": {
+                "items": [
+                    {
+                        "id": "zfs:tank",
+                        "name": "tank",
+                        "type": "ZFS",
+                        "status": "online",
+                        "pool_guid": "1234567890123456789",
+                        "free_bytes": 100_000_000_000,
+                        "degraded": False,
+                    }
+                ]
+            }
+        },
+    )
+    missing_csrf = client.post(
+        "/api/v1/storage/volumes/preview",
+        json={"name": "movies", "purpose": "media"},
+    )
+    assert missing_csrf.status_code == 403
+
+    response = client.post(
+        "/api/v1/storage/volumes/preview",
+        headers=_state_headers(csrf),
+        json={"name": "movies", "purpose": "media"},
+    )
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+    assert plan["provider_resource_id"] == "tank/movies"
+    assert plan["ready"] is True
+
+    headers = _state_headers(csrf, **{"Idempotency-Key": "create-guided-volume"})
+    created = client.post(
+        "/api/v1/storage/volumes",
+        headers=headers,
+        json={"plan": plan, "plan_sha256": plan["plan_sha256"], "confirmation": "CREATE"},
+    )
+    assert created.status_code == 202
+    assert created.json()["operation"]["kind"] == "storage.volume.create"
+    replay = client.post(
+        "/api/v1/storage/volumes",
+        headers=headers,
+        json={"plan": plan, "plan_sha256": plan["plan_sha256"], "confirmation": "CREATE"},
+    )
+    assert replay.status_code == 202
+    assert replay.json()["replayed"] is True
+
+
 def test_expected_topology_api_persists_drift_history_and_requires_csrf(api_runtime: Any) -> None:
     client, app, setup_token, _secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)

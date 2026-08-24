@@ -19,6 +19,15 @@ async function storageLifecycleServer(page: Page) {
   let foreignMigrationStarted = false;
   let unraidEvidenceLoaded = false;
   let nasEvidenceLoaded = false;
+  let guidedVolumeCreated = false;
+  const volumeOperationId = "88888888-8888-4888-8888-888888888888";
+  const volumePlan = {
+    schema_version: 1, kind: "storage.volume.create", mode: "guided", name: "media-library",
+    purpose: "media", provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library",
+    presentation: "file", parent: { pool_id: "zfs:tank", pool_name: "tank", pool_guid: "1234567890123456789", free_bytes_at_preview: 900_000_000_000 },
+    size_bytes: null, properties: { compression: "zstd", recordsize: "1M", atime: "off", mountpoint: "/srv/hoardarr/volumes/media-library" },
+    blockers: [], ready: true, explanation: "Creates a separate storage area tuned for large media files.", plan_sha256: "e".repeat(64),
+  };
   const group = () => ({
     id: groupId,
     name: "Media",
@@ -319,13 +328,39 @@ async function storageLifecycleServer(page: Page) {
       if (resumed) operationStatus = "succeeded";
       return json(operation());
     }
+    if (pathname.endsWith(`/operations/${volumeOperationId}`)) return json({
+      id: volumeOperationId, kind: "storage.volume.create", status: "succeeded",
+      resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" },
+      result: { volume_id: "volume-media-library" }, error: null, created_at: now, updated_at: now,
+    });
     if (pathname.endsWith("/operations")) return json({ items: operationStatus ? [operation()] : [] });
     if (pathname.endsWith("/storage/mergerfs")) return json({ available: true, status: "configured", items: [] });
     if (pathname.endsWith("/storage/transfers/summary")) return json({ active: 0, pending: 0, failed: 0, completed: 0, bytes_moved: 0, current_throughput_bytes_per_second: 0, estimated_drain_seconds: null, hardlink_rate: null, copy_rate: null, seeding_retained_bytes: 0, recoverable_bytes: 0 });
     if (pathname.endsWith("/storage/logical")) return json({ items: [] });
     if (pathname.endsWith("/hardware/topology/plan-templates")) return json({ items: [] });
     if (pathname.endsWith("/hardware/topology/plans")) return json({ items: [] });
-    if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
+    if (pathname.endsWith("/storage/volumes/preview")) {
+      const body = request.postDataJSON() as { name: string; purpose: string };
+      expect(body).toMatchObject({ name: "media-library", purpose: "media" });
+      return json({ plan: volumePlan, plan_sha256: volumePlan.plan_sha256 });
+    }
+    if (pathname.endsWith("/storage/volumes") && request.method() === "POST") {
+      const body = request.postDataJSON() as { plan: typeof volumePlan; plan_sha256: string; confirmation: string };
+      expect(body.plan).toEqual(volumePlan);
+      expect(body.plan_sha256).toBe(volumePlan.plan_sha256);
+      expect(body.confirmation).toBe("CREATE");
+      guidedVolumeCreated = true;
+      return json({ operation: { id: volumeOperationId, kind: "storage.volume.create", status: "queued", resource: { type: "storage_volume", id: "zfs:dataset:tank/media-library" }, result: null, error: null, created_at: now, updated_at: now }, replayed: false }, 202);
+    }
+    if (pathname.endsWith("/storage/volumes")) return json({ items: guidedVolumeCreated ? [{
+      id: "volume-media-library", stable_identity: "zfs:dataset:tank/media-library", name: "media-library",
+      provider: "zfs", resource_type: "dataset", provider_resource_id: "tank/media-library", presentation: "file",
+      parent_storage_entity_id: null, mountpoint: "/srv/hoardarr/volumes/media-library", device_path: null,
+      filesystem_type: "zfs", filesystem_uuid: null, size_bytes: 900_000_000_000, allocated_bytes: 0,
+      lifecycle_state: "active", config: volumePlan.properties, capabilities: {}, capabilities_detected_at: now,
+      created_at: now, updated_at: now,
+    }] : [] });
+    if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "configured", items: [{ id: "zfs:tank", name: "tank", type: "ZFS", status: "online", total_bytes: 1_000_000_000_000, used_bytes: 100_000_000_000, free_bytes: 900_000_000_000, members: 2, mountpoint: "/tank", pool_guid: "1234567890123456789", degraded: false }] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations") || pathname.endsWith("/wizards")) return json({ items: [] });
     if (pathname.endsWith("/system/overview")) return json({ captured_at: now, source: "live", system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.11", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] }, storage: { snapshot: null, drive_count: 2, raw_capacity_bytes: 2_000_000_000_000, health: "healthy", pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] } }, network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: now, detail: null, neighbors: [] } }, activity: { operations: [] }, applications: { connections: [] }, alerts: [] });
     if (pathname.endsWith("/system/resources")) return json({ captured_at: now, processor: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, volumes: [], network: { interfaces: [] }, storage: { performance: null } });
@@ -341,6 +376,7 @@ async function storageLifecycleServer(page: Page) {
     foreignMigrationStarted: () => foreignMigrationStarted,
     unraidEvidenceLoaded: () => unraidEvidenceLoaded,
     nasEvidenceLoaded: () => nasEvidenceLoaded,
+    guidedVolumeCreated: () => guidedVolumeCreated,
   };
 }
 
@@ -385,6 +421,28 @@ test("drains and retires a Storage Group source through the real browser workflo
   await page.getByText("Recent lifecycle activity").click();
   await expect(page.getByText("backend released for reuse")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("storage-lifecycle-completed.png"), fullPage: true });
+});
+
+test("creates a real provider-backed media area through the Guided Storage UI", async ({ page }, testInfo) => {
+  const observed = await storageLifecycleServer(page);
+  await page.goto("/");
+  await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+  await expect(page.getByRole("heading", { name: "Storage areas", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Add storage area" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a storage area" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("media-library");
+  await dialog.getByRole("button", { name: "Review plan" }).click();
+  await expect(page.getByText("Recommended plan")).toBeVisible();
+  await expect(page.getByText("ZFS pool tank")).toBeVisible();
+  await expect(dialog.getByText("/srv/hoardarr/volumes/media-library", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("guided-storage-volume-review.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Create storage" }).click();
+  await expect(page.getByText("Storage area ready")).toBeVisible();
+  expect(observed.guidedVolumeCreated()).toBe(true);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByText("zfs:dataset:tank/media-library")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("guided-storage-volume-created.png"), fullPage: true });
 });
 
 test("reviews and completes a bounded read-only foreign inventory in the real Storage UI", async ({ page }, testInfo) => {

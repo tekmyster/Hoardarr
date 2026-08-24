@@ -15,6 +15,7 @@ import { DownloadTierPanel } from "./DownloadTierPanel";
 import { TopologyExpectationPanel } from "./TopologyExpectationPanel";
 import { TopologyPlanningPanel } from "./TopologyPlanningPanel";
 import { ForeignStoragePanel } from "./ForeignStoragePanel";
+import { StorageVolumesPanel } from "./StorageVolumesPanel";
 
 export type StorageAction = "add" | "move" | "change";
 export type DriveAction = "configure" | "test" | "smart_short" | "smart_long" | "import" | "expand" | "cache" | "wipe" | "advanced";
@@ -214,6 +215,7 @@ export function StoragePage({
     <StoragePerformance />
 
     <div id="storage-groups-panel"><StorageGroupsPanel /></div>
+    <StorageVolumesPanel pools={storageInventory?.pools.items ?? []} />
     <DownloadTierPanel />
 
     <StorageExpansionPanel onPlan={onDriveAction} snapshotId={snapshot?.id ?? null} />

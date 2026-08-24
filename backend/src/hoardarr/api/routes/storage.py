@@ -40,6 +40,8 @@ from hoardarr.api.schemas import (
     StorageGroupCreateRequest,
     StorageRedundancyApplyRequest,
     StorageRedundancyPreviewRequest,
+    StorageVolumeApplyRequest,
+    StorageVolumePreviewRequest,
     TierTransferApplyRequest,
     TierTransferCleanupRequest,
     TierTransferPreviewRequest,
@@ -111,7 +113,12 @@ from hoardarr.storage.snapraid import (
 )
 from hoardarr.storage.telemetry import storage_telemetry
 from hoardarr.storage.tiering import TieringError, plan_transfer, transfer_queue_summary
-from hoardarr.storage.volumes import volume_documents
+from hoardarr.storage.volume_plans import (
+    VolumePlanError,
+    build_guided_volume_plan,
+    validate_guided_volume_plan,
+)
+from hoardarr.storage.volumes import canonical_volume_identity, volume_documents
 
 router = APIRouter(prefix="/storage", tags=["storage"])
 
@@ -934,6 +941,80 @@ def storage_volume_inventory(
     """List provider-backed datasets, filesystem volumes, block volumes, and LUNs."""
 
     return {"items": volume_documents(session)}
+
+
+@router.post("/volumes/preview")
+def preview_storage_volume(
+    payload: StorageVolumePreviewRequest,
+    _principal: Principal = Depends(require_state_scope("operate")),
+) -> dict[str, object]:
+    inventory = discover_storage_inventory()
+    try:
+        plan = build_guided_volume_plan(
+            inventory.get("pools", {}).get("items", []),
+            **payload.model_dump(),
+        )
+    except VolumePlanError as exc:
+        raise Problem(422, exc.code, "Volume plan rejected", str(exc)) from exc
+    return {"plan": plan, "plan_sha256": plan["plan_sha256"]}
+
+
+@router.post("/volumes", status_code=202)
+def create_storage_volume(
+    payload: StorageVolumeApplyRequest,
+    request: Request,
+    key: str = Depends(idempotency_key),
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    if payload.plan.get("plan_sha256") != payload.plan_sha256:
+        raise Problem(409, "volume_plan_changed", "Plan changed", "Preview the volume again.")
+    try:
+        plan = validate_guided_volume_plan(payload.plan)
+        stable_identity = canonical_volume_identity(
+            str(plan["provider"]),
+            str(plan["resource_type"]),
+            str(plan["provider_resource_id"]),
+        )
+    except (VolumePlanError, ValueError) as exc:
+        code = exc.code if isinstance(exc, VolumePlanError) else "volume_plan_invalid"
+        raise Problem(422, code, "Volume plan rejected", str(exc)) from exc
+    if plan["ready"] is not True:
+        raise Problem(
+            409,
+            "volume_plan_blocked",
+            "Volume plan blocked",
+            "Resolve every plan blocker before creating storage.",
+        )
+    operation_request = {
+        "plan": plan,
+        "plan_sha256": payload.plan_sha256,
+        "confirmation_sha256": document_hash({"confirmation": payload.confirmation}),
+    }
+    try:
+        operation, created = create_operation(
+            session,
+            kind="storage.volume.create",
+            principal=principal,
+            request=operation_request,
+            idempotency_key=key,
+            resource_type="storage_volume",
+            resource_id=stable_identity,
+        )
+    except OperationConflict as exc:
+        raise Problem(409, "idempotency_conflict", "Conflict", str(exc)) from exc
+    if created:
+        record_audit(
+            session,
+            principal=principal,
+            action="storage.volume.create",
+            outcome="accepted",
+            correlation_id=request.state.request_id,
+            target_type="storage_volume",
+            target_id=stable_identity,
+            details={"plan_sha256": payload.plan_sha256, "purpose": plan["purpose"]},
+        )
+    return {"operation": operation_document(operation), "replayed": not created}
 
 
 @router.post("/redundancy/preview")

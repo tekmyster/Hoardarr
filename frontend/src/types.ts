@@ -755,6 +755,60 @@ export interface StorageGroupDocument {
   }>;
 }
 
+export interface StorageVolumeCapability {
+  support: "supported" | "unsupported" | "not_reported";
+  availability: "available" | "temporarily_unavailable" | "unsupported" | "not_reported";
+  source: "provider_baseline" | "provider_observation";
+  constraints: Record<string, unknown>;
+}
+
+export interface StorageVolumeDocument {
+  id: string;
+  stable_identity: string;
+  name: string;
+  provider: string;
+  resource_type: "filesystem" | "dataset" | "zvol" | "logical_volume" | "lun";
+  provider_resource_id: string;
+  presentation: "file" | "block";
+  parent_storage_entity_id: string | null;
+  mountpoint: string | null;
+  device_path: string | null;
+  filesystem_type: string | null;
+  filesystem_uuid: string | null;
+  size_bytes: number | null;
+  allocated_bytes: number | null;
+  lifecycle_state: string;
+  config: Record<string, unknown>;
+  capabilities: Record<string, StorageVolumeCapability>;
+  capabilities_detected_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StorageVolumePlan {
+  schema_version: 1;
+  kind: "storage.volume.create";
+  mode: "guided";
+  name: string;
+  purpose: "media" | "downloads" | "archive" | "backup" | "general" | "vm";
+  provider: "zfs";
+  resource_type: "dataset" | "zvol";
+  provider_resource_id: string;
+  presentation: "file" | "block";
+  parent: {
+    pool_id: string;
+    pool_name: string;
+    pool_guid: string;
+    free_bytes_at_preview: number;
+  };
+  size_bytes: number | null;
+  properties: Record<string, string | boolean>;
+  blockers: Array<{ code: string; message: string }>;
+  ready: boolean;
+  explanation: string;
+  plan_sha256: string;
+}
+
 export interface StorageBackendActivationPlan {
   schema_version: 1;
   kind: "storage.backend.activate";

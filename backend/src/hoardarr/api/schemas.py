@@ -546,6 +546,19 @@ class StorageRedundancyApplyRequest(StrictModel):
     confirmation: Literal["APPLY"]
 
 
+class StorageVolumePreviewRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=63)
+    purpose: Literal["media", "downloads", "archive", "backup", "general", "vm"]
+    pool_id: str | None = Field(default=None, min_length=5, max_length=320)
+    size_bytes: int | None = Field(default=None, ge=1, le=10**18)
+
+
+class StorageVolumeApplyRequest(StrictModel):
+    plan: dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: Literal["CREATE"]
+
+
 class StorageGroupCreateRequest(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     namespace_path: str = Field(min_length=2, max_length=4096)

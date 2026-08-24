@@ -55,6 +55,8 @@ import type {
   StorageDrainPlan,
   StorageExpansionAssessment,
   StorageGroupDocument,
+  StorageVolumeDocument,
+  StorageVolumePlan,
   StorageRedundancyPlan,
   StorageRedundancyEventDocument,
   StorageRedundancySettings,
@@ -439,6 +441,39 @@ class HoardarrApi {
     if (demoMode) return [];
     const result = await this.request<{ items: StorageGroupDocument[] }>("/storage/groups", { signal });
     return result.items;
+  }
+
+  async storageVolumes(signal?: AbortSignal): Promise<StorageVolumeDocument[]> {
+    const result = await this.request<{ items: StorageVolumeDocument[] }>("/storage/volumes", {
+      signal,
+    });
+    return result.items;
+  }
+
+  async previewStorageVolume(input: {
+    name: string;
+    purpose: StorageVolumePlan["purpose"];
+    pool_id?: string;
+    size_bytes?: number;
+  }): Promise<StorageVolumePlan> {
+    const result = await this.request<{ plan: StorageVolumePlan }>("/storage/volumes/preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return result.plan;
+  }
+
+  async createStorageVolume(plan: StorageVolumePlan): Promise<OperationDocument> {
+    const result = await this.request<{ operation: OperationDocument }>("/storage/volumes", {
+      method: "POST",
+      headers: { "Idempotency-Key": createIdempotencyKey() },
+      body: JSON.stringify({
+        plan,
+        plan_sha256: plan.plan_sha256,
+        confirmation: "CREATE",
+      }),
+    });
+    return result.operation;
   }
 
   async registeredDisks(signal?: AbortSignal): Promise<PhysicalDiskDocument[]> {

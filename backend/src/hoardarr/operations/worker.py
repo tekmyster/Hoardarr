@@ -97,6 +97,7 @@ from hoardarr.storage.client import (
     apply_snapraid_replacement,
     apply_storage_plan,
     apply_storage_redundancy,
+    apply_storage_volume,
     storage_operation_status,
 )
 from hoardarr.storage.drain_worker import (
@@ -124,6 +125,8 @@ from hoardarr.storage.tiering import (
     execute_transfer,
     plan_transfer,
 )
+from hoardarr.storage.volume_plans import VolumePlanError, validate_guided_volume_plan
+from hoardarr.storage.volumes import StorageVolumeError, register_volume
 from hoardarr.telemetry.samples import EntityReading, MetricReading
 from hoardarr.telemetry.service import TelemetryService, collect_for_worker
 from hoardarr.telemetry.store import ingest as ingest_metrics
@@ -154,6 +157,7 @@ SUPPORTED_OPERATION_KINDS = frozenset(
         "storage.snapraid.replace",
         "storage.array.replace",
         "storage.redundancy.apply",
+        "storage.volume.create",
         "storage.drain",
         "connectivity.apply",
         "connectivity.remove",
@@ -1610,6 +1614,32 @@ def _execute_work(
                 needs_attention=getattr(exc, "needs_attention", False),
             ) from exc
         return RedundancyExecution(plan=plan, result=result)
+    if item.kind == "storage.volume.create":
+        raw_plan = item.request.get("plan")
+        if (
+            not isinstance(raw_plan, dict)
+            or raw_plan.get("plan_sha256") != item.request.get("plan_sha256")
+            or item.request.get("confirmation_sha256") != document_hash({"confirmation": "CREATE"})
+            or item.resource_type != "storage_volume"
+        ):
+            raise WorkFailure("volume_plan_changed", "The volume request is invalid")
+        try:
+            plan = validate_guided_volume_plan(raw_plan)
+            result = apply_storage_volume(
+                settings.storage_executor_socket,
+                operation_id=item.operation_id,
+                plan_sha256=str(item.request["plan_sha256"]),
+                plan=plan,
+                confirmation_sha256=str(item.request["confirmation_sha256"]),
+                timeout_seconds=settings.storage_executor_timeout_seconds,
+            )
+        except (StorageExecutorError, VolumePlanError) as exc:
+            raise WorkFailure(
+                exc.code,
+                str(exc),
+                needs_attention=getattr(exc, "needs_attention", False),
+            ) from exc
+        return MaintenanceExecution(result=result)
     if item.kind == "storage.transfer":
         value = item.request.get("plan")
         if not isinstance(value, dict) or document_hash(value) != item.request.get("plan_sha256"):
@@ -1927,6 +1957,34 @@ def _finalize_success(
             return
 
         if isinstance(execution, MaintenanceExecution):
+            if item.kind == "storage.volume.create":
+                volume = execution.result.get("volume")
+                if not isinstance(volume, dict):
+                    fail_operation(
+                        session,
+                        operation,
+                        code="volume_result_invalid",
+                        message="The volume service returned an invalid result",
+                        needs_attention=True,
+                    )
+                    return
+                try:
+                    registered, _created = register_volume(session, volume)
+                except StorageVolumeError:
+                    fail_operation(
+                        session,
+                        operation,
+                        code="volume_result_invalid",
+                        message="The created volume could not be registered safely",
+                        needs_attention=True,
+                    )
+                    return
+                complete_operation(
+                    session,
+                    operation,
+                    {**execution.result, "volume_id": registered.id},
+                )
+                return
             complete_operation(session, operation, execution.result)
             return
 
@@ -2042,6 +2100,7 @@ def _finalize_failure(
             "storage.maintenance",
             "storage.snapraid.replace",
             "storage.redundancy.apply",
+            "storage.volume.create",
             "storage.transfer",
             "storage.transfer.cleanup",
             "hardware.locate",
@@ -2350,6 +2409,7 @@ def recover_abandoned_operations(
                             "storage.foreign.inspect",
                             "storage.snapraid.replace",
                             "storage.redundancy.apply",
+                            "storage.volume.create",
                         )
                     ),
                     Operation.lease_owner.is_not(None),
@@ -2445,6 +2505,7 @@ def recover_abandoned_operations(
                 "storage.snapraid.replace": storage_max_age,
                 "storage.array.replace": storage_max_age,
                 "storage.redundancy.apply": storage_max_age,
+                "storage.volume.create": storage_max_age,
                 "connectivity.apply": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "connectivity.remove": int(settings.connectivity_executor_timeout_seconds) + 120,
                 "backup.control_plane": 900,

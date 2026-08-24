@@ -41,6 +41,7 @@ NON_CANCELLABLE_AFTER_START = frozenset(
         "storage.foreign.migrate",
         "storage.snapraid.replace",
         "storage.redundancy.apply",
+        "storage.volume.create",
         "storage.transfer",
         "hardware.locate",
         "connectivity.apply",

@@ -69,6 +69,11 @@ from hoardarr.storage.snapraid import (
     replace_data_entry,
     validate_replacement_plan,
 )
+from hoardarr.storage.volume_plans import (
+    VolumePlanError,
+    validate_guided_volume_plan,
+    volume_create_command,
+)
 from hoardarr.storage.zfs import (
     parse_zpool_data_topology,
     valid_pool_guid,
@@ -205,6 +210,7 @@ CommandProbe = Callable[[list[str], int], str]
 InventoryProvider = Callable[[], dict[str, Any]]
 InspectionInventoryProvider = Callable[[Path, Mapping[str, int]], dict[str, Any]]
 ZfsStateProvider = Callable[[str], dict[str, Any]]
+ZfsResourceProvider = Callable[[str], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
 
 
@@ -460,6 +466,62 @@ def _live_md_array_state(array_name: str) -> dict[str, Any]:
         "degraded": bool(degraded),
         "sync_action": sync_action,
     }
+
+
+def _live_zfs_resource_state(resource_name: str) -> dict[str, Any]:
+    if (
+        re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,254}/[A-Za-z0-9_.:/-]{1,510}", resource_name)
+        is None
+    ):
+        raise ExecutorFailure(
+            "zfs_resource_identity_invalid", "The reviewed ZFS resource name is invalid."
+        )
+    try:
+        result = subprocess.run(
+            [
+                _tool("zfs"),
+                "get",
+                "-Hp",
+                "-o",
+                "property,value",
+                "guid,type,mountpoint,volsize",
+                resource_name,
+            ],
+            check=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutorFailure(
+            "zfs_resource_verification_failed",
+            "The created ZFS resource could not be read back safely.",
+            needs_attention=True,
+        ) from exc
+    if len(result.stdout) > 64 * 1024:
+        raise ExecutorFailure(
+            "zfs_resource_verification_failed",
+            "The ZFS resource response is unexpectedly large.",
+            needs_attention=True,
+        )
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[0] in {"guid", "type", "mountpoint", "volsize"}:
+            values[parts[0]] = parts[1]
+    if not valid_pool_guid(values.get("guid")) or values.get("type") not in {
+        "filesystem",
+        "volume",
+    }:
+        raise ExecutorFailure(
+            "zfs_resource_verification_failed",
+            "The created ZFS resource identity is incomplete.",
+            needs_attention=True,
+        )
+    return values
 
 
 def _smartctl(command: list[str], *, allow_unsupported_log: bool = False) -> str:
@@ -2795,6 +2857,148 @@ def apply_storage_plan(
         return result
 
 
+def apply_storage_volume(
+    request: Mapping[str, Any],
+    *,
+    paths: Paths | None = None,
+    runner: CommandRunner = _run,
+    zfs_state_provider: ZfsStateProvider = _live_zfs_pool_state,
+    zfs_resource_provider: ZfsResourceProvider = _live_zfs_resource_state,
+) -> dict[str, Any]:
+    expected = {"operation", "operation_id", "plan_sha256", "plan", "confirmation_sha256"}
+    operation_id = request.get("operation_id")
+    plan_sha = request.get("plan_sha256")
+    raw_plan = request.get("plan")
+    if (
+        set(request) != expected
+        or request.get("operation") != "apply_storage_volume"
+        or not isinstance(operation_id, str)
+        or not UUID_RE.fullmatch(operation_id)
+        or not isinstance(plan_sha, str)
+        or not SHA256_RE.fullmatch(plan_sha)
+        or not isinstance(raw_plan, dict)
+        or raw_plan.get("plan_sha256") != plan_sha
+        or request.get("confirmation_sha256") != document_hash({"confirmation": "CREATE"})
+    ):
+        raise ExecutorFailure(
+            "volume_confirmation_missing", "Exact volume creation confirmation is required."
+        )
+    try:
+        plan = validate_guided_volume_plan(raw_plan)
+        command = volume_create_command(plan)
+    except VolumePlanError as exc:
+        raise ExecutorFailure(exc.code, str(exc)) from exc
+
+    paths = paths or Paths()
+    validate_quarantine(paths.quarantine_marker)
+    try:
+        paths.transaction_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = paths.transaction_root.lstat()
+    except OSError as exc:
+        raise ExecutorFailure(
+            "transaction_journal_unavailable",
+            "Storage activity tracking could not be prepared. No volume was created.",
+        ) from exc
+    if not stat.S_ISDIR(details.st_mode) or (
+        os.name != "nt" and (details.st_uid != _executor_uid() or details.st_mode & 0o077)
+    ):
+        raise ExecutorFailure(
+            "transaction_journal_unsafe",
+            "Storage activity tracking is unsafe. No volume was created.",
+        )
+    journal_path = _journal_path(paths, operation_id)
+    prior = _load_prior_journal(journal_path, plan_sha)
+    if prior is not None:
+        return {**prior, "replayed": True}
+
+    parent = plan["parent"]
+    state = zfs_state_provider(str(parent["pool_name"]))
+    if state.get("pool_guid") != parent["pool_guid"]:
+        raise ExecutorFailure(
+            "zfs_pool_identity_changed",
+            "The ZFS pool identity changed after review. No volume was created.",
+        )
+    journal: dict[str, Any] = {
+        "schema_version": 1,
+        "operation_id": operation_id,
+        "plan_sha256": plan_sha,
+        "state": "running",
+        "phase": "Creating logical storage",
+        "completed_steps": 0,
+        "total_steps": 2,
+        "current_action": {"id": "volume:create", "type": "zfs.create"},
+        "started_at": time.time(),
+        "updated_at": time.time(),
+    }
+    atomic_json(journal_path, journal)
+    try:
+        runner([_tool(command[0]), *command[1:]], 300)
+        journal.update(
+            {
+                "phase": "Verifying logical storage",
+                "completed_steps": 1,
+                "current_action": {"id": "volume:verify", "type": "zfs.verify"},
+                "updated_at": time.time(),
+            }
+        )
+        atomic_json(journal_path, journal)
+        current = zfs_state_provider(str(parent["pool_name"]))
+        if current.get("pool_guid") != parent["pool_guid"]:
+            raise ExecutorFailure(
+                "zfs_pool_identity_changed",
+                "The parent ZFS pool identity changed during volume creation.",
+                needs_attention=True,
+            )
+        resource = zfs_resource_provider(str(plan["provider_resource_id"]))
+        expected_type = "volume" if plan["resource_type"] == "zvol" else "filesystem"
+        if resource.get("type") != expected_type or not valid_pool_guid(resource.get("guid")):
+            raise ExecutorFailure(
+                "zfs_resource_verification_failed",
+                "The created ZFS resource did not match the reviewed resource type.",
+                needs_attention=True,
+            )
+    except Exception:
+        journal.update({"state": "needs_attention", "updated_at": time.time()})
+        atomic_json(journal_path, journal)
+        raise
+
+    properties = plan["properties"]
+    volume = {
+        "provider": "zfs",
+        "resource_type": plan["resource_type"],
+        "provider_resource_id": plan["provider_resource_id"],
+        "name": plan["name"],
+        "presentation": plan["presentation"],
+        "mountpoint": properties.get("mountpoint"),
+        "device_path": (
+            f"/dev/zvol/{plan['provider_resource_id']}" if plan["resource_type"] == "zvol" else None
+        ),
+        "filesystem_type": "zfs" if plan["resource_type"] == "dataset" else None,
+        "filesystem_uuid": resource["guid"] if plan["resource_type"] == "dataset" else None,
+        "size_bytes": plan["size_bytes"],
+        "lifecycle_state": "active",
+        "config": {"purpose": plan["purpose"], **properties},
+    }
+    result = {
+        "operation_id": operation_id,
+        "provider_resource_id": plan["provider_resource_id"],
+        "volume": volume,
+        "replayed": False,
+    }
+    journal.update(
+        {
+            "state": "succeeded",
+            "phase": "Logical storage created",
+            "completed_steps": 2,
+            "current_action": None,
+            "result": result,
+            "updated_at": time.time(),
+        }
+    )
+    atomic_json(journal_path, journal)
+    return result
+
+
 def apply_device_maintenance(
     request: Mapping[str, Any],
     *,
@@ -4900,6 +5104,8 @@ def _handle(connection: socket.socket, paths: Paths, *, status_only: bool = Fals
             result = preview_foreign_stack(request, paths=paths)
         elif request.get("operation") == "apply_storage_redundancy":
             result = apply_storage_redundancy(request, paths=paths)
+        elif request.get("operation") == "apply_storage_volume":
+            result = apply_storage_volume(request, paths=paths)
         else:
             result = apply_storage_plan(request, paths=paths)
         response = {"ok": True, "result": result}

@@ -20,9 +20,160 @@ from hoardarr.storage.executor import (
     _selected_live_devices,
     _validate_plan,
     apply_storage_plan,
+    apply_storage_volume,
     storage_operation_status,
 )
 from hoardarr.storage.layouts import CommandSpec, snapraid_expand_config
+from hoardarr.storage.volume_plans import build_guided_volume_plan
+
+
+def test_guided_zfs_volume_execution_revalidates_pool_and_replays_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_guided_volume_plan(
+        [
+            {
+                "id": "zfs:tank",
+                "name": "tank",
+                "type": "ZFS",
+                "status": "online",
+                "pool_guid": "1234567890123456789",
+                "free_bytes": 100_000_000_000,
+                "degraded": False,
+            }
+        ],
+        name="movies",
+        purpose="media",
+    )
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    request = {
+        "operation": "apply_storage_volume",
+        "operation_id": operation_id,
+        "plan_sha256": plan["plan_sha256"],
+        "plan": plan,
+        "confirmation_sha256": document_hash({"confirmation": "CREATE"}),
+    }
+    commands: list[list[str]] = []
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        quarantine_marker=tmp_path / "quarantine.json",
+    )
+
+    def state(_name: str) -> dict[str, str]:
+        return {"pool_guid": "1234567890123456789"}
+
+    first = apply_storage_volume(
+        request,
+        paths=paths,
+        runner=lambda command, _timeout: commands.append(command),
+        zfs_state_provider=state,
+        zfs_resource_provider=lambda _name: {"guid": "1111222233334444", "type": "filesystem"},
+    )
+    assert commands == [
+        [
+            "/usr/sbin/zfs",
+            "create",
+            "-o",
+            "atime=off",
+            "-o",
+            "compression=zstd",
+            "-o",
+            "mountpoint=/srv/hoardarr/volumes/movies",
+            "-o",
+            "recordsize=1M",
+            "tank/movies",
+        ]
+    ]
+    assert first["volume"]["provider_resource_id"] == "tank/movies"
+    replay = apply_storage_volume(
+        request,
+        paths=paths,
+        runner=lambda *_args: pytest.fail("a replay must not run zfs again"),
+        zfs_state_provider=state,
+        zfs_resource_provider=lambda _name: {"guid": "1111222233334444", "type": "filesystem"},
+    )
+    assert replay["replayed"] is True
+
+
+def test_guided_zfs_volume_execution_rejects_malformed_resource_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_guided_volume_plan(
+        [
+            {
+                "id": "zfs:tank",
+                "name": "tank",
+                "type": "ZFS",
+                "status": "online",
+                "pool_guid": "1234567890123456789",
+                "free_bytes": 100_000_000_000,
+                "degraded": False,
+            }
+        ],
+        name="movies",
+        purpose="media",
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    with pytest.raises(ExecutorFailure) as raised:
+        apply_storage_volume(
+            {
+                "operation": "apply_storage_volume",
+                "operation_id": "33333333-3333-4333-8333-333333333333",
+                "plan_sha256": plan["plan_sha256"],
+                "plan": plan,
+                "confirmation_sha256": document_hash({"confirmation": "CREATE"}),
+            },
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                quarantine_marker=tmp_path / "quarantine.json",
+            ),
+            runner=lambda *_args: None,
+            zfs_state_provider=lambda _name: {"pool_guid": "1234567890123456789"},
+            zfs_resource_provider=lambda _name: {"type": "filesystem", "guid": "not-a-guid"},
+        )
+    assert raised.value.code == "zfs_resource_verification_failed"
+
+
+def test_guided_zfs_volume_execution_refuses_pool_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_guided_volume_plan(
+        [
+            {
+                "id": "zfs:tank",
+                "name": "tank",
+                "type": "ZFS",
+                "status": "online",
+                "pool_guid": "1234567890123456789",
+                "free_bytes": 100_000_000_000,
+                "degraded": False,
+            }
+        ],
+        name="movies",
+        purpose="media",
+    )
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "validate_quarantine", lambda _marker: {"ready": True})
+    with pytest.raises(ExecutorFailure) as raised:
+        apply_storage_volume(
+            {
+                "operation": "apply_storage_volume",
+                "operation_id": "22222222-2222-4222-8222-222222222222",
+                "plan_sha256": plan["plan_sha256"],
+                "plan": plan,
+                "confirmation_sha256": document_hash({"confirmation": "CREATE"}),
+            },
+            paths=Paths(
+                transaction_root=tmp_path / "transactions",
+                quarantine_marker=tmp_path / "quarantine.json",
+            ),
+            runner=lambda *_args: pytest.fail("identity drift must fail before zfs create"),
+            zfs_state_provider=lambda _name: {"pool_guid": "9876543210987654321"},
+        )
+    assert raised.value.code == "zfs_pool_identity_changed"
 
 
 @pytest.mark.parametrize(
@@ -334,9 +485,7 @@ def test_existing_mergerfs_snapraid_expansion_applies_explicit_role(
     monkeypatch.setattr(
         executor,
         "mergerfs_expand_commands",
-        lambda _mountpoint, _branches: [
-            CommandSpec(("setfattr", "runtime"), 120, "expand")
-        ],
+        lambda _mountpoint, _branches: [CommandSpec(("setfattr", "runtime"), 120, "expand")],
     )
     monkeypatch.setattr(
         executor,
@@ -404,9 +553,7 @@ def test_existing_mergerfs_snapraid_expansion_applies_explicit_role(
     else:
         assert "2-parity /mnt/hoardarr/new-member/snapraid.parity" in updated
         parity_sync = next(
-            command
-            for command in commands
-            if command[0] == "snapraid" and command[-1] == "sync"
+            command for command in commands if command[0] == "snapraid" and command[-1] == "sync"
         )
         assert "--force-full" in parity_sync
         assert not any(command[0] == "setfattr" for command in commands)
@@ -496,9 +643,7 @@ def test_existing_zfs_expansion_adds_vdev_without_recreating_pool(
     monkeypatch.setattr(
         executor,
         "_stable_path",
-        lambda _paths, disk: PurePosixPath(
-            f"/dev/disk/by-id/scsi-{disk['id'].rsplit('-', 1)[-1]}"
-        ),
+        lambda _paths, disk: PurePosixPath(f"/dev/disk/by-id/scsi-{disk['id'].rsplit('-', 1)[-1]}"),
     )
     monkeypatch.setattr(executor, "_tool", lambda name: name)
 
