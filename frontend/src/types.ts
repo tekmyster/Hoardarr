@@ -1696,6 +1696,13 @@ export interface MetricAlertDocument {
   suppressed_until: string | null;
   suppressed_by: string | null;
   suppression_reason: string | null;
+  runbook: {
+    id: string;
+    title: string;
+    summary: string;
+    actions: string[];
+    evidence: string[];
+  } | null;
 }
 
 export interface WebhookEndpointDocument {

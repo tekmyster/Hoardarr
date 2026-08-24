@@ -20,6 +20,7 @@ from hoardarr.db.models import (
     TelemetryState,
     new_id,
 )
+from hoardarr.telemetry.runbooks import alert_runbook
 from hoardarr.telemetry.store import aware, entity_document
 
 BASIC_RULES = {
@@ -392,4 +393,5 @@ def alert_document(alert: MetricAlert, entity: MetricEntity) -> dict[str, Any]:
         "suppressed_until": suppressed_until,
         "suppressed_by": alert.suppressed_by,
         "suppression_reason": alert.suppression_reason,
+        "runbook": alert_runbook(alert, entity),
     }

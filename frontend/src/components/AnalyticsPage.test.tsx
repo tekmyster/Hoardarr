@@ -112,6 +112,13 @@ const activeAlert: MetricAlertDocument = {
   suppressed_until: null,
   suppressed_by: null,
   suppression_reason: null,
+  runbook: {
+    id: "unreadable-sector-risk",
+    title: "Protect the data before testing the drive",
+    summary: "Preserve important data before running an extended health test.",
+    actions: ["Confirm current backups or drain important data to healthy storage."],
+    evidence: ["drive.pending_sectors"],
+  },
 };
 
 describe("AnalyticsPage", () => {
@@ -158,6 +165,8 @@ describe("AnalyticsPage", () => {
 
     render(<AnalyticsPage />);
     expect(await screen.findByText("Enterprise SSD")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("What to do"));
+    expect(screen.getByText("Protect the data before testing the drive")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
     await waitFor(() => expect(acknowledge).toHaveBeenCalledWith("alert-1"));
     expect(screen.getByText(/acknowledged · Started/)).toBeInTheDocument();
