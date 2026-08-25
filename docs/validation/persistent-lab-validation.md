@@ -2,7 +2,7 @@
 
 Initial appliance validation was completed 2026-08-24 against commit `055dff81c460`.
 The live-product/storage validation below was repeated through commit
-`101dabb6aace698b541d5798e5a51b46c4ee4c00` and application version 0.3.11 Beta 1.
+`bcc9f87ea37c3592959e4290f9e9caa6713e5202` and application version 0.3.11 Beta 1.
 
 ## Built artifact
 
@@ -49,6 +49,14 @@ release-bundle/systemd, installed-appliance/recovery/reapply, fleet/PostgreSQL a
 Isolated storage workflow `32802346515` passed the Storage Group lifecycle, extended storage
 stacks, mergerFS telemetry and controller-redundancy jobs. Both installed release symlinks resolve
 to `0.3.11-101dabb6aace`; the API and durable worker are active and `/health/ready` is ready.
+
+On 2026-08-25 both nodes were advanced again to CI archive
+`hoardarr-0.3.11-bcc9f87ea37c-ubuntu24.04-amd64-cp312.tar.gz` (32,251,852 bytes,
+SHA-256 `56b31e86f7d499eb4698faed11759d4f8ee6026e0c9f038d2710a36d3f504d0d`). Workflow
+`32805828031` passed backend, frontend unit/accessibility/build/browser E2E,
+release-bundle/systemd, installed-appliance/recovery/reapply, fleet/PostgreSQL and MinIO jobs.
+Both active release symlinks resolve to `0.3.11-bcc9f87ea37c`; required long-running units are
+active and both readiness endpoints report ready.
 
 ## Storage identity and UI evidence
 
@@ -155,10 +163,35 @@ StorageEntity `91710909-1cef-4e4e-ab82-b5d34bee5c93`, Storage Group
 member identities, exact 46,062,751,744-byte capacity, one logical metric entity, and the merged
 pre/post-expansion history.
 
+## Live landing/download tier evidence
+
+The authenticated Hoardarr-B production UI selected the blank 8-GiB virtual disk
+`/dev/sdd`, WWN `naa.6000c2963bea3b56c89635fc438a9bcd`, through the drive action **Use for
+downloads/cache**. Guided mode selected the verified `Media Library` Storage Group and derived
+`/data/downloads`; it explicitly preserved the existing ZFS pool, media libraries and shares.
+Immutable plan `4ce3d8d0b02c0fa6815aee75bdcaf88ff2b22343429a3cec25b14d7cd114c977` bound the
+complete blank-media scan, 512-byte sector geometry, full-surface read, ext4/GPT layout, exact
+Storage Group and torrent/Usenet completion policies. Operation
+`07a89ed4-852e-4512-a32e-f5c2aaec68c5` completed 10 of 10 durable steps in 28 seconds.
+
+Linux readback proves `/dev/sdd1` is ext4 UUID `99b9e6ed-0751-4b47-bc66-1dac647a5ede`, mounted at
+the private stable member path and bind-presented at `/data/downloads` with `noatime`. ZFS pool
+`media` remains healthy at `/data`; SMB share `data` still exposes `/data`; the existing Storage
+Group ID remains `db8c30f9-c47f-4332-8aac-cd1494dbac95`; the new landing backend is
+`8dd3012e-162a-4c0a-8bd5-f631be53d14f`; and the new cache StorageEntity is
+`040fc89d-24de-4241-b6b8-db4d2d915b13`. The physical-disk registry now marks only this virtual
+disk `managed_member`. Durable lifecycle event `landing_backend_activated` retains the operation
+evidence. A second authenticated browser view displays the real tier with measured 61.4 KB used,
+7.9 GB free, zero fabricated transfers and the production torrent/Usenet transfer controls.
+
+The one-time generated service credential remains visibly awaiting actual owner save/confirmation
+in the first audit tab; automation did not falsely assert that the owner saved it. No protected
+physical SSD was attached or modified.
+
 ## Remaining boundary
 
 This evidence verifies the persistent appliance nodes, stable virtual-disk discovery, a real
-Hoardarr-managed mergerFS/Storage Group workflow on A, and a real ZFS/Storage Group workflow on B.
-`LAB-03` remains in progress until SnapRAID, Linux MD, landing-tier and shared-multipath constructs
-are created. `LAB-04` remains in progress until tiers, peers, failover history and their graphs are
-also visible without fixtures.
+Hoardarr-managed mergerFS/Storage Group workflow on A, and real ZFS/Storage Group plus landing-tier
+workflows on B. `LAB-03` remains in progress until SnapRAID, Linux MD and shared-multipath
+constructs are created. `LAB-04` remains in progress until peers, failover history and their graphs
+are also visible without fixtures.
