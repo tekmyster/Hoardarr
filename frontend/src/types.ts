@@ -842,6 +842,8 @@ export interface PhysicalDiskDocument {
   media_type: string | null;
   health_state: string;
   lifecycle_state: string;
+  system_device?: boolean;
+  assignable?: boolean;
   last_seen_at: string;
 }
 

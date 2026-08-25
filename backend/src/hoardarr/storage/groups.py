@@ -465,15 +465,20 @@ def reconcile_snapshot_disks(session: Session, snapshot: dict[str, Any]) -> dict
                 "media_type": media_type,
                 "health_state": health_state,
                 "metadata": {
-                    key: connection[key]
-                    for key in (
-                        "transport",
-                        "protocol",
-                        "controller_address",
-                        "enclosure_id",
-                        "slot",
-                    )
-                    if key in connection
+                    **{
+                        key: connection[key]
+                        for key in (
+                            "transport",
+                            "protocol",
+                            "controller_address",
+                            "enclosure_id",
+                            "slot",
+                        )
+                        if key in connection
+                    },
+                    "system_device": bool(
+                        raw.get("system_device") is True or raw.get("system_disk") is True
+                    ),
                 },
             },
         )
@@ -530,6 +535,7 @@ def assign_backend(
     namespace_path: str | None,
     role: str,
     principal: Principal,
+    protected_identities: set[str] | None = None,
 ) -> StorageBackend:
     group = session.get(StorageGroup, group_id)
     if group is None:
@@ -546,6 +552,15 @@ def assign_backend(
     if storage_entity_id and entity is None:
         raise StorageGroupError(
             "storage_entity_not_found", "The logical storage object does not exist."
+        )
+    protected_identities = protected_identities or set()
+    if disk is not None and (
+        disk.stable_identity in protected_identities
+        or (disk.metadata_json or {}).get("system_device") is True
+    ):
+        raise StorageGroupError(
+            "system_disk_protected",
+            "Protected system storage cannot be assigned to a Storage Group.",
         )
     if disk is not None and disk.lifecycle_state not in {"discovered", "reuse_ready"}:
         raise StorageGroupError(
@@ -1006,7 +1021,13 @@ def group_documents(session: Session) -> list[dict[str, Any]]:
     return documents
 
 
-def disk_documents(session: Session) -> list[dict[str, Any]]:
+def disk_documents(
+    session: Session,
+    *,
+    protected_identities: set[str] | None = None,
+    assignment_evidence_available: bool = True,
+) -> list[dict[str, Any]]:
+    protected_identities = protected_identities or set()
     return [
         {
             "id": disk.id,
@@ -1020,6 +1041,16 @@ def disk_documents(session: Session) -> list[dict[str, Any]]:
             "media_type": disk.media_type,
             "health_state": disk.health_state,
             "lifecycle_state": disk.lifecycle_state,
+            "system_device": bool(
+                disk.stable_identity in protected_identities
+                or (disk.metadata_json or {}).get("system_device") is True
+            ),
+            "assignable": bool(
+                assignment_evidence_available
+                and disk.lifecycle_state in {"discovered", "reuse_ready"}
+                and disk.stable_identity not in protected_identities
+                and (disk.metadata_json or {}).get("system_device") is not True
+            ),
             "last_seen_at": disk.last_seen_at.isoformat(),
         }
         for disk in session.scalars(select(PhysicalDisk).order_by(PhysicalDisk.stable_identity))

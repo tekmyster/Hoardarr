@@ -914,6 +914,27 @@ def test_disk_reservation_api_is_guarded_persistent_and_idempotent(api_runtime: 
     )
     assert blocked.status_code == 422
     assert blocked.json()["type"].endswith("system_disk_protected")
+    group = client.post(
+        "/api/v1/storage/groups",
+        headers=_state_headers(csrf),
+        json={
+            "name": "Protected assignment test",
+            "namespace_path": "/srv/hoardarr/protected-test",
+            "purpose": "media",
+        },
+    )
+    assert group.status_code == 201
+    assignment = client.post(
+        f"/api/v1/storage/groups/{group.json()['item']['id']}/backends",
+        headers=_state_headers(csrf),
+        json={
+            "physical_disk_id": system.id,
+            "namespace_path": "/srv/hoardarr/backends/system",
+            "role": "data",
+        },
+    )
+    assert assignment.status_code == 422
+    assert assignment.json()["type"].endswith("system_disk_protected")
     released = client.post(endpoint, headers=_state_headers(csrf), json={"action": "release"})
     assert released.status_code == 200
     assert released.json()["item"]["lifecycle_state"] == "discovered"
@@ -934,10 +955,40 @@ def test_authenticated_read_only_settings_requests_do_not_require_csrf_origin(
 def test_storage_group_api_preserves_identity_and_guards_lifecycle(
     api_runtime: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, _app, setup_token, _secret_box = api_runtime
+    client, app, setup_token, _secret_box = api_runtime
     assert client.get("/api/v1/storage/groups").status_code == 401
     csrf = _claim_owner(client, setup_token)
     headers = _state_headers(csrf)
+
+    hardware = {
+        "schema_version": 1,
+        "source": {"kind": "fixture"},
+        "controllers": [],
+        "disks": [
+            {"id": "wwn:5000c500feed0001", "stable_identity": True, "system_device": False},
+            {"id": "wwn:5000c500feed0002", "stable_identity": True, "system_device": False},
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        operation = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(operation)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=operation.id,
+                detector_schema_version=1,
+                source="fixture",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
 
     reconciled = client.post(
         "/api/v1/storage/disks/reconcile",
@@ -1137,6 +1188,34 @@ def test_retired_backend_release_api_requires_scope_csrf_and_exact_confirmation(
     client, app, setup_token, _secret_box = api_runtime
     csrf = _claim_owner(client, setup_token)
     headers = _state_headers(csrf)
+    hardware = {
+        "schema_version": 1,
+        "source": {"kind": "fixture"},
+        "controllers": [],
+        "disks": [
+            {"id": "wwn:api-retired", "stable_identity": True, "system_device": False}
+        ],
+    }
+    with app.state.session_factory() as session, session.begin():
+        operation = Operation(
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="system",
+            actor_id="worker",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(operation)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                operation_id=operation.id,
+                detector_schema_version=1,
+                source="fixture",
+                payload_json=hardware,
+                sha256=document_hash(hardware),
+            )
+        )
     reconciled = client.post(
         "/api/v1/storage/disks/reconcile",
         headers=headers,

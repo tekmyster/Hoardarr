@@ -17,6 +17,8 @@ const disk: PhysicalDiskDocument = {
   media_type: "hdd",
   health_state: "healthy",
   lifecycle_state: "discovered",
+  system_device: false,
+  assignable: true,
   last_seen_at: "2026-08-23T12:00:00Z",
 };
 
@@ -57,6 +59,21 @@ beforeEach(() => {
 });
 
 describe("StorageGroupsPanel", () => {
+  it("never offers a protected system disk for assignment", async () => {
+    vi.spyOn(api, "storageGroups").mockResolvedValue([group]);
+    vi.spyOn(api, "registeredDisks").mockResolvedValue([{
+      ...disk,
+      id: "system-disk",
+      system_device: true,
+      assignable: false,
+    }]);
+    render(<StorageGroupsPanel />);
+
+    const chooser = await screen.findByLabelText("Disk to add to Media");
+    expect(chooser).toHaveTextContent("Choose a disk");
+    expect(chooser).not.toHaveTextContent("Media Disk");
+  });
+
   it("attaches a completed logical pool and hides its managed member disks", async () => {
     const managedMember = { ...disk, lifecycle_state: "managed_member" };
     const storage: LogicalStorageDocument = {

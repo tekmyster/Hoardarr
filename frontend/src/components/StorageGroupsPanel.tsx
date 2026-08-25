@@ -136,7 +136,7 @@ export function StorageGroupsPanel() {
     [groups],
   );
   const availableDisks = disks.filter(
-    (disk) => !assignedDiskIds.has(disk.id) && ["discovered", "reuse_ready"].includes(disk.lifecycle_state),
+    (disk) => !assignedDiskIds.has(disk.id) && disk.assignable === true && disk.system_device === false,
   );
   const availableStorage = logicalStorage.filter((storage) => !assignedStorageIds.has(storage.id));
 

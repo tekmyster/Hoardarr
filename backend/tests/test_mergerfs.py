@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from hoardarr.storage import mergerfs as mergerfs_module
 from hoardarr.storage.mergerfs import discover_mergerfs
 
 
@@ -71,6 +74,42 @@ def test_mergerfs_discovery_preserves_absolute_configured_branches(
         "/mnt/hoardarr/disks/disk1",
         "/mnt/hoardarr/disks/disk2",
     ]
+
+
+def test_mergerfs_discovery_uses_dynamic_runtime_branch_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mountinfo = tmp_path / "mountinfo"
+    fstab = tmp_path / "fstab"
+    mountinfo.write_text(
+        "36 25 0:32 / /mnt/combined rw - fuse.mergerfs /mnt/a:/mnt/b rw\n",
+        encoding="utf-8",
+    )
+    fstab.write_text(
+        "/mnt/a:/mnt/b:/mnt/c /mnt/combined fuse.mergerfs defaults 0 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mergerfs_module.os,
+        "getxattr",
+        lambda path, name: b"/mnt/a=RW:/mnt/b=RO:/mnt/c=NC"
+        if str(path).replace("\\", "/").endswith("/mnt/combined/.mergerfs")
+        and name == "user.mergerfs.branches"
+        else (_ for _ in ()).throw(OSError("unexpected xattr")),
+        raising=False,
+    )
+
+    item = discover_mergerfs(
+        mountinfo_path=mountinfo,
+        fstab_path=fstab,
+        executable="/usr/bin/mergerfs",
+    )["items"][0]
+
+    assert item["branches"] == ["/mnt/a", "/mnt/b", "/mnt/c"]
+    assert item["runtime_branches"] == ["/mnt/a", "/mnt/b", "/mnt/c"]
+    assert item["runtime_branch_modes"] == {"/mnt/a": "RW", "/mnt/b": "RO", "/mnt/c": "NC"}
+    assert item["runtime_source"] == "/mnt/a:/mnt/b"
+    assert item["branch_evidence"] == "mergerfs runtime control xattr"
 
 
 def test_mergerfs_discovery_reports_an_empty_unavailable_host(tmp_path: Path) -> None:

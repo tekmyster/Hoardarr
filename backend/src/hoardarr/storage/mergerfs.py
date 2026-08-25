@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 MERGERFS_TYPES = frozenset({"mergerfs", "fuse.mergerfs"})
@@ -21,6 +22,39 @@ def _branches(source: str) -> list[str]:
 def _instance_id(mountpoint: str) -> str:
     digest = hashlib.sha256(mountpoint.encode()).hexdigest()[:16]
     return f"mergerfs:{digest}"
+
+
+def _live_branches(mountpoint: str) -> tuple[list[str], dict[str, str]] | None:
+    """Read mergerFS' authoritative dynamic branch list when the control file is available."""
+
+    try:
+        raw = os.getxattr(
+            os.fspath(Path(mountpoint) / ".mergerfs"),
+            "user.mergerfs.branches",
+        )
+    except (AttributeError, OSError):
+        return None
+    if len(raw) > 65_536:
+        return None
+    try:
+        reported = _branches(raw.decode("utf-8", errors="strict"))
+    except UnicodeError:
+        return None
+    branches: list[str] = []
+    modes: dict[str, str] = {}
+    for value in reported:
+        match = re.fullmatch(r"(.+)=(RW|RO|NC)", value)
+        branch = match.group(1) if match else value
+        mode = match.group(2) if match else "not_reported"
+        branches.append(branch)
+        modes[branch] = mode
+    if (
+        not branches
+        or len(branches) != len(set(branches))
+        or any(not PurePosixPath(branch).is_absolute() for branch in branches)
+    ):
+        return None
+    return branches, modes
 
 
 def _mountinfo_instances(path: Path) -> list[dict[str, Any]]:
@@ -105,6 +139,16 @@ def discover_mergerfs(
 
     items: list[dict[str, Any]] = []
     for mountpoint, item in sorted(by_mountpoint.items()):
+        if item["active"]:
+            live_result = _live_branches(mountpoint)
+            if live_result is not None:
+                live_branches, live_modes = live_result
+                item["runtime_source"] = item["source"]
+                item["runtime_branches"] = live_branches
+                item["runtime_branch_modes"] = live_modes
+                item["source"] = ":".join(live_branches)
+                item["branches"] = live_branches
+                item["branch_evidence"] = "mergerfs runtime control xattr"
         name = Path(mountpoint).name or mountpoint
         items.append({"id": _instance_id(mountpoint), "name": name, **item})
     available = bool(executable or shutil.which("mergerfs"))

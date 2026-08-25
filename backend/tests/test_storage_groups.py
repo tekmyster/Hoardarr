@@ -165,6 +165,45 @@ def test_system_disk_cannot_be_reserved() -> None:
             raise AssertionError("system disk was reserved")
 
 
+def test_system_disk_cannot_be_assigned_even_when_registry_state_is_discovered() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    with Session(engine) as session:
+        disk, _ = register_disk(
+            session,
+            {
+                "stable_identity": "wwn:system-disk",
+                "metadata": {"system_device": True},
+            },
+        )
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        try:
+            assign_backend(
+                session,
+                group_id=group.id,
+                physical_disk_id=disk.id,
+                storage_entity_id=None,
+                namespace_path="/srv/hoardarr/backends/system",
+                role="data",
+                principal=actor,
+            )
+        except StorageGroupError as exc:
+            assert exc.code == "system_disk_protected"
+        else:
+            raise AssertionError("system disk was assigned")
+
+        document = disk_documents(session)[0]
+        assert document["system_device"] is True
+        assert document["assignable"] is False
+
+
 def test_group_assignment_activation_and_single_preferred_writer() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

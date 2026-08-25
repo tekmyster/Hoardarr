@@ -195,6 +195,24 @@ def _latest_hardware(session: Session) -> HardwareSnapshot:
     return snapshot
 
 
+def _protected_disk_identities(snapshot: HardwareSnapshot) -> set[str]:
+    return {
+        str(item.get("id"))
+        for item in snapshot.payload_json.get("disks", [])[:4096]
+        if isinstance(item, dict)
+        and (item.get("system_disk") is True or item.get("system_device") is True)
+    }
+
+
+def _current_disk_protection(session: Session) -> tuple[set[str], bool]:
+    snapshot = session.scalar(
+        select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+    )
+    if snapshot is None:
+        return set(), False
+    return _protected_disk_identities(snapshot), True
+
+
 @router.get("/mergerfs")
 def mergerfs_inventory(
     _principal: Principal = Depends(authenticated_principal),
@@ -609,6 +627,11 @@ def add_storage_backend(
     principal: Principal = Depends(require_state_scope("operate")),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
+    protected = (
+        _protected_disk_identities(_latest_hardware(session))
+        if payload.physical_disk_id is not None
+        else set()
+    )
     try:
         backend = assign_backend(
             session,
@@ -618,6 +641,7 @@ def add_storage_backend(
             namespace_path=payload.namespace_path,
             role=payload.role,
             principal=principal,
+            protected_identities=protected,
         )
     except StorageGroupError as exc:
         raise _group_problem(exc) from exc
@@ -895,7 +919,14 @@ def registered_disks(
     _principal: Principal = Depends(authenticated_principal),
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
-    return {"items": disk_documents(session)}
+    protected, evidence_available = _current_disk_protection(session)
+    return {
+        "items": disk_documents(
+            session,
+            protected_identities=protected,
+            assignment_evidence_available=evidence_available,
+        )
+    }
 
 
 @router.post("/disks/reconcile")
@@ -921,8 +952,13 @@ def reconcile_registered_disks(
         target_type="physical_disk_registry",
         details={"observed": len(payload.items), "created": created},
     )
+    protected, evidence_available = _current_disk_protection(session)
     return {
-        "items": disk_documents(session),
+        "items": disk_documents(
+            session,
+            protected_identities=protected,
+            assignment_evidence_available=evidence_available,
+        ),
         "created": created,
         "updated": len(payload.items) - created,
     }
@@ -937,12 +973,7 @@ def change_disk_reservation(
     session: Session = Depends(database_session),
 ) -> dict[str, object]:
     snapshot = _latest_hardware(session)
-    protected = {
-        str(item.get("id"))
-        for item in snapshot.payload_json.get("disks", [])[:4096]
-        if isinstance(item, dict)
-        and (item.get("system_disk") is True or item.get("system_device") is True)
-    }
+    protected = _protected_disk_identities(snapshot)
     try:
         disk = set_disk_reservation(
             session,
@@ -962,7 +993,13 @@ def change_disk_reservation(
         target_id=disk.id,
         details={"stable_identity": disk.stable_identity, "lifecycle_state": disk.lifecycle_state},
     )
-    return {"item": next(item for item in disk_documents(session) if item["id"] == disk.id)}
+    return {
+        "item": next(
+            item
+            for item in disk_documents(session, protected_identities=protected)
+            if item["id"] == disk.id
+        )
+    }
 
 
 @router.get("/logical")
