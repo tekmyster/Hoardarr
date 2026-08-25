@@ -622,6 +622,7 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByLabel("Fast download path")).toHaveValue("/data/downloads");
     await expect(dialog.getByText("Existing media remains unchanged")).toBeVisible();
     await expect(dialog.getByText(/Keep completed torrents on the fast tier while seeding/i)).toBeVisible();
+    await expect(dialog.getByText("Use this drive independently")).toHaveCount(0);
   });
 
   test("opens a snapshot-bound expansion recommendation in the real storage wizard", async ({ page }) => {

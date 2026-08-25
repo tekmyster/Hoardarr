@@ -2122,7 +2122,7 @@ export default function App() {
     const backendOwnsFilesystem = storageRole === "zfs" || (storageRole === "mixed" && mixedComponentType === "zfs");
     return (
       <>
-        {mode === "guided" && <Card title="Recommended for your setup" description={recommendation.summary}>
+        {mode === "guided" && storageRole !== "download-cache" && <Card title="Recommended for your setup" description={recommendation.summary}>
           <div className="recommendation-head"><div><span>{selectedDriveIds.length} selected drive{selectedDriveIds.length === 1 ? "" : "s"}</span><strong>{recommendation.title}</strong></div><SourceBadge>Recommended</SourceBadge></div>
           <div className="review-grid"><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Protection" value={recommendation.protection} /><ReviewLine label="Adding drives later" value={recommendation.expansion} /></div>
           <ul>{recommendation.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
