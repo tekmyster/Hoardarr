@@ -181,7 +181,7 @@ def claim_setup(session: Session, *, token: str, username: str, password: str) -
         )
         .values(consumed_at=now)
     )
-    if consumed.rowcount != 1:
+    if int(getattr(consumed, "rowcount", 0) or 0) != 1:
         raise AuthenticationError("setup token is invalid or expired")
     user = _owner(normalized, password)
     session.add(user)

@@ -8,7 +8,9 @@ import os
 import socket
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import quote, urlsplit
 
 import uvicorn
@@ -287,7 +289,7 @@ def _revoke_all_sessions_command(args: argparse.Namespace) -> None:
         expected: int = 0,
         observed: int = 0,
         exit_code: int = 3,
-    ) -> None:
+    ) -> NoReturn:
         supplied_reason = str(args.reason or "").strip().casefold()
         reported_reason = (
             supplied_reason
@@ -390,7 +392,7 @@ def _reset_password_command(args: argparse.Namespace) -> None:
         user_id: str | None = None,
         username: str | None = None,
         exit_code: int = 3,
-    ) -> None:
+    ) -> NoReturn:
         print(
             json.dumps(
                 {
@@ -481,6 +483,16 @@ def _reset_password_command(args: argparse.Namespace) -> None:
                 exit_code=2,
             )
 
+        if _active_units(("hoardarr-api.service",)):
+            rejected(
+                "api_service_active",
+                "Stop or quiesce the Hoardarr API before administrator password reset.",
+                expected=expected,
+                observed=snapshot.observed_active_sessions,
+                user_id=snapshot.user_id,
+                username=snapshot.username,
+            )
+
         with factory() as session:
             session.execute(text("BEGIN IMMEDIATE"))
             commit_started = False
@@ -495,14 +507,40 @@ def _reset_password_command(args: argparse.Namespace) -> None:
                 commit_started = True
                 session.commit()
             except PasswordResetError:
-                session.rollback()
+                try:
+                    session.rollback()
+                except Exception:
+                    rejected(
+                        "password_reset_rollback_uncertain",
+                        "Password reset rollback could not be confirmed; "
+                        "do not retry automatically.",
+                        expected=expected,
+                        observed=snapshot.observed_active_sessions,
+                        user_id=snapshot.user_id,
+                        username=snapshot.username,
+                        exit_code=6,
+                    )
                 raise
             except Exception:
-                session.rollback()
                 if commit_started:
+                    with suppress(Exception):
+                        session.rollback()
                     rejected(
                         "password_reset_commit_uncertain",
                         "Password reset commit could not be confirmed; do not retry automatically.",
+                        expected=expected,
+                        observed=snapshot.observed_active_sessions,
+                        user_id=snapshot.user_id,
+                        username=snapshot.username,
+                        exit_code=6,
+                    )
+                try:
+                    session.rollback()
+                except Exception:
+                    rejected(
+                        "password_reset_rollback_uncertain",
+                        "Password reset rollback could not be confirmed; "
+                        "do not retry automatically.",
                         expected=expected,
                         observed=snapshot.observed_active_sessions,
                         user_id=snapshot.user_id,

@@ -614,6 +614,63 @@ def test_cli_target_preflight_rejections_are_sanitized_and_do_not_read_password(
     )
 
 
+def test_cli_rechecks_api_state_after_password_read_before_database_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = settings_for(tmp_path)
+    engine = create_database_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    seed(factory)
+    engine.dispose()
+    service_checks = 0
+    password_reads = 0
+
+    def drifting_api_state(units: tuple[str, ...]) -> list[str]:
+        nonlocal service_checks
+        assert units == ("hoardarr-api.service",)
+        service_checks += 1
+        return [] if service_checks == 1 else ["hoardarr-api.service"]
+
+    def read_password(_password_stdin: bool) -> str:
+        nonlocal password_reads
+        password_reads += 1
+        return NEW_PASSWORD
+
+    _set_reset_argv(monkeypatch)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "_is_root", lambda: True)
+    monkeypatch.setattr(cli, "_active_units", drifting_api_state)
+    monkeypatch.setattr(cli, "_read_password", read_password)
+
+    with pytest.raises(SystemExit) as rejected:
+        cli.main()
+    assert rejected.value.code == 3
+    output = capsys.readouterr().out
+    document = json.loads(output)
+    assert document["error"]["code"] == "api_service_active"
+    assert document["revoked_active_sessions"] == 0
+    assert service_checks == 2 and password_reads == 1
+    assert all(
+        forbidden not in output
+        for forbidden in (
+            NEW_PASSWORD,
+            OLD_PASSWORD,
+            "password_hash",
+            "token_hash",
+            "csrf",
+            str(tmp_path),
+            "SELECT",
+            "OperationalError",
+        )
+    )
+    engine = create_database_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    assert_original_state(factory)
+    engine.dispose()
+
+
 def test_cli_success_and_generic_failure_json_are_sanitized(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -674,7 +731,9 @@ def test_cli_success_and_generic_failure_json_are_sanitized(
     )
 
 
-def test_cli_commit_uncertainty_is_not_retried_or_exposed(
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_cli_commit_uncertainty_is_not_retried_or_reclassified_when_rollback_fails(
+    rollback_fails: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -692,6 +751,7 @@ def test_cli_commit_uncertainty_is_not_retried_or_exposed(
 
     real_create_factory = cli.create_session_factory
     factory_calls = 0
+    rollback_calls = 0
 
     class CommitFailureSession:
         def __init__(self, session) -> None:  # type: ignore[no-untyped-def]
@@ -708,6 +768,15 @@ def test_cli_commit_uncertainty_is_not_retried_or_exposed(
 
         def commit(self) -> None:
             raise RuntimeError(f"uncertain {NEW_PASSWORD} {tmp_path} SELECT token_hash")
+
+        def rollback(self) -> None:
+            nonlocal rollback_calls
+            rollback_calls += 1
+            if rollback_fails:
+                raise RuntimeError(
+                    f"rollback failed {NEW_PASSWORD} {tmp_path} SELECT csrf"
+                )
+            self.session.rollback()
 
     def create_commit_failing_factory(engine):  # type: ignore[no-untyped-def]
         base = real_create_factory(engine)
@@ -737,6 +806,7 @@ def test_cli_commit_uncertainty_is_not_retried_or_exposed(
     document = json.loads(output)
     assert document["error"]["code"] == "password_reset_commit_uncertain"
     assert reset_calls == 1 and factory_calls == 2
+    assert rollback_calls == 1
     assert all(
         forbidden not in output
         for forbidden in (
@@ -744,6 +814,7 @@ def test_cli_commit_uncertainty_is_not_retried_or_exposed(
             str(tmp_path),
             "SELECT",
             "token_hash",
+            "csrf",
             "RuntimeError",
         )
     )
