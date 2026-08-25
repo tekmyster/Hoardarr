@@ -639,6 +639,26 @@ class PhysicalDisk(Base):
     )
 
 
+class PhysicalDiskIdentityAlias(Base):
+    """A retired physical identity that still resolves to one durable disk row."""
+
+    __tablename__ = "physical_disk_identity_aliases"
+    __table_args__ = (
+        UniqueConstraint("alias_identity", name="uq_physical_disk_identity_alias"),
+        Index("ix_physical_disk_identity_alias_disk", "physical_disk_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    physical_disk_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("physical_disks.id", ondelete="CASCADE"), nullable=False
+    )
+    alias_identity: Mapped[str] = mapped_column(String(512), nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class StorageBackend(Base):
     """A lifecycle-managed backend assigned to a stable Storage Group namespace."""
 

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import (
     PhysicalDisk,
+    PhysicalDiskIdentityAlias,
     StorageBackend,
     StorageEntity,
     StorageGroup,
@@ -495,6 +496,14 @@ def register_disk(session: Session, observation: dict[str, Any]) -> tuple[Physic
     disk = session.scalar(
         select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_identity)
     )
+    if disk is None:
+        alias = session.scalar(
+            select(PhysicalDiskIdentityAlias).where(
+                PhysicalDiskIdentityAlias.alias_identity == stable_identity
+            )
+        )
+        if alias is not None:
+            disk = session.get(PhysicalDisk, alias.physical_disk_id)
     created = disk is None
     if disk is None:
         disk = PhysicalDisk(stable_identity=stable_identity)

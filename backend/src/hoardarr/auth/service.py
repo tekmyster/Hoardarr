@@ -4,12 +4,14 @@ import hashlib
 import hmac
 import re
 import secrets
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from hoardarr.db.models import ApiToken, AuthSession, SetupClaim, User, utc_now
@@ -31,6 +33,24 @@ class AuthenticationError(RuntimeError):
 
 class SetupUnavailableError(AuthenticationError):
     pass
+
+
+class SessionRevocationError(AuthenticationError):
+    def __init__(
+        self,
+        code: str,
+        safe_message: str,
+        *,
+        expected_count: int,
+        observed_count: int,
+        exit_code: int = 3,
+    ) -> None:
+        super().__init__(safe_message)
+        self.code = code
+        self.safe_message = safe_message
+        self.expected_count = expected_count
+        self.observed_count = observed_count
+        self.exit_code = exit_code
 
 
 @dataclass(frozen=True)
@@ -228,6 +248,126 @@ def revoke_session(session: Session, session_id: str) -> bool:
         return False
     session.delete(record)
     return True
+
+
+SESSION_REVOCATION_REASON_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
+LOCAL_CONSOLE_ACTOR_ID = "00000000-0000-0000-0000-000000000000"
+SessionRevocationHook = Callable[[str, Session], None]
+
+
+def active_session_count(session: Session, *, now: datetime | None = None) -> int:
+    """Count sessions accepted by the same expiry boundary used during authentication."""
+    observed_at = now or utc_now()
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(AuthSession)
+            .where(AuthSession.expires_at > observed_at)
+        )
+        or 0
+    )
+
+
+def revoke_all_active_sessions(
+    session: Session,
+    *,
+    expected_count: int,
+    reason: str,
+    failure_hook: SessionRevocationHook | None = None,
+) -> dict[str, object]:
+    """Atomically revoke an exact active-session set inside the caller-owned transaction."""
+    if not 0 <= expected_count <= 1_000_000:
+        raise SessionRevocationError(
+            "expected_count_invalid",
+            "Expected session count must be between 0 and 1,000,000.",
+            expected_count=expected_count,
+            observed_count=0,
+            exit_code=2,
+        )
+    clean_reason = reason.strip().casefold()
+    if not SESSION_REVOCATION_REASON_RE.fullmatch(clean_reason):
+        raise SessionRevocationError(
+            "reason_invalid",
+            "Reason must contain 1-128 lowercase letters, numbers, dots, dashes, or underscores.",
+            expected_count=expected_count,
+            observed_count=0,
+            exit_code=2,
+        )
+    now = utc_now()
+    observed_count = active_session_count(session, now=now)
+    if observed_count != expected_count:
+        raise SessionRevocationError(
+            "session_count_mismatch",
+            "Active session count does not match the supplied precondition.",
+            expected_count=expected_count,
+            observed_count=observed_count,
+            exit_code=4,
+        )
+    if failure_hook is not None:
+        failure_hook("after_count", session)
+    rechecked_count = active_session_count(session, now=now)
+    if rechecked_count != expected_count:
+        raise SessionRevocationError(
+            "session_count_drift",
+            "Active session count changed inside the protected transaction.",
+            expected_count=expected_count,
+            observed_count=rechecked_count,
+            exit_code=4,
+        )
+    deleted = session.execute(delete(AuthSession).where(AuthSession.expires_at > now))
+    revoked_count = int(getattr(deleted, "rowcount", 0) or 0)
+    if revoked_count != expected_count:
+        raise SessionRevocationError(
+            "session_delete_mismatch",
+            "The exact active-session set could not be revoked.",
+            expected_count=expected_count,
+            observed_count=observed_count,
+            exit_code=5,
+        )
+    from hoardarr.audit.service import record_audit
+
+    event = record_audit(
+        session,
+        principal=Principal(
+            user_id=LOCAL_CONSOLE_ACTOR_ID,
+            username="local-console",
+            is_admin=True,
+            auth_type="local_console",
+            scopes=frozenset({"admin"}),
+        ),
+        action="auth.sessions.revoke_all",
+        outcome="succeeded",
+        correlation_id=str(uuid.uuid4()),
+        target_type="auth_sessions",
+        details={
+            "reason": clean_reason,
+            "expected_count": expected_count,
+            "observed_count": observed_count,
+            "revoked_count": revoked_count,
+        },
+    )
+    session.flush()
+    if failure_hook is not None:
+        failure_hook("after_audit", session)
+    remaining_count = active_session_count(session, now=now)
+    if remaining_count != 0:
+        raise SessionRevocationError(
+            "session_readback_failed",
+            "Active-session readback was not zero after revocation.",
+            expected_count=expected_count,
+            observed_count=remaining_count,
+            exit_code=5,
+        )
+    return {
+        "schema_version": 1,
+        "status": "succeeded",
+        "expected_count": expected_count,
+        "observed_count": observed_count,
+        "revoked_count": revoked_count,
+        "remaining_active_count": remaining_count,
+        "reason": clean_reason,
+        "audit_event_id": event.id,
+    }
 
 
 def create_api_token(

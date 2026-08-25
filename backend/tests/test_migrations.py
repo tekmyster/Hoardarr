@@ -87,6 +87,7 @@ def test_every_retained_schema_revision_upgrades_directly_to_head_and_preserves_
         "connectivity_services",
         "storage_groups",
         "physical_disks",
+        "physical_disk_identity_aliases",
         "storage_backends",
         "storage_lifecycle_events",
         "storage_drain_jobs",

@@ -7,7 +7,15 @@ from typing import Any
 from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import MetricEntity, MetricRollup, MetricSample, TelemetryState, utc_now
+from hoardarr.db.models import (
+    MetricEntity,
+    MetricRollup,
+    MetricSample,
+    PhysicalDisk,
+    PhysicalDiskIdentityAlias,
+    TelemetryState,
+    utc_now,
+)
 from hoardarr.telemetry.catalog import CATALOG_BY_ID
 from hoardarr.telemetry.samples import MetricReading
 
@@ -29,7 +37,37 @@ def ingest(session: Session, readings: list[MetricReading]) -> dict[str, int]:
         return {"inserted": 0, "duplicates": 0}
     inserted = 0
     duplicates = 0
-    entity_keys = {(item.entity.entity_type, item.entity.stable_id) for item in readings}
+    drive_ids = {
+        item.entity.stable_id.removeprefix("drive:")
+        for item in readings
+        if item.entity.entity_type == "drive"
+    }
+    drive_aliases: dict[str, str] = {}
+    if drive_ids:
+        for alias, current in session.execute(
+            select(PhysicalDiskIdentityAlias.alias_identity, PhysicalDisk.stable_identity)
+            .join(PhysicalDisk, PhysicalDisk.id == PhysicalDiskIdentityAlias.physical_disk_id)
+            .where(PhysicalDiskIdentityAlias.alias_identity.in_(sorted(drive_ids)))
+        ):
+            drive_aliases[alias] = current
+
+    def canonical_key(reading: MetricReading) -> tuple[str, str]:
+        stable_id = reading.entity.stable_id
+        if reading.entity.entity_type == "drive":
+            prefix = "drive:" if stable_id.startswith("drive:") else ""
+            raw = stable_id.removeprefix("drive:")
+            stable_id = f"{prefix}{drive_aliases.get(raw, raw)}"
+        return reading.entity.entity_type, stable_id
+
+    def canonical_metadata(values: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, value in values.items():
+            prefix = "drive:" if value.startswith("drive:") else ""
+            raw = value.removeprefix("drive:")
+            normalized[key] = f"{prefix}{drive_aliases.get(raw, raw)}"
+        return normalized
+
+    entity_keys = {canonical_key(item) for item in readings}
     entity_cache: dict[tuple[str, str], MetricEntity] = {}
     stable_ids = sorted({key[1] for key in entity_keys})
     for offset in range(0, len(stable_ids), 500):
@@ -38,21 +76,21 @@ def ingest(session: Session, readings: list[MetricReading]) -> dict[str, int]:
                 MetricEntity.stable_id.in_(stable_ids[offset : offset + 500])
             )
         )
-        for entity in candidates:
-            key = (entity.entity_type, entity.stable_id)
-            if key in entity_keys:
-                entity_cache[key] = entity
+        for candidate_entity in candidates:
+            candidate_key = (candidate_entity.entity_type, candidate_entity.stable_id)
+            if candidate_key in entity_keys:
+                entity_cache[candidate_key] = candidate_entity
 
     for reading in readings:
-        key = (reading.entity.entity_type, reading.entity.stable_id)
-        entity = entity_cache.get(key)
+        key = canonical_key(reading)
+        entity: MetricEntity | None = entity_cache.get(key)
         if entity is None:
             entity = MetricEntity(
                 entity_type=reading.entity.entity_type,
-                stable_id=reading.entity.stable_id,
+                stable_id=key[1],
                 display_name=reading.entity.display_name,
-                labels_json=dict(reading.entity.labels),
-                topology_json=dict(reading.entity.topology),
+                labels_json=canonical_metadata(reading.entity.labels),
+                topology_json=canonical_metadata(reading.entity.topology),
                 first_seen_at=reading.normalized_time,
                 last_seen_at=reading.normalized_time,
             )
@@ -60,8 +98,8 @@ def ingest(session: Session, readings: list[MetricReading]) -> dict[str, int]:
             entity_cache[key] = entity
         else:
             entity.display_name = reading.entity.display_name
-            entity.labels_json = dict(reading.entity.labels)
-            entity.topology_json = dict(reading.entity.topology)
+            entity.labels_json = canonical_metadata(reading.entity.labels)
+            entity.topology_json = canonical_metadata(reading.entity.topology)
             entity.last_seen_at = max(aware(entity.last_seen_at), reading.normalized_time)
     session.flush()
 
@@ -69,7 +107,7 @@ def ingest(session: Session, readings: list[MetricReading]) -> dict[str, int]:
         batch = readings[offset : offset + 500]
         requested = [
             (
-                entity_cache[(item.entity.entity_type, item.entity.stable_id)].id,
+                entity_cache[canonical_key(item)].id,
                 item.metric_id,
                 item.normalized_time,
             )
@@ -89,13 +127,17 @@ def ingest(session: Session, readings: list[MetricReading]) -> dict[str, int]:
         }
         seen_in_batch: set[tuple[str, str, datetime]] = set()
         pending: list[MetricSample] = []
-        for reading, key in zip(batch, requested, strict=True):
-            normalized_key = (key[0], key[1], aware(key[2]))
+        for reading, requested_key in zip(batch, requested, strict=True):
+            normalized_key = (
+                requested_key[0],
+                requested_key[1],
+                aware(requested_key[2]),
+            )
             if normalized_key in existing_keys or normalized_key in seen_in_batch:
                 duplicates += 1
                 continue
             seen_in_batch.add(normalized_key)
-            entity = entity_cache[(reading.entity.entity_type, reading.entity.stable_id)]
+            entity = entity_cache[canonical_key(reading)]
             pending.append(
                 MetricSample(
                     entity_id=entity.id,

@@ -12,13 +12,16 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import uvicorn
+from sqlalchemy import text
 
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import (
     AuthenticationError,
+    SessionRevocationError,
     SetupUnavailableError,
     create_initial_owner,
     issue_setup_token,
+    revoke_all_active_sessions,
 )
 from hoardarr.backups.service import (
     BackupError,
@@ -31,8 +34,15 @@ from hoardarr.db.engine import (
     create_database_engine,
     create_session_factory,
     sqlite_database_has_schema,
+    sqlite_database_path,
 )
 from hoardarr.db.migrate import database_is_current, upgrade_database
+from hoardarr.migration_identity import (
+    IdentityMigrationError,
+    failure_result,
+    load_identity_manifest,
+    run_identity_migration,
+)
 from hoardarr.operations.worker import run_forever, run_once
 
 
@@ -88,6 +98,21 @@ def _is_root() -> bool:
     return not hasattr(os, "geteuid") or os.geteuid() == 0
 
 
+def _active_units(units: tuple[str, ...]) -> list[str]:
+    if os.name != "posix":
+        return []
+    active: list[str] = []
+    for unit in units:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            active.append(unit)
+    return active
+
+
 def _setup_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     browser_setup = args.browser or not (args.console or args.username or args.password_stdin)
     if browser_setup and (args.username or args.password_stdin):
@@ -124,26 +149,17 @@ def _restore_command(args: argparse.Namespace, parser: argparse.ArgumentParser) 
         parser.error("fresh restore requires --yes")
     if not _is_root():
         parser.error("fresh restore must run as root")
-    if os.name == "posix":
-        active: list[str] = []
-        for unit in (
+    active = _active_units(
+        (
             "hoardarr-api.service",
             "hoardarr-worker.service",
             "hoardarr-account-executor.service",
             "hoardarr-storage-executor.service",
             "hoardarr-storage-status.service",
-        ):
-            result = subprocess.run(
-                ["systemctl", "is-active", "--quiet", unit],
-                check=False,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                active.append(unit)
-        if active:
-            parser.error(
-                "stop Hoardarr services before restore; active: " + ", ".join(active)
-            )
+        )
+    )
+    if active:
+        parser.error("stop Hoardarr services before restore; active: " + ", ".join(active))
     try:
         passphrase = _read_secret_export_passphrase() if args.passphrase_stdin else None
         report = apply_fresh_control_plane_restore(
@@ -201,6 +217,157 @@ def _export_control_plane_command(
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+def _identity_migration_command(args: argparse.Namespace) -> None:
+    if not _is_root():
+        exc = IdentityMigrationError(
+            "local_root_required", "Hardware identity migration must run as local root."
+        )
+        print(json.dumps(failure_result(exc), sort_keys=True))
+        raise SystemExit(exc.exit_code)
+    active = _active_units(("hoardarr-api.service", "hoardarr-worker.service"))
+    if active:
+        exc = IdentityMigrationError(
+            "services_active",
+            "Stop the Hoardarr API and worker before hardware identity migration.",
+        )
+        print(json.dumps(failure_result(exc), sort_keys=True))
+        raise SystemExit(exc.exit_code)
+    engine = None
+    try:
+        manifest, manifest_digest = load_identity_manifest(Path(args.manifest))
+        settings = Settings()
+        database_path = sqlite_database_path(settings.database_url)
+        if database_path is None:
+            raise IdentityMigrationError(
+                "database_unsupported",
+                "Hardware identity migration currently requires the Hoardarr SQLite database.",
+            )
+        engine = create_database_engine(settings.database_url)
+        if not database_is_current(engine, settings.database_url):
+            raise IdentityMigrationError(
+                "database_migration_required",
+                "Database migrations are not current; run hoardarr-migrate first.",
+                exit_code=4,
+            )
+        factory = create_session_factory(engine)
+        result = run_identity_migration(
+            factory,
+            database_path=database_path,
+            manifest=manifest,
+            manifest_digest=manifest_digest,
+            expected_database_sha256=args.expected_database_sha256,
+            apply=bool(args.apply),
+        )
+    except IdentityMigrationError as exc:
+        print(json.dumps(failure_result(exc), sort_keys=True))
+        raise SystemExit(exc.exit_code) from exc
+    finally:
+        if engine is not None:
+            engine.dispose()
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _revoke_all_sessions_command(args: argparse.Namespace) -> None:
+    def rejected(
+        code: str,
+        message: str,
+        *,
+        expected: int = 0,
+        observed: int = 0,
+        exit_code: int = 3,
+    ) -> None:
+        supplied_reason = str(args.reason or "").strip().casefold()
+        reported_reason = (
+            supplied_reason
+            if supplied_reason
+            and len(supplied_reason) <= 128
+            and all(
+                char in "abcdefghijklmnopqrstuvwxyz0123456789._-"
+                for char in supplied_reason
+            )
+            else None
+        )
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "rejected",
+                    "expected_count": expected,
+                    "observed_count": observed,
+                    "revoked_count": 0,
+                    "remaining_active_count": observed,
+                    "reason": reported_reason,
+                    "audit_event_id": None,
+                    "error": {"code": code, "message": message},
+                },
+                sort_keys=True,
+            )
+        )
+        raise SystemExit(exit_code)
+
+    try:
+        expected = int(args.expected_count)
+    except (TypeError, ValueError):
+        rejected(
+            "expected_count_invalid",
+            "Expected session count must be an integer.",
+            exit_code=2,
+        )
+    if not _is_root():
+        rejected(
+            "local_root_required",
+            "Bulk session revocation must run as local root.",
+            expected=expected,
+        )
+    active = _active_units(("hoardarr-api.service",))
+    if active:
+        rejected(
+            "api_service_active",
+            "Stop or quiesce the Hoardarr API before bulk session revocation.",
+            expected=expected,
+        )
+    settings = Settings()
+    engine = create_database_engine(settings.database_url)
+    try:
+        if not database_is_current(engine, settings.database_url):
+            rejected(
+                "database_migration_required",
+                "Database migrations are not current; run hoardarr-migrate first.",
+                expected=expected,
+                exit_code=4,
+            )
+        factory = create_session_factory(engine)
+        with factory() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                result = revoke_all_active_sessions(
+                    session,
+                    expected_count=expected,
+                    reason=args.reason,
+                )
+                session.commit()
+            except SessionRevocationError as exc:
+                session.rollback()
+                rejected(
+                    exc.code,
+                    exc.safe_message,
+                    expected=exc.expected_count,
+                    observed=exc.observed_count,
+                    exit_code=exc.exit_code,
+                )
+            except Exception:
+                session.rollback()
+                rejected(
+                    "session_revocation_failed",
+                    "Bulk session revocation failed and was rolled back.",
+                    expected=expected,
+                    exit_code=5,
+                )
+    finally:
+        engine.dispose()
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="hoardarr", description="Manage this Hoardarr server")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -252,6 +419,27 @@ def main() -> None:
         action="store_true",
         help="include the installation key encrypted by a passphrase read from standard input",
     )
+    migrate_identities = commands.add_parser(
+        "migrate-hardware-identities",
+        help="rebind reviewed physical identities without touching storage data",
+    )
+    migrate_identities.add_argument("--manifest", required=True, help="absolute strict JSON map")
+    migrate_identities.add_argument(
+        "--expected-database-sha256",
+        required=True,
+        help="exact offline database SHA-256 observed during preflight",
+    )
+    identity_mode = migrate_identities.add_mutually_exclusive_group(required=True)
+    identity_mode.add_argument("--dry-run", action="store_true")
+    identity_mode.add_argument("--apply", action="store_true")
+    auth = commands.add_parser("auth", help="local authentication administration")
+    auth_commands = auth.add_subparsers(dest="auth_command", required=True)
+    revoke_all = auth_commands.add_parser(
+        "revoke-all-sessions", help="atomically revoke an exact active-session set"
+    )
+    revoke_all.add_argument("--reason", required=True)
+    revoke_all.add_argument("--expected-count", required=True)
+    revoke_all.add_argument("--json", action="store_true", required=True)
     args = parser.parse_args()
     if args.command == "setup":
         if not 60 <= args.ttl <= 3600:
@@ -261,6 +449,10 @@ def main() -> None:
         _restore_command(args, restore)
     elif args.command == "export-control-plane":
         _export_control_plane_command(args, export)
+    elif args.command == "migrate-hardware-identities":
+        _identity_migration_command(args)
+    elif args.command == "auth" and args.auth_command == "revoke-all-sessions":
+        _revoke_all_sessions_command(args)
 
 
 def setup_token_main() -> None:
