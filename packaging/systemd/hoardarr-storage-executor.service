@@ -25,12 +25,14 @@ NoNewPrivileges=yes
 # filesystem namespace controls (including PrivateTmp, ProtectSystem,
 # ProtectHome, ReadWritePaths, ProtectClock, ProtectControlGroups and the
 # ProtectKernel* path controls) explicitly prevent service-created mounts from
-# propagating to the host. Keep the closed typed protocol, AF_UNIX-only network
-# boundary and syscall hardening below instead of enabling those directives.
+# propagating to the host. Keep the closed typed protocol and syscall hardening
+# below instead of enabling those directives. AF_NETLINK is required by the
+# targeted udev trigger used after an approved drive leaves quarantine; no IP
+# networking is available to this service.
 ProtectHostname=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
