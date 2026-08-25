@@ -889,7 +889,7 @@ def test_zfs_resume_after_layout_never_replays_pool_creation(
                     "destructive": True,
                 }
             ],
-            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "format": {"mount_options": [], "trim": {"enabled": True, "mode": "continuous"}},
             "layout_options": options,
             "service_account": {"username": "media"},
         },
@@ -923,6 +923,7 @@ def test_zfs_resume_after_layout_never_replays_pool_creation(
 
     assert result["topology"] == "zfs"
     assert not any(command[:2] == ["zpool", "create"] for command in commands)
+    assert not any(command[:2] == ["zpool", "set"] for command in commands)
     assert "runtime:fstab" in journal["completed_actions"]
     assert journal["completed_steps"] == journal["total_steps"]
 

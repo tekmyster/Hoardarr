@@ -2530,7 +2530,12 @@ def _execute_actions(
     trim = format_document.get("trim") if isinstance(format_document.get("trim"), Mapping) else {}
     trim_enabled = trim.get("enabled") is True
     trim_mode = trim.get("mode") if trim_enabled else "disabled"
-    if trim_enabled and not all(_discard_supported(device) for device in devices.values()):
+    layout_checkpoint = "runtime:layout"
+    if (
+        trim_enabled
+        and layout_checkpoint not in completed
+        and not all(_discard_supported(device) for device in devices.values())
+    ):
         raise ExecutorFailure(
             "trim_path_changed",
             "TRIM support changed before storage execution. No discard command was issued.",
@@ -2621,7 +2626,6 @@ def _execute_actions(
         complete_checkpoint(f"runtime:mount:{identifier}")
 
     presentation_root = _safe_mountpoint(str(document["presentation_root"]))
-    layout_checkpoint = "runtime:layout"
     # ZFS persists its own mountpoint and pool geometry.  A post-layout failure
     # (for example while creating media folders) can therefore leave the pool
     # fully built while the generic fstab checkpoint is still pending.  Never
@@ -3173,7 +3177,12 @@ def _execute_actions(
             runner=runner,
         )
 
-    if trim_enabled:
+    # Trim policy is part of the layout transaction and is committed before the
+    # durable layout checkpoint.  A resumed ZFS operation may intentionally skip
+    # the already-created pool while the generic fstab phase is still pending;
+    # do not replay trim configuration (or access layout-local variables) after
+    # that checkpoint.
+    if trim_enabled and not layout_is_persisted:
         if topology == "zfs":
             runner([_tool("zpool"), "set", "autotrim=on", str(options["name"])], 120)
         elif trim_mode == "continuous" and topology == "raid":
