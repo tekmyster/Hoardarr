@@ -9,8 +9,8 @@ The CSV is authoritative for per-task execution fields; the roadmap remains auth
 - IN PROGRESS: 3
 - NOT STARTED: 101
 - PHYSICAL VALIDATION PENDING: 1
-- VERIFIED: 89
-- VERIFIED IN ISOLATION: 59
+- VERIFIED: 88
+- VERIFIED IN ISOLATION: 60
 
 ## Active selection rule
 

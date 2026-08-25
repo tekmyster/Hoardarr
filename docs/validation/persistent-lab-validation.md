@@ -55,8 +55,9 @@ Audit credentials are stored only in local DPAPI-encrypted files outside the rep
 
 ## Live managed-storage and Storage Group evidence
 
-Hoardarr-A now contains a real, product-created mergerFS media path backed only by three
-purpose-created 12-GiB VMDKs. The product discovery registered one logical storage object:
+Hoardarr-A contains a real, product-created mergerFS media path that was initially backed by three
+purpose-created 12-GiB VMDKs and was later expanded through the product to the purpose-created
+8-GiB VMDK. The product discovery retained one logical storage object:
 
 - Hoardarr `StorageEntity`: `91710909-1cef-4e4e-ab82-b5d34bee5c93`
 - stable identity: `mergerfs:9ad4fa497d85f983`
@@ -69,9 +70,9 @@ the stable namespace `/data`, attach that exact logical storage, review its moun
 activate it, and make it preferred for new files. Persisted readback showed group
 `e1ed4dc7-d5d1-486e-b22b-daa78bdbeffb`, backend
 `5f31b341-1922-477c-a30d-3cf107a0c927`, the unchanged StorageEntity ID above, and lifecycle state
-`preferred_write`. The three member identities remained `managed_member`; the purpose-created 8-GiB
-spare remained merely `discovered`. The 24-GiB system VMDK remained excluded from expansion in the
-UI, and none of the protected Cisco SSDs was attached or modified.
+`preferred_write`. After the expansion all four member identities were `managed_member`. The
+24-GiB system VMDK remained excluded from expansion in the UI, and none of the protected Cisco
+SSDs was attached or modified.
 
 The UI also showed the real Activity history, live mergerFS pool/share discovery, virtual PVSCSI
 topology, expansion candidates, and honest `Not reported` health/bay fields. This establishes a
@@ -84,6 +85,41 @@ no UI metric consumer. Over a 39-second observation the persisted sample count a
 `2026-08-24T22:06:27.023606Z`). This is direct live-lab evidence that collection/persistence is not
 owned by a graph subscription. It is not a substitute for the longer browser-disconnect workload
 and retention scenarios already tracked by their dedicated validation tasks.
+
+## Live mergerFS expansion evidence
+
+On 2026-08-24 the authenticated production UI analyzed the unassigned 8-GiB VMDK
+`wwn:naa.6000c29019336c157c2f94e3aae65c53`, showed its real capacity and absence of detected
+signatures, recommended adding it to `Media Library`, disclosed that mergerFS alone provides no
+drive-failure protection, and required the immutable destructive review. Plan
+`f274ca5b-74b9-4342-9b53-d8d7b0d5502a` bound candidate `9a476d082bd022f5ce6173fe`, the hardware
+snapshot, target Storage Group, and exact disk identity. Durable operation
+`b0c54ce7-69ea-4d77-b4b2-45bc8121509a` performed the full-surface read, GPT creation, ext4 format,
+managed mount, mergerFS activation, persistent fstab update, quarantine release, directory/share
+verification, and completed at 100% (11/11 steps).
+
+Restart recovery found three real implementation defects and corrected them without rebuilding or
+copying user data:
+
+- mergerFS runtime branch updates now set the exact reviewed list, so retry is idempotent and an
+  interrupted older executor cannot append a member twice;
+- the storage executor systemd sandbox permits local `AF_NETLINK`, which `udevadm trigger --settle`
+  requires, while continuing to prohibit IP networking;
+- expansion registration resolves the Storage Group's existing logical entity rather than hashing
+  its `/data` bind presentation as a second pool. Startup reconciliation merged 245 short-lived
+  alias samples into the canonical telemetry history and removed the orphan alias.
+
+The final runtime and persistent mergerFS lists contain the fourth member exactly once. Usable pool
+capacity changed from 37,714,550,784 to 46,062,751,744 bytes. The pre-expansion validation file
+remained at `/data/.hoardarr-validation/pre-expansion.bin` with unchanged SHA-256
+`2daeb1f36095b44b318410b3f4e8b5d989dcc7bb023d1426c492dab0a3053e74`. Its ext4 member UUID is
+`4282a58c-cdc0-4069-ba8d-636e46d33cda`. The SMB share remained named `data` with path `/data`.
+StorageEntity `91710909-1cef-4e4e-ab82-b5d34bee5c93`, Storage Group
+`e1ed4dc7-d5d1-486e-b22b-daa78bdbeffb`, backend
+`5f31b341-1922-477c-a30d-3cf107a0c927`, stable identity `mergerfs:9ad4fa497d85f983`, namespace
+`/data`, and `preferred_write` state were unchanged. The canonical entity now records all four
+member identities, exact 46,062,751,744-byte capacity, one logical metric entity, and the merged
+pre/post-expansion history.
 
 ## Remaining boundary
 
