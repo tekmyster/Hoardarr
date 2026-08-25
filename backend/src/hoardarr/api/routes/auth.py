@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
+import time
 from datetime import UTC
+from typing import NoReturn
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from hoardarr.api.client import client_identity
@@ -28,6 +33,7 @@ from hoardarr.auth.service import (
     claim_setup,
     create_api_token,
     create_session,
+    refresh_password_hash_if_needed,
     refresh_session_csrf,
     revoke_session,
     tokens_equal,
@@ -36,6 +42,11 @@ from hoardarr.db.models import ApiToken, AuthSession, SetupClaim, User, utc_now
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 setup_router = APIRouter(prefix="/setup", tags=["setup"])
+LOGGER = logging.getLogger(__name__)
+
+_AUTHENTICATION_WRITE_ATTEMPTS = 2
+_AUTHENTICATION_WRITE_RETRY_SECONDS = 0.05
+_AUTHENTICATION_RETRY_SLEEP = time.sleep
 
 
 def _set_session_cookie(
@@ -89,6 +100,128 @@ def _rate_limited(exc: RateLimitExceeded) -> Problem:
         "Wait before trying again.",
         headers={"Retry-After": str(exc.retry_after)},
     )
+
+
+def _normalized_database_cause(exc: OperationalError) -> str:
+    origin = exc.orig
+    code = getattr(origin, "sqlite_errorcode", None)
+    primary = code & 0xFF if isinstance(code, int) else None
+    if primary in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return "database_busy"
+    if primary == sqlite3.SQLITE_READONLY:
+        return "database_read_only"
+    if primary == sqlite3.SQLITE_FULL:
+        return "database_full"
+    if primary in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+        return "database_integrity_error"
+    if primary in {sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_IOERR, sqlite3.SQLITE_PERM}:
+        return "database_unavailable"
+
+    # Some DBAPI wrappers do not retain SQLite's numeric extended result. The
+    # raw value is used only for bounded classification and is never logged or
+    # returned to the client because it may contain SQL or filesystem paths.
+    detail = str(origin).casefold()
+    if "locked" in detail or "busy" in detail:
+        return "database_busy"
+    if "readonly" in detail or "read-only" in detail:
+        return "database_read_only"
+    if "database or disk is full" in detail:
+        return "database_full"
+    if "malformed" in detail or "not a database" in detail:
+        return "database_integrity_error"
+    if "unable to open" in detail or "disk i/o" in detail:
+        return "database_unavailable"
+    return "database_operation_failed"
+
+
+def _database_problem(
+    request: Request,
+    exc: OperationalError,
+    *,
+    stage: str,
+) -> Problem:
+    cause = _normalized_database_cause(exc)
+    LOGGER.warning(
+        "Authentication database failure request_id=%s cause=%s stage=%s disposition=failed",
+        request.state.request_id,
+        cause,
+        stage,
+    )
+    busy = cause == "database_busy"
+    return Problem(
+        503,
+        "authentication_database_busy" if busy else "authentication_database_unavailable",
+        "Sign-in temporarily unavailable",
+        "Hoardarr could not safely record the sign-in. Try again shortly.",
+        headers={"Retry-After": "1"},
+    )
+
+
+def _reserve_authentication_writer(session: Session, request: Request) -> None:
+    """Reserve a bounded write transaction before creating auth state.
+
+    Only a failed reservation is retried. Once any session or audit row has
+    been flushed, commit uncertainty is deliberately fail-closed and is never
+    replayed, preventing duplicate successful login state.
+    """
+
+    for attempt in range(_AUTHENTICATION_WRITE_ATTEMPTS):
+        try:
+            if session.get_bind().dialect.name == "sqlite":
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                session.begin()
+            return
+        except OperationalError as exc:
+            cause = _normalized_database_cause(exc)
+            session.rollback()
+            if cause == "database_busy" and attempt + 1 < _AUTHENTICATION_WRITE_ATTEMPTS:
+                LOGGER.warning(
+                    "Authentication database failure request_id=%s cause=%s "
+                    "stage=writer_reservation disposition=retrying",
+                    request.state.request_id,
+                    cause,
+                )
+                _AUTHENTICATION_RETRY_SLEEP(_AUTHENTICATION_WRITE_RETRY_SECONDS)
+                continue
+            raise _database_problem(request, exc, stage="writer_reservation") from exc
+    raise RuntimeError("authentication writer reservation exhausted without a result")
+
+
+def _flush_authentication_state(session: Session, request: Request, *, stage: str) -> None:
+    try:
+        session.flush()
+    except OperationalError as exc:
+        session.rollback()
+        raise _database_problem(request, exc, stage=stage) from exc
+
+
+def _commit_authentication_state(session: Session, request: Request, *, stage: str) -> None:
+    try:
+        session.commit()
+    except OperationalError as exc:
+        session.rollback()
+        raise _database_problem(request, exc, stage=stage) from exc
+
+
+def _raise_login_rejected(
+    session: Session,
+    request: Request,
+    *,
+    reserve_writer: bool,
+) -> NoReturn:
+    if reserve_writer:
+        session.rollback()
+        _reserve_authentication_writer(session, request)
+    record_unauthenticated_audit(
+        session,
+        action="auth.login",
+        outcome="rejected",
+        correlation_id=request.state.request_id,
+    )
+    _flush_authentication_state(session, request, stage="rejection_audit_write")
+    _commit_authentication_state(session, request, stage="rejection_commit")
+    raise Problem(401, "login_rejected", "Sign-in failed", "Invalid username or password.")
 
 
 @setup_router.get("/status")
@@ -210,28 +343,51 @@ def login(
             user = authenticate_password(
                 session, payload.username, payload.password.get_secret_value()
             )
-        except AuthenticationError as exc:
-            record_unauthenticated_audit(
-                session,
-                action="auth.login",
-                outcome="rejected",
-                correlation_id=request.state.request_id,
-            )
-            session.commit()
-            raise Problem(
-                401, "login_rejected", "Sign-in failed", "Invalid username or password."
-            ) from exc
+        except AuthenticationError:
+            _raise_login_rejected(session, request, reserve_writer=True)
+        except OperationalError as exc:
+            request.app.state.login_ip_limiter.refund(ip_key)
+            request.app.state.login_limiter.refund(account_key)
+            session.rollback()
+            raise _database_problem(request, exc, stage="credential_read") from exc
     finally:
         request.app.state.authentication_slots.release()
     request.app.state.login_ip_limiter.refund(ip_key)
     request.app.state.login_limiter.refund(account_key)
+    verified_user_id = user.id
+    verified_password_hash = user.password_hash
+    session.rollback()
+    _reserve_authentication_writer(session, request)
+    try:
+        current_user = session.get(User, verified_user_id)
+    except OperationalError as exc:
+        session.rollback()
+        raise _database_problem(request, exc, stage="credential_revalidation_read") from exc
+    if current_user is None or not tokens_equal(
+        current_user.password_hash, verified_password_hash
+    ):
+        try:
+            current_user = authenticate_password(
+                session, payload.username, payload.password.get_secret_value()
+            )
+        except AuthenticationError:
+            _raise_login_rejected(session, request, reserve_writer=False)
+        except OperationalError as exc:
+            session.rollback()
+            raise _database_problem(request, exc, stage="credential_revalidation_read") from exc
+    user = current_user
+    refresh_password_hash_if_needed(user, payload.password.get_secret_value())
     settings = request.app.state.settings
     session_ttl = (
         settings.remembered_session_ttl_seconds
         if payload.remember_me
         else settings.session_ttl_seconds
     )
-    issued = create_session(session, user, session_ttl)
+    try:
+        issued = create_session(session, user, session_ttl)
+    except OperationalError as exc:
+        session.rollback()
+        raise _database_problem(request, exc, stage="session_write") from exc
     principal = Principal(
         user_id=user.id,
         username=user.username,
@@ -247,7 +403,8 @@ def login(
         outcome="succeeded",
         correlation_id=request.state.request_id,
     )
-    session.commit()
+    _flush_authentication_state(session, request, stage="success_audit_write")
+    _commit_authentication_state(session, request, stage="success_commit")
     _set_session_cookie(
         response,
         request,

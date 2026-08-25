@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,8 +11,10 @@ from typing import Any
 
 import httpx
 import pytest
+from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import OperationalError
 
 import hoardarr.api.routes.auth as auth_routes
 import hoardarr.api.routes.storage as storage_routes
@@ -18,7 +22,14 @@ import hoardarr.storage.drain as drain_service
 import hoardarr.storage.groups as group_service
 from hoardarr import __version__
 from hoardarr.api.app import create_app
-from hoardarr.auth.service import create_initial_owner, issue_setup_token
+from hoardarr.audit.service import record_unauthenticated_audit
+from hoardarr.auth.service import (
+    PASSWORD_HASHER,
+    authenticate_password,
+    create_initial_owner,
+    create_session,
+    issue_setup_token,
+)
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import create_database_engine, create_session_factory
@@ -97,6 +108,66 @@ def _claim_owner(client: TestClient, setup_token: str) -> str:
 
 def _state_headers(csrf: str, **extra: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf, **extra}
+
+
+def _use_short_sqlite_busy_timeout(app: Any, milliseconds: int) -> None:
+    @event.listens_for(app.state.engine, "connect")
+    def configure_busy_timeout(
+        dbapi_connection: Any, _connection_record: Any
+    ) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"PRAGMA busy_timeout={milliseconds}")
+        cursor.close()
+
+    # Ensure every subsequent test connection executes the test-only timeout
+    # hook after the production engine's normal five-second configuration.
+    app.state.engine.dispose()
+
+
+def _authentication_row_counts(app: Any) -> tuple[int, int, int]:
+    with app.state.session_factory() as session:
+        sessions = session.scalar(select(func.count()).select_from(AuthSession)) or 0
+        succeeded = (
+            session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.action == "auth.login", AuditEvent.outcome == "succeeded")
+            )
+            or 0
+        )
+        rejected = (
+            session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.action == "auth.login", AuditEvent.outcome == "rejected")
+            )
+            or 0
+        )
+    return int(sessions), int(succeeded), int(rejected)
+
+
+def _hold_disposable_auth_writer(
+    app: Any,
+    ready: threading.Event,
+    release: threading.Event,
+) -> None:
+    with app.state.session_factory() as session:
+        try:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            record_unauthenticated_audit(
+                session,
+                action="test.concurrent-worker",
+                outcome="succeeded",
+                correlation_id="disposable-writer",
+            )
+            session.flush()
+            ready.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError("test writer release timed out")
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
 
 
 def test_storage_group_namespace_reconciliation_is_authenticated_and_identity_bound(
@@ -1972,6 +2043,294 @@ def test_login_session_is_durable_before_browser_cookie_is_published(
     assert response.status_code == 200, response.text
     assert observed_session_counts == [2]
     assert client.get("/api/v1/auth/me").status_code == 200
+
+
+def test_disposable_wal_writer_reproduces_previous_login_operational_error(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "auth-contention.db"
+    database_url = f"sqlite:///{database.as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    factory = create_session_factory(engine)
+    with factory() as seed, seed.begin():
+        owner = create_initial_owner(seed, username="owner", password="disposable-password")
+        create_session(seed, owner, 3600)
+        record_unauthenticated_audit(
+            seed,
+            action="test.seed",
+            outcome="succeeded",
+            correlation_id="disposable-seed",
+        )
+
+    writer = factory()
+    contender = factory()
+    try:
+        assert writer.connection().exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        writer.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        record_unauthenticated_audit(
+            writer,
+            action="test.concurrent-worker",
+            outcome="succeeded",
+            correlation_id="disposable-writer",
+        )
+        writer.flush()
+        contender.connection().exec_driver_sql("PRAGMA busy_timeout=25")
+        user = authenticate_password(contender, "owner", "disposable-password")
+
+        with pytest.raises(OperationalError) as rejected:
+            create_session(contender, user, 3600)
+
+        code = getattr(rejected.value.orig, "sqlite_errorcode", None)
+        assert isinstance(code, int) and code & 0xFF == sqlite3.SQLITE_BUSY
+        assert getattr(rejected.value.orig, "sqlite_errorname", "").startswith("SQLITE_BUSY")
+        contender.rollback()
+        writer.rollback()
+        with factory() as readback:
+            assert readback.scalar(select(func.count()).select_from(AuthSession)) == 1
+            assert readback.scalar(select(func.count()).select_from(AuditEvent)) == 1
+    finally:
+        contender.close()
+        writer.close()
+        engine.dispose()
+
+
+def test_login_retries_only_prewrite_busy_reservation_and_creates_one_result(
+    api_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    _use_short_sqlite_busy_timeout(app, 25)
+    before = _authentication_row_counts(app)
+    assert before == (1, 0, 0)
+    ready = threading.Event()
+    release = threading.Event()
+    caplog.set_level("WARNING", logger=auth_routes.__name__)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        writer = executor.submit(_hold_disposable_auth_writer, app, ready, release)
+        assert ready.wait(timeout=2)
+
+        def release_during_retry(delay: float) -> None:
+            assert delay == auth_routes._AUTHENTICATION_WRITE_RETRY_SECONDS
+            release.set()
+            writer.result(timeout=2)
+
+        monkeypatch.setattr(auth_routes, "_AUTHENTICATION_RETRY_SLEEP", release_during_retry)
+        response = client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": "http://testserver"},
+            json={"username": "owner", "password": "a-long-unique-test-password"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert _authentication_row_counts(app) == (2, 1, 0)
+    assert client.get("/api/v1/auth/me").status_code == 200
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "cause=database_busy stage=writer_reservation disposition=retrying" in messages
+    assert "disposition=failed" not in messages
+    assert "owner" not in messages
+    assert "a-long-unique-test-password" not in messages
+    assert str(app.state.settings.database_url) not in messages
+
+
+def test_login_busy_exhaustion_is_bounded_redacted_and_creates_no_auth_state(
+    api_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    _use_short_sqlite_busy_timeout(app, 25)
+    before = _authentication_row_counts(app)
+    ready = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(auth_routes, "_AUTHENTICATION_RETRY_SLEEP", lambda _delay: None)
+    caplog.set_level("WARNING", logger=auth_routes.__name__)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        writer = executor.submit(_hold_disposable_auth_writer, app, ready, release)
+        assert ready.wait(timeout=2)
+        started = time.monotonic()
+        response = client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": "http://testserver"},
+            json={"username": "owner", "password": "a-long-unique-test-password"},
+        )
+        elapsed = time.monotonic() - started
+        release.set()
+        writer.result(timeout=2)
+
+    assert response.status_code == 503
+    document = response.json()
+    assert document == {
+        "type": "https://hoardarr.dev/problems/authentication_database_busy",
+        "title": "Sign-in temporarily unavailable",
+        "status": 503,
+        "detail": "Hoardarr could not safely record the sign-in. Try again shortly.",
+        "code": "authentication_database_busy",
+        "instance": "/api/v1/auth/login",
+        "request_id": document["request_id"],
+    }
+    assert response.headers["retry-after"] == "1"
+    assert elapsed < 1.0
+    assert _authentication_row_counts(app) == before
+    combined = response.text + "\n" + "\n".join(
+        record.getMessage() for record in caplog.records
+    )
+    assert "cause=database_busy stage=writer_reservation disposition=retrying" in combined
+    assert "cause=database_busy stage=writer_reservation disposition=failed" in combined
+    for secret in (
+        "owner",
+        "a-long-unique-test-password",
+        "auth_sessions",
+        str(app.state.settings.database_url),
+    ):
+        assert secret not in combined
+
+
+def test_login_unavailable_database_diagnostic_never_leaks_raw_exception(
+    api_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    before = _authentication_row_counts(app)
+    private_detail = "unable to open database file C:/private/owner.db credential-material"
+
+    def unavailable(_session: Any, request: Any) -> None:
+        origin = sqlite3.OperationalError(private_detail)
+        failure = OperationalError(
+            "INSERT INTO auth_sessions (token_hash) VALUES (?)",
+            {"token_hash": "session-secret-material"},
+            origin,
+        )
+        raise auth_routes._database_problem(
+            request, failure, stage="writer_reservation"
+        ) from failure
+
+    monkeypatch.setattr(auth_routes, "_reserve_authentication_writer", unavailable)
+    caplog.set_level("WARNING", logger=auth_routes.__name__)
+    response = client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": "http://testserver"},
+        json={"username": "owner", "password": "a-long-unique-test-password"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "authentication_database_unavailable"
+    assert response.headers["retry-after"] == "1"
+    assert _authentication_row_counts(app) == before
+    combined = response.text + "\n" + "\n".join(
+        record.getMessage() for record in caplog.records
+    )
+    assert "cause=database_unavailable stage=writer_reservation disposition=failed" in combined
+    for secret in (
+        private_detail,
+        "C:/private/owner.db",
+        "credential-material",
+        "session-secret-material",
+        "INSERT INTO",
+        "auth_sessions",
+        "owner",
+    ):
+        assert secret not in combined
+
+
+def test_login_with_long_lived_wal_reader_preserves_reader_and_auth_state(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    reader = app.state.session_factory()
+    try:
+        reader.connection().exec_driver_sql("BEGIN")
+        assert reader.scalar(select(func.count()).select_from(User)) == 1
+        response = client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": "http://testserver"},
+            json={"username": "owner", "password": "a-long-unique-test-password"},
+        )
+        assert response.status_code == 200, response.text
+        assert reader.scalar(select(func.count()).select_from(User)) == 1
+    finally:
+        reader.rollback()
+        reader.close()
+    assert _authentication_row_counts(app) == (2, 1, 0)
+
+
+def test_invalid_login_results_remain_indistinguishable_and_session_free(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    before = _authentication_row_counts(app)
+    results = [
+        client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": "http://testserver"},
+            json={"username": username, "password": "incorrect-password"},
+        )
+        for username in ("owner", "absent-user")
+    ]
+
+    assert [result.status_code for result in results] == [401, 401]
+    documents = [result.json() for result in results]
+    for document in documents:
+        request_id = document.pop("request_id")
+        assert request_id
+        assert document == {
+            "type": "https://hoardarr.dev/problems/login_rejected",
+            "title": "Sign-in failed",
+            "status": 401,
+            "detail": "Invalid username or password.",
+            "code": "login_rejected",
+            "instance": "/api/v1/auth/login",
+        }
+    assert _authentication_row_counts(app) == (before[0], before[1], before[2] + 2)
+
+
+def test_login_preserves_password_rehash_upgrade_inside_reserved_writer(
+    api_runtime: Any,
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    password = "a-long-unique-test-password"
+    _claim_owner(client, setup_token)
+    client.cookies.clear()
+    legacy_hasher = PasswordHasher(
+        time_cost=2,
+        memory_cost=32 * 1024,
+        parallelism=2,
+        hash_len=32,
+        salt_len=16,
+    )
+    legacy_hash = legacy_hasher.hash(password)
+    with app.state.session_factory() as session, session.begin():
+        user = session.scalar(select(User).where(User.username == "owner"))
+        assert user is not None
+        user.password_hash = legacy_hash
+
+    response = client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": "http://testserver"},
+        json={"username": "owner", "password": password},
+    )
+
+    assert response.status_code == 200, response.text
+    with app.state.session_factory() as session:
+        user = session.scalar(select(User).where(User.username == "owner"))
+        assert user is not None
+        assert user.password_hash != legacy_hash
+        assert PASSWORD_HASHER.verify(user.password_hash, password)
+        assert not PASSWORD_HASHER.check_needs_rehash(user.password_hash)
 
 
 def test_trusted_local_setup_can_create_owner_without_a_site_code(api_runtime: Any) -> None:

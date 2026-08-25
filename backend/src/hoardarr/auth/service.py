@@ -169,9 +169,14 @@ def authenticate_password(session: Session, username: str, password: str) -> Use
         raise AuthenticationError("invalid username or password") from exc
     if user is None:
         raise AuthenticationError("invalid username or password")
+    return user
+
+
+def refresh_password_hash_if_needed(user: User, password: str) -> None:
+    """Upgrade a verified password hash only inside the caller's write transaction."""
+
     if PASSWORD_HASHER.check_needs_rehash(user.password_hash):
         user.password_hash = PASSWORD_HASHER.hash(password)
-    return user
 
 
 def create_session(session: Session, user: User, ttl_seconds: int) -> IssuedSession:
