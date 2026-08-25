@@ -16,6 +16,7 @@ from hoardarr.networking.executor import (
     apply,
     build_plan,
     confirm,
+    finalize_confirmation,
     status,
 )
 
@@ -67,9 +68,12 @@ def networking_apply(
 @router.post("/confirm")
 def networking_confirm(
     payload: ManagedNetworkConfirmRequest,
+    background_tasks: BackgroundTasks,
     _principal: Principal = Depends(require_state_scope("admin")),
 ) -> dict[str, object]:
     try:
-        return confirm(payload.token)
+        result = confirm(payload.token, finalize=False)
+        background_tasks.add_task(finalize_confirmation, payload.token)
+        return result
     except NetworkFailure as exc:
         raise _problem(exc) from exc

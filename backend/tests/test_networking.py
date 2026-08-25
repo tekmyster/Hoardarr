@@ -154,6 +154,13 @@ def test_deferred_network_activation_delivers_token_before_confirmation(
         "_selected_interfaces",
         lambda _configuration: [{"id": "enp5s0f0", "mac_address": "00:11:22:33:44:55"}],
     )
+    monkeypatch.setattr(
+        executor,
+        "_active_ipv4_addresses",
+        lambda _configuration, **_kwargs: [
+            {"interface": "enp5s0f0", "address": "10.81.200.19/24"}
+        ],
+    )
     planned = executor.build_plan(configuration())
 
     pending = executor.apply(
@@ -168,8 +175,12 @@ def test_deferred_network_activation_delivers_token_before_confirmation(
 
     executor.activate_pending(pending["token"], paths=paths, runner=runner)
     assert any(command[:2] == ["netplan", "apply"] for command in commands)
-    executor.confirm(pending["token"], paths=paths, runner=runner)
+    assert ["ip", "address", "add", "10.81.200.19/24", "dev", "enp5s0f0"] in commands
+    executor.confirm(pending["token"], paths=paths, runner=runner, finalize=False)
     assert paths.state.exists()
+    assert paths.pending.exists()
+    executor.finalize_confirmation(pending["token"], paths=paths, runner=runner)
+    assert ["ip", "address", "del", "10.81.200.19/24", "dev", "enp5s0f0"] in commands
     assert not paths.pending.exists()
 
 

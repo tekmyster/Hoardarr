@@ -4,6 +4,7 @@ import argparse
 import base64
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -789,6 +790,116 @@ def _restore_service_states(
         )
 
 
+def _active_ipv4_addresses(
+    configuration: ManagedNetworkRequest, *, runner: Runner
+) -> list[dict[str, str]]:
+    """Capture globally routable IPv4 addresses that may carry confirmation.
+
+    A managed address change can otherwise remove the address used by the
+    browser before it can confirm the rollback-protected plan.  Only addresses
+    already assigned to the selected endpoint are eligible for the bounded
+    confirmation bridge.
+    """
+
+    endpoint_names = set(configuration.host.network.interface_ids)
+    if configuration.host.network.mode in {"active_passive", "lacp"}:
+        endpoint_names.add("bond0")
+    result = _run(
+        [_command("ip"), "-j", "address", "show"],
+        runner=runner,
+        check=False,
+    )
+    try:
+        inventory = json.loads(result.stdout or "[]")
+    except (TypeError, ValueError):
+        return []
+    captured: list[dict[str, str]] = []
+    for interface in inventory if isinstance(inventory, list) else []:
+        if not isinstance(interface, Mapping):
+            continue
+        name = interface.get("ifname")
+        if (
+            not isinstance(name, str)
+            or name not in endpoint_names
+            or not INTERFACE_RE.fullmatch(name)
+        ):
+            continue
+        address_info = interface.get("addr_info")
+        for address in address_info if isinstance(address_info, list) else []:
+            if not isinstance(address, Mapping):
+                continue
+            local = address.get("local")
+            prefix = address.get("prefixlen")
+            if (
+                address.get("family") != "inet"
+                or address.get("scope") != "global"
+                or not isinstance(local, str)
+                or not isinstance(prefix, int)
+                or not 0 <= prefix <= 32
+            ):
+                continue
+            try:
+                parsed = ipaddress.ip_address(local)
+            except ValueError:
+                continue
+            if parsed.version != 4 or parsed.is_loopback or parsed.is_link_local:
+                continue
+            captured.append({"interface": name, "address": f"{parsed}/{prefix}"})
+    return captured
+
+
+def _retain_confirmation_addresses(
+    pending: dict[str, Any], configuration: ManagedNetworkRequest, *, runner: Runner
+) -> None:
+    desired = {str(ipaddress.ip_interface(value)) for value in configuration.host.network.addresses}
+    retained: list[dict[str, str]] = []
+    for item in pending.get("previous_ipv4_addresses", []):
+        if not isinstance(item, Mapping):
+            continue
+        interface = item.get("interface")
+        address = item.get("address")
+        if (
+            not isinstance(interface, str)
+            or INTERFACE_RE.fullmatch(interface) is None
+            or not isinstance(address, str)
+            or address in desired
+        ):
+            continue
+        try:
+            normalized = str(ipaddress.ip_interface(address))
+        except ValueError:
+            continue
+        result = _run(
+            [_command("ip"), "address", "add", normalized, "dev", interface],
+            runner=runner,
+            check=False,
+        )
+        if result.returncode == 0:
+            retained.append({"interface": interface, "address": normalized})
+    pending["confirmation_ipv4_addresses"] = retained
+
+
+def _remove_confirmation_addresses(pending: Mapping[str, Any], *, runner: Runner) -> None:
+    for item in pending.get("confirmation_ipv4_addresses", []):
+        if not isinstance(item, Mapping):
+            continue
+        interface = item.get("interface")
+        address = item.get("address")
+        if not isinstance(interface, str) or INTERFACE_RE.fullmatch(interface) is None:
+            continue
+        if not isinstance(address, str):
+            continue
+        try:
+            normalized = str(ipaddress.ip_interface(address))
+        except ValueError:
+            continue
+        _run(
+            [_command("ip"), "address", "del", normalized, "dev", interface],
+            runner=runner,
+            check=False,
+        )
+
+
 def _activate(
     configuration: ManagedNetworkRequest,
     paths: Paths,
@@ -865,6 +976,9 @@ def apply(
     token = uuid.uuid4().hex
     previous_host = _host_properties(runner=runner)
     previous_services = _service_states(runner=runner)
+    previous_ipv4_addresses = (
+        _active_ipv4_addresses(configuration, runner=runner) if "network" in components else []
+    )
     _backup(paths, token)
     pending = {
         "token": token,
@@ -873,6 +987,7 @@ def apply(
         "changed_components": list(components),
         "previous_host": previous_host,
         "previous_services": previous_services,
+        "previous_ipv4_addresses": previous_ipv4_addresses,
         "activation_state": "prepared",
     }
     _atomic_write(paths.pending, json.dumps(pending, sort_keys=True), 0o600)
@@ -898,6 +1013,8 @@ def apply(
             activate_pending(token, paths=paths, runner=runner)
     except Exception:
         with contextlib.suppress(Exception):
+            if "network" in components:
+                _remove_confirmation_addresses(pending, runner=runner)
             _restore(paths, token)
             if "server" in components:
                 _restore_host_properties(pending["previous_host"], runner=runner)
@@ -948,6 +1065,8 @@ def activate_pending(
         ) from exc
     try:
         _activate(configuration, paths, components, runner=runner)
+        if "network" in components:
+            _retain_confirmation_addresses(pending, configuration, runner=runner)
     except Exception:
         with contextlib.suppress(Exception):
             _restore(paths, token)
@@ -964,8 +1083,35 @@ def activate_pending(
     return {"state": "active"}
 
 
-def confirm(
+def finalize_confirmation(
     token: str, *, paths: Paths = DEFAULT_PATHS, runner: Runner = subprocess.run
+) -> dict[str, Any]:
+    try:
+        pending = json.loads(paths.pending.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise NetworkFailure(
+            "network_confirmation_missing", "No confirmed network change is awaiting cleanup."
+        ) from exc
+    if pending.get("token") != token:
+        raise NetworkFailure(
+            "network_confirmation_invalid", "The network confirmation token is invalid."
+        )
+    if pending.get("activation_state") != "confirmed":
+        raise NetworkFailure(
+            "network_confirmation_pending", "The network change has not been confirmed."
+        )
+    _remove_confirmation_addresses(pending, runner=runner)
+    paths.pending.unlink(missing_ok=True)
+    shutil.rmtree(paths.rollback_root / token, ignore_errors=True)
+    return {"state": "active"}
+
+
+def confirm(
+    token: str,
+    *,
+    paths: Paths = DEFAULT_PATHS,
+    runner: Runner = subprocess.run,
+    finalize: bool = True,
 ) -> dict[str, Any]:
     try:
         pending = json.loads(paths.pending.read_text(encoding="utf-8"))
@@ -986,8 +1132,10 @@ def confirm(
     _run([_command("systemctl"), "stop", f"{unit}.timer"], runner=runner, check=False)
     _run([_command("systemctl"), "reset-failed", f"{unit}.service"], runner=runner, check=False)
     _atomic_write(paths.state, json.dumps(pending["configuration"], sort_keys=True), 0o600)
-    paths.pending.unlink(missing_ok=True)
-    shutil.rmtree(paths.rollback_root / token, ignore_errors=True)
+    pending["activation_state"] = "confirmed"
+    _atomic_write(paths.pending, json.dumps(pending, sort_keys=True), 0o600)
+    if finalize:
+        finalize_confirmation(token, paths=paths, runner=runner)
     return {"state": "active"}
 
 
@@ -999,6 +1147,8 @@ def rollback(token: str, *, paths: Paths = DEFAULT_PATHS, runner: Runner = subpr
     if pending.get("token") != token:
         return
     components = _changed_components(pending.get("changed_components"))
+    if "network" in components:
+        _remove_confirmation_addresses(pending, runner=runner)
     _restore(paths, token)
     if "server" in components:
         _restore_host_properties(pending.get("previous_host", {}), runner=runner)
