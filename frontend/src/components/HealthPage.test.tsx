@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import type { HardwareSnapshot, StorageInventory, StorageTelemetryDocument } from "../types";
@@ -70,7 +71,8 @@ describe("HealthPage", () => {
     vi.spyOn(api, "storageTelemetry").mockResolvedValue(telemetry);
     vi.spyOn(api, "connectivityServices").mockResolvedValue([]);
 
-    render(<HealthPage />);
+    const open = vi.fn();
+    render(<HealthPage onOpenHistory={open} />);
     expect(await screen.findByText(/reports warning/i)).toBeInTheDocument();
     expect(screen.getByText("Power-on hours", { selector: "th" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText("Not reported").length).toBeGreaterThan(1));
@@ -79,6 +81,8 @@ describe("HealthPage", () => {
     expect(screen.getByText("DS424IOM6")).toBeInTheDocument();
     expect(screen.getByText("38 °C")).toBeInTheDocument();
     expect(screen.getByText(/7,600 RPM/)).toBeInTheDocument();
+    await userEvent.click(screen.getAllByRole("button", { name: "Graph" })[0]);
+    expect(open).toHaveBeenCalledWith({ entityType: "drive", stableId: "wwn:drive-1", displayName: "CISCO SSD-240G", metricId: "drive.temperature", sourceSurface: "health" });
   });
 
   it("keeps partial health visible when one provider fails", async () => {

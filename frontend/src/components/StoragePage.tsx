@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import type { MetricHistoryContext } from "../metricHistory";
 import { existingDataSummary, humanCapacity } from "../policy";
 import type { DeviceMaintenancePlan, Drive, HardwareSnapshot, OperationDocument, PhysicalDiskDocument, StorageExpansionSelection, StorageInventory, StorageOperationProgress } from "../types";
 import { Card, Notice, StatusBadge } from "./ui";
@@ -89,6 +90,7 @@ export function StoragePage({
   activeOperation = null,
   operationProgress = null,
   focusedStorageId = null,
+  onOpenHistory,
 }: {
   snapshot: HardwareSnapshot | null;
   drives: Drive[];
@@ -108,6 +110,7 @@ export function StoragePage({
   activeOperation?: OperationDocument | null;
   operationProgress?: StorageOperationProgress | null;
   focusedStorageId?: string | null;
+  onOpenHistory?: (context: MetricHistoryContext) => void;
 }) {
   const managedDriveIds = new Set(assignedDriveIds);
   for (const disk of registeredDisks) {
@@ -220,7 +223,7 @@ export function StoragePage({
       <article><span>Last scanned</span><strong>{snapshot ? formatDate(snapshot.captured_at) : "—"}</strong><small>{snapshot ? "Live hardware inventory" : "Run a scan to populate storage"}</small></article>
     </div>
 
-    <StoragePerformance />
+    <StoragePerformance onOpenHistory={onOpenHistory} />
 
     <div id="storage-groups-panel"><StorageGroupsPanel refreshToken={registeredDisks.map((disk) => `${disk.stable_identity}:${disk.lifecycle_state}`).join("|")} /></div>
     <StorageVolumesPanel pools={storageInventory?.pools.items ?? []} />

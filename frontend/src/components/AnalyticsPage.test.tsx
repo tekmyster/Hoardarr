@@ -320,6 +320,66 @@ describe("AnalyticsPage", () => {
     expect(api.topMetrics).toHaveBeenCalledTimes(1);
   });
 
+  it("opens the exact contextual entity and filters the metric catalog by entity applicability", async () => {
+    const host: MetricEntity = { ...entity, id: "host-entity", entity_type: "host", stable_id: "host:hoardarr-a", display_name: "hoardarr-a" };
+    const contextualCatalog: MetricCatalogDocument = {
+      ...catalog,
+      items: [...catalog.items, {
+        ...catalog.items[0], id: "cpu.utilization", name: "CPU utilization", entity_types: ["host"], unit: "percent",
+      }],
+    };
+    vi.spyOn(api, "metricCatalog").mockResolvedValue(contextualCatalog);
+    vi.spyOn(api, "metricEntities").mockResolvedValue([host, entity]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: sample.timestamp, items: [sample], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    const historySpy = vi.spyOn(api, "metricHistory").mockImplementation(async ({ entityId, metricId }) => ({
+      entity: entityId === entity.id ? entity : host,
+      metric_id: metricId,
+      unit: metricId === "cpu.utilization" ? "percent" : "bytes_per_second",
+      resolution: "raw",
+      start: "2026-08-22T10:00:00Z",
+      end: "2026-08-22T11:00:00Z",
+      points: [{ timestamp: "2026-08-22T11:00:00Z", value: 41, quality: "available" }],
+    }));
+    render(<AnalyticsPage context={{ entityType: "drive", stableId: "wwn:one", metricId: "io.read.bytes_per_second", sourceSurface: "storage" }} />);
+    expect(await screen.findByText("History for Enterprise SSD")).toBeInTheDocument();
+    expect(screen.getByLabelText("Storage item")).toHaveValue(entity.id);
+    expect(screen.getByLabelText("Metric")).toHaveValue("io.read.bytes_per_second");
+    expect(screen.queryByRole("option", { name: "CPU utilization" })).not.toBeInTheDocument();
+    await waitFor(() => expect(historySpy).toHaveBeenCalledWith(expect.objectContaining({ entityId: entity.id, metricId: "io.read.bytes_per_second", resolution: "auto", maximumPoints: 800 })));
+    await userEvent.click(screen.getByText("Graph details"));
+    expect(screen.getByText("wwn:one")).toBeInTheDocument();
+    expect(screen.getByText(/800/)).toBeInTheDocument();
+  });
+
+  it("aborts replaced history requests and ignores a late obsolete response", async () => {
+    const second: MetricEntity = { ...entity, id: "entity-2", stable_id: "wwn:two", display_name: "Second SSD" };
+    vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
+    vi.spyOn(api, "metricEntities").mockResolvedValue([entity, second]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: sample.timestamp, items: [sample], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    let resolveFirst: ((value: ReturnType<typeof historyDocument>) => void) | undefined;
+    function historyDocument(target: MetricEntity, value: number) {
+      return { entity: target, metric_id: sample.metric_id, unit: sample.unit, resolution: "raw" as const, start: sample.timestamp, end: sample.timestamp, points: [{ timestamp: sample.timestamp, value, quality: "available" as const }] };
+    }
+    const historySpy = vi.spyOn(api, "metricHistory").mockImplementation(({ entityId }) => {
+      if (entityId === entity.id) return new Promise((resolve) => { resolveFirst = resolve; });
+      return Promise.resolve(historyDocument(second, 2_097_152));
+    });
+    render(<AnalyticsPage />);
+    await waitFor(() => expect(historySpy).toHaveBeenCalledTimes(1));
+    const firstSignal = historySpy.mock.calls[0][0].signal;
+    await userEvent.selectOptions(screen.getByLabelText("Storage item"), second.id);
+    expect(await screen.findByText("2 MiB/s", { selector: ".history-buckets td" })).toBeInTheDocument();
+    expect(firstSignal?.aborted).toBe(true);
+    resolveFirst?.(historyDocument(entity, 99_999_999));
+    await Promise.resolve();
+    expect(screen.getByText("2 MiB/s", { selector: ".history-buckets td" })).toBeInTheDocument();
+    expect(screen.queryByText("95.4 MiB/s", { selector: ".history-buckets td" })).not.toBeInTheDocument();
+  });
+
   it("cancels history work and polling when the page unmounts", async () => {
     vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
     vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);

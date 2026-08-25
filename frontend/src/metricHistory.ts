@@ -1,6 +1,52 @@
-import type { MetricClassification, MetricDefinition, MetricHistoryDocument, MetricQuality, MetricSampleDocument } from "./types";
+import type { MetricClassification, MetricDefinition, MetricEntity, MetricHistoryDocument, MetricQuality, MetricSampleDocument } from "./types";
 
 const VALUE_QUALITIES = new Set<MetricQuality>(["available", "stale", "derived", "estimated"]);
+
+export interface MetricHistoryContext {
+  entityType: string;
+  stableId?: string;
+  displayName?: string;
+  metricId?: string;
+  sourceSurface: "overview" | "storage" | "health" | "controller_redundancy" | "analytics";
+}
+
+export function applicableMetricDefinitions(
+  definitions: readonly MetricDefinition[],
+  entityType: string | null | undefined,
+): MetricDefinition[] {
+  if (!entityType) return [];
+  return definitions.filter((definition) => definition.entitled && definition.entity_types.includes(entityType));
+}
+
+export function resolveMetricHistoryEntity(
+  entities: readonly MetricEntity[],
+  context: MetricHistoryContext | null | undefined,
+): MetricEntity | null {
+  if (!context) return null;
+  const sameType = entities.filter((entity) => entity.entity_type === context.entityType);
+  if (context.stableId) {
+    const exact = sameType.find((entity) => entity.stable_id === context.stableId);
+    if (exact) return exact;
+  }
+  if (context.displayName) {
+    const exactNames = sameType.filter((entity) => entity.display_name === context.displayName);
+    if (exactNames.length === 1) return exactNames[0];
+    if (exactNames.length > 1) return null;
+  }
+  return sameType.length === 1 ? sameType[0] : null;
+}
+
+export function applicableMetricSelection(
+  definitions: readonly MetricDefinition[],
+  entityType: string | null | undefined,
+  preferredMetricId?: string,
+): string {
+  const applicable = applicableMetricDefinitions(definitions, entityType);
+  if (preferredMetricId && applicable.some((definition) => definition.id === preferredMetricId)) {
+    return preferredMetricId;
+  }
+  return applicable[0]?.id ?? "";
+}
 
 export function qualityHasValue(quality: MetricQuality): boolean {
   return VALUE_QUALITIES.has(quality);

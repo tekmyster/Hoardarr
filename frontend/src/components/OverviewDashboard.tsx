@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { api } from "../api/client";
 import { appendBounded } from "../liveHistory";
+import type { MetricHistoryContext } from "../metricHistory";
 import {
   DASHBOARD_LAYOUT_KEY,
   DASHBOARD_PANEL_IDS,
@@ -274,7 +275,7 @@ function panelBody(panel: DashboardPanelId, data: OverviewDocument | null, resou
   return data.storage.shares.status === "not_configured" ? <EmptyReading>Shares are not configured.</EmptyReading> : <DefinitionList items={[["Shares", data.storage.shares.items.length]]} />;
 }
 
-export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageId: string) => void } = {}) {
+export function OverviewDashboard({ onOpenStorage, onOpenHistory }: { onOpenStorage?: (storageId: string) => void; onOpenHistory?: (context: MetricHistoryContext) => void } = {}) {
   const [data, setData] = useState<OverviewDocument | null>(null);
   const [resources, setResources] = useState<ResourceUsageDocument | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -387,6 +388,7 @@ export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageI
         {loading && !data && !resources ? "Requesting live data…" : loadError || resourceError ? "Live data unavailable" : `Live reading · ${formatDate(resources?.captured_at ?? data?.captured_at)}`}
       </div>
       <div>
+        {onOpenHistory && <button type="button" className="button button-secondary" disabled={!data?.system.hostname} onClick={() => data?.system.hostname && onOpenHistory({ entityType: "host", stableId: `host:${data.system.hostname}`, displayName: data.system.hostname, metricId: "cpu.utilization", sourceSurface: "overview" })}>Open system history</button>}
         <button type="button" className="button button-secondary" onClick={() => void refreshAll()} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button>
         <button type="button" className={`button ${customizing ? "button-primary" : "button-secondary"}`} aria-pressed={customizing} onClick={() => setCustomizing((value) => !value)}>{customizing ? "Done" : "Customize Dashboard"}</button>
       </div>

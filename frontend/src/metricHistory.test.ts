@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { MetricHistoryDocument } from "./types";
+import type { MetricDefinition, MetricEntity, MetricHistoryDocument } from "./types";
 import {
+  applicableMetricDefinitions,
+  applicableMetricSelection,
   historyEnvelopeValues,
   historyMeanValues,
   nullablePath,
   qualityHasValue,
   qualityLabel,
+  resolveMetricHistoryEntity,
   stateTimeline,
 } from "./metricHistory";
 
@@ -23,6 +26,28 @@ function history(input: Partial<MetricHistoryDocument>): MetricHistoryDocument {
 }
 
 describe("metric history presentation contract", () => {
+  it("offers only entitled catalog metrics applicable to the exact entity type", () => {
+    const definitions = [
+      { id: "cpu.utilization", entity_types: ["host"], entitled: true },
+      { id: "drive.temperature", entity_types: ["drive"], entitled: true },
+      { id: "drive.endurance", entity_types: ["drive"], entitled: false },
+    ] as MetricDefinition[];
+    expect(applicableMetricDefinitions(definitions, "drive").map((item) => item.id)).toEqual(["drive.temperature"]);
+    expect(applicableMetricSelection(definitions, "drive", "cpu.utilization")).toBe("drive.temperature");
+    expect(applicableMetricSelection(definitions, "drive", "drive.temperature")).toBe("drive.temperature");
+  });
+
+  it("resolves context by stable identity and refuses ambiguous display-name substitution", () => {
+    const entities = [
+      { id: "one", entity_type: "drive", stable_id: "wwn:one", display_name: "SSD" },
+      { id: "two", entity_type: "drive", stable_id: "wwn:two", display_name: "SSD" },
+      { id: "host", entity_type: "host", stable_id: "host:a", display_name: "a" },
+    ] as MetricEntity[];
+    expect(resolveMetricHistoryEntity(entities, { entityType: "drive", stableId: "wwn:two", displayName: "SSD", sourceSurface: "storage" })?.id).toBe("two");
+    expect(resolveMetricHistoryEntity(entities, { entityType: "drive", displayName: "SSD", sourceSurface: "storage" })).toBeNull();
+    expect(resolveMetricHistoryEntity(entities, { entityType: "host", sourceSurface: "overview" })?.id).toBe("host");
+  });
+
   it("preserves null/unavailable samples as disconnected graph segments", () => {
     const document = history({
       points: [

@@ -65,4 +65,19 @@ describe("StoragePerformance", () => {
     expect(storageLoadState({ ...missing, read_wait_ms: 35 }).label).toBe("Response delay");
     expect(storageLoadState({ ...missing, write_wait_ms: 120 }).label).toBe("Severe response delay");
   });
+
+  it("opens persistent history for the exact reported drive identity", async () => {
+    const document = reading({ ...missing, read_bytes_per_second: 4096, write_bytes_per_second: 2048 });
+    document.drives = [{
+      id: "wwn:drive-one", device: "/dev/sdb", device_name: "sdb", model: "Media SSD", serial: "SERIAL",
+      rotational: false, system_disk: false, pool_ids: [], metrics: { ...missing, read_bytes_per_second: 4096 },
+      writes_today_bytes: 1024, os_write_bytes_since_boot: 2048,
+      endurance: { lifetime_writes_bytes: null, remaining_percent: null, source: null },
+    }];
+    vi.spyOn(api, "storageTelemetry").mockResolvedValue(document);
+    const open = vi.fn();
+    render(<StoragePerformance onOpenHistory={open} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open persistent history" }));
+    expect(open).toHaveBeenCalledWith({ entityType: "drive", stableId: "wwn:drive-one", displayName: "Media SSD", metricId: "io.read.bytes_per_second", sourceSurface: "storage" });
+  });
 });

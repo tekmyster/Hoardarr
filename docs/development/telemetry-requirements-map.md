@@ -45,6 +45,54 @@ exercised by backend, frontend, accessibility, Playwright, scale, and soak tests
 Exact outcomes and the remaining Linux and physical-hardware boundaries are recorded in
 `docs/validation/telemetry-validation.md`.
 
+## Persistent contextual performance graphs (KPIUI-15)
+
+The normalized telemetry history API is now reachable from the operational context
+that owns the entity. Overview opens the observed host, Storage opens an exact drive
+or pool, Health opens an exact drive/controller/enclosure/pool, and Controller
+Redundancy keeps each physical path separate. The contextual navigation contract is
+`MetricHistoryContext`; it carries the stable entity ID, entity type, display name,
+metric ID, and source surface. Resolution is fail closed: an exact type and stable ID
+is preferred, a display-name match is accepted only when unique, and an ambiguous
+name does not select a substitute entity.
+
+The applicable catalog inventory is the checked-in 101-row catalog rather than a UI
+list. KPIUI-15 currently exposes applicable definitions for these entity classes:
+
+| Context | Catalog applicability | Persistent graph families |
+|---|---:|---|
+| Host/system | 25 | CPU, load, memory, swap, capacity, throughput, IOPS, latency, utilization, ARC, capacity growth |
+| Drive | 37 | throughput, IOPS, latency, utilization, queue/busy/weighted time, reads/writes today, temperature, health, SMART/NVMe wear and endurance, latency analytics, workload ratio |
+| Pool | 31 | capacity, throughput, IOPS, latency, utilization, queue, reads/writes today, health, fragmentation, scrub/rebuild, members/errors, ARC, latency/capacity/workload analytics |
+| Logical storage | 17 | capacity, throughput, IOPS, latency, utilization, queue, reads/writes today, health, healthy/failed path count |
+| Controller | 8 | queue, busy time, health, timeout, temperature, cache hit/state, battery state |
+| Storage path | 16 | per-path throughput, IOPS, latency, utilization, queue, health/state, interface/SAS errors, latency analytics |
+| Enclosure | 4 | health, temperature, fan speed, path redundancy |
+
+Entitlement filtering is applied after entity applicability. A graph request is never
+made for an inapplicable metric/entity pair. A missing provider sample retains its
+reported quality (`not_reported`, `unsupported`, `temporarily_unavailable`, or
+`stale`) and nullable value rather than becoming zero or idle.
+
+`frontend/src/components/MetricHistoryPresentation.tsx` is the shared rendering
+contract used by Analytics and controller/path history. It owns formatting, help,
+sample provenance, numeric raw/rollup presentation, categorical state timelines,
+accessible bucket values, and Advanced diagnostics. Numeric rollups display the
+stored mean with minimum/maximum peak context and first/last/count; raw samples do
+not claim an envelope. Categorical values retain observed order and are never
+averaged. Logical-storage performance remains authoritative logical-storage data;
+physical path series are not summed or converted into an inferred logical total.
+
+Requests remain server-backed and bounded. The client requests at most the smaller
+of the server-advertised graph budget and 800 points, supports 24-hour, 7-day, and
+30-day ranges (plus longer entitled ranges), and discloses requested/selected
+resolution, bucket interval, raw versus rollup, returned/displayed/budgeted point
+counts, retention, entitlement, aggregation, source, unit, and methodology. Entity,
+metric, and range replacement aborts the prior request and a sequence guard rejects
+late responses. Controller/path history is additionally bounded to eight series and
+240 displayed points per path. Overview and Storage session buffers remain explicitly
+labelled live-session-only and are not used as persistent history.
+
 ## Operational WebUI provenance and quality contract (KPIUI-03/KPIUI-04)
 
 The operational WebUI now uses one explicit contract from persisted observation

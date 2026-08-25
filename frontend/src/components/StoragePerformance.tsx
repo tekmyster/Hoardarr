@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { appendBounded } from "../liveHistory";
+import type { MetricHistoryContext } from "../metricHistory";
 import type { StoragePerformanceMetrics, StorageTelemetryDocument } from "../types";
 import { Card, Notice } from "./ui";
 
@@ -110,7 +111,7 @@ export function storageLoadState(metrics: StoragePerformanceMetrics): { label: s
   return { label: "Not reported", tone: "", methodology };
 }
 
-export function StoragePerformance() {
+export function StoragePerformance({ onOpenHistory }: { onOpenHistory?: (context: MetricHistoryContext) => void } = {}) {
   const [data, setData] = useState<StorageTelemetryDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
@@ -178,10 +179,22 @@ export function StoragePerformance() {
       <LiveGraph title="Response time" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.readWait)} secondary={history.map((item) => item.writeWait)} history={history} formatter={(value) => `${number(value)} ms`} />
     </div>}
 
+    {onOpenHistory && <div className="form-actions"><button type="button" className="button button-secondary" onClick={() => {
+      const first = data?.pools[0] ?? data?.drives[0];
+      if (!first) return;
+      onOpenHistory({
+        entityType: "name" in first ? "pool" : "drive",
+        stableId: first.id,
+        displayName: "name" in first ? first.name : first.model || first.device,
+        metricId: "io.read.bytes_per_second",
+        sourceSurface: "storage",
+      });
+    }} disabled={!data?.pools.length && !data?.drives.length}>Open persistent history</button></div>}
+
     <details className="storage-performance-details">
       <summary>Drive and pool details</summary>
       <h3>Individual drives</h3>
-      {individualDrives.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Drive</th><th>Read / write</th><th>IOPS</th><th>Wait</th><th>Writes today</th><th>Lifetime writes</th><th>Endurance left</th></tr></thead><tbody>
+      {individualDrives.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Drive</th><th>Read / write</th><th>IOPS</th><th>Wait</th><th>Writes today</th><th>Lifetime writes</th><th>Endurance left</th>{onOpenHistory && <th>History</th>}</tr></thead><tbody>
         {individualDrives.map((drive) => <tr key={drive.id}>
           <td><code>{drive.device}</code><small className="cell-detail">{drive.model || drive.serial || "Model not reported"}{drive.system_disk ? " · System" : ""}</small></td>
           <td>{rate(drive.metrics.read_bytes_per_second)} / {rate(drive.metrics.write_bytes_per_second)}</td>
@@ -190,17 +203,19 @@ export function StoragePerformance() {
           <td>{bytes(drive.writes_today_bytes)}</td>
           <td>{bytes(drive.endurance.lifetime_writes_bytes)}</td>
           <td>{number(drive.endurance.remaining_percent, "%")}</td>
+          {onOpenHistory && <td><button type="button" className="button button-compact" onClick={() => onOpenHistory({ entityType: "drive", stableId: drive.id, displayName: drive.model || drive.device, metricId: "io.read.bytes_per_second", sourceSurface: "storage" })}>Graph</button></td>}
         </tr>)}
       </tbody></table></div> : <p>No independent drives were reported.</p>}
 
       <h3>Pool details</h3>
-      {data?.pools.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Pool</th><th>Read / write</th><th>IOPS</th><th>Wait</th><th>Writes today</th></tr></thead><tbody>
+      {data?.pools.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Pool</th><th>Read / write</th><th>IOPS</th><th>Wait</th><th>Writes today</th>{onOpenHistory && <th>History</th>}</tr></thead><tbody>
         {data.pools.map((pool) => <tr key={pool.id}>
           <td>{pool.name}<small className="cell-detail">{pool.type}</small></td>
           <td>{pool.metrics ? `${rate(pool.metrics.read_bytes_per_second)} / ${rate(pool.metrics.write_bytes_per_second)}` : "Not reported"}</td>
           <td>{pool.metrics ? `${number(pool.metrics.read_iops)} / ${number(pool.metrics.write_iops)}` : "Not reported"}</td>
           <td>{pool.metrics ? `${number(pool.metrics.read_wait_ms, " ms")} / ${number(pool.metrics.write_wait_ms, " ms")}` : "Not reported"}</td>
           <td>{bytes(pool.writes_today_bytes)}</td>
+          {onOpenHistory && <td><button type="button" className="button button-compact" onClick={() => onOpenHistory({ entityType: "pool", stableId: pool.id, displayName: pool.name, metricId: "io.read.bytes_per_second", sourceSurface: "storage" })}>Graph</button></td>}
         </tr>)}
       </tbody></table></div> : <p>No pools are configured.</p>}
 

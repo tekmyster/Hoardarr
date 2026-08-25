@@ -10,6 +10,7 @@ import type {
   StorageRedundancySettings,
 } from "../types";
 import { humanCapacity } from "../policy";
+import { formatMetricValue, MetricHistoryDiagnostics } from "./MetricHistoryPresentation";
 import { Notice, StatusBadge } from "./ui";
 
 type DetailTab = "overview" | "paths" | "performance" | "events" | "settings";
@@ -27,6 +28,8 @@ const PATH_COUNT_METRICS = [
   { id: "storage.paths.healthy", label: "Healthy paths", unit: "count" },
   { id: "storage.paths.failed", label: "Failed paths", unit: "count" },
 ] as const;
+const MAX_PATH_SERIES = 8;
+const MAX_PATH_HISTORY_POINTS = 240;
 
 function display(value: unknown): string {
   if (value === null || value === undefined || value === "") return "Not reported";
@@ -95,7 +98,8 @@ function PathGraph({
         })}
       </svg>
       <div className="graph-legend">{series.map((item, index) => <span key={item.entity.id}><i className={`series-${index % 8}`} />{item.entity.display_name}</span>)}</div>
-      <details className="graph-diagnostics"><summary>Graph sources and resolution</summary><ul>{series.map((item) => <li key={item.entity.id}><strong>{item.entity.display_name}</strong>: {item.history.metric_source ?? item.history.points.find((point) => point.source)?.source ?? "Source not reported"} · {item.history.source_resolution ?? item.history.resolution} · {item.history.raw === false ? "aggregated buckets with minimum/maximum boundaries" : "raw observations"} · {item.history.points.length} points</li>)}</ul></details>
+      <details className="history-buckets"><summary>Accessible series values</summary><div className="table-scroll"><table className="data-table"><thead><tr><th scope="col">Path</th><th scope="col">Time</th><th scope="col">Value / mean</th><th scope="col">Min / max</th><th scope="col">Quality</th></tr></thead><tbody>{series.flatMap((item) => item.history.points.map((point) => <tr key={`${item.entity.id}:${point.timestamp}`}><td>{item.entity.display_name}</td><td>{new Date(point.timestamp).toLocaleString()}</td><td>{formatMetricValue(qualityHasValue(point.quality) ? point.mean ?? point.value : null, item.history.unit)}</td><td>{formatMetricValue(point.minimum ?? null, item.history.unit)} / {formatMetricValue(point.maximum ?? null, item.history.unit)}</td><td>{qualityLabel(point.quality)}</td></tr>))}</tbody></table></div></details>
+      {series.map((item) => <MetricHistoryDiagnostics key={`diagnostics:${item.entity.id}`} history={item.history} />)}
       {annotations.length > 0 && <small>Vertical markers show failover, path loss, and recovery events.</small>}
     </>}
   </figure>;
@@ -146,10 +150,13 @@ export function ControllerRedundancyDetail({
   const [logicalEntity, setLogicalEntity] = useState<MetricEntity | null>(null);
   const [current, setCurrent] = useState<MetricSampleDocument[]>([]);
   const [histories, setHistories] = useState<Record<string, MetricHistoryDocument>>({});
+  const [rangeHours, setRangeHours] = useState(24);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<StorageRedundancySettings | null>(storage.redundancy_settings ?? null);
-  const historyCache = useRef<{ storageId: string; loadedAt: number } | null>(null);
+  const historyCache = useRef<{ storageId: string; rangeHours: number; loadedAt: number } | null>(null);
+  const historyRequestSequence = useRef(0);
 
   useEffect(() => setSettings(storage.redundancy_settings ?? null), [storage.id, storage.redundancy_settings]);
 
@@ -203,14 +210,18 @@ export function ControllerRedundancyDetail({
   useEffect(() => {
     if (tab !== "performance" || entities.length === 0) return;
     const cached = historyCache.current;
-    if (cached?.storageId === storage.id && Date.now() - cached.loadedAt < 30_000) return;
+    if (cached?.storageId === storage.id && cached.rangeHours === rangeHours && Date.now() - cached.loadedAt < 30_000) return;
     const controller = new AbortController();
     const end = new Date();
-    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+    const start = new Date(end.getTime() - rangeHours * 60 * 60 * 1000);
+    const boundedEntities = entities.slice(0, MAX_PATH_SERIES);
     const requests = [
-      ...entities.flatMap((entity) => METRICS.map((metric) => ({ entity, metric }))),
+      ...boundedEntities.flatMap((entity) => METRICS.map((metric) => ({ entity, metric }))),
       ...(logicalEntity ? PATH_COUNT_METRICS.map((metric) => ({ entity: logicalEntity, metric })) : []),
     ];
+    const requestSequence = ++historyRequestSequence.current;
+    setHistories({});
+    setHistoryLoading(true);
     void Promise.all(requests.map(async ({ entity, metric }) => {
       const history = await api.metricHistory({
         entityId: entity.id,
@@ -218,20 +229,22 @@ export function ControllerRedundancyDetail({
         start: start.toISOString(),
         end: end.toISOString(),
         resolution: "auto",
-        maximumPoints: 240,
+        maximumPoints: MAX_PATH_HISTORY_POINTS,
         signal: controller.signal,
       });
       return [`${entity.id}:${metric.id}`, history] as const;
     })).then((pairs) => {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && historyRequestSequence.current === requestSequence) {
         setHistories(Object.fromEntries(pairs));
-        historyCache.current = { storageId: storage.id, loadedAt: Date.now() };
+        historyCache.current = { storageId: storage.id, rangeHours, loadedAt: Date.now() };
       }
     }).catch((requestError) => {
-      if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Path graphs could not be loaded.");
+      if (!controller.signal.aborted && historyRequestSequence.current === requestSequence) setError(requestError instanceof Error ? requestError.message : "Path graphs could not be loaded.");
+    }).finally(() => {
+      if (historyRequestSequence.current === requestSequence) setHistoryLoading(false);
     });
     return () => controller.abort();
-  }, [entities, logicalEntity, storage.id, tab]);
+  }, [entities, logicalEntity, rangeHours, storage.id, tab]);
 
   const samples = useMemo(() => new Map(current.map((sample) => [`${sample.entity.id}:${sample.metric_id}`, sample])), [current]);
   const summary = storage.redundancy_summary ?? {
@@ -312,7 +325,7 @@ export function ControllerRedundancyDetail({
       {entities.filter((entity) => entity.stable_id.endsWith(path.stable_path_identity)).map((entity) => <PathLiveMetrics key={entity.id} entity={entity} samples={samples} />)}
     </article>)}</div>}
 
-    {tab === "performance" && <div className="redundancy-graphs">{METRICS.map((metric) => <PathGraph key={metric.id} label={metric.label} unit={metric.unit} events={events} series={entities.map((entity) => ({ entity, history: histories[`${entity.id}:${metric.id}`] })).filter((item): item is { entity: MetricEntity; history: MetricHistoryDocument } => Boolean(item.history))} />)}
+    {tab === "performance" && <div className="redundancy-graphs"><div className="analytics-controls"><label>Time range<select value={rangeHours} onChange={(event) => setRangeHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={168}>7 days</option><option value={720}>30 days</option></select></label></div>{entities.length > MAX_PATH_SERIES && <Notice tone="info" title="Path series limit">Showing the first {MAX_PATH_SERIES} of {entities.length} reported paths. Select an individual path in Storage Analytics for its complete history.</Notice>}{historyLoading && <p className="empty-state">Loading bounded path history…</p>}{METRICS.map((metric) => <PathGraph key={metric.id} label={metric.label} unit={metric.unit} events={events} series={entities.slice(0, MAX_PATH_SERIES).map((entity) => ({ entity, history: histories[`${entity.id}:${metric.id}`] })).filter((item): item is { entity: MetricEntity; history: MetricHistoryDocument } => Boolean(item.history))} />)}
       {PATH_COUNT_METRICS.map((metric) => <PathGraph key={metric.id} label={metric.label} unit={metric.unit} events={events} series={logicalEntity && histories[`${logicalEntity.id}:${metric.id}`] ? [{ entity: logicalEntity, history: histories[`${logicalEntity.id}:${metric.id}`] }] : []} />)}
       <section className="path-state-history"><h3>Path state history</h3>{events.length === 0 ? <p>No controller-path changes have been recorded.</p> : <ol>{events.filter((event) => event.path_id || event.event_type.includes("redundancy") || event.event_type.includes("failover")).slice(0, 20).map((event) => <li key={event.id}><time>{new Date(event.occurred_at).toLocaleString()}</time><strong>{event.event_type.replaceAll("_", " ")}</strong><span>{event.previous_state ? `${event.previous_state} → ` : ""}{event.resulting_state}</span></li>)}</ol>}</section>
     </div>}

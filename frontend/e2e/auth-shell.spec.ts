@@ -1455,6 +1455,157 @@ test.describe("production sign-in shell", () => {
     await page.screenshot({ path: `${evidenceDirectory}/mobile-320-keyboard-focus.png`, fullPage: false });
   });
 
+  test("opens bounded persistent history across operational entity contexts", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    const evidenceDirectory = "test-results/WO-KPIUI-003";
+    await mkdir(evidenceDirectory, { recursive: true });
+    const observedAt = "2026-08-25T18:00:00Z";
+    const entity = (id: string, entityType: string, stableId: string, displayName: string) => ({
+      id, entity_type: entityType, stable_id: stableId, display_name: displayName,
+      labels: { evidence_scope: "deterministic_test_fixture" }, topology: {},
+      first_seen_at: observedAt, last_seen_at: observedAt,
+    });
+    const entities = [
+      entity("context-host", "host", "host:hoardarr", "KPI TEST DATA — HOARDARR HOST"),
+      entity("context-drive", "drive", "wwn:kpiui-drive", "KPI TEST DATA — MEDIA SSD"),
+      entity("context-pool", "pool", "pool:kpiui-media", "KPI TEST DATA — MEDIA POOL"),
+      entity("context-path", "storage_path", "storage-path:kpiui-a", "KPI TEST DATA — PATH A"),
+      entity("context-enclosure", "enclosure", "ses:kpiui-shelf", "KPI TEST DATA — SHELF"),
+    ];
+    const definition = (id: string, name: string, entityTypes: string[], unit: string, aggregation = "mean") => ({
+      id, name, entity_types: entityTypes, unit, kind: "raw", source: "Deterministic contextual history provider",
+      minimum_interval_seconds: 5, capability: null, retention_class: "recent", aggregation,
+      availability: "Deterministic browser evidence only", formula: null,
+      test_evidence: "WO-KPIUI-003 browser evidence", entitled: true,
+    });
+    const definitions = [
+      definition("cpu.utilization", "CPU utilization", ["host"], "percent"),
+      definition("io.read.bytes_per_second", "Read throughput", ["drive", "pool", "storage_path"], "bytes_per_second"),
+      definition("io.read.latency", "Read response time", ["drive", "pool", "storage_path"], "milliseconds"),
+      definition("health.overall", "Health state", ["drive", "pool", "enclosure"], "state", "state_transition"),
+      definition("enclosure.temperature", "Enclosure temperature", ["enclosure"], "celsius"),
+    ];
+    const currentItems = [
+      [entities[0], "cpu.utilization", "CPU utilization", 22, "percent", "available"],
+      [entities[1], "io.read.bytes_per_second", "Read throughput", 10_485_760, "bytes_per_second", "available"],
+      [entities[2], "io.read.bytes_per_second", "Read throughput", 20_971_520, "bytes_per_second", "stale"],
+      [entities[3], "io.read.bytes_per_second", "Read throughput", null, "bytes_per_second", "temporarily_unavailable"],
+      [entities[4], "enclosure.temperature", "Enclosure temperature", null, "celsius", "unsupported"],
+    ].map(([metricEntity, metricId, name, value, unit, quality]) => ({
+      metric_id: metricId, name, entity: metricEntity, timestamp: observedAt, value, unit,
+      source: "Deterministic contextual history provider", collection_interval_seconds: 5,
+      quality, raw: true, classification: "raw", labels: {}, capability: null,
+      error_code: quality === "temporarily_unavailable" ? "provider_timeout" : null,
+    }));
+    const requests: Array<{ entity: string | null; metric: string | null; maximum: string | null; hours: number }> = [];
+    let failNextHistory = false;
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
+    await page.route("**/api/v1/telemetry/catalog", (route) => route.fulfill({ json: {
+      items: definitions,
+      quality_states: ["available", "not_reported", "unsupported", "temporarily_unavailable", "stale", "estimated", "derived"],
+      entitlements: { state: "valid", capabilities: ["metrics.history.extended"], expires_at: null, license_id: "test-only", detail: "Deterministic test entitlement", validated_at: observedAt, cached: false, basic_metrics_available: true },
+    } }));
+    await page.route("**/api/v1/telemetry/entities**", (route) => route.fulfill({ json: { items: entities } }));
+    await page.route("**/api/v1/telemetry/current**", (route) => route.fulfill({ json: { captured_at: observedAt, items: currentItems, restricted_capabilities: [] } }));
+    await page.route("**/api/v1/telemetry/settings", (route) => route.fulfill({ json: {
+      collection: { fast_interval_seconds: 5, device_interval_seconds: 300, hardware_interval_seconds: 900 },
+      history: { recent_resolution_seconds: 5, recent_retention_hours: 48, medium_resolution_seconds: 3600, medium_retention_days: 90, long_resolution_seconds: 86400, long_retention_days: 730, maximum_graph_points: 1200, maximum_series: 8, maximum_observations: 9600 },
+      storage: { database_bytes: 8192, oldest_raw_history: observedAt, oldest_retained_history: observedAt, entity_count: entities.length, estimated_bytes_per_day: 2048, estimate_method: "test estimate", last_cleanup: null, next_cleanup: null, cleanup_batch_size: 1000 },
+      extended_history: { entitled: true, capability: "metrics.history.extended" },
+    } }));
+    await page.route("**/api/v1/telemetry/history**", (route) => {
+      const url = new URL(route.request().url());
+      const entityId = url.searchParams.get("entity_id");
+      const metricId = url.searchParams.get("metric_id");
+      const start = Date.parse(url.searchParams.get("start") ?? observedAt);
+      const end = Date.parse(url.searchParams.get("end") ?? observedAt);
+      const hours = Math.round((end - start) / 3_600_000);
+      requests.push({ entity: entityId, metric: metricId, maximum: url.searchParams.get("limit"), hours });
+      if (failNextHistory) {
+        failNextHistory = false;
+        return route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ title: "History provider unavailable", status: 503, detail: "The deterministic history request was intentionally failed." }) });
+      }
+      const selectedEntity = entities.find((item) => item.id === entityId) ?? entities[0];
+      const rolled = hours > 48;
+      const sourceResolution = hours > 168 ? "day" : rolled ? "hour" : "raw";
+      const categorical = metricId === "health.overall";
+      const points = categorical ? [
+        { timestamp: new Date(start).toISOString(), value: "healthy", quality: "available", states: ["healthy", "degraded", "healthy"], transition_count: 2, sample_count: 3, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+        { timestamp: new Date(start + Math.max(1, end - start) / 2).toISOString(), value: null, quality: "not_reported", states: [], transition_count: 0, sample_count: 0, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+      ] : selectedEntity.entity_type === "enclosure" ? [
+        { timestamp: new Date(start).toISOString(), value: null, mean: null, minimum: null, maximum: null, first: null, last: null, quality: "unsupported", sample_count: 0, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+      ] : [
+        { timestamp: new Date(start).toISOString(), value: 24, mean: 24, minimum: rolled ? 8 : null, maximum: rolled ? 61 : null, first: 20, last: 30, quality: rolled ? "derived" : "available", sample_count: rolled ? 12 : 1, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+        { timestamp: new Date(start + Math.max(1, end - start) / 3).toISOString(), value: 32, mean: 32, minimum: rolled ? 12 : null, maximum: rolled ? 74 : null, first: 28, last: 35, quality: rolled ? "derived" : "available", sample_count: rolled ? 10 : 1, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+        { timestamp: new Date(start + Math.max(1, end - start) * 2 / 3).toISOString(), value: null, mean: null, minimum: null, maximum: null, first: null, last: null, quality: "temporarily_unavailable", sample_count: 0, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+        { timestamp: new Date(end - 1).toISOString(), value: 18, mean: 18, minimum: rolled ? 15 : null, maximum: rolled ? 25 : null, first: 21, last: 18, quality: rolled ? "derived" : "available", sample_count: rolled ? 8 : 1, interval_seconds: rolled ? 3600 : 5, raw: !rolled },
+      ];
+      return route.fulfill({ json: {
+        entity: selectedEntity, metric_id: metricId, unit: categorical ? "state" : definitions.find((item) => item.id === metricId)?.unit ?? "count",
+        resolution: sourceResolution, requested_resolution: "auto", source_resolution: sourceResolution,
+        aggregation_method: categorical ? "ordered state transitions" : rolled ? "first/last/minimum/maximum/mean/count" : "raw samples",
+        raw: !rolled, points_returned: points.length, displayed_points: points.length, maximum_points: 800,
+        metric_source: "Deterministic contextual history provider", metric_kind: "raw", formula: null,
+        start: new Date(start).toISOString(), end: new Date(end).toISOString(),
+        points,
+      } });
+    });
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open system history" }).click();
+    await expect(page.getByText("History for KPI TEST DATA — HOARDARR HOST")).toBeVisible();
+    await expect(page.getByLabel("Metric")).toHaveValue("cpu.utilization");
+    await page.getByText("Graph details").click();
+    await expect(page.getByText("host:hoardarr")).toBeVisible();
+    await page.screenshot({ path: `${evidenceDirectory}/desktop-light-system-context.png`, fullPage: true });
+
+    await page.getByLabel("Storage item").selectOption("context-drive");
+    await page.getByLabel("Time range").selectOption("168");
+    await expect(page.locator(".rollup-minimum")).toBeVisible();
+    await page.getByText("Accessible bucket values").click();
+    await expect(page.getByRole("columnheader", { name: "First / last" })).toBeVisible();
+    await page.screenshot({ path: `${evidenceDirectory}/desktop-light-drive-rollup.png`, fullPage: true });
+
+    await page.getByLabel("Metric").selectOption("health.overall");
+    await expect(page.getByRole("region", { name: "Health state state timeline" })).toBeVisible();
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.screenshot({ path: `${evidenceDirectory}/desktop-dark-state-history.png`, fullPage: true });
+
+    await page.getByLabel("Storage item").selectOption("context-path");
+    await page.getByLabel("Time range").selectOption("720");
+    await expect(page.getByRole("img", { name: "Read throughput numeric history" })).toBeVisible();
+    await page.screenshot({ path: `${evidenceDirectory}/desktop-dark-path-context.png`, fullPage: true });
+
+    await page.getByLabel("Storage item").selectOption("context-enclosure");
+    await page.getByLabel("Metric").selectOption("enclosure.temperature");
+    await expect(page.getByText("No reported numeric values are available in these buckets.")).toBeVisible();
+    await page.setViewportSize({ width: 320, height: 900 });
+    const graphDetails = page.getByText("Graph details");
+    await graphDetails.focus();
+    await expect(graphDetails).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("ses:kpiui-shelf")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `${evidenceDirectory}/mobile-320-enclosure-unavailable.png`, fullPage: true });
+
+    failNextHistory = true;
+    await page.getByLabel("Time range").selectOption("24");
+    await expect(page.getByText("History unavailable")).toBeVisible();
+    await page.screenshot({ path: `${evidenceDirectory}/mobile-320-history-error.png`, fullPage: true });
+    expect(requests.length).toBeLessThanOrEqual(10);
+    expect(requests.every((request) => request.maximum === "800")).toBe(true);
+    expect(requests.some((request) => request.hours === 24)).toBe(true);
+    expect(requests.some((request) => request.hours === 168)).toBe(true);
+    expect(requests.some((request) => request.hours === 720)).toBe(true);
+    expect(consoleErrors).toEqual([
+      "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    ]);
+  });
+
   test("creates and verifies a real remote-backup target workflow", async ({ page }) => {
     await authenticatedEmptyServer(page);
     let savedTarget: Record<string, unknown> | null = null;

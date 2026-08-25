@@ -15,6 +15,7 @@ import { StorageOperationNotices, StorageProgressDetails } from "./components/St
 import { StorageWizardDialog } from "./components/StorageWizardDialog";
 import { Card, ChoiceCard, Field, Notice, SourceBadge, Spinner, StatusBadge } from "./components/ui";
 import { gatewayForPayload, normalizeServerNameInput, serverSettingsError, supportedTimeZones, timeZoneLabel, timeZoneOffsetLabel, timeZoneUsesDaylightSaving, uiDefaultsFromOnboarding } from "./onboarding";
+import type { MetricHistoryContext } from "./metricHistory";
 import { actionDestructiveLabel, detectedFilesystems, driveMayContainData, exactConsentAccepted, existingDataSummary, filesystemRecommendation, hasKnownSectorGeometry, humanCapacity, isImportedNtfs, isUsbRaidOverride, layoutChoicesForDrive, recommendStorage, sectorGeometryAssessment, selectPortableSystem, storageChoiceNeedsSectorGeometry, storageRoleLabel, toggleNetworkInterfaceSelection, type ProtectionPreference } from "./policy";
 import type {
   Drive,
@@ -127,6 +128,7 @@ function checkboxToggle(values: string[], value: string): string[] {
 export default function App() {
   const [activeStep, setActiveStep] = useState(0);
   const [activePage, setActivePage] = useState<AppPage>("Overview");
+  const [analyticsContext, setAnalyticsContext] = useState<MetricHistoryContext | null>(null);
   const [focusedStorageId, setFocusedStorageId] = useState<string | null>(null);
   const [storageAction, setStorageAction] = useState<StorageAction | null>(null);
   const [firstRunSetup, setFirstRunSetup] = useState(false);
@@ -2492,9 +2494,14 @@ export default function App() {
     return <AuthenticationPage setupStatus={setupStatus} busy={busy} error={error} demo={demoMode} onSubmit={authenticateAndLoad} />;
   }
 
+  const openPersistentHistory = (context: MetricHistoryContext): void => {
+    setAnalyticsContext(context);
+    setActivePage("Analytics");
+  };
+
   return (
-    <AppShell activePage={activePage} onNavigate={setActivePage} demo={demoMode}>
-      {activePage === "Overview" ? <OverviewDashboard onOpenStorage={(storageId) => { setFocusedStorageId(storageId); setActivePage("Storage"); }} /> : activePage === "Storage" ? <StoragePage
+    <AppShell activePage={activePage} onNavigate={(page) => { if (page === "Analytics") setAnalyticsContext(null); setActivePage(page); }} demo={demoMode}>
+      {activePage === "Overview" ? <OverviewDashboard onOpenStorage={(storageId) => { setFocusedStorageId(storageId); setActivePage("Storage"); }} onOpenHistory={openPersistentHistory} /> : activePage === "Storage" ? <StoragePage
         snapshot={snapshot}
         drives={drives}
         busy={busy}
@@ -2512,7 +2519,8 @@ export default function App() {
         activeOperation={storageOperation}
         operationProgress={storageProgress}
         focusedStorageId={focusedStorageId}
-      /> : activePage === "Storage Access" ? <ConnectivityPage /> : activePage === "Networking" ? renderNetworkingPage() : activePage === "Applications" ? <ApplicationsPage onChanged={setIntegrations} onRecommendations={applyApplicationRecommendations} /> : activePage === "Activity" ? <ActivityPage /> : activePage === "Health" ? <HealthPage /> : activePage === "Analytics" ? <AnalyticsPage /> : <SettingsPage />}
+        onOpenHistory={openPersistentHistory}
+      /> : activePage === "Storage Access" ? <ConnectivityPage /> : activePage === "Networking" ? renderNetworkingPage() : activePage === "Applications" ? <ApplicationsPage onChanged={setIntegrations} onRecommendations={applyApplicationRecommendations} /> : activePage === "Activity" ? <ActivityPage /> : activePage === "Health" ? <HealthPage onOpenHistory={openPersistentHistory} /> : activePage === "Analytics" ? <AnalyticsPage context={analyticsContext} /> : <SettingsPage />}
       {storageAction && <StorageWizardDialog
         action={storageAction}
         mode={mode}

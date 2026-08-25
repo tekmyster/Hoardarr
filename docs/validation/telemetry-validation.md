@@ -336,3 +336,85 @@ the same clearly labeled deterministic API evidence:
 
 These artifacts are deterministic validation evidence, not beta or physical
 hardware telemetry. KPIUI-05 was not started.
+
+## KPIUI-15 persistent contextual graph validation — 2026-08-25
+
+Scope was limited to contextual local appliance performance history and its exact
+frontend, tests, and validation evidence. The accepted normalized telemetry API and
+SQLite persistence contract required no backend change. No beta topology, website,
+fleet/public analytics, hypervisor, network, or protected disk was changed.
+
+### Contract and request evidence
+
+- Overview, Storage, and Health open persistent Analytics history with the exact
+  observed entity type and stable ID. Controller Redundancy uses the same shared
+  presentation helpers while retaining separate physical path series.
+- The entity selector offers only catalog-defined, entitled definitions applicable
+  to the chosen entity. Ambiguous display names do not override a stable identity.
+- History is authoritative server history. Browser-session Overview and Storage
+  charts remain separately labelled and bounded; they do not satisfy or seed the
+  persistent graph.
+- History replacement clears obsolete data, aborts the prior request, and rejects a
+  late response using a monotonically increasing request sequence. The deterministic
+  browser scenario changed entity and 24-hour/7-day/30-day ranges without an
+  inapplicable request and kept each request at `limit=800`; ten or fewer history
+  requests served the complete scenario.
+- Raw numeric points render without an aggregate envelope. Hourly and daily rollups
+  expose mean, minimum, maximum, first, last, sample count, and quality in an
+  accessible values table. Nullable unavailable buckets remain visible gaps.
+  Categorical path/health history remains an ordered state timeline and is not
+  averaged.
+- Controller/path history is capped at eight visible path series and 240 points per
+  series. Per-path observations are never summed into logical throughput, IOPS, or
+  latency. Authoritative logical-storage observations remain distinct.
+- Guided content uses the catalog human name and honest quality/loading/empty/error
+  copy. Advanced diagnostics expose entity name/type/stable ID, metric ID,
+  provider/source, unit, raw/derived/estimated classification and formula,
+  requested/selected resolution, bucket interval, raw/rollup source, returned and
+  displayed points, maximum point budget, retention/entitlement boundary, and
+  aggregation method.
+
+### Executed checks
+
+| Check | Result |
+|---|---|
+| Focused backend enterprise telemetry compatibility | 42 passed; one existing Starlette/httpx deprecation warning |
+| Focused frontend contextual-history units/components | 6 files, 32 passed |
+| Complete frontend unit suite | 41 files, 200 passed; existing axe/jsdom canvas notice only |
+| TypeScript production build | passed; CSS 84.66 kB, JS 721.99 kB; existing chunk-size advisory only |
+| Focused retry-disabled Chromium contextual graph scenario | 1 passed |
+| Final complete retry-disabled Chromium pass 1 | 41 passed, 4 workers |
+| Final complete retry-disabled Chromium pass 2 | 41 passed, 4 workers |
+| Included Analytics memory soak in each full pass | 200 visits and 200 range changes; reported heap 10,000,000 bytes before/warm/final |
+| Scoped `git diff --check` | clean; line-ending conversion notices only |
+
+The two complete Chromium passes were executed after the final contextual-banner
+fix, with retries disabled. The deterministic scenario used the production frontend
+contract and clearly labelled `KPI TEST DATA` entities for host, drive, pool,
+storage-path, and enclosure contexts. It exercised available, stale, temporarily
+unavailable, and unsupported current states; raw, hourly, and daily history; a
+numeric rollup envelope; a categorical state timeline; a nullable gap; 24-hour,
+7-day, and 30-day ranges; an intentional bounded history 503; desktop/320-pixel
+layouts; light/dark themes; keyboard activation; and horizontal-overflow checks.
+Console assertions permitted only the scenario's deliberate latest-snapshot 404 and
+history 503. No unexpected browser error or request fan-out was accepted.
+
+### Retained browser evidence
+
+These are deterministic test-data artifacts, not beta or physical-provider
+telemetry:
+
+| Artifact | Dimensions | SHA-256 |
+|---|---:|---|
+| `frontend/test-results/WO-KPIUI-003/desktop-light-system-context.png` | 1440 x 2364 | `fcdec524a477c48644c43be127366700c5881d18e64cf70bb95dd5bd1f8d8102` |
+| `frontend/test-results/WO-KPIUI-003/desktop-light-drive-rollup.png` | 1440 x 2360 | `99a5812ddeb72d210a7a16ffb35343c1c55c69b6ee1136cf8ab0e1effd83e5d6` |
+| `frontend/test-results/WO-KPIUI-003/desktop-dark-state-history.png` | 1440 x 2017 | `7349a34464c90b397888d0e292409556dbbc3d111edfa8d6291735a84b746ae1` |
+| `frontend/test-results/WO-KPIUI-003/desktop-dark-path-context.png` | 1440 x 2178 | `de8288b015fd92bb5e58d7b4d228c18aa06cdeac23227128daedf79a318b7ca8` |
+| `frontend/test-results/WO-KPIUI-003/mobile-320-enclosure-unavailable.png` | 320 x 2977 | `16445f89cd05898a9bbf72b745648c034913bb7fa0064d70bb8281a37c22d4f2` |
+| `frontend/test-results/WO-KPIUI-003/mobile-320-history-error.png` | 320 x 2305 | `8fa48bcebb1072408cf29d72546a7f802420a6cae023dea82ac1cda4f8515912` |
+
+No physical provider was exercised. Catalog entries remain graphable only when the
+selected real entity/provider reports them; unavailable values remain honest. This
+run makes no physical-hardware, beta-deployment, or provider-certification claim.
+KPIUI-05, KPIUI-06, KPIUI-08, KPIUI-18, KPIUI-20, and dependent rows were not
+started.

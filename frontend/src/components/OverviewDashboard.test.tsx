@@ -177,4 +177,13 @@ describe("OverviewDashboard", () => {
     });
     expect(screen.getByRole("button", { name: "+ Alerts" })).toBeInTheDocument();
   });
+
+  it("opens persistent host history with the observed hostname identity", async () => {
+    vi.spyOn(api, "overview").mockResolvedValue(overview);
+    vi.spyOn(api, "resourceUsage").mockResolvedValue(resourceReading(10));
+    const open = vi.fn();
+    render(<OverviewDashboard onOpenHistory={open} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open system history" }));
+    expect(open).toHaveBeenCalledWith({ entityType: "host", stableId: "host:hoardarr-build", displayName: "hoardarr-build", metricId: "cpu.utilization", sourceSurface: "overview" });
+  });
 });
