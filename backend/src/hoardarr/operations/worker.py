@@ -2755,12 +2755,12 @@ def recover_abandoned_operations(
 def reconcile_completed_storage_state(
     session_factory: SessionFactory, *, limit: int = 256
 ) -> int:
-    """Reapply idempotent logical-storage registration for completed expansions.
+    """Reapply idempotent logical-storage registration for completed storage.
 
     Host storage may have completed before application metadata was committed, or
     an older expansion may have registered a bind presentation path as a second
-    mergerFS identity. Replaying only succeeded, immutable expansion plans on
-    worker startup repairs that control-plane state without touching storage.
+    mergerFS identity. Replaying succeeded, immutable plans on worker startup
+    repairs that control-plane state without touching storage.
     """
 
     with session_factory() as session, session.begin():
@@ -2786,11 +2786,6 @@ def reconcile_completed_storage_state(
                 continue
             plan = session.get(Plan, plan_id)
             if plan is None or document_hash(plan.document_json) != plan.sha256:
-                continue
-            storage = plan.document_json.get("storage")
-            if not isinstance(storage, Mapping) or not isinstance(
-                storage.get("expansion"), Mapping
-            ):
                 continue
             if (
                 register_completed_storage(

@@ -707,6 +707,119 @@ def register_completed_storage(
                 canonical_metric=metric,
             )
         return entity
+    if topology in {"zfs", "raid", "snapraid", "mixed"}:
+        options = storage.get("layout_options")
+        selected = storage.get("selected_devices")
+        mountpoint = result.get("mountpoint")
+        if (
+            not isinstance(options, Mapping)
+            or not isinstance(selected, list)
+            or not selected
+            or not isinstance(mountpoint, str)
+            or not mountpoint.startswith("/")
+        ):
+            return None
+        name = options.get("name")
+        if not isinstance(name, str) or not name or len(name) > 128:
+            return None
+        provider = {
+            "zfs": "zfs",
+            "raid": "linux_md",
+            "snapraid": "snapraid",
+            "mixed": "mixed",
+        }[topology]
+        stable_identity = f"{provider}:{name}"
+        try:
+            capacity_bytes = shutil.disk_usage(mountpoint).total
+        except OSError:
+            return None
+        if capacity_bytes <= 0:
+            return None
+        member_ids = [
+            str(item.get("id"))
+            for item in selected
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        ]
+        presentation_device = {
+            "zfs": name,
+            "raid": f"/dev/md/{name}",
+        }.get(topology, mountpoint)
+        configuration = {
+            "member_stable_identities": member_ids,
+            "layout_options": dict(options),
+            "telemetry_stable_id": f"logical-storage:{stable_identity}",
+            "redundancy_capable": False,
+        }
+        entity = session.scalar(
+            select(StorageEntity).where(StorageEntity.stable_identity == stable_identity)
+        )
+        if entity is None:
+            entity = StorageEntity(
+                name=name,
+                stable_identity=stable_identity,
+                storage_kind=topology,
+                filesystem_uuid=None,
+                mountpoint=mountpoint,
+                presentation_device=presentation_device,
+                capacity_bytes=capacity_bytes,
+                logical_sector_bytes=None,
+                physical_sector_bytes=None,
+                topology_state="not_applicable",
+                provider=provider,
+                config_json=configuration,
+            )
+            session.add(entity)
+            session.flush()
+        else:
+            entity.name = name
+            entity.mountpoint = mountpoint
+            entity.presentation_device = presentation_device
+            entity.capacity_bytes = capacity_bytes
+            entity.config_json = {**entity.config_json, **configuration}
+        for stable_member_id in member_ids:
+            disk = session.scalar(
+                select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_member_id)
+            )
+            if disk is None:
+                continue
+            disk.lifecycle_state = "managed_member"
+            disk.metadata_json = {
+                **disk.metadata_json,
+                "managed_storage_entity_id": entity.id,
+                "managed_storage_kind": topology,
+            }
+        metric = session.scalar(
+            select(MetricEntity).where(
+                MetricEntity.entity_type == "logical_storage",
+                MetricEntity.stable_id == f"logical-storage:{stable_identity}",
+            )
+        )
+        if metric is None:
+            session.add(
+                MetricEntity(
+                    entity_type="logical_storage",
+                    stable_id=f"logical-storage:{stable_identity}",
+                    display_name=name,
+                    labels_json={"storage_entity_id": entity.id, "provider": provider},
+                    topology_json={
+                        "member_count": len(member_ids),
+                        "topology_state": "not_applicable",
+                    },
+                )
+            )
+        else:
+            metric.display_name = name
+            metric.labels_json = {
+                **metric.labels_json,
+                "storage_entity_id": entity.id,
+                "provider": provider,
+            }
+            metric.topology_json = {
+                **metric.topology_json,
+                "member_count": len(member_ids),
+                "topology_state": "not_applicable",
+            }
+        return entity
     if topology not in {
         "individual",
         "import",

@@ -216,6 +216,56 @@ def test_completed_mergerfs_pool_is_one_logical_backend_and_members_are_not_reus
     assert document["paths"] == []
 
 
+def test_completed_zfs_pool_is_registered_as_one_logical_backend(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    members = [
+        PhysicalDisk(stable_identity="wwn:zfs-a", lifecycle_state="discovered"),
+        PhysicalDisk(stable_identity="wwn:zfs-b", lifecycle_state="discovered"),
+        PhysicalDisk(stable_identity="wwn:zfs-c", lifecycle_state="discovered"),
+    ]
+    session.add_all(members)
+    session.flush()
+    monkeypatch.setattr(
+        "hoardarr.storage.redundancy.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=25_000_000, used=1_000_000, free=24_000_000),
+    )
+
+    plan = {
+        "storage": {
+            "topology": "zfs",
+            "selected_devices": [{"id": disk.stable_identity} for disk in members],
+            "layout_options": {
+                "name": "media",
+                "mountpoint": "/data",
+                "ashift": 12,
+                "recordsize": "1M",
+                "compression": "lz4",
+                "vdevs": [
+                    {"type": "raidz1", "device_ids": [disk.stable_identity for disk in members]}
+                ],
+            },
+        }
+    }
+    entity = register_completed_storage(session, plan, {"mountpoint": "/data"})
+    session.flush()
+
+    assert entity is not None
+    assert entity.stable_identity == "zfs:media"
+    assert entity.provider == "zfs"
+    assert entity.mountpoint == "/data"
+    assert entity.presentation_device == "media"
+    assert entity.capacity_bytes == 25_000_000
+    assert {disk.lifecycle_state for disk in members} == {"managed_member"}
+    replayed = register_completed_storage(session, plan, {"mountpoint": "/data"})
+    assert replayed is not None and replayed.id == entity.id
+    document = storage_documents(session)[0]
+    assert document["storage_kind"] == "zfs"
+    assert document["provider"] == "zfs"
+    assert document["redundancy_capable"] is False
+    assert document["paths"] == []
+
+
 def test_mergerfs_expansion_preserves_group_entity_and_merges_presentation_alias(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:

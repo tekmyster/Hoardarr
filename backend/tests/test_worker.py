@@ -995,14 +995,13 @@ def test_recovery_reconciles_completed_storage_after_worker_loss(tmp_path: Path)
         ]
 
 
-def test_worker_startup_reconciles_succeeded_expansion_registration(
+def test_worker_startup_reconciles_succeeded_storage_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _settings, session_factory = _runtime(tmp_path)
     document = {
         "storage": {
             "topology": "mergerfs",
-            "expansion": {"kind": "add_mergerfs_member", "storage_group_id": "group-1"},
         }
     }
     plan_sha = document_hash(document)
