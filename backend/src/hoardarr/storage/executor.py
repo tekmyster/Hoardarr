@@ -3412,12 +3412,17 @@ def apply_storage_plan(
             journal["phase"] = "Resuming storage build from the last safe checkpoint"
             journal["current_action"] = None
             journal["updated_at"] = time.time()
-            journal.setdefault("notices", []).append(
-                {
-                    "code": "storage_build_resumed",
-                    "message": "Storage execution resumed from its durable checkpoint.",
-                }
-            )
+            notices = journal.setdefault("notices", [])
+            if not any(
+                isinstance(item, Mapping) and item.get("code") == "storage_build_resumed"
+                for item in notices
+            ):
+                notices.append(
+                    {
+                        "code": "storage_build_resumed",
+                        "message": "Storage execution resumed from its durable checkpoint.",
+                    }
+                )
             atomic_json(journal_path, journal)
         else:
             _revalidate(document, provider, paths)

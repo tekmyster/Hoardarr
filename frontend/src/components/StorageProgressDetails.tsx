@@ -1,5 +1,39 @@
 import { humanCapacity } from "../policy";
 import type { StorageOperationProgress } from "../types";
+import { Notice } from "./ui";
+
+type StorageNotice = StorageOperationProgress["notices"][number];
+
+function noticePresentation(notice: StorageNotice): {
+  title: string;
+  tone: "info" | "warning";
+} {
+  if (notice.code === "storage_build_resumed") {
+    return { title: "Storage build resumed", tone: "info" };
+  }
+  if (notice.code.startsWith("smart_")) {
+    return { title: "SMART self-test not run", tone: "warning" };
+  }
+  return { title: "Storage notice", tone: "warning" };
+}
+
+export function StorageOperationNotices({ notices }: { notices: StorageNotice[] }) {
+  const seen = new Set<string>();
+  const unique = notices.filter((notice) => {
+    const key = `${notice.code}:${notice.action_id ?? ""}:${notice.device_id ?? ""}:${notice.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return <>{unique.map((notice) => {
+    const presentation = noticePresentation(notice);
+    return <Notice
+      key={`${notice.code}:${notice.action_id ?? ""}:${notice.device_id ?? ""}`}
+      tone={presentation.tone}
+      title={presentation.title}
+    >{notice.message}</Notice>;
+  })}</>;
+}
 
 function duration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "Calculating…";

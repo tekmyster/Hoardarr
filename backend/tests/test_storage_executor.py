@@ -1846,8 +1846,22 @@ def test_existing_mergerfs_expansion_requires_setfattr_before_any_storage_action
     assert requested == ["setfattr"]
 
 
+@pytest.mark.parametrize(
+    "prior_notices",
+    [
+        [],
+        [
+            {
+                "code": "storage_build_resumed",
+                "message": "Storage execution resumed from its durable checkpoint.",
+            }
+        ],
+    ],
+)
 def test_storage_build_resumes_exact_needs_attention_journal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prior_notices: list[dict[str, str]],
 ) -> None:
     document = _document()
     request = _request(document)
@@ -1868,7 +1882,7 @@ def test_storage_build_resumes_exact_needs_attention_journal(
         "completed_actions": [f"identity:{DEVICE_ID}"],
         "completed_steps": 1,
         "total_steps": 6,
-        "notices": [],
+        "notices": prior_notices,
         "action_results": [],
         "current_action": {"id": "layout", "type": "storage.layout.apply"},
     }
@@ -1900,6 +1914,7 @@ def test_storage_build_resumes_exact_needs_attention_journal(
     assert isinstance(resumed_journal, dict)
     assert resumed_journal["completed_actions"] == [f"identity:{DEVICE_ID}"]
     assert resumed_journal["notices"][-1]["code"] == "storage_build_resumed"
+    assert len(resumed_journal["notices"]) == 1
     assert result["operation_id"] == request["operation_id"]
     status = storage_operation_status(str(request["operation_id"]), paths=paths)
     assert status["state"] == "succeeded"

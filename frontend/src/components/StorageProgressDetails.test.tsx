@@ -1,8 +1,25 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { StorageProgressDetails } from "./StorageProgressDetails";
+import { StorageOperationNotices, StorageProgressDetails } from "./StorageProgressDetails";
 
 describe("StorageProgressDetails", () => {
+  it("labels and deduplicates durable recovery notices without calling them SMART results", () => {
+    render(<StorageOperationNotices notices={[
+      {
+        code: "storage_build_resumed",
+        message: "Storage execution resumed from its durable checkpoint.",
+      },
+      {
+        code: "storage_build_resumed",
+        message: "Storage execution resumed from its durable checkpoint.",
+      },
+    ]} />);
+
+    expect(screen.getByText("Storage build resumed")).toBeInTheDocument();
+    expect(screen.getAllByText("Storage execution resumed from its durable checkpoint.")).toHaveLength(1);
+    expect(screen.queryByText(/SMART self-test/i)).not.toBeInTheDocument();
+  });
+
   it("explains measured drive progress and the estimate basis", () => {
     render(<StorageProgressDetails progress={{
       operation_id: "operation",

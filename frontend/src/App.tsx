@@ -11,7 +11,7 @@ import { OverviewDashboard } from "./components/OverviewDashboard";
 import { EyeIcon, OneTimePassword } from "./components/OneTimePassword";
 import { SettingsPage } from "./components/SettingsPage";
 import { StoragePage, type DriveAction, type SavedStorageDraft, type StorageAction } from "./components/StoragePage";
-import { StorageProgressDetails } from "./components/StorageProgressDetails";
+import { StorageOperationNotices, StorageProgressDetails } from "./components/StorageProgressDetails";
 import { StorageWizardDialog } from "./components/StorageWizardDialog";
 import { Card, ChoiceCard, Field, Notice, SourceBadge, Spinner, StatusBadge } from "./components/ui";
 import { gatewayForPayload, normalizeServerNameInput, serverSettingsError, supportedTimeZones, timeZoneLabel, timeZoneOffsetLabel, timeZoneUsesDaylightSaving, uiDefaultsFromOnboarding } from "./onboarding";
@@ -2252,7 +2252,7 @@ export default function App() {
             <span style={{ width: `${storageProgress?.percent ?? (storageOperation.status === "succeeded" ? 100 : 0)}%` }} />
           </div>
           <StorageProgressDetails progress={storageProgress} />
-          {storageProgress?.notices.map((notice) => <Notice key={`${notice.action_id ?? notice.code}:${notice.device_id ?? "drive"}`} tone="warning" title="SMART self-test skipped">{notice.message}</Notice>)}
+          {storageProgress && <StorageOperationNotices notices={storageProgress.notices} />}
           {storageOperation.status === "succeeded" && <Notice tone="success" title="Storage build completed">The executor completed the approved plan. Select Close to refresh inventory and leave the wizard.</Notice>}
           {["failed", "cancelled", "needs_attention"].includes(storageOperation.status) && <Notice tone="danger" title={storageOperation.error?.code ?? "Storage was not completed"}>{storageOperation.error?.detail ?? storageOperation.error?.message ?? "The operation stopped. No success is being claimed; review the latest event before retrying."}</Notice>}
           {storageOperation.status === "needs_attention" && <div className="button-row"><button type="button" className="button button-primary" disabled={busy} onClick={() => void resumeStorageBuild()}>Resume from safe checkpoint</button><button type="button" className="button button-secondary" onClick={minimizeStorageActivity}>Review in Activity</button></div>}

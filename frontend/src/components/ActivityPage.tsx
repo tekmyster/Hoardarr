@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { OperationDocument, OperationEvent, StorageOperationProgress } from "../types";
-import { StorageProgressDetails } from "./StorageProgressDetails";
+import { StorageOperationNotices, StorageProgressDetails } from "./StorageProgressDetails";
 import { Card, Notice, StatusBadge } from "./ui";
 
 const REFRESH_MS = 2_000;
@@ -110,7 +110,7 @@ export function ActivityPage() {
     {selected && <Card title="Selected operation" description={selected.id}>
       <div className="storage-operation-heading"><StatusBadge status={selected.status.replace("_", " ")} /><strong>{progress?.percent ?? (selected.status === "succeeded" ? 100 : 0)}%</strong></div>
       {STORAGE_PROGRESS_KINDS.has(selected.kind) && <><div className="operation-progress-track" role="progressbar" aria-label="Selected storage operation progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress?.percent ?? 0}><span style={{ width: `${progress?.percent ?? (selected.status === "succeeded" ? 100 : 0)}%` }} /></div><StorageProgressDetails progress={progress} /></>}
-      {progress?.notices.map((notice) => <Notice key={`${notice.action_id ?? notice.code}:${notice.device_id ?? "drive"}`} tone="warning" title="SMART self-test skipped">{notice.message}</Notice>)}
+      {progress && <StorageOperationNotices notices={progress.notices} />}
       {smartResults.length > 0 && <div className="table-scroll" aria-label="SMART self-test history"><h3>SMART self-test result</h3><table className="data-table"><thead><tr><th>Drive</th><th>Test</th><th>Result</th><th>Detail</th></tr></thead><tbody>{smartResults.map((result) => <tr key={String(result.action_id)}><td><code>{String(result.device_id ?? "Not reported")}</code></td><td>{String(result.action_id).includes("extended") ? "Long / extended" : "Short"}</td><td><StatusBadge status={String(result.outcome ?? "not reported").replace("_", " ")} /></td><td>{String(result.message ?? result.code ?? "Not reported")}</td></tr>)}</tbody></table></div>}
       {selected.error && <Notice tone="danger" title={selected.error.code ?? "Operation failed"}>{selected.error.detail ?? selected.error.message ?? "The operation needs attention."}</Notice>}
       {events.length ? <ol className="activity-event-list">{events.map((event) => <li key={event.sequence}><time>{formatDate(event.created_at)}</time><strong>{event.type}</strong><span>{event.message}</span></li>)}</ol> : <p>No events have been recorded for this operation.</p>}
