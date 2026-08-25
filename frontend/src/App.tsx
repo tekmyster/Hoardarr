@@ -213,6 +213,7 @@ export default function App() {
   const [mergerFsCreatePolicy, setMergerFsCreatePolicy] = useState<"mfs" | "epmfs">("mfs");
   const [mergerFsSearchPolicy, setMergerFsSearchPolicy] = useState<"ff" | "all">("ff");
   const [arrayName, setArrayName] = useState("media");
+  const [arrayMountpoint, setArrayMountpoint] = useState("/data");
   const [zfsVdevType, setZfsVdevType] = useState<"mirror" | "raidz1" | "raidz2" | "raidz3">("raidz2");
   const [zfsVdevWidth, setZfsVdevWidth] = useState(4);
   const [zfsAshift, setZfsAshift] = useState(12);
@@ -645,6 +646,17 @@ export default function App() {
     if (!/^[a-z][a-z0-9_-]{0,62}$/.test(arrayName)) {
       throw new Error("Use a lower-case storage name containing letters, numbers, dashes, or underscores.");
     }
+    if (topology === "zfs" || topology === "raid" || topology === "snapraid") {
+      if (!/^\/(?:mnt|srv)(?:\/.+)|^\/data(?:\/.*)?$/.test(arrayMountpoint) || arrayMountpoint.includes("..")) {
+        throw new Error("Use an array mount path at /data or beneath /mnt, /srv, or /data without .. segments.");
+      }
+      const occupied = Array.isArray(expansionSelection?.configuration.occupied_mountpoints)
+        ? expansionSelection.configuration.occupied_mountpoints
+        : [];
+      if (occupied.includes(arrayMountpoint)) {
+        throw new Error(`${arrayMountpoint} already belongs to managed storage. Choose a separate mount path for this new array.`);
+      }
+    }
     if (topology === "zfs") {
       const minimum = { mirror: 2, raidz1: 3, raidz2: 4, raidz3: 5 }[zfsVdevType];
       if (zfsVdevWidth < minimum || selectedDriveIds.length % zfsVdevWidth !== 0) {
@@ -657,7 +669,7 @@ export default function App() {
       const existingZfsMountpoint = expansionSelection?.kind === "add_zfs_vdev"
         && expansionSelection.target?.provider === "zfs"
         ? expansionSelection.target.mountpoint
-        : "/data";
+        : arrayMountpoint;
       return {
         name: arrayName,
         vdevs,
@@ -678,7 +690,7 @@ export default function App() {
         level: mdLevel,
         device_ids: selectedDriveIds,
         filesystem: selectedFilesystem,
-        mountpoint: "/data",
+        mountpoint: arrayMountpoint,
         chunk_kib: mdChunkKib,
         metadata: "1.2",
       };
@@ -692,7 +704,7 @@ export default function App() {
         name: arrayName,
         data: selectedDriveIds.slice(snapraidParityCount),
         parity,
-        mountpoint: "/data",
+        mountpoint: arrayMountpoint,
         sync_schedule: "daily",
         scrub_schedule: "weekly",
         scrub_percent: 12,
@@ -764,6 +776,7 @@ export default function App() {
       storage_role: storageRole,
       array: {
         name: arrayName,
+        mountpoint: arrayMountpoint,
         zfs_vdev_type: zfsVdevType,
         zfs_vdev_width: zfsVdevWidth,
         zfs_ashift: zfsAshift,
@@ -1170,6 +1183,8 @@ export default function App() {
           : expansionSelection?.kind === "add_zfs_vdev"
           && expansionSelection.target?.provider === "zfs"
           ? expansionSelection.target.mountpoint
+          : topology === "zfs" || topology === "raid" || topology === "snapraid"
+          ? arrayMountpoint
           : "/data";
         const layoutUpdated = await api.saveWizardStep(storageUpdated, "layout", {
           work_path: topology === "cache" ? `${storageRoot}/downloads/work` : `${storageRoot}/work`,
@@ -1328,6 +1343,8 @@ export default function App() {
     setMergerFsMountpoint("/mnt/combined-storage");
     setMergerFsCreatePolicy("mfs");
     setMergerFsSearchPolicy("ff");
+    setArrayName("media");
+    setArrayMountpoint("/data");
     setUsbOverrideAck("");
     setFormatFilesystem(null);
     setFormatPartitionTable("gpt");
@@ -1523,6 +1540,7 @@ export default function App() {
       setStorageRole(isStorageRole(savedRole) ? savedRole : "individual");
       const array = objectValue(draft.array);
       setArrayName(stringValue(array.name, "media"));
+      setArrayMountpoint(stringValue(array.mountpoint, "/data"));
       setMixedComponentType(array.mixed_component_type === "raid" ? "raid" : "zfs");
       setMixedComponentWidth(numberValue(array.mixed_component_width, 4));
       const mergerfs = objectValue(draft.mergerfs);
@@ -1640,6 +1658,9 @@ export default function App() {
       setSelectedDriveIds(driveIds);
       setUsbOverrideAck("");
       setExpansionSelection(expansion ?? null);
+      const reviewedOccupiedMountpoints = Array.isArray(expansion?.configuration.occupied_mountpoints)
+        ? expansion.configuration.occupied_mountpoints.filter((item): item is string => typeof item === "string")
+        : [];
 
       if (effectiveAction === "advanced") {
         setMode("advanced");
@@ -1653,12 +1674,20 @@ export default function App() {
           setZfsVdevWidth(expansion.configuration.vdev_width ?? driveIds.length);
           if (expansion.target?.provider === "zfs") {
             setArrayName(expansion.target.instance_id.replace(/^zfs:/, ""));
+            setArrayMountpoint(expansion.target.mountpoint);
+          } else {
+            const name = `zfs-${String(expansion.configuration.vdev_type ?? "pool")}`;
+            setArrayName(name);
+            setArrayMountpoint(reviewedOccupiedMountpoints.includes("/data") ? `/mnt/hoardarr/${name}` : "/data");
           }
         }
         if (expansion?.configuration.topology === "raid") {
           const level = expansion.configuration.md_level;
           if (level === "raid1" || level === "raid5" || level === "raid6" || level === "raid10") {
             setMdLevel(level);
+            const name = `md-${level}`;
+            setArrayName(name);
+            setArrayMountpoint(reviewedOccupiedMountpoints.includes("/data") ? `/mnt/hoardarr/${name}` : "/data");
           }
         }
       } else {
@@ -2131,7 +2160,7 @@ export default function App() {
         </Card>}
         <Card title="How should these drives be presented?" description={firstDrive?.connection.bus.toLowerCase() === "usb" ? "USB storage defaults to an independent drive. Array options are intentionally kept out of Guided setup." : "Choose how capacity should be exposed."}>
           <SelectedDriveSummary drives={selectedDrives} />
-          <div className="choice-grid layout-choices">{layoutChoices.map((choice) => <ChoiceCard key={choice.id} name="storage-role" value={choice.id} checked={storageRole === choice.id} label={`${choice.label}${choice.recommended ? " — Recommended" : ""}`} description={choice.description} warning={choice.warning} onChange={() => {
+          <div className="choice-grid layout-choices">{layoutChoices.map((choice) => <ChoiceCard key={choice.id} name="storage-role" value={choice.id} checked={storageRole === choice.id} label={`${choice.label}${(storageRole === "download-cache" ? choice.id === "download-cache" : choice.recommended) ? " — Recommended" : ""}`} description={choice.description} warning={choice.warning} onChange={() => {
             setStorageRole(choice.id);
             if (choice.id === "download-cache") setPurpose("downloads");
             if (choice.id === "block") setPurpose("block");
@@ -2168,6 +2197,7 @@ export default function App() {
         {mode === "advanced" && (storageRole === "zfs" || storageRole === "raid" || storageRole === "snapraid" || storageRole === "mixed") && <Card title="Array settings" description="Choose the exact layout that will appear in the immutable review plan.">
           <div className="form-grid three-columns advanced-format-grid">
             <Field label="Storage name" source="Advanced selection"><input value={arrayName} onChange={(event) => { setArrayName(event.target.value.toLowerCase()); setPlan(null); }} /></Field>
+            <Field label="Mount path" source={expansionSelection?.kind === "add_zfs_vdev" ? "Existing storage" : "Advanced selection"}><input aria-label="Array mount path" value={arrayMountpoint} readOnly={expansionSelection?.kind === "add_zfs_vdev"} onChange={(event) => { setArrayMountpoint(event.target.value); setPlan(null); }} /></Field>
             {storageRole === "zfs" && <>
               <Field label="Protection layout" source="Advanced selection"><select value={zfsVdevType} onChange={(event) => { setZfsVdevType(event.target.value as typeof zfsVdevType); setPlan(null); }}><option value="mirror">Mirror — 1 failure per vdev</option><option value="raidz1">RAIDZ1 — 1 failure per vdev</option><option value="raidz2">RAIDZ2 — 2 failures per vdev</option><option value="raidz3">RAIDZ3 — 3 failures per vdev</option></select></Field>
               <Field label="Drives per vdev" source="Advanced selection"><input type="number" min="2" max={selectedDriveIds.length || 2} value={zfsVdevWidth} onChange={(event) => { setZfsVdevWidth(Number(event.target.value)); setPlan(null); }} /></Field>
@@ -2343,7 +2373,7 @@ export default function App() {
         {planNeedsApproval ? <Notice tone="danger" title="ARE YOU SURE?">{String(planRisk.message ?? "The plan contains destructive storage actions.")} Nothing has been changed yet.</Notice> : planDeclaredNonDestructive ? <Notice tone="success" title="No destructive approval is required">The backend explicitly marked this plan as non-destructive.</Notice> : <Notice tone="warning" title="Risk declaration is incomplete">The plan did not explicitly declare both destructive risk and approval status. Treat any undeclared action conservatively and do not apply it.</Notice>}
         <Card title="Exact drives in this plan" description="Verify device, model, serial or WWN, capacity, connection, and physical location—not just a friendly label."><SelectedDriveSummary drives={selectedDrives} detailed /></Card>
         <div className="review-grid">
-          <Card title="Storage"><ReviewLine label="Setup" value={storageRoleLabel(storageRole)} />{mode === "guided" && <><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Drive failure" value={recommendation.protection} /></>}{storageRole === "mergerfs" && <ReviewLine label="Combined storage" value={mergerFsTarget === "create" ? `${mergerFsName} (${mergerFsMountpoint})` : mergerFsInventory?.items.find((item) => item.id === mergerFsTarget)?.mountpoint ?? "Not selected"} />}{storageRole === "download-cache" && <><ReviewLine label="Backing Storage Group" value={cacheBackingGroup?.name ?? "Not selected"} /><ReviewLine label="Fast landing path" value={cacheBackingGroup ? `${cacheBackingGroup.namespace_path}/downloads` : "Not selected"} mono /></>}<ReviewLine label="Filesystem" value={reviewFilesystem} /><ReviewLine label="Existing data" value={preserveData ? "Preserve/import" : "Replace only after final consent"} /><details><summary>Technical details</summary><ReviewLine label="Backend topology" value={storageRole} /><ReviewLine label="Partitioning" value={preserveData ? "Preserve existing" : storageRole === "zfs" ? "Whole-device ZFS vdevs; no partition creation planned" : "GPT, 1 MiB aligned"} /></details></Card>
+          <Card title="Storage"><ReviewLine label="Setup" value={storageRoleLabel(storageRole)} />{mode === "guided" && <><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Drive failure" value={recommendation.protection} /></>}{storageRole === "mergerfs" && <ReviewLine label="Combined storage" value={mergerFsTarget === "create" ? `${mergerFsName} (${mergerFsMountpoint})` : mergerFsInventory?.items.find((item) => item.id === mergerFsTarget)?.mountpoint ?? "Not selected"} />}{storageRole === "download-cache" && <><ReviewLine label="Backing Storage Group" value={cacheBackingGroup?.name ?? "Not selected"} /><ReviewLine label="Fast landing path" value={cacheBackingGroup ? `${cacheBackingGroup.namespace_path}/downloads` : "Not selected"} mono /></>}{(storageRole === "zfs" || storageRole === "raid" || storageRole === "snapraid") && <ReviewLine label="Mount path" value={arrayMountpoint} mono />}<ReviewLine label="Filesystem" value={reviewFilesystem} /><ReviewLine label="Existing data" value={preserveData ? "Preserve/import" : "Replace only after final consent"} /><details><summary>Technical details</summary><ReviewLine label="Backend topology" value={storageRole} /><ReviewLine label="Partitioning" value={preserveData ? "Preserve existing" : storageRole === "zfs" ? "Whole-device ZFS vdevs; no partition creation planned" : "GPT, 1 MiB aligned"} /></details></Card>
           {storageRole !== "test" && <Card title="Libraries and downloads">{storageRole === "download-cache" ? <><ReviewLine label="Existing libraries" value="Unchanged" /><ReviewLine label="Torrent completion" value={cacheTorrentCompletion === "copy_then_retain_until_seeding_completes" ? "Copy to media; retain until seeding completes" : "Manual release"} /><ReviewLine label="Usenet completion" value={cacheUsenetCompletion === "verify_then_move_to_media" ? "Verify, then move to media" : "Copy to media and keep landing copy"} /><ReviewLine label="Media path" value={`${cacheBackingGroup?.namespace_path ?? "/data"}/media`} /></> : <><ReviewLine label="Media server" value={mediaServers.join(", ") || "None selected"} /><ReviewLine label="Libraries" value={libraries.filter((library) => library.selected).map((library) => library.label).join(", ")} /><ReviewLine label="Torrents" value={torrentDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Usenet" value={usenetDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Media path" value="/data/media" /></>}</Card>}
           {storageRole !== "test" && <Card title="File access"><ReviewLine label="Protocol" value="SMB" /><ReviewLine label="Application identity" value={serviceUsername} /><ReviewLine label="Application access" value="Modify" /><ReviewLine label="Anonymous" value="No access" /></Card>}
           {storageRole !== "test" && <Card title="Storage Access"><ReviewLine label="When" value={connectivitySkipped ? "Set up later" : "Apply with storage"} /><ReviewLine label="Methods" value={connectivitySkipped ? "None" : [smbEnabled && "SMB", nfsEnabled && "NFS", iscsiEnabled && "iSCSI", fcoeEnabled && "FCoE"].filter(Boolean).join(", ")} /><ReviewLine label="Name" value={connectivitySkipped ? "—" : shareName} /><ReviewLine label="Path" value={connectivitySkipped ? "—" : sharePath} mono /></Card>}
@@ -2572,6 +2602,7 @@ function expansionSelectionValue(value: unknown): StorageExpansionSelection | nu
       ...(typeof configuration.zfs_vdev_count === "number" ? { zfs_vdev_count: configuration.zfs_vdev_count } : {}),
       ...(configuration.md_level === "raid1" || configuration.md_level === "raid5" || configuration.md_level === "raid6" || configuration.md_level === "raid10" ? { md_level: configuration.md_level } : {}),
       ...(typeof configuration.member_count === "number" ? { member_count: configuration.member_count } : {}),
+      ...(stringArray(configuration.occupied_mountpoints).length ? { occupied_mountpoints: stringArray(configuration.occupied_mountpoints) } : {}),
     },
   };
 }

@@ -701,6 +701,48 @@ def test_linux_md_expansion_candidate_binds_exact_reviewed_geometry(
     assert storage["layout_options"]["device_ids"] == disk_ids
 
 
+def test_new_array_expansion_rejects_reviewed_occupied_mountpoint(session: Session) -> None:
+    payload = _direct_payload(drive_count=4)
+    snapshot = _snapshot(session, payload)
+    disk_ids = [str(item["id"]) for item in payload["disks"]]  # type: ignore[index]
+    wizard = create_wizard(session, mode="advanced", hardware_snapshot_id=snapshot.id)
+    with pytest.raises(WizardValidationError, match="already used by managed storage"):
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=0,
+            step="storage",
+            answers=_storage_answers(
+                selected_device_ids=disk_ids,
+                topology="raid",
+                portable_systems=["linux"],
+                expansion={
+                    "candidate_id": "9" * 24,
+                    "kind": "new_linux_md_raid6",
+                    "storage_group_id": None,
+                    "hardware_snapshot_sha256": snapshot.sha256,
+                    "disk_ids": disk_ids,
+                    "target": None,
+                    "configuration": {
+                        "topology": "raid",
+                        "md_level": "raid6",
+                        "member_count": 4,
+                        "occupied_mountpoints": ["/data"],
+                    },
+                },
+                layout_options={
+                    "name": "media-md",
+                    "level": "raid6",
+                    "device_ids": disk_ids,
+                    "filesystem": "xfs",
+                    "mountpoint": "/data",
+                    "chunk_kib": 512,
+                    "metadata": "1.2",
+                },
+            ),
+        )
+
+
 def test_linux_md_expansion_candidate_rejects_changed_level(session: Session) -> None:
     payload = _direct_payload(drive_count=4)
     snapshot = _snapshot(session, payload)

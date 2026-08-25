@@ -646,6 +646,7 @@ def test_five_matched_blank_disks_offer_source_backed_raidz_geometry_math() -> N
             "topology": "zfs",
             "vdev_type": "raidz2",
             "vdev_width": 5,
+            "occupied_mountpoints": [],
         }
 
 
@@ -653,6 +654,13 @@ def test_matched_blank_disks_offer_executable_linux_md_geometries() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
+        create_group(
+            session,
+            name="Existing media",
+            namespace_path="/data",
+            purpose="media",
+            principal=_principal(),
+        )
         observations = []
         for index in range(4):
             identity = f"wwn:md-{index}"
@@ -689,6 +697,7 @@ def test_matched_blank_disks_offer_executable_linux_md_geometries() -> None:
             "topology": "raid",
             "md_level": "raid10",
             "member_count": 4,
+            "occupied_mountpoints": ["/data"],
         }
         assert all(
             not item["recommended"]

@@ -318,6 +318,18 @@ def build_expansion_assessment(
     groups = list(session.scalars(select(StorageGroup).order_by(StorageGroup.name)))
     pools = ((storage_inventory or {}).get("pools") or {}).get("items")
     pool_items = pools if isinstance(pools, list) else []
+    occupied_mountpoints = sorted(
+        {
+            *(group.namespace_path for group in groups if group.namespace_path),
+            *(
+                str(item["mountpoint"])
+                for item in pool_items
+                if isinstance(item, dict)
+                and isinstance(item.get("mountpoint"), str)
+                and str(item["mountpoint"]).startswith("/")
+            ),
+        }
+    )
     pool_types = {
         str(item.get("type", "")).casefold() for item in pool_items if isinstance(item, dict)
     }
@@ -824,6 +836,7 @@ def build_expansion_assessment(
                             "topology": "zfs",
                             "vdev_type": vdev_type,
                             "vdev_width": width,
+                            "occupied_mountpoints": occupied_mountpoints,
                         },
                     )
                 )
@@ -897,6 +910,7 @@ def build_expansion_assessment(
                     "topology": "raid",
                     "md_level": level,
                     "member_count": width,
+                    "occupied_mountpoints": occupied_mountpoints,
                 },
             )
         )

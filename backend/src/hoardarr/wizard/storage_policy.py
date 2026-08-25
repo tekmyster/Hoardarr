@@ -255,6 +255,7 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
         "zfs_vdev_count",
         "md_level",
         "member_count",
+        "occupied_mountpoints",
     }:
         _error("storage.expansion.configuration", "contains unsupported fields")
     expected_configuration: dict[str, Any] = {
@@ -298,6 +299,23 @@ def _normalize_expansion(value: Any) -> dict[str, Any]:
                 "storage.expansion.configuration.member_count",
                 "must match a valid reviewed Linux MD geometry",
             )
+    occupied_mountpoints = configuration.get("occupied_mountpoints", [])
+    if not isinstance(occupied_mountpoints, list) or any(
+        not isinstance(item, str)
+        or not item.startswith("/")
+        or ".." in PurePosixPath(item).parts
+        or len(item) > 512
+        for item in occupied_mountpoints
+    ):
+        _error(
+            "storage.expansion.configuration.occupied_mountpoints",
+            "must contain safe absolute mount paths from the reviewed assessment",
+        )
+    if len(set(occupied_mountpoints)) != len(occupied_mountpoints):
+        _error(
+            "storage.expansion.configuration.occupied_mountpoints",
+            "must not contain duplicate paths",
+        )
     snapraid_role = configuration.get("snapraid_role")
     if snapraid_role is not None:
         if snapraid_role not in {"data", "parity"}:
@@ -1145,6 +1163,14 @@ def normalize_storage_answers(
                     "storage.expansion.configuration",
                     "the Linux MD geometry no longer matches the reviewed expansion choice",
                 )
+        if (
+            normalized.get("layout_options", {}).get("mountpoint")
+            in configuration.get("occupied_mountpoints", [])
+        ):
+            _error(
+                "storage.layout_options.mountpoint",
+                "is already used by managed storage in the reviewed expansion assessment",
+            )
     if storage.get("format_options") is not None:
         normalized["format_options"] = {
             "filesystem": format_decision["filesystem"],

@@ -623,6 +623,8 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByText("Existing media remains unchanged")).toBeVisible();
     await expect(dialog.getByText(/Keep completed torrents on the fast tier while seeding/i)).toBeVisible();
     await expect(dialog.getByText("Use this drive independently")).toHaveCount(0);
+    await expect(dialog.getByText("Use as one drive — Recommended", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText("Use for downloads and temporary files — Recommended", { exact: true })).toBeVisible();
   });
 
   test("opens a snapshot-bound expansion recommendation in the real storage wizard", async ({ page }) => {
@@ -837,6 +839,9 @@ test.describe("production sign-in shell", () => {
 
   test("opens a reviewed Linux MD expansion candidate with its exact geometry", async ({ page }) => {
     await storageWizardServer(page);
+    await page.route("**/api/v1/storage/groups", (route) => route.fulfill({ json: { items: [{
+      id: "group-media", name: "Media Library", namespace_path: "/data", purpose: "media", state: "active", policy: {}, backends: [], events: [],
+    }] } }));
     const disks = [1, 2, 3, 4].map((number) => ({
       id: `serial:test:ssd-${number}`,
       stable_identity: `serial:SSD-${number}`,
@@ -877,7 +882,7 @@ test.describe("production sign-in shell", () => {
         migration_work: "Create after immutable review and exact approval.",
         restrictions: ["All four disks become dedicated array members."],
         target: null,
-        configuration: { topology: "raid", md_level: "raid10", member_count: 4 },
+        configuration: { topology: "raid", md_level: "raid10", member_count: 4, occupied_mountpoints: ["/data"] },
       }],
       methodology: "Read-only assessment bound to the latest hardware snapshot.",
     } }));
@@ -888,6 +893,7 @@ test.describe("production sign-in shell", () => {
     const dialog = page.getByRole("dialog", { name: "Add storage" });
     await expect(dialog.locator('input[name="storage-role"][value="raid"]')).toBeChecked();
     await expect(dialog.getByLabel("RAID level")).toHaveValue("raid10");
+    await expect(dialog.getByLabel("Array mount path")).toHaveValue("/mnt/hoardarr/md-raid10");
     await expect(dialog.locator(".selected-drives article")).toHaveCount(4);
   });
 

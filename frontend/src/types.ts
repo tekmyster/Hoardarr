@@ -1341,6 +1341,7 @@ export interface StorageExpansionSelection {
     zfs_vdev_count?: number;
     md_level?: "raid1" | "raid5" | "raid6" | "raid10";
     member_count?: number;
+    occupied_mountpoints?: string[];
   };
 }
 
@@ -1416,6 +1417,7 @@ export interface StorageExpansionAssessment {
       snapraid_config_sha256?: string;
       md_level?: "raid1" | "raid5" | "raid6" | "raid10";
       member_count?: number;
+      occupied_mountpoints?: string[];
     };
   }>;
   methodology: string;
