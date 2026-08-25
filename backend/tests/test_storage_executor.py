@@ -1384,12 +1384,50 @@ def test_plan_validation_accepts_only_hash_verified_typed_document() -> None:
     assert approval is None
 
 
-@pytest.mark.parametrize("topology", ["cache", "block", "import"])
+@pytest.mark.parametrize("topology", ["block", "import"])
 def test_single_drive_special_layouts_are_typed_and_executable(topology: str) -> None:
     document = _document()
     document["storage"]["topology"] = topology  # type: ignore[index]
     document["storage"]["actions"][-1]["topology"] = topology  # type: ignore[index]
     _validate_plan(_request(document))
+
+
+def test_cache_layout_requires_exact_verified_backing_namespace() -> None:
+    document = _document()
+    document["presentation_root"] = "/data/downloads"
+    storage = document["storage"]
+    assert isinstance(storage, dict)
+    storage["topology"] = "cache"
+    actions = storage["actions"]
+    assert isinstance(actions, list)
+    assert isinstance(actions[-1], dict)
+    actions[-1]["topology"] = "cache"
+    storage["cache_policy"] = {
+        "backing_storage_group_id": "22222222-2222-4222-8222-222222222222",
+        "backing_backend_id": "33333333-3333-4333-8333-333333333333",
+        "backing_namespace": "/data",
+        "backing_activation_plan_sha256": "a" * 64,
+        "landing_path": "/data/downloads",
+        "torrent_completion": "copy_then_retain_until_seeding_completes",
+        "usenet_completion": "verify_then_move_to_media",
+    }
+    _validate_plan(_request(document))
+
+    storage["cache_policy"]["landing_path"] = "/other/downloads"  # type: ignore[index]
+    with pytest.raises(ExecutorFailure) as raised:
+        _validate_plan(_request(document))
+    assert raised.value.code == "cache_policy_invalid"
+
+
+def test_cache_landing_path_may_contain_only_empty_directories(tmp_path: Path) -> None:
+    landing = tmp_path / "downloads"
+    (landing / "torrents" / "incomplete").mkdir(parents=True)
+    executor._verify_empty_cache_landing_path(landing)
+
+    (landing / "unexpected.bin").write_bytes(b"existing media")
+    with pytest.raises(ExecutorFailure) as raised:
+        executor._verify_empty_cache_landing_path(landing)
+    assert raised.value.code == "cache_landing_path_not_empty"
 
 
 def test_test_only_executor_finishes_without_mount_or_storage_command(

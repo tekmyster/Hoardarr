@@ -127,6 +127,42 @@ def _normalize_mergerfs(value: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_cache_policy(value: Any) -> dict[str, str]:
+    policy = _as_mapping(value, field="storage.cache_policy")
+    allowed = {"backing_storage_group_id", "torrent_completion", "usenet_completion"}
+    unknown = sorted(set(policy) - allowed)
+    if unknown:
+        _error("storage.cache_policy", f"unknown fields: {', '.join(unknown)}")
+    group_id = policy.get("backing_storage_group_id")
+    if not isinstance(group_id, str) or not 1 <= len(group_id) <= 36:
+        _error(
+            "storage.cache_policy.backing_storage_group_id",
+            "must identify the managed media Storage Group",
+        )
+    torrent_completion = policy.get(
+        "torrent_completion", "copy_then_retain_until_seeding_completes"
+    )
+    if torrent_completion not in {
+        "copy_then_retain_until_seeding_completes",
+        "copy_then_retain_until_manual_release",
+    }:
+        _error(
+            "storage.cache_policy.torrent_completion",
+            "must retain the source until seeding completes or manual release",
+        )
+    usenet_completion = policy.get("usenet_completion", "verify_then_move_to_media")
+    if usenet_completion not in {"verify_then_move_to_media", "copy_then_keep_source"}:
+        _error(
+            "storage.cache_policy.usenet_completion",
+            "must verify and move or copy while retaining the source",
+        )
+    return {
+        "backing_storage_group_id": group_id,
+        "torrent_completion": str(torrent_completion),
+        "usenet_completion": str(usenet_completion),
+    }
+
+
 def _normalize_expansion(value: Any) -> dict[str, Any]:
     expansion = _as_mapping(value, field="storage.expansion")
     allowed = {
@@ -854,6 +890,7 @@ def normalize_storage_answers(
         "advanced_usb_acknowledgement",
         "layout_options",
         "expansion",
+        "cache_policy",
     }
     unknown = sorted(set(storage) - allowed)
     if unknown:
@@ -1046,6 +1083,15 @@ def normalize_storage_answers(
                 )
     elif storage.get("mergerfs") is not None:
         _error("storage.mergerfs", "is only valid for combined storage")
+    if topology == "cache":
+        if storage.get("cache_policy") is None:
+            _error(
+                "storage.cache_policy",
+                "choose the media Storage Group that receives completed downloads",
+            )
+        normalized["cache_policy"] = _normalize_cache_policy(storage["cache_policy"])
+    elif storage.get("cache_policy") is not None:
+        _error("storage.cache_policy", "is only valid for download and temporary-work storage")
     if topology in ARRAY_TOPOLOGIES:
         if storage.get("layout_options") is not None:
             try:
@@ -1236,9 +1282,21 @@ def build_storage_plan(
         )
 
     storage_with_layout = {**storage, "layout": dict(layout)}
-    libraries = [] if storage["topology"] == "test" else _library_documents(storage_with_layout)
+    libraries = (
+        []
+        if storage["topology"] in {"test", "cache"}
+        else _library_documents(storage_with_layout)
+    )
     folders = [library["path"] for library in libraries]
     downloads_path = layout["downloads_path"]
+    if storage["topology"] == "cache":
+        folders.extend(
+            [
+                layout["work_path"],
+                f"{layout['work_path']}/torrents",
+                f"{layout['work_path']}/usenet",
+            ]
+        )
     if storage["topology"] != "test" and storage["downloads"]["torrents"]:
         folders.extend(
             [
@@ -1282,6 +1340,11 @@ def build_storage_plan(
         },
         "selected_devices": selected,
         "topology": storage["topology"],
+        **(
+            {"cache_policy": dict(storage["cache_policy"])}
+            if storage["topology"] == "cache"
+            else {}
+        ),
         **({"expansion": dict(storage["expansion"])} if "expansion" in storage else {}),
         **({"mergerfs": dict(storage["mergerfs"])} if storage["topology"] == "mergerfs" else {}),
         **(
@@ -1312,7 +1375,7 @@ def build_storage_plan(
                 "incomplete": f"{downloads_path}/torrents/incomplete",
                 "complete": f"{downloads_path}/torrents/complete",
                 "cache_import": (
-                    "copy_then_retain_until_seeding_completes"
+                    storage["cache_policy"]["torrent_completion"]
                     if storage["topology"] == "cache"
                     else "move_or_hardlink_when_same_filesystem"
                 ),
@@ -1322,7 +1385,7 @@ def build_storage_plan(
                 "incomplete": f"{downloads_path}/usenet/incomplete",
                 "complete": f"{downloads_path}/usenet/complete",
                 "cache_import": (
-                    "verify_then_move_to_media"
+                    storage["cache_policy"]["usenet_completion"]
                     if storage["topology"] == "cache"
                     else "move_when_same_filesystem"
                 ),

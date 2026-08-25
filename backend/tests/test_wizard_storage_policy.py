@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from hoardarr.db.models import Base, HardwareSnapshot, Operation
+from hoardarr.db.models import Base, HardwareSnapshot, Operation, StorageBackend, StorageGroup
 from hoardarr.operations.service import document_hash
 from hoardarr.wizard.service import (
     DEFAULT_LAYOUT,
@@ -157,20 +157,54 @@ def _storage_plan(
     storage_answers: dict[str, object] | None = None,
 ) -> tuple[object, object, HardwareSnapshot]:
     snapshot = _snapshot(session, _usb_payload())
+    answers = deepcopy(storage_answers or _storage_answers())
+    cache_layout = DEFAULT_LAYOUT
+    if answers.get("topology") == "cache":
+        group = StorageGroup(name="Media Library", namespace_path="/data", purpose="media")
+        session.add(group)
+        session.flush()
+        backend = StorageBackend(
+            storage_group_id=group.id,
+            stable_identity="zfs:media",
+            namespace_path="/data",
+            role="data",
+            lifecycle_state="preferred_write",
+            config_json={
+                "activation": {
+                    "plan_sha256": "a" * 64,
+                    "evidence": {"identity_match": True, "exact_mount": True},
+                }
+            },
+        )
+        session.add(backend)
+        session.flush()
+        answers.setdefault(
+            "cache_policy",
+            {
+                "backing_storage_group_id": group.id,
+                "torrent_completion": "copy_then_retain_until_seeding_completes",
+                "usenet_completion": "verify_then_move_to_media",
+            },
+        )
+        cache_layout = {
+            "work_path": "/data/downloads/work",
+            "downloads_path": "/data/downloads",
+            "media_path": "/data/media",
+        }
     wizard = create_wizard(session, mode=mode, hardware_snapshot_id=snapshot.id)
     wizard = update_step(
         session,
         wizard_id=wizard.id,
         expected_revision=0,
         step="storage",
-        answers=storage_answers or _storage_answers(),
+        answers=answers,
     )
     wizard = update_step(
         session,
         wizard_id=wizard.id,
         expected_revision=wizard.revision,
         step="layout",
-        answers=DEFAULT_LAYOUT,
+        answers=cache_layout,
     )
     wizard = update_step(
         session,
@@ -181,6 +215,37 @@ def _storage_plan(
     )
     plan = create_plan(session, wizard_id=wizard.id, expected_revision=wizard.revision)
     return wizard, plan, snapshot
+
+
+def test_cache_requires_backing_group_and_typed_completion_policies(session: Session) -> None:
+    snapshot = _snapshot(session, _usb_payload())
+    wizard = create_wizard(session, mode="guided", hardware_snapshot_id=snapshot.id)
+    with pytest.raises(WizardValidationError) as missing:
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=wizard.revision,
+            step="storage",
+            answers=_storage_answers(topology="cache"),
+        )
+    assert "storage.cache_policy" in missing.value.errors
+
+    with pytest.raises(WizardValidationError) as malformed:
+        update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=wizard.revision,
+            step="storage",
+            answers=_storage_answers(
+                topology="cache",
+                cache_policy={
+                    "backing_storage_group_id": "22222222-2222-4222-8222-222222222222",
+                    "torrent_completion": "delete_while_seeding",
+                    "usenet_completion": "verify_then_move_to_media",
+                },
+            ),
+        )
+    assert "storage.cache_policy.torrent_completion" in malformed.value.errors
 
 
 def test_test_only_plan_runs_intake_checks_without_building_or_sharing_storage(
@@ -1227,6 +1292,17 @@ def test_preserved_cache_does_not_invent_a_destructive_layout_action(session: Se
     assert layout_action["destructive"] is False
     assert storage["risk"]["destructive"] is False
     assert storage["risk"]["approval_required"] is False
+    assert plan.document_json["presentation_root"] == "/data/downloads"
+    assert storage["libraries"] == []
+    assert storage["folders"] == [
+        "/data/downloads/work",
+        "/data/downloads/work/torrents",
+        "/data/downloads/work/usenet",
+        "/data/downloads/torrents/incomplete",
+        "/data/downloads/torrents/complete",
+        "/data/downloads/usenet/incomplete",
+        "/data/downloads/usenet/complete",
+    ]
 
 
 def test_non_destructive_plan_marks_every_storage_action_explicitly(session: Session) -> None:

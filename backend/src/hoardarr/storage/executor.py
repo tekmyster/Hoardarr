@@ -1148,6 +1148,40 @@ def _validate_plan(
     if not isinstance(presentation_root_value, str):
         raise ExecutorFailure("mountpoint_invalid", "The storage presentation root is invalid.")
     presentation_root = _safe_mountpoint(presentation_root_value)
+    if storage.get("topology") == "cache":
+        cache_policy = storage.get("cache_policy")
+        required_cache_fields = {
+            "backing_storage_group_id",
+            "backing_backend_id",
+            "backing_namespace",
+            "backing_activation_plan_sha256",
+            "landing_path",
+            "torrent_completion",
+            "usenet_completion",
+        }
+        if (
+            not isinstance(cache_policy, Mapping)
+            or set(cache_policy) != required_cache_fields
+            or cache_policy.get("landing_path") != presentation_root_value
+            or not isinstance(cache_policy.get("backing_namespace"), str)
+            or not UUID_RE.fullmatch(str(cache_policy.get("backing_storage_group_id", "")))
+            or not UUID_RE.fullmatch(str(cache_policy.get("backing_backend_id", "")))
+            or not SHA256_RE.fullmatch(
+                str(cache_policy.get("backing_activation_plan_sha256", ""))
+            )
+            or cache_policy.get("torrent_completion")
+            not in {
+                "copy_then_retain_until_seeding_completes",
+                "copy_then_retain_until_manual_release",
+            }
+            or cache_policy.get("usenet_completion")
+            not in {"verify_then_move_to_media", "copy_then_keep_source"}
+            or PurePosixPath(presentation_root_value)
+            != PurePosixPath(str(cache_policy["backing_namespace"])) / "downloads"
+        ):
+            raise ExecutorFailure(
+                "cache_policy_invalid", "The download-storage policy is incomplete or changed."
+            )
     outer_actions = document.get("actions")
     directories = outer_actions.get("directories") if isinstance(outer_actions, Mapping) else None
     if not isinstance(directories, list):
@@ -1770,6 +1804,42 @@ def _safe_mountpoint(value: str) -> Path:
     result = Path(str(path))
     _assert_no_symlink_components(result)
     return result
+
+
+def _verify_empty_cache_landing_path(path: Path, *, maximum_entries: int = 10_000) -> None:
+    """Allow an existing empty directory tree, but never hide files beneath a cache mount."""
+
+    if not path.exists():
+        return
+    pending = [path]
+    observed = 0
+    try:
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    observed += 1
+                    if observed > maximum_entries:
+                        raise ExecutorFailure(
+                            "cache_landing_path_unbounded",
+                            "The download path contains too many entries to verify safely.",
+                        )
+                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        raise ExecutorFailure(
+                            "cache_landing_path_not_empty",
+                            (
+                                "The download path already contains data and cannot be "
+                                "covered by a new mount."
+                            ),
+                        )
+                    pending.append(Path(entry.path))
+    except ExecutorFailure:
+        raise
+    except OSError as exc:
+        raise ExecutorFailure(
+            "cache_landing_path_unavailable",
+            "The existing download path could not be inspected safely.",
+        ) from exc
 
 
 def _service_account_group_id(username: str) -> int:
@@ -2650,6 +2720,28 @@ def _execute_actions(
                 "individual_layout_ambiguous",
                 "Individual storage requires exactly one selected drive.",
             )
+        if topology == "cache":
+            cache_policy = storage.get("cache_policy")
+            backing_namespace = (
+                cache_policy.get("backing_namespace")
+                if isinstance(cache_policy, Mapping)
+                else None
+            )
+            backing_path = (
+                _safe_mountpoint(backing_namespace)
+                if isinstance(backing_namespace, str)
+                else None
+            )
+            if (
+                backing_path is None
+                or not backing_path.is_mount()
+                or presentation_root != backing_path / "downloads"
+            ):
+                raise ExecutorFailure(
+                    "cache_backing_storage_unavailable",
+                    "The reviewed media Storage Group is not mounted at its verified path.",
+                )
+            _verify_empty_cache_landing_path(presentation_root)
         runner(
             [_tool("mount"), "--bind", os.fspath(disk_mounts[0]), os.fspath(presentation_root)], 120
         )

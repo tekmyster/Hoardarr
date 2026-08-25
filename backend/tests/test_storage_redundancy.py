@@ -20,6 +20,7 @@ from hoardarr.db.models import (
     StorageBackend,
     StorageEntity,
     StorageGroup,
+    StorageLifecycleEvent,
     StoragePath,
     StorageRedundancyEvent,
 )
@@ -264,6 +265,120 @@ def test_completed_zfs_pool_is_registered_as_one_logical_backend(
     assert document["provider"] == "zfs"
     assert document["redundancy_capable"] is False
     assert document["paths"] == []
+
+
+def test_completed_cache_activates_one_landing_backend_and_replays_idempotently(
+    session: Session,
+) -> None:
+    device = _path("hba-cache", "/dev/sdd", wwid="naa.600a098000cache")
+    device_id = str(device["id"])
+    disk = PhysicalDisk(stable_identity=device_id, lifecycle_state="discovered")
+    group = StorageGroup(name="Media Library", namespace_path="/data", purpose="media")
+    session.add_all([disk, group])
+    session.flush()
+    backing = StorageBackend(
+        storage_group_id=group.id,
+        stable_identity="zfs:media",
+        namespace_path="/data",
+        role="data",
+        lifecycle_state="preferred_write",
+        config_json={
+            "activation": {
+                "plan_sha256": "a" * 64,
+                "evidence": {"identity_match": True, "exact_mount": True},
+            }
+        },
+    )
+    session.add(backing)
+    session.flush()
+    policy = {
+        "backing_storage_group_id": group.id,
+        "backing_backend_id": backing.id,
+        "backing_namespace": "/data",
+        "backing_activation_plan_sha256": "a" * 64,
+        "landing_path": "/data/downloads",
+        "torrent_completion": "copy_then_retain_until_seeding_completes",
+        "usenet_completion": "verify_then_move_to_media",
+    }
+    plan = {
+        "storage": {
+            "topology": "cache",
+            "purpose": "downloads",
+            "selected_devices": [device],
+            "cache_policy": policy,
+        }
+    }
+    result = {
+        "mountpoint": "/data/downloads",
+        "filesystem_uuids": {device_id: "44444444-4444-4444-8444-444444444444"},
+    }
+
+    entity = register_completed_storage(session, plan, result)
+    session.flush()
+
+    assert entity is not None
+    landing = session.scalar(
+        select(StorageBackend).where(StorageBackend.storage_entity_id == entity.id)
+    )
+    assert landing is not None
+    assert landing.storage_group_id == group.id
+    assert landing.role == "landing"
+    assert landing.namespace_path == "/data/downloads"
+    assert landing.lifecycle_state == "active"
+    assert disk.lifecycle_state == "managed_member"
+    event = session.scalar(
+        select(StorageLifecycleEvent).where(
+            StorageLifecycleEvent.event_type == "landing_backend_activated"
+        )
+    )
+    assert event is not None
+    assert event.storage_backend_id == landing.id
+
+    replay = register_completed_storage(session, plan, result)
+    session.flush()
+    assert replay is not None and replay.id == entity.id
+    assert len(session.scalars(select(StorageBackend)).all()) == 2
+    assert len(session.scalars(select(StorageLifecycleEvent)).all()) == 1
+
+
+def test_cache_registration_rejects_stale_backing_activation_before_creating_entity(
+    session: Session,
+) -> None:
+    device = _path("hba-cache", "/dev/sdd", wwid="naa.600a098000stale")
+    group = StorageGroup(name="Media Library", namespace_path="/data", purpose="media")
+    session.add(group)
+    session.flush()
+    backing = StorageBackend(
+        storage_group_id=group.id,
+        stable_identity="zfs:media",
+        namespace_path="/data",
+        role="data",
+        lifecycle_state="preferred_write",
+        config_json={"activation": {"plan_sha256": "b" * 64}},
+    )
+    session.add(backing)
+    session.flush()
+    result = register_completed_storage(
+        session,
+        {
+            "storage": {
+                "topology": "cache",
+                "selected_devices": [device],
+                "cache_policy": {
+                    "backing_storage_group_id": group.id,
+                    "backing_backend_id": backing.id,
+                    "backing_namespace": "/data",
+                    "backing_activation_plan_sha256": "a" * 64,
+                    "landing_path": "/data/downloads",
+                    "torrent_completion": "copy_then_retain_until_seeding_completes",
+                    "usenet_completion": "verify_then_move_to_media",
+                },
+            }
+        },
+        {"mountpoint": "/data/downloads"},
+    )
+    assert result is None
+    assert session.scalar(select(StorageEntity)) is None
 
 
 def test_mergerfs_expansion_preserves_group_entity_and_merges_presentation_alias(

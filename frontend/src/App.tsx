@@ -36,6 +36,7 @@ import type {
   StorageRole,
   StorageExpansionSelection,
   StorageInventory,
+  StorageGroupDocument,
   StorageOperationProgress,
   WizardDocument,
   WizardMode,
@@ -204,6 +205,7 @@ export default function App() {
   const [storageRole, setStorageRole] = useState<StorageRole>("individual");
   const [mergerFsInventory, setMergerFsInventory] = useState<MergerFsInventory | null>(null);
   const [storageInventory, setStorageInventory] = useState<StorageInventory | null>(null);
+  const [storageGroups, setStorageGroups] = useState<StorageGroupDocument[]>([]);
   const [expansionSelection, setExpansionSelection] = useState<StorageExpansionSelection | null>(null);
   const [mergerFsTarget, setMergerFsTarget] = useState("");
   const [mergerFsName, setMergerFsName] = useState("combined-storage");
@@ -233,6 +235,9 @@ export default function App() {
   const [mediaServers, setMediaServers] = useState<string[]>(["Plex"]);
   const [torrentDownloads, setTorrentDownloads] = useState(true);
   const [usenetDownloads, setUsenetDownloads] = useState(true);
+  const [cacheBackingGroupId, setCacheBackingGroupId] = useState("");
+  const [cacheTorrentCompletion, setCacheTorrentCompletion] = useState<"copy_then_retain_until_seeding_completes" | "copy_then_retain_until_manual_release">("copy_then_retain_until_seeding_completes");
+  const [cacheUsenetCompletion, setCacheUsenetCompletion] = useState<"verify_then_move_to_media" | "copy_then_keep_source">("verify_then_move_to_media");
   const [newLibraryName, setNewLibraryName] = useState("");
   const [newLibraryType, setNewLibraryType] = useState("series");
   const [newLibraryApp, setNewLibraryApp] = useState("Sonarr");
@@ -340,6 +345,13 @@ export default function App() {
     [storageInventory],
   );
   const selectedDrives = useMemo(() => drives.filter((drive) => selectedDriveIds.includes(drive.id)), [drives, selectedDriveIds]);
+  const eligibleCacheBackingGroups = useMemo(() => storageGroups.filter((group) => {
+    if (group.state !== "active" || group.namespace?.available !== true) return false;
+    const hasWritableData = group.backends.some((backend) => backend.role === "data" && ["active", "preferred_write"].includes(backend.lifecycle_state) && backend.namespace_path === group.namespace_path);
+    const hasLanding = group.backends.some((backend) => ["cache", "landing"].includes(backend.role) && !["retired", "reuse_ready"].includes(backend.lifecycle_state));
+    return hasWritableData && !hasLanding;
+  }), [storageGroups]);
+  const cacheBackingGroup = eligibleCacheBackingGroups.find((group) => group.id === cacheBackingGroupId) ?? null;
   const recommendation = useMemo(() => recommendStorage({
     drives: selectedDrives,
     purpose,
@@ -382,13 +394,14 @@ export default function App() {
   }
 
   async function loadAuthenticatedData(firstRun: boolean): Promise<void> {
-    const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundWizards, foundOperations, foundIntegrations, foundFleetSettings] = await Promise.all([
+    const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundStorageGroups, foundWizards, foundOperations, foundIntegrations, foundFleetSettings] = await Promise.all([
         api.onboarding(),
         api.networkInterfaces(),
         api.networkingStatus(),
         api.latestHardwareSnapshot(),
         api.mergerfsInventory(),
         api.storageInventory(),
+        api.storageGroups(),
         api.listWizards(),
         api.listOperations(),
         api.integrations(),
@@ -483,6 +496,7 @@ export default function App() {
     setSnapshot(latestSnapshot);
     setMergerFsInventory(foundMergerFs);
     setStorageInventory(foundStorage);
+    setStorageGroups(foundStorageGroups);
     setIntegrations(foundIntegrations);
     if (foundFleetSettings) {
       setFleetSettings(foundFleetSettings);
@@ -514,6 +528,7 @@ export default function App() {
         const recoveredStorage = objectValue(recoveredWizard.answers.storage);
         const recoveredAccount = objectValue(recoveredStorage.service_account);
         const recoveredDownloads = objectValue(recoveredStorage.downloads);
+        const recoveredCachePolicy = objectValue(recoveredStorage.cache_policy);
         const recoveredTopology = stringValue(recoveredStorage.topology, "individual");
         setWizard(recoveredWizard);
         setPlan(recoveredPlan);
@@ -530,6 +545,9 @@ export default function App() {
         setLibraries(libraryChoices(recoveredStorage.libraries));
         setTorrentDownloads(booleanValue(recoveredDownloads.torrents, true));
         setUsenetDownloads(booleanValue(recoveredDownloads.usenet, true));
+        setCacheBackingGroupId(stringValue(recoveredCachePolicy.backing_storage_group_id, ""));
+        setCacheTorrentCompletion(recoveredCachePolicy.torrent_completion === "copy_then_retain_until_manual_release" ? "copy_then_retain_until_manual_release" : "copy_then_retain_until_seeding_completes");
+        setCacheUsenetCompletion(recoveredCachePolicy.usenet_completion === "copy_then_keep_source" ? "copy_then_keep_source" : "verify_then_move_to_media");
         setServiceUsername(stringValue(recoveredAccount.username, "media"));
         setServiceCredentialMode(recoveredAccount.credential_mode === "provide_separately" ? "provide" : "generate");
         setStorageOperation(recoverableStorage);
@@ -776,6 +794,11 @@ export default function App() {
       libraries,
       media_servers: mediaServers,
       downloads: { torrents: torrentDownloads, usenet: usenetDownloads },
+      cache_policy: {
+        backing_storage_group_id: cacheBackingGroupId,
+        torrent_completion: cacheTorrentCompletion,
+        usenet_completion: cacheUsenetCompletion,
+      },
       service_username: serviceUsername,
       account_mode: serviceCredentialMode,
       connectivity: {
@@ -1086,9 +1109,12 @@ export default function App() {
         if (selectedDrives.some((drive) => isUsbRaidOverride(drive, storageRole)) && !exactConsentAccepted(usbOverrideAck)) {
           throw new Error('Type the exact words “I AGREE” to override the USB array safety policy.');
         }
+        if (storageRole === "download-cache" && !cacheBackingGroup) {
+          throw new Error("Choose an available media Storage Group for completed downloads.");
+        }
       } else if (activeStep === 6) {
         const selected = libraries.filter((library) => library.selected);
-        if (!selected.length) throw new Error("Select at least one library.");
+        if (storageRole !== "download-cache" && !selected.length) throw new Error("Select at least one library.");
       } else if (activeStep === 7) {
         validateServiceAccount();
       } else if (activeStep === 8) {
@@ -1121,6 +1147,11 @@ export default function App() {
             destructive_write_read: testDestructive,
           },
           downloads: { torrents: torrentDownloads, usenet: usenetDownloads },
+          ...(topology === "cache" ? { cache_policy: {
+            backing_storage_group_id: cacheBackingGroupId,
+            torrent_completion: cacheTorrentCompletion,
+            usenet_completion: cacheUsenetCompletion,
+          } } : {}),
           ...(topology === "mergerfs" ? { mergerfs: mergerFsAnswer() } : {}),
           ...(expansionSelection ? { expansion: expansionSelection } : {}),
           ...(topology === "zfs" || topology === "raid" || topology === "snapraid" || topology === "mixed" ? { layout_options: layoutOptionsAnswer(topology) } : {}),
@@ -1134,12 +1165,14 @@ export default function App() {
           } } : {}),
           ...(usbOverrideAck ? { advanced_usb_acknowledgement: usbOverrideAck } : {}),
         });
-        const storageRoot = expansionSelection?.kind === "add_zfs_vdev"
+        const storageRoot = topology === "cache" && cacheBackingGroup
+          ? cacheBackingGroup.namespace_path
+          : expansionSelection?.kind === "add_zfs_vdev"
           && expansionSelection.target?.provider === "zfs"
           ? expansionSelection.target.mountpoint
           : "/data";
         const layoutUpdated = await api.saveWizardStep(storageUpdated, "layout", {
-          work_path: `${storageRoot}/work`,
+          work_path: topology === "cache" ? `${storageRoot}/downloads/work` : `${storageRoot}/work`,
           downloads_path: `${storageRoot}/downloads`,
           media_path: `${storageRoot}/media`,
         });
@@ -1306,6 +1339,9 @@ export default function App() {
     setMediaServers(["Plex"]);
     setTorrentDownloads(true);
     setUsenetDownloads(true);
+    setCacheBackingGroupId("");
+    setCacheTorrentCompletion("copy_then_retain_until_seeding_completes");
+    setCacheUsenetCompletion("verify_then_move_to_media");
     setNewLibraryName("");
     setNewLibraryType("series");
     setNewLibraryApp("Sonarr");
@@ -1402,6 +1438,7 @@ export default function App() {
         const storedTests = objectValue(storedStorage.intake_tests);
         const storedAccount = objectValue(storedStorage.service_account);
         const storedDownloads = objectValue(storedStorage.downloads);
+        const storedCachePolicy = objectValue(storedStorage.cache_policy);
         const storedConnectivity = objectValue(refreshed.wizard.answers.connectivity);
         const services = Array.isArray(storedConnectivity.services) ? storedConnectivity.services.map(objectValue) : [];
         const protocols = new Set(services.map((service) => stringValue(service.protocol, "")));
@@ -1429,6 +1466,9 @@ export default function App() {
         setStorageRole(storedTopology === "cache" ? "download-cache" : isStorageRole(storedTopology) ? storedTopology : "individual");
         setTorrentDownloads(booleanValue(storedDownloads.torrents, true));
         setUsenetDownloads(booleanValue(storedDownloads.usenet, true));
+        setCacheBackingGroupId(stringValue(storedCachePolicy.backing_storage_group_id, ""));
+        setCacheTorrentCompletion(storedCachePolicy.torrent_completion === "copy_then_retain_until_manual_release" ? "copy_then_retain_until_manual_release" : "copy_then_retain_until_seeding_completes");
+        setCacheUsenetCompletion(storedCachePolicy.usenet_completion === "copy_then_keep_source" ? "copy_then_keep_source" : "verify_then_move_to_media");
         setServiceUsername(stringValue(storedAccount.username, "media"));
         setServiceCredentialMode(storedAccount.credential_mode === "provide_separately" ? "provide" : "generate");
         setConnectivitySkipped(booleanValue(storedConnectivity.skip, false));
@@ -1506,6 +1546,10 @@ export default function App() {
       const downloads = objectValue(draft.downloads);
       setTorrentDownloads(booleanValue(downloads.torrents, true));
       setUsenetDownloads(booleanValue(downloads.usenet, true));
+      const cachePolicy = objectValue(draft.cache_policy);
+      setCacheBackingGroupId(stringValue(cachePolicy.backing_storage_group_id, ""));
+      setCacheTorrentCompletion(cachePolicy.torrent_completion === "copy_then_retain_until_manual_release" ? "copy_then_retain_until_manual_release" : "copy_then_retain_until_seeding_completes");
+      setCacheUsenetCompletion(cachePolicy.usenet_completion === "copy_then_keep_source" ? "copy_then_keep_source" : "verify_then_move_to_media");
       setServiceUsername(stringValue(draft.service_username, "media"));
       setServiceCredentialMode(draft.account_mode === "provide" ? "provide" : "generate");
       const connectivity = objectValue(draft.connectivity);
@@ -1633,6 +1677,10 @@ export default function App() {
       }
       if (effectiveAction === "import" || effectiveAction === "test") setPreserveData(true);
       if (effectiveAction === "configure" || effectiveAction === "cache" || effectiveAction === "expand") setPreserveData(false);
+      if (effectiveAction === "cache") {
+        setCacheBackingGroupId((current) => eligibleCacheBackingGroups.some((group) => group.id === current) ? current : eligibleCacheBackingGroups[0]?.id ?? "");
+        setConnectivitySkipped(true);
+      }
       if (effectiveAction !== "test") {
         const plannedTopology = expansion?.configuration.topology;
         setStorageRole(
@@ -1665,14 +1713,16 @@ export default function App() {
       : "/data";
     try {
       if (wizard) await api.completeWizard(wizard.id);
-      const [found, foundMergerFs, foundStorage] = await Promise.all([
+      const [found, foundMergerFs, foundStorage, foundGroups] = await Promise.all([
         api.discoverHardware(),
         api.mergerfsInventory(),
         api.storageInventory(),
+        api.storageGroups(),
       ]);
       setSnapshot(found);
       setMergerFsInventory(foundMergerFs);
       setStorageInventory(foundStorage);
+      setStorageGroups(foundGroups);
       if (wizard) setSavedWizards((items) => items.filter((item) => item.id !== wizard.id));
       resetStorageDraftState();
       setStorageOperation(null);
@@ -2103,6 +2153,17 @@ export default function App() {
           </div>
         </Card>}
         {mode === "guided" && storageRole === "snapraid" && <Card title="Media protection" description="Hoardarr combines the data drives into one media folder and keeps parity on the largest selected drive or drives."><Notice tone="info" title={recommendation.protection}>{recommendation.expansion}</Notice><details><summary>Technical details</summary><p>Uses mergerFS with {snapraidParityCount} SnapRAID parity drive{snapraidParityCount === 1 ? "" : "s"}. The first parity sync runs during setup.</p></details></Card>}
+        {storageRole === "download-cache" && <Card title="Where should completed downloads go?" description="The fast drive handles downloads and temporary work. Hoardarr binds it beneath an existing managed media location without replacing that media storage.">
+          {eligibleCacheBackingGroups.length ? <div className="form-grid two-columns">
+            <Field label="Media Storage Group" source="Verified managed storage"><select aria-label="Media Storage Group" value={cacheBackingGroupId} onChange={(event) => { setCacheBackingGroupId(event.target.value); setPlan(null); }}><option value="">Choose storage</option>{eligibleCacheBackingGroups.map((group) => <option key={group.id} value={group.id}>{group.name} — {group.namespace_path}</option>)}</select></Field>
+            <Field label="Fast download path" source="Derived by Hoardarr"><input value={cacheBackingGroup ? `${cacheBackingGroup.namespace_path}/downloads` : "Choose a Storage Group"} readOnly aria-readonly="true" /></Field>
+          </div> : <Notice tone="warning" title="No verified media Storage Group is available">Create or activate a Storage Group with one verified writable data backend first. Hoardarr will not attach a fast tier to an arbitrary folder or hide an existing mount.</Notice>}
+          <Notice tone="info" title="Existing media remains unchanged">The media pool, filesystem, libraries, share definitions, and application paths stay in place. Only the <code>downloads</code> subtree becomes the fast landing tier.</Notice>
+          {mode === "guided" ? <dl className="settings-list"><div><dt aria-hidden="true">✓</dt><dd>Keep completed torrents on the fast tier while seeding; copy verified media into the selected Storage Group</dd></div><div><dt aria-hidden="true">✓</dt><dd>Verify completed Usenet downloads, then move them into media storage</dd></div></dl> : <div className="form-grid two-columns">
+            <Field label="Completed torrents" source="Advanced selection"><select value={cacheTorrentCompletion} onChange={(event) => { setCacheTorrentCompletion(event.target.value as typeof cacheTorrentCompletion); setPlan(null); }}><option value="copy_then_retain_until_seeding_completes">Copy to media; retain until seeding completes</option><option value="copy_then_retain_until_manual_release">Copy to media; retain until manually released</option></select></Field>
+            <Field label="Completed Usenet downloads" source="Advanced selection"><select value={cacheUsenetCompletion} onChange={(event) => { setCacheUsenetCompletion(event.target.value as typeof cacheUsenetCompletion); setPlan(null); }}><option value="verify_then_move_to_media">Verify, then move to media</option><option value="copy_then_keep_source">Copy to media and keep landing copy</option></select></Field>
+          </div>}
+        </Card>}
         {mode === "advanced" && (storageRole === "zfs" || storageRole === "raid" || storageRole === "snapraid" || storageRole === "mixed") && <Card title="Array settings" description="Choose the exact layout that will appear in the immutable review plan.">
           <div className="form-grid three-columns advanced-format-grid">
             <Field label="Storage name" source="Advanced selection"><input value={arrayName} onChange={(event) => { setArrayName(event.target.value.toLowerCase()); setPlan(null); }} /></Field>
@@ -2178,6 +2239,15 @@ export default function App() {
   }
 
   function renderLibraries() {
+    if (storageRole === "download-cache") {
+      const root = cacheBackingGroup?.namespace_path ?? "/data";
+      return <>
+        <Card title="Download folders" description="These real paths will live on the selected fast drive beneath the existing Storage Group namespace.">
+          <div className="download-layout"><label><input type="checkbox" checked={torrentDownloads} onChange={(event) => setTorrentDownloads(event.target.checked)} /><span><strong>Torrents</strong><code>{root}/downloads/torrents/incomplete</code><code>{root}/downloads/torrents/complete</code></span><SourceBadge>Hoardarr recommended</SourceBadge></label><label><input type="checkbox" checked={usenetDownloads} onChange={(event) => setUsenetDownloads(event.target.checked)} /><span><strong>Usenet</strong><code>{root}/downloads/usenet/incomplete</code><code>{root}/downloads/usenet/complete</code></span><SourceBadge>Hoardarr recommended</SourceBadge></label></div>
+        </Card>
+        <Notice tone="info" title="Your media libraries stay on their current storage">Hoardarr does not recreate Movies, TV, SMB, NFS, Plex, or ARR paths during this operation. Completed content follows the reviewed movement policy into <code>{root}/media</code>.</Notice>
+      </>;
+    }
     return (
       <>
         <Card title="Which media server do you use?" description="This keeps folder names and access guidance aligned with your media applications. You can select more than one."><div className="check-stack">{["Plex", "Jellyfin", "Emby"].map((server) => <label key={server}><input type="checkbox" checked={mediaServers.includes(server)} onChange={() => setMediaServers((values) => checkboxToggle(values, server))} /><span><strong>{server}</strong><small>Use the same stable <code>/data/media</code> library root.</small></span>{server === "Plex" && <SourceBadge>Common choice</SourceBadge>}</label>)}</div></Card>
@@ -2187,7 +2257,7 @@ export default function App() {
         </Card>
         <Card title="How do you download?" description="Downloader APIs can prefill these answers during app onboarding. They stay visible and can be unchecked.">
           <div className="download-layout"><label><input type="checkbox" checked={torrentDownloads} onChange={(event) => setTorrentDownloads(event.target.checked)} /><span><strong>Torrents</strong><code>/data/downloads/torrents/incomplete</code><code>/data/downloads/torrents/complete</code></span><SourceBadge>Hoardarr recommended</SourceBadge></label><label><input type="checkbox" checked={usenetDownloads} onChange={(event) => setUsenetDownloads(event.target.checked)} /><span><strong>Usenet</strong><code>/data/downloads/usenet/incomplete</code><code>/data/downloads/usenet/complete</code></span><SourceBadge>Hoardarr recommended</SourceBadge></label></div>
-          {storageRole === "download-cache" ? <Notice tone="warning" title="Downloads stay fast while media moves safely">Completed torrents remain on the fast drive while seeding, with a copy imported to media. Usenet repair and unpack work stays on the fast drive before the completed file moves to media.</Notice> : <Notice tone="info" title="Completed files can move without another copy">When downloads and libraries share this filesystem, Hoardarr uses hardlinks where the application supports them. Cross-filesystem imports use a real copy or move.</Notice>}
+          <Notice tone="info" title="Completed files can move without another copy">When downloads and libraries share this filesystem, Hoardarr uses hardlinks where the application supports them. Cross-filesystem imports use a real copy or move.</Notice>
         </Card>
       </>
     );
@@ -2272,8 +2342,8 @@ export default function App() {
         {planNeedsApproval ? <Notice tone="danger" title="ARE YOU SURE?">{String(planRisk.message ?? "The plan contains destructive storage actions.")} Nothing has been changed yet.</Notice> : planDeclaredNonDestructive ? <Notice tone="success" title="No destructive approval is required">The backend explicitly marked this plan as non-destructive.</Notice> : <Notice tone="warning" title="Risk declaration is incomplete">The plan did not explicitly declare both destructive risk and approval status. Treat any undeclared action conservatively and do not apply it.</Notice>}
         <Card title="Exact drives in this plan" description="Verify device, model, serial or WWN, capacity, connection, and physical location—not just a friendly label."><SelectedDriveSummary drives={selectedDrives} detailed /></Card>
         <div className="review-grid">
-          <Card title="Storage"><ReviewLine label="Setup" value={storageRoleLabel(storageRole)} />{mode === "guided" && <><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Drive failure" value={recommendation.protection} /></>}{storageRole === "mergerfs" && <ReviewLine label="Combined storage" value={mergerFsTarget === "create" ? `${mergerFsName} (${mergerFsMountpoint})` : mergerFsInventory?.items.find((item) => item.id === mergerFsTarget)?.mountpoint ?? "Not selected"} />}<ReviewLine label="Filesystem" value={reviewFilesystem} /><ReviewLine label="Existing data" value={preserveData ? "Preserve/import" : "Replace only after final consent"} /><details><summary>Technical details</summary><ReviewLine label="Backend topology" value={storageRole} /><ReviewLine label="Partitioning" value={preserveData ? "Preserve existing" : storageRole === "zfs" ? "Whole-device ZFS vdevs; no partition creation planned" : "GPT, 1 MiB aligned"} /></details></Card>
-          {storageRole !== "test" && <Card title="Libraries and downloads"><ReviewLine label="Media server" value={mediaServers.join(", ") || "None selected"} /><ReviewLine label="Libraries" value={libraries.filter((library) => library.selected).map((library) => library.label).join(", ")} /><ReviewLine label="Torrents" value={torrentDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Usenet" value={usenetDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Media path" value="/data/media" /></Card>}
+          <Card title="Storage"><ReviewLine label="Setup" value={storageRoleLabel(storageRole)} />{mode === "guided" && <><ReviewLine label="Raw capacity" value={humanCapacity(recommendation.rawCapacityBytes)} /><ReviewLine label="Estimated usable" value={recommendation.usableCapacityBytes === null ? "Not calculated" : humanCapacity(recommendation.usableCapacityBytes)} /><ReviewLine label="Drive failure" value={recommendation.protection} /></>}{storageRole === "mergerfs" && <ReviewLine label="Combined storage" value={mergerFsTarget === "create" ? `${mergerFsName} (${mergerFsMountpoint})` : mergerFsInventory?.items.find((item) => item.id === mergerFsTarget)?.mountpoint ?? "Not selected"} />}{storageRole === "download-cache" && <><ReviewLine label="Backing Storage Group" value={cacheBackingGroup?.name ?? "Not selected"} /><ReviewLine label="Fast landing path" value={cacheBackingGroup ? `${cacheBackingGroup.namespace_path}/downloads` : "Not selected"} mono /></>}<ReviewLine label="Filesystem" value={reviewFilesystem} /><ReviewLine label="Existing data" value={preserveData ? "Preserve/import" : "Replace only after final consent"} /><details><summary>Technical details</summary><ReviewLine label="Backend topology" value={storageRole} /><ReviewLine label="Partitioning" value={preserveData ? "Preserve existing" : storageRole === "zfs" ? "Whole-device ZFS vdevs; no partition creation planned" : "GPT, 1 MiB aligned"} /></details></Card>
+          {storageRole !== "test" && <Card title="Libraries and downloads">{storageRole === "download-cache" ? <><ReviewLine label="Existing libraries" value="Unchanged" /><ReviewLine label="Torrent completion" value={cacheTorrentCompletion === "copy_then_retain_until_seeding_completes" ? "Copy to media; retain until seeding completes" : "Manual release"} /><ReviewLine label="Usenet completion" value={cacheUsenetCompletion === "verify_then_move_to_media" ? "Verify, then move to media" : "Copy to media and keep landing copy"} /><ReviewLine label="Media path" value={`${cacheBackingGroup?.namespace_path ?? "/data"}/media`} /></> : <><ReviewLine label="Media server" value={mediaServers.join(", ") || "None selected"} /><ReviewLine label="Libraries" value={libraries.filter((library) => library.selected).map((library) => library.label).join(", ")} /><ReviewLine label="Torrents" value={torrentDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Usenet" value={usenetDownloads ? "Configured" : "Not configured"} /><ReviewLine label="Media path" value="/data/media" /></>}</Card>}
           {storageRole !== "test" && <Card title="File access"><ReviewLine label="Protocol" value="SMB" /><ReviewLine label="Application identity" value={serviceUsername} /><ReviewLine label="Application access" value="Modify" /><ReviewLine label="Anonymous" value="No access" /></Card>}
           {storageRole !== "test" && <Card title="Storage Access"><ReviewLine label="When" value={connectivitySkipped ? "Set up later" : "Apply with storage"} /><ReviewLine label="Methods" value={connectivitySkipped ? "None" : [smbEnabled && "SMB", nfsEnabled && "NFS", iscsiEnabled && "iSCSI", fcoeEnabled && "FCoE"].filter(Boolean).join(", ")} /><ReviewLine label="Name" value={connectivitySkipped ? "—" : shareName} /><ReviewLine label="Path" value={connectivitySkipped ? "—" : sharePath} mono /></Card>}
           <Card title="Network"><ReviewLine label="Connection" value={networkMode} /><ReviewLine label="Selected ports" value={selectedInterfaceSummary} mono /><ReviewLine label="LLDP" value={lldp ? lldpMode === "rx_tx" ? "Receive + transmit" : "Receive only" : "Disabled"} /><ReviewLine label="CDP" value={cdpReceive ? cdpSmart ? "Listen + smart transmit" : "Listen only" : "Disabled"} /><ReviewLine label="Plan status" value={networkPlan ? networkPlan.plan.apply_available ? "Preview reports apply available" : "Review-only — apply blocked" : "Not previewed"} />{networkPlan && <ReviewLine label="Plan SHA-256" value={networkPlan.sha256} mono />}{networkPlan?.plan.blockers.map((blocker) => <Notice key={blocker.code} tone="warning" title={blocker.code}>{blocker.message}</Notice>)}</Card>

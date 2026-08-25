@@ -22,6 +22,8 @@ from hoardarr.db.models import (
     StorageBackend,
     StorageController,
     StorageEntity,
+    StorageGroup,
+    StorageLifecycleEvent,
     StoragePath,
     StorageRedundancyEvent,
     StorageVolume,
@@ -849,6 +851,39 @@ def register_completed_storage(
         and isinstance(member_mountpoints.get(device_id), str)
         else mountpoint
     )
+    cache_context: tuple[Mapping[str, Any], StorageGroup, StorageBackend, str] | None = None
+    if topology == "cache":
+        policy = storage.get("cache_policy")
+        if not isinstance(policy, Mapping):
+            return None
+        group_id = policy.get("backing_storage_group_id")
+        backing_backend_id = policy.get("backing_backend_id")
+        landing_path = policy.get("landing_path")
+        group = session.get(StorageGroup, group_id) if isinstance(group_id, str) else None
+        backing = (
+            session.get(StorageBackend, backing_backend_id)
+            if isinstance(backing_backend_id, str)
+            else None
+        )
+        backing_activation = (
+            backing.config_json.get("activation") if backing is not None else None
+        )
+        if (
+            group is None
+            or group.state != "active"
+            or backing is None
+            or backing.storage_group_id != group.id
+            or backing.role != "data"
+            or backing.lifecycle_state not in {"active", "preferred_write"}
+            or not isinstance(backing_activation, Mapping)
+            or backing_activation.get("plan_sha256")
+            != policy.get("backing_activation_plan_sha256")
+            or not isinstance(landing_path, str)
+            or landing_path != mountpoint
+            or landing_path != f"{group.namespace_path.rstrip('/')}/downloads"
+        ):
+            return None
+        cache_context = (policy, group, backing, landing_path)
     try:
         presentation_device = str(device.get("kernel_path") or device.get("path") or "Not reported")
         if (
@@ -919,6 +954,79 @@ def register_completed_storage(
             storage_kind=str(storage.get("topology")),
         )
         entity.config_json = {**entity.config_json, "device_mountpoint": device_mountpoint}
+        if topology == "cache":
+            if cache_context is None:  # defensive: validated before entity creation
+                return None
+            policy, group, backing, landing_path = cache_context
+            backend = session.scalar(
+                select(StorageBackend).where(StorageBackend.storage_entity_id == entity.id)
+            )
+            if backend is None:
+                backend = StorageBackend(
+                    storage_group_id=group.id,
+                    storage_entity_id=entity.id,
+                    stable_identity=f"storage:{entity.stable_identity}",
+                    namespace_path=landing_path,
+                    role="landing",
+                    lifecycle_state="active",
+                    config_json={
+                        "activation": {
+                            "plan_sha256": document_hash(
+                                {
+                                    "storage_entity_id": entity.id,
+                                    "cache_policy": dict(policy),
+                                    "mountpoint": mountpoint,
+                                }
+                            ),
+                            "verified_at": datetime.now(UTC).isoformat(),
+                            "evidence": {
+                                "path": landing_path,
+                                "exact_mount": True,
+                                "identity_match": True,
+                                "identity_basis": "completed immutable storage execution",
+                            },
+                        },
+                        "cache_policy": dict(policy),
+                    },
+                )
+                session.add(backend)
+                session.flush()
+                session.add(
+                    StorageLifecycleEvent(
+                        storage_group_id=group.id,
+                        storage_backend_id=backend.id,
+                        physical_disk_id=None,
+                        event_type="landing_backend_activated",
+                        previous_state=None,
+                        resulting_state="active",
+                        actor_type="service",
+                        actor_id="hoardarr-worker",
+                        reason=(
+                            "Download storage completed its immutable build and mount "
+                            "verification."
+                        ),
+                        details_json={
+                            "landing_path": landing_path,
+                            "backing_backend_id": backing.id,
+                            "storage_entity_id": entity.id,
+                        },
+                    )
+                )
+            entity.config_json = {
+                **entity.config_json,
+                "cache_policy": dict(policy),
+                "storage_group_id": group.id,
+            }
+            disk = session.scalar(
+                select(PhysicalDisk).where(PhysicalDisk.stable_identity == device_id)
+            )
+            if disk is not None:
+                disk.lifecycle_state = "managed_member"
+                disk.metadata_json = {
+                    **disk.metadata_json,
+                    "managed_storage_entity_id": entity.id,
+                    "managed_storage_kind": "cache",
+                }
         return entity
     except RedundancyError:
         # Locally attached disks without an authoritative WWID remain usable;

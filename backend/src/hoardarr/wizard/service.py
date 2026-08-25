@@ -19,6 +19,8 @@ from hoardarr.db.models import (
     IntegrationConnection,
     Plan,
     PlanApproval,
+    StorageBackend,
+    StorageGroup,
     WizardSession,
     new_id,
     utc_now,
@@ -42,6 +44,11 @@ MUTABLE_STATUSES = frozenset({"draft", "review"})
 
 DEFAULT_LAYOUT: dict[str, str] = {
     "work_path": "/data/work",
+    "downloads_path": "/data/downloads",
+    "media_path": "/data/media",
+}
+CACHE_LAYOUT: dict[str, str] = {
+    "work_path": "/data/downloads/work",
     "downloads_path": "/data/downloads",
     "media_path": "/data/media",
 }
@@ -214,7 +221,7 @@ def _paths_overlap(first: str, second: str) -> bool:
     )
 
 
-def _validate_layout(value: Any, *, mode: str) -> dict[str, str]:
+def _validate_layout(value: Any, *, mode: str, topology: str | None = None) -> dict[str, str]:
     if not isinstance(value, Mapping):
         _validation("layout", "must be an object")
     allowed = frozenset(DEFAULT_LAYOUT)
@@ -228,12 +235,22 @@ def _validate_layout(value: Any, *, mode: str) -> dict[str, str]:
         name: _validate_path(value[name], field=f"layout.{name}", protect_host_paths=True)
         for name in DEFAULT_LAYOUT
     }
-    if mode in GUIDED_MODES and layout != DEFAULT_LAYOUT:
+    guided_layout = CACHE_LAYOUT if topology == "cache" else DEFAULT_LAYOUT
+    if mode in GUIDED_MODES and layout != guided_layout:
         _validation("layout", "custom paths require Advanced mode")
     names = tuple(layout)
     for index, first_name in enumerate(names):
         for second_name in names[index + 1 :]:
-            if _paths_overlap(layout[first_name], layout[second_name]):
+            cache_work_inside_downloads = (
+                topology == "cache"
+                and {first_name, second_name} == {"work_path", "downloads_path"}
+                and PurePosixPath(layout["downloads_path"])
+                in PurePosixPath(layout["work_path"]).parents
+            )
+            if (
+                _paths_overlap(layout[first_name], layout[second_name])
+                and not cache_work_inside_downloads
+            ):
                 _validation(
                     "layout",
                     f"{first_name} and {second_name} must be separate, non-overlapping paths",
@@ -482,7 +499,11 @@ def update_step(
             _validation(exc.field, exc.message)
         next_step = "layout"
     elif step == "layout":
-        normalized = _validate_layout(detached, mode=wizard.mode)
+        storage_answers = wizard.answers_json.get("storage", {})
+        topology = (
+            storage_answers.get("topology") if isinstance(storage_answers, Mapping) else None
+        )
+        normalized = _validate_layout(detached, mode=wizard.mode, topology=topology)
         next_step = "applications"
     elif step == "applications":
         normalized = _validate_applications(detached)
@@ -571,6 +592,14 @@ def _directory_actions(
             (library["path"], f"library_{index + 1}")
             for index, library in enumerate(storage_plan["libraries"])
         ]
+        if storage_plan.get("topology") == "cache":
+            paths.extend(
+                [
+                    (layout["work_path"], "download_work"),
+                    (f"{layout['work_path']}/torrents", "torrent_work"),
+                    (f"{layout['work_path']}/usenet", "usenet_work"),
+                ]
+            )
         for transport in ("torrents", "usenet"):
             download = storage_plan["downloads"][transport]
             if download["enabled"]:
@@ -652,7 +681,7 @@ def _storage_apply_blockers(storage_plan: Mapping[str, Any] | None) -> list[dict
                 ),
             }
         )
-    elif topology == "cache":
+    elif topology == "cache" and not isinstance(storage_plan.get("cache_policy"), Mapping):
         blockers.append(
             {
                 "code": "cache_policy_required",
@@ -674,6 +703,78 @@ def _storage_apply_blockers(storage_plan: Mapping[str, Any] | None) -> list[dict
             }
         )
     return blockers
+
+
+def _bind_cache_policy_to_managed_storage(
+    session: Session, storage_plan: dict[str, Any]
+) -> None:
+    """Bind a cache plan to one verified writable media namespace.
+
+    The browser supplies only the chosen Storage Group and movement choices. The
+    server derives the backing backend and landing path from current managed
+    state so an arbitrary path cannot be smuggled into a destructive plan.
+    """
+
+    if storage_plan.get("topology") != "cache":
+        return
+    requested = storage_plan.get("cache_policy")
+    if not isinstance(requested, Mapping):
+        _validation("storage.cache_policy", "choose a backing media Storage Group")
+    group_id = requested.get("backing_storage_group_id")
+    group = session.get(StorageGroup, group_id) if isinstance(group_id, str) else None
+    if group is None or group.state != "active":
+        _validation(
+            "storage.cache_policy.backing_storage_group_id",
+            "must identify an active managed Storage Group",
+        )
+    backends = list(
+        session.scalars(
+            select(StorageBackend).where(
+                StorageBackend.storage_group_id == group.id,
+                StorageBackend.role == "data",
+                StorageBackend.lifecycle_state.in_(("active", "preferred_write")),
+            )
+        )
+    )
+    verified: list[StorageBackend] = []
+    for backend in backends:
+        activation = (backend.config_json or {}).get("activation")
+        evidence = activation.get("evidence") if isinstance(activation, Mapping) else None
+        if (
+            backend.namespace_path == group.namespace_path
+            and isinstance(evidence, Mapping)
+            and evidence.get("identity_match") is True
+            and evidence.get("exact_mount") is True
+        ):
+            verified.append(backend)
+    preferred = [item for item in verified if item.lifecycle_state == "preferred_write"]
+    backing = preferred[0] if len(preferred) == 1 else verified[0] if len(verified) == 1 else None
+    if backing is None:
+        _validation(
+            "storage.cache_policy.backing_storage_group_id",
+            "requires one exact, activated writable media backend",
+        )
+    existing_landing = session.scalar(
+        select(StorageBackend.id).where(
+            StorageBackend.storage_group_id == group.id,
+            StorageBackend.role.in_(("cache", "landing")),
+            StorageBackend.lifecycle_state.not_in(("retired", "reuse_ready")),
+        )
+    )
+    if existing_landing is not None:
+        _validation(
+            "storage.cache_policy.backing_storage_group_id",
+            "already has configured download storage",
+        )
+    landing_path = posixpath.join(group.namespace_path.rstrip("/"), "downloads")
+    storage_plan["cache_policy"] = {
+        **dict(requested),
+        "backing_storage_group_id": group.id,
+        "backing_backend_id": backing.id,
+        "backing_namespace": group.namespace_path,
+        "backing_activation_plan_sha256": backing.config_json["activation"]["plan_sha256"],
+        "landing_path": landing_path,
+    }
 
 
 def _connectivity_actions(
@@ -801,11 +902,13 @@ def _build_plan_document(
 ) -> dict[str, Any]:
     raw_layout = wizard.answers_json.get("layout")
     raw_applications = wizard.answers_json.get("applications")
+    raw_storage = wizard.answers_json.get("storage")
     if raw_layout is None:
         _validation("layout", "complete the layout step before reviewing the plan")
     if raw_applications is None:
         _validation("applications", "complete the applications step before reviewing the plan")
-    layout = _validate_layout(raw_layout, mode=wizard.mode)
+    topology = raw_storage.get("topology") if isinstance(raw_storage, Mapping) else None
+    layout = _validate_layout(raw_layout, mode=wizard.mode, topology=topology)
     applications = _validate_applications(raw_applications)
     connectivity = _validate_connectivity(
         wizard.answers_json.get("connectivity", {"skip": True, "services": []})
@@ -817,7 +920,6 @@ def _build_plan_document(
         layout,
     )
     storage_plan: dict[str, Any] | None = None
-    raw_storage = wizard.answers_json.get("storage")
     if raw_storage is not None:
         if wizard.hardware_snapshot_id is None:
             _validation("hardware_snapshot_id", "storage plans require a discovery snapshot")
@@ -844,6 +946,7 @@ def _build_plan_document(
                 snapshot_sha256=snapshot.sha256,
                 snapshot_payload=snapshot.payload_json,
             )
+            _bind_cache_policy_to_managed_storage(session, storage_plan)
         except StoragePolicyError as exc:
             _validation(exc.field, exc.message)
     directory_actions = _directory_actions(layout, storage_plan)
@@ -876,7 +979,12 @@ def _build_plan_document(
     }
     if storage_plan is not None:
         document["storage"] = storage_plan
-        presentation_root = posixpath.commonpath(tuple(layout.values()))
+        cache_policy = storage_plan.get("cache_policy")
+        presentation_root = (
+            str(cache_policy["landing_path"])
+            if storage_plan.get("topology") == "cache" and isinstance(cache_policy, Mapping)
+            else posixpath.commonpath(tuple(layout.values()))
+        )
         if presentation_root == "/":
             document["blockers"].append(
                 {
