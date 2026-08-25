@@ -38,6 +38,7 @@ from hoardarr.operations.service import (
 )
 from hoardarr.operations.worker import (
     INTEGRATION_AAD_RECORD_TYPE,
+    reconcile_completed_storage_state,
     recover_abandoned_operations,
     refresh_servarr_activity,
     run_once,
@@ -874,6 +875,69 @@ def test_recovery_reconciles_completed_storage_after_worker_loss(tmp_path: Path)
             "cancellation_too_late",
             "succeeded",
         ]
+
+
+def test_worker_startup_reconciles_succeeded_expansion_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings, session_factory = _runtime(tmp_path)
+    document = {
+        "storage": {
+            "topology": "mergerfs",
+            "expansion": {"kind": "add_mergerfs_member", "storage_group_id": "group-1"},
+        }
+    }
+    plan_sha = document_hash(document)
+    wizard = WizardSession(
+        id="expansion-reconcile-wizard",
+        workflow="storage.add",
+        status="applied",
+        revision=1,
+        current_step="apply",
+    )
+    plan = Plan(
+        id="expansion-reconcile-plan",
+        wizard_session_id=wizard.id,
+        revision=1,
+        kind="storage.add",
+        document_json=document,
+        sha256=plan_sha,
+    )
+    operation = Operation(
+        kind="storage.apply",
+        actor_type="browser_session",
+        actor_id="test-user",
+        resource_type="wizard_session",
+        resource_id=wizard.id,
+        idempotency_key="expansion-reconcile",
+        request_sha256=document_hash({"plan_id": plan.id}),
+        request_json={"plan_id": plan.id},
+        result_json={"mountpoint": "/data"},
+        status="succeeded",
+    )
+    with session_factory() as session, session.begin():
+        session.add(wizard)
+    with session_factory() as session, session.begin():
+        session.add(plan)
+        stored_wizard = session.get(WizardSession, wizard.id)
+        assert stored_wizard is not None
+        stored_wizard.plan_id = plan.id
+    with session_factory() as session, session.begin():
+        session.add(operation)
+    calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def register(
+        _session: object,
+        plan_value: dict[str, Any],
+        result: dict[str, Any],
+        **_kwargs: Any,
+    ):
+        calls.append((plan_value, result))
+        return object()
+
+    monkeypatch.setattr("hoardarr.operations.worker.register_completed_storage", register)
+    assert reconcile_completed_storage_state(session_factory) == 1
+    assert calls == [(document, {"mountpoint": "/data"})]
 
 
 def test_worker_reconciles_access_from_immutable_applied_plan(

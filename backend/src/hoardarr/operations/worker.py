@@ -7,7 +7,7 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -2713,6 +2713,59 @@ def recover_abandoned_operations(
         )
 
 
+def reconcile_completed_storage_state(
+    session_factory: SessionFactory, *, limit: int = 256
+) -> int:
+    """Reapply idempotent logical-storage registration for completed expansions.
+
+    Host storage may have completed before application metadata was committed, or
+    an older expansion may have registered a bind presentation path as a second
+    mergerFS identity. Replaying only succeeded, immutable expansion plans on
+    worker startup repairs that control-plane state without touching storage.
+    """
+
+    with session_factory() as session, session.begin():
+        operations = list(
+            session.scalars(
+                select(Operation)
+                .where(
+                    Operation.kind == "storage.apply",
+                    Operation.status == "succeeded",
+                    Operation.result_json.is_not(None),
+                )
+                .order_by(Operation.created_at.desc())
+                .limit(max(1, min(limit, 1024)))
+            )
+        )
+        snapshot = session.scalar(
+            select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+        )
+        reconciled = 0
+        for operation in reversed(operations):
+            plan_id = operation.request_json.get("plan_id")
+            if not isinstance(plan_id, str) or not isinstance(operation.result_json, dict):
+                continue
+            plan = session.get(Plan, plan_id)
+            if plan is None or document_hash(plan.document_json) != plan.sha256:
+                continue
+            storage = plan.document_json.get("storage")
+            if not isinstance(storage, Mapping) or not isinstance(
+                storage.get("expansion"), Mapping
+            ):
+                continue
+            if (
+                register_completed_storage(
+                    session,
+                    plan.document_json,
+                    operation.result_json,
+                    hardware_snapshot=snapshot.payload_json if snapshot is not None else None,
+                )
+                is not None
+            ):
+                reconciled += 1
+        return reconciled
+
+
 def run_forever(
     *,
     session_factory: SessionFactory,
@@ -2733,6 +2786,17 @@ def run_forever(
     telemetry_service = TelemetryService(settings)
     try:
         recover_abandoned_operations(session_factory=session_factory, settings=settings)
+        try:
+            reconciled_storage = reconcile_completed_storage_state(session_factory)
+            if reconciled_storage:
+                LOGGER.info(
+                    "Reconciled %d completed storage expansion registration(s)",
+                    reconciled_storage,
+                )
+        except Exception as exc:
+            # Metadata repair is idempotent and must not prevent the worker from
+            # processing new durable operations when one legacy row is malformed.
+            LOGGER.warning("Completed storage reconciliation deferred (%s)", type(exc).__name__)
         recovery_interval = 30.0
         next_recovery = time.monotonic() + recovery_interval
         next_servarr_activity = time.monotonic()

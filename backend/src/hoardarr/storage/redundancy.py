@@ -8,17 +8,23 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import delete, exists, select, update
+from sqlalchemy.orm import Session, aliased
 
 from hoardarr.db.models import (
     ConnectivityService,
+    MetricAlert,
+    MetricAlertRule,
     MetricEntity,
+    MetricRollup,
+    MetricSample,
     PhysicalDisk,
+    StorageBackend,
     StorageController,
     StorageEntity,
     StoragePath,
     StorageRedundancyEvent,
+    StorageVolume,
     utc_now,
 )
 from hoardarr.operations.service import document_hash
@@ -432,6 +438,90 @@ def register_single_path_storage(
     return entity
 
 
+def _remove_orphaned_mergerfs_alias(
+    session: Session,
+    *,
+    alias_stable_identity: str,
+    canonical_entity: StorageEntity,
+    canonical_metric: MetricEntity,
+) -> None:
+    """Merge telemetry and remove an unreferenced presentation-path alias.
+
+    Older expansion plans could identify the same mergerFS instance by its bind
+    presentation path. Only aliases with no storage dependencies are eligible;
+    anything that became independently managed is deliberately left untouched.
+    """
+
+    alias = session.scalar(
+        select(StorageEntity).where(StorageEntity.stable_identity == alias_stable_identity)
+    )
+    if alias is None or alias.id == canonical_entity.id:
+        return
+    referenced = any(
+        bool(session.scalar(query))
+        for query in (
+            select(exists().where(StorageBackend.storage_entity_id == alias.id)),
+            select(exists().where(StoragePath.storage_entity_id == alias.id)),
+            select(exists().where(StorageVolume.parent_storage_entity_id == alias.id)),
+            select(exists().where(StorageRedundancyEvent.storage_entity_id == alias.id)),
+        )
+    )
+    if referenced:
+        return
+    alias_metric = session.scalar(
+        select(MetricEntity).where(
+            MetricEntity.entity_type == "logical_storage",
+            MetricEntity.stable_id == f"logical-storage:{alias_stable_identity}",
+        )
+    )
+    if alias_metric is not None and alias_metric.id != canonical_metric.id:
+        canonical_sample = aliased(MetricSample)
+        session.execute(
+            delete(MetricSample).where(
+                MetricSample.entity_id == alias_metric.id,
+                exists().where(
+                    canonical_sample.entity_id == canonical_metric.id,
+                    canonical_sample.metric_id == MetricSample.metric_id,
+                    canonical_sample.observed_at == MetricSample.observed_at,
+                ),
+            )
+        )
+        session.execute(
+            update(MetricSample)
+            .where(MetricSample.entity_id == alias_metric.id)
+            .values(entity_id=canonical_metric.id)
+        )
+        canonical_rollup = aliased(MetricRollup)
+        session.execute(
+            delete(MetricRollup).where(
+                MetricRollup.entity_id == alias_metric.id,
+                exists().where(
+                    canonical_rollup.entity_id == canonical_metric.id,
+                    canonical_rollup.metric_id == MetricRollup.metric_id,
+                    canonical_rollup.resolution == MetricRollup.resolution,
+                    canonical_rollup.period_start == MetricRollup.period_start,
+                ),
+            )
+        )
+        session.execute(
+            update(MetricRollup)
+            .where(MetricRollup.entity_id == alias_metric.id)
+            .values(entity_id=canonical_metric.id)
+        )
+        session.execute(
+            update(MetricAlert)
+            .where(MetricAlert.entity_id == alias_metric.id)
+            .values(entity_id=canonical_metric.id)
+        )
+        session.execute(
+            update(MetricAlertRule)
+            .where(MetricAlertRule.entity_id == alias_metric.id)
+            .values(entity_id=canonical_metric.id)
+        )
+        session.delete(alias_metric)
+    session.delete(alias)
+
+
 def register_completed_storage(
     session: Session,
     plan_document: Mapping[str, Any],
@@ -456,8 +546,52 @@ def register_completed_storage(
             "/"
         ):
             presentation_mountpoint = pool_mountpoint
-        stable_identity = f"mergerfs:{hashlib.sha256(pool_mountpoint.encode()).hexdigest()[:16]}"
-        name = str(mergerfs.get("name") or "mergerFS storage")[:128]
+        observed_stable_identity = (
+            f"mergerfs:{hashlib.sha256(pool_mountpoint.encode()).hexdigest()[:16]}"
+        )
+        expansion = storage.get("expansion")
+        expansion_group_id = (
+            expansion.get("storage_group_id") if isinstance(expansion, Mapping) else None
+        )
+        entity = None
+        if isinstance(expansion_group_id, str):
+            entity = session.scalar(
+                select(StorageEntity)
+                .join(StorageBackend, StorageBackend.storage_entity_id == StorageEntity.id)
+                .where(
+                    StorageBackend.storage_group_id == expansion_group_id,
+                    StorageEntity.storage_kind == "mergerfs",
+                )
+                .order_by(StorageEntity.created_at)
+                .limit(1)
+            )
+        if entity is not None:
+            configured_pool = entity.config_json.get("pool_mountpoint")
+            if isinstance(configured_pool, str) and configured_pool.startswith("/"):
+                pool_mountpoint = configured_pool
+            stable_identity = entity.stable_identity
+            name = entity.name
+        else:
+            stable_identity = observed_stable_identity
+            name = str(mergerfs.get("name") or "mergerFS storage")[:128]
+            entity = session.scalar(
+                select(StorageEntity).where(StorageEntity.stable_identity == stable_identity)
+            )
+        prior_member_ids = (
+            [
+                str(item)
+                for item in entity.config_json.get("member_stable_identities", [])
+                if isinstance(item, str)
+            ]
+            if entity is not None
+            else []
+        )
+        selected_member_ids = [
+            str(item.get("id"))
+            for item in selected
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        ]
+        member_ids = list(dict.fromkeys([*prior_member_ids, *selected_member_ids]))
         capacity_bytes = 0
         try:
             capacity_bytes = shutil.disk_usage(presentation_mountpoint).total
@@ -465,21 +599,38 @@ def register_completed_storage(
             for item in selected:
                 if isinstance(item, Mapping) and isinstance(item.get("capacity_bytes"), int):
                     capacity_bytes += max(0, int(item["capacity_bytes"]))
+        if entity is not None and isinstance(expansion_group_id, str):
+            # mergerFS may cache statfs briefly after its runtime branch list changes.
+            # Reconcile an expansion from the durable prior capacity plus the exact
+            # newly mounted filesystems, while remaining idempotent on replay.
+            member_mountpoints = result.get("member_mountpoints")
+            added_capacity = 0
+            for item in selected:
+                if not isinstance(item, Mapping) or not isinstance(item.get("id"), str):
+                    continue
+                member_id = str(item["id"])
+                if member_id in prior_member_ids:
+                    continue
+                member_path = (
+                    member_mountpoints.get(member_id)
+                    if isinstance(member_mountpoints, Mapping)
+                    else None
+                )
+                try:
+                    added_capacity += shutil.disk_usage(str(member_path)).total
+                except (OSError, TypeError):
+                    if isinstance(item.get("capacity_bytes"), int):
+                        added_capacity += max(0, int(item["capacity_bytes"]))
+            capacity_bytes = max(capacity_bytes, entity.capacity_bytes + added_capacity)
         if capacity_bytes <= 0:
             return None
-        entity = session.scalar(
-            select(StorageEntity).where(StorageEntity.stable_identity == stable_identity)
-        )
-        member_ids = [
-            str(item.get("id"))
-            for item in selected
-            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
-        ]
         configuration = {
             "pool_mountpoint": pool_mountpoint,
             "member_stable_identities": member_ids,
-            "create_policy": mergerfs.get("create_policy"),
-            "search_policy": mergerfs.get("search_policy"),
+            "create_policy": mergerfs.get("create_policy")
+            or (entity.config_json.get("create_policy") if entity is not None else None),
+            "search_policy": mergerfs.get("search_policy")
+            or (entity.config_json.get("search_policy") if entity is not None else None),
             "redundancy_capable": False,
         }
         if entity is None:
@@ -524,18 +675,18 @@ def register_completed_storage(
             )
         )
         if metric is None:
-            session.add(
-                MetricEntity(
-                    entity_type="logical_storage",
-                    stable_id=f"logical-storage:{stable_identity}",
-                    display_name=name,
-                    labels_json={"storage_entity_id": entity.id, "provider": "mergerfs"},
-                    topology_json={
-                        "member_count": len(member_ids),
-                        "topology_state": "not_applicable",
-                    },
-                )
+            metric = MetricEntity(
+                entity_type="logical_storage",
+                stable_id=f"logical-storage:{stable_identity}",
+                display_name=name,
+                labels_json={"storage_entity_id": entity.id, "provider": "mergerfs"},
+                topology_json={
+                    "member_count": len(member_ids),
+                    "topology_state": "not_applicable",
+                },
             )
+            session.add(metric)
+            session.flush()
         else:
             metric.display_name = name
             metric.labels_json = {
@@ -548,6 +699,13 @@ def register_completed_storage(
                 "member_count": len(member_ids),
                 "topology_state": "not_applicable",
             }
+        if entity is not None and observed_stable_identity != stable_identity:
+            _remove_orphaned_mergerfs_alias(
+                session,
+                alias_stable_identity=observed_stable_identity,
+                canonical_entity=entity,
+                canonical_metric=metric,
+            )
         return entity
     if topology not in {
         "individual",

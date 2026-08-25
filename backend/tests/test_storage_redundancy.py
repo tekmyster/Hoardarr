@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +17,9 @@ from hoardarr.db.models import (
     MetricEntity,
     MetricSample,
     PhysicalDisk,
+    StorageBackend,
     StorageEntity,
+    StorageGroup,
     StoragePath,
     StorageRedundancyEvent,
 )
@@ -211,6 +214,143 @@ def test_completed_mergerfs_pool_is_one_logical_backend_and_members_are_not_reus
     assert document["provider"] == "mergerfs"
     assert document["redundancy_capable"] is False
     assert document["paths"] == []
+
+
+def test_mergerfs_expansion_preserves_group_entity_and_merges_presentation_alias(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_disk = PhysicalDisk(stable_identity="wwn:old", lifecycle_state="managed_member")
+    new_disk = PhysicalDisk(stable_identity="wwn:new", lifecycle_state="discovered")
+    canonical = StorageEntity(
+        name="Media Library",
+        stable_identity="mergerfs:canonical",
+        storage_kind="mergerfs",
+        filesystem_uuid=None,
+        mountpoint="/data",
+        presentation_device="/mnt/hoardarr/media",
+        capacity_bytes=60_000,
+        logical_sector_bytes=None,
+        physical_sector_bytes=None,
+        topology_state="not_applicable",
+        provider="mergerfs",
+        config_json={
+            "pool_mountpoint": "/mnt/hoardarr/media",
+            "member_stable_identities": ["wwn:old"],
+            "create_policy": "mfs",
+            "search_policy": "ff",
+        },
+    )
+    group = StorageGroup(name="Media Library", namespace_path="/data", purpose="media")
+    session.add_all([old_disk, new_disk, canonical, group])
+    session.flush()
+    session.add(
+        StorageBackend(
+            storage_group_id=group.id,
+            storage_entity_id=canonical.id,
+            stable_identity="storage:mergerfs:canonical",
+            namespace_path="/data",
+            role="data",
+            lifecycle_state="preferred_write",
+        )
+    )
+    canonical_metric = MetricEntity(
+        entity_type="logical_storage",
+        stable_id="logical-storage:mergerfs:canonical",
+        display_name="Media Library",
+        labels_json={"storage_entity_id": canonical.id},
+        topology_json={"member_count": 1},
+    )
+    alias_identity = f"mergerfs:{hashlib.sha256(b'/data').hexdigest()[:16]}"
+    alias = StorageEntity(
+        name="data",
+        stable_identity=alias_identity,
+        storage_kind="mergerfs",
+        filesystem_uuid=None,
+        mountpoint="/data",
+        presentation_device="/data",
+        capacity_bytes=80_000,
+        logical_sector_bytes=None,
+        physical_sector_bytes=None,
+        topology_state="not_applicable",
+        provider="mergerfs",
+        config_json={"pool_mountpoint": "/data", "member_stable_identities": ["wwn:new"]},
+    )
+    alias_metric = MetricEntity(
+        entity_type="logical_storage",
+        stable_id=f"logical-storage:{alias_identity}",
+        display_name="data",
+        labels_json={"storage_entity_id": alias.id},
+        topology_json={"member_count": 1},
+    )
+    session.add_all([canonical_metric, alias, alias_metric])
+    session.flush()
+    observed_at = datetime.now(UTC)
+    session.add(
+        MetricSample(
+            entity_id=alias_metric.id,
+            metric_id="storage.capacity.total_bytes",
+            value=80_000.0,
+            value_text=None,
+            quality="available",
+            source="test",
+            collection_interval_seconds=60,
+            raw=True,
+            labels_json={},
+            error_code=None,
+            observed_at=observed_at,
+        )
+    )
+    session.flush()
+    monkeypatch.setattr(
+        "hoardarr.storage.redundancy.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=20_000 if str(path) == "/mnt/new" else 60_000),
+    )
+
+    entity = register_completed_storage(
+        session,
+        {
+            "storage": {
+                "topology": "mergerfs",
+                "selected_devices": [{"id": "wwn:new", "capacity_bytes": 21_000}],
+                "mergerfs": {"name": "data", "mountpoint": "/data", "mode": "existing"},
+                "expansion": {
+                    "kind": "add_mergerfs_member",
+                    "storage_group_id": group.id,
+                },
+            }
+        },
+        {"mountpoint": "/data", "member_mountpoints": {"wwn:new": "/mnt/new"}},
+    )
+    session.flush()
+
+    assert entity is not None
+    assert entity.id == canonical.id
+    assert entity.stable_identity == "mergerfs:canonical"
+    assert entity.capacity_bytes == 80_000
+    assert entity.config_json["pool_mountpoint"] == "/mnt/hoardarr/media"
+    assert entity.config_json["member_stable_identities"] == ["wwn:old", "wwn:new"]
+    assert session.get(StorageEntity, alias.id) is None
+    assert session.scalar(select(MetricEntity).where(MetricEntity.id == alias_metric.id)) is None
+    moved = session.scalar(select(MetricSample).where(MetricSample.observed_at == observed_at))
+    assert moved is not None and moved.entity_id == canonical_metric.id
+    assert new_disk.metadata_json["managed_storage_entity_id"] == canonical.id
+    replayed = register_completed_storage(
+        session,
+        {
+            "storage": {
+                "topology": "mergerfs",
+                "selected_devices": [{"id": "wwn:new", "capacity_bytes": 21_000}],
+                "mergerfs": {"name": "data", "mountpoint": "/data", "mode": "existing"},
+                "expansion": {
+                    "kind": "add_mergerfs_member",
+                    "storage_group_id": group.id,
+                },
+            }
+        },
+        {"mountpoint": "/data", "member_mountpoints": {"wwn:new": "/mnt/new"}},
+    )
+    assert replayed is not None and replayed.id == canonical.id
+    assert replayed.capacity_bytes == 80_000
 
 
 def test_matching_capacity_is_not_enough_when_wwid_differs(session: Session) -> None:
