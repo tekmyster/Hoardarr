@@ -1,8 +1,8 @@
 # Persistent A/B lab validation
 
 Initial appliance validation was completed 2026-08-24 against commit `055dff81c460`.
-The live-product/storage validation below was repeated against commit `077cdaa531b2` and
-application version 0.3.11 Beta 1.
+The live-product/storage validation below was repeated through commit
+`101dabb6aace698b541d5798e5a51b46c4ee4c00` and application version 0.3.11 Beta 1.
 
 ## Built artifact
 
@@ -41,6 +41,15 @@ installed-appliance, migration, systemd, fleet/PostgreSQL, and MinIO recovery jo
 release symlinks resolved to `0.3.11-077cdaa531b2`; API and worker units were active and
 `/health/ready` returned ready after startup.
 
+On 2026-08-25 both nodes were advanced to the immutable CI artifact
+`hoardarr-0.3.11-101dabb6aace-ubuntu24.04-amd64-cp312.tar.gz` (32,247,037 bytes,
+SHA-256 `9fadcd3288ef3667e754a3cc56b64465803225dcea92e63ca03c970c41e1bf06`). Main
+workflow `32802346543` passed backend, frontend unit/accessibility/build/browser E2E,
+release-bundle/systemd, installed-appliance/recovery/reapply, fleet/PostgreSQL and MinIO jobs.
+Isolated storage workflow `32802346515` passed the Storage Group lifecycle, extended storage
+stacks, mergerFS telemetry and controller-redundancy jobs. Both installed release symlinks resolve
+to `0.3.11-101dabb6aace`; the API and durable worker are active and `/health/ready` is ready.
+
 ## Storage identity and UI evidence
 
 VMware `disk.EnableUUID` is enabled on both powered-off VMs. After reboot, Linux exposed a distinct
@@ -78,6 +87,31 @@ The UI also showed the real Activity history, live mergerFS pool/share discovery
 topology, expansion candidates, and honest `Not reported` health/bay fields. This establishes a
 visible beta Storage Group and pool on A. It does not claim SnapRAID, ZFS, Linux MD, a landing tier,
 shared multipath, HA peer handoff, or physical-hardware validation.
+
+Hoardarr-B now also contains a real product-created ZFS RAIDZ1 pool named `media` on three
+purpose-created 12-GiB VMDKs. Durable storage operation
+`e161115e-81cf-4420-a294-4a7165b1426d` completed all 15 identity, full-surface-read, ZFS, runtime,
+directory, fstab and share phases. The pool is online at `/data` with `lz4` compression and a 1-MiB
+record size. Startup recovery registered logical StorageEntity
+`73b3bea6-9da4-48fd-b804-7ad8cbabd2ef`, stable identity `zfs:media`, capacity
+24,604,835,840 bytes, and all three members as managed. The authenticated B UI created Storage
+Group `Media Library`, attached that exact entity, reviewed immutable activation plan
+`df1a9185c821c98bbc5d9b4784f6e259c060b9dee3e15545107f24b65e8fd089`, activated it, and made it
+preferred for new writes.
+
+That workflow exposed an honest namespace defect: the group had retained the unavailable default
+`/srv/hoardarr/media` even though the verified backend was mounted at `/data`. Commit `101dabb6aace`
+now marks unavailable namespaces explicitly and refuses to direct Plex/ARR applications to an empty
+system-disk path. In the real B UI the warning offered `Use verified storage path /data`; accepting
+it changed only the group namespace to `/data`. The ZFS mount, StorageEntity, activation evidence,
+share and data were unchanged. The `media` service account then completed a write/read/delete proof
+under `/data/media`. Lifecycle event `storage_group_namespace_reconciled` and audit action
+`storage.group.namespace_reconcile` retain the old/new paths and exact backend identity.
+
+The A Networking UI was also exercised from static `10.81.200.114` to DHCP `10.81.200.120` and
+back to static `.114`. The second apply kept the authenticated request connection available while
+the new address settled: confirmation returned two expected not-ready conflicts and then HTTP 200.
+The former address was removed automatically, no rollback state remained, and the API stayed ready.
 
 After all Hoardarr-A audit browser tabs were closed, the durable worker continued collection with
 no UI metric consumer. Over a 39-second observation the persisted sample count advanced from
@@ -123,7 +157,8 @@ pre/post-expansion history.
 
 ## Remaining boundary
 
-This evidence verifies the persistent appliance nodes, stable virtual-disk discovery, and one real
-Hoardarr-managed mergerFS/Storage Group workflow on A. `LAB-03` remains in progress until the other
-required real virtual providers and tiers are created. `LAB-04` remains in progress until tiers,
-peers, failover history, and their graphs are also visible without fixtures.
+This evidence verifies the persistent appliance nodes, stable virtual-disk discovery, a real
+Hoardarr-managed mergerFS/Storage Group workflow on A, and a real ZFS/Storage Group workflow on B.
+`LAB-03` remains in progress until SnapRAID, Linux MD, landing-tier and shared-multipath constructs
+are created. `LAB-04` remains in progress until tiers, peers, failover history and their graphs are
+also visible without fixtures.
