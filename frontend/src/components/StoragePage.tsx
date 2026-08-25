@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { existingDataSummary, humanCapacity } from "../policy";
-import type { DeviceMaintenancePlan, Drive, HardwareSnapshot, OperationDocument, StorageExpansionSelection, StorageInventory, StorageOperationProgress } from "../types";
+import type { DeviceMaintenancePlan, Drive, HardwareSnapshot, OperationDocument, PhysicalDiskDocument, StorageExpansionSelection, StorageInventory, StorageOperationProgress } from "../types";
 import { Card, Notice, StatusBadge } from "./ui";
 import { StorageProgressDetails } from "./StorageProgressDetails";
 import { StorageTopologyPanels } from "./StorageTopologyPanels";
@@ -32,6 +32,7 @@ export interface SavedStorageDraft {
 }
 
 const EMPTY_DRIVE_IDS = new Set<string>();
+const MANAGED_DISK_STATES = new Set(["assigned", "active", "preferred_write", "draining", "verifying", "read_only", "retired", "managed_member"]);
 
 const DRIVE_ACTIONS: ReadonlyArray<{ id: DriveAction; label: string; detail: string }> = [
   { id: "configure", label: "Set up as storage", detail: "Choose its use, format, and sharing." },
@@ -83,6 +84,7 @@ export function StoragePage({
   onDiscardDraft,
   assignedDriveIds = EMPTY_DRIVE_IDS,
   reservedDriveIds = EMPTY_DRIVE_IDS,
+  registeredDisks = [],
   storageInventory = null,
   activeOperation = null,
   operationProgress = null,
@@ -101,11 +103,17 @@ export function StoragePage({
   onDiscardDraft?: (draftId: string) => void;
   assignedDriveIds?: ReadonlySet<string>;
   reservedDriveIds?: ReadonlySet<string>;
+  registeredDisks?: PhysicalDiskDocument[];
   storageInventory?: StorageInventory | null;
   activeOperation?: OperationDocument | null;
   operationProgress?: StorageOperationProgress | null;
   focusedStorageId?: string | null;
 }) {
+  const managedDriveIds = new Set(assignedDriveIds);
+  for (const disk of registeredDisks) {
+    if (MANAGED_DISK_STATES.has(disk.lifecycle_state)) managedDriveIds.add(disk.stable_identity);
+  }
+  const availableDrives = drives.filter((drive) => drive.selectable && !managedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id));
   const [maintenanceDrive, setMaintenanceDrive] = useState<Drive | null>(null);
   const [maintenanceAction, setMaintenanceAction] = useState<"wipe" | "sector_conversion">("wipe");
   const [wipeMethod, setWipeMethod] = useState<"metadata_clear" | "hdd_overwrite" | "ata_secure_erase" | "nvme_sanitize" | "nvme_crypto_erase" | "scsi_sanitize" | "scsi_crypto_erase">("metadata_clear");
@@ -214,7 +222,7 @@ export function StoragePage({
 
     <StoragePerformance />
 
-    <div id="storage-groups-panel"><StorageGroupsPanel /></div>
+    <div id="storage-groups-panel"><StorageGroupsPanel refreshToken={registeredDisks.map((disk) => `${disk.stable_identity}:${disk.lifecycle_state}`).join("|")} /></div>
     <StorageVolumesPanel pools={storageInventory?.pools.items ?? []} />
     <DownloadTierPanel />
 
@@ -224,18 +232,18 @@ export function StoragePage({
 
     <SnapraidReplacementPanel
       inventory={storageInventory}
-      availableDrives={drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id))}
+      availableDrives={availableDrives}
     />
 
     <ArrayReplacementPanel
       inventory={storageInventory}
-      availableDrives={drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id))}
+      availableDrives={availableDrives}
     />
 
     <StorageTopologyPanels
       topology={storageInventory?.topology}
-      actionableDriveIds={new Set(drives.filter((drive) => drive.selectable && !assignedDriveIds.has(drive.id) && !reservedDriveIds.has(drive.id)).map((drive) => drive.id))}
-      managedDriveIds={assignedDriveIds}
+      actionableDriveIds={new Set(availableDrives.map((drive) => drive.id))}
+      managedDriveIds={managedDriveIds}
       onDriveAction={(action, driveId) => onDriveAction(action, driveId)}
       onManageLifecycle={() => document.getElementById("storage-groups-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
     />
@@ -254,7 +262,7 @@ export function StoragePage({
         <thead><tr><th>Device</th><th>Hardware identity</th><th>Model</th><th>Health</th><th>Connection</th><th>Capacity</th><th>Location</th><th>Existing data</th><th><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{drives.map((drive, index) => {
           const existing = existingDataSummary(drive);
-          const assigned = assignedDriveIds.has(drive.id);
+          const assigned = managedDriveIds.has(drive.id);
           const reserved = reservedDriveIds.has(drive.id);
           return <tr key={`${drive.id}-${index}`}>
             <td><code>{drive.path}</code><small className="cell-detail">{drive.alternatePaths && drive.alternatePaths.length > 1 ? `${drive.alternatePaths.length} paths to one logical device` : drive.stableIdentity ? "Stable identity" : "Identity incomplete"}</small></td>

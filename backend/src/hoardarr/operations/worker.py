@@ -2793,6 +2793,7 @@ def reconcile_completed_storage_state(
                     plan.document_json,
                     operation.result_json,
                     hardware_snapshot=snapshot.payload_json if snapshot is not None else None,
+                    reconcile_only=True,
                 )
                 is not None
             ):

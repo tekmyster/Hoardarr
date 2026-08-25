@@ -636,7 +636,7 @@ def test_raid_layout_revalidates_expected_holders_after_create(
                     "destructive": True,
                 }
             ],
-            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "format": {"mount_options": ["noatime"], "trim": {"enabled": False}},
             "layout_options": {
                 "name": "md-raid5",
                 "mountpoint": "/mnt/hoardarr/md-raid5",
@@ -707,6 +707,10 @@ def test_raid_layout_revalidates_expected_holders_after_create(
         ("mount", 4, 2),
     ]
     assert len(holder_revalidations) == 2
+    assert (
+        f"UUID=raid-filesystem-uuid {tmp_path / 'raid'} ext4 noatime 0 2"
+        in paths.fstab.read_text(encoding="utf-8")
+    )
 
 
 def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_source(

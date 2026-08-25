@@ -31,6 +31,7 @@ from hoardarr.storage.executor import (
     apply_storage_redundancy,
     storage_operation_status,
 )
+from hoardarr.storage.groups import disk_documents
 from hoardarr.storage.redundancy import (
     RedundancyError,
     apply_redundancy_result,
@@ -265,6 +266,112 @@ def test_completed_zfs_pool_is_registered_as_one_logical_backend(
     assert document["provider"] == "zfs"
     assert document["redundancy_capable"] is False
     assert document["paths"] == []
+
+
+def test_completed_md_reconciles_exact_stable_members_after_kernel_renumbering(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    member_ids = ["wwn:naa.md-a", "wwn:naa.md-b", "wwn:naa.md-c"]
+    members = [
+        PhysicalDisk(stable_identity=member_ids[0], kernel_path="/dev/sdz"),
+        PhysicalDisk(stable_identity=member_ids[1], kernel_path="/dev/sdy"),
+        PhysicalDisk(stable_identity=member_ids[2], kernel_path="/dev/sdx"),
+    ]
+    path_lookalike = PhysicalDisk(
+        stable_identity="serial:different-disk",
+        kernel_path="/dev/sdf",
+        vendor="VMware",
+        model="Virtual disk",
+        capacity_bytes=6_442_450_944,
+    )
+    foreign = PhysicalDisk(
+        stable_identity="wwn:naa.foreign-array",
+        kernel_path="/dev/sdw",
+        lifecycle_state="foreign",
+    )
+    session.add_all([*members, path_lookalike, foreign])
+    session.flush()
+    monkeypatch.setattr(
+        "hoardarr.storage.redundancy.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=12_572_672_000, used=0, free=12_572_672_000),
+    )
+
+    entity = register_completed_storage(
+        session,
+        {
+            "storage": {
+                "topology": "raid",
+                "selected_devices": [
+                    {"id": member_ids[0], "kernel_path": "/dev/sdf"},
+                    {"id": member_ids[1], "kernel_path": "/dev/sde"},
+                    {"id": member_ids[2], "kernel_path": "/dev/sdg"},
+                ],
+                "layout_options": {
+                    "name": "md-raid5",
+                    "level": "raid5",
+                    "filesystem": "ext4",
+                    "mountpoint": "/mnt/hoardarr/md-raid5",
+                    "chunk_kib": 512,
+                },
+            }
+        },
+        {"mountpoint": "/mnt/hoardarr/md-raid5"},
+    )
+    session.flush()
+
+    assert entity is not None
+    assert entity.stable_identity == "linux_md:md-raid5"
+    assert entity.presentation_device == "/dev/md/md-raid5"
+    assert {member.lifecycle_state for member in members} == {"managed_member"}
+    assert all(
+        member.metadata_json["managed_storage_entity_id"] == entity.id for member in members
+    )
+    assert path_lookalike.lifecycle_state == "discovered"
+    assert foreign.lifecycle_state == "foreign"
+    eligibility = {item["stable_identity"]: item["assignable"] for item in disk_documents(session)}
+    assert all(eligibility[member_id] is False for member_id in member_ids)
+    assert eligibility[path_lookalike.stable_identity] is True
+
+
+def test_completed_md_startup_replay_does_not_resurrect_stale_or_ambiguous_members(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repairable = PhysicalDisk(stable_identity="wwn:naa.repairable", lifecycle_state="discovered")
+    retired = PhysicalDisk(stable_identity="wwn:naa.retired", lifecycle_state="retired")
+    released = PhysicalDisk(stable_identity="wwn:naa.released", lifecycle_state="reuse_ready")
+    conflicting = PhysicalDisk(
+        stable_identity="wwn:naa.conflicting",
+        lifecycle_state="managed_member",
+        metadata_json={"managed_storage_entity_id": "different-storage"},
+    )
+    session.add_all([repairable, retired, released, conflicting])
+    session.flush()
+    monkeypatch.setattr(
+        "hoardarr.storage.redundancy.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=12_572_672_000, used=0, free=12_572_672_000),
+    )
+    selected = [repairable, retired, released, conflicting]
+
+    entity = register_completed_storage(
+        session,
+        {
+            "storage": {
+                "topology": "raid",
+                "selected_devices": [{"id": disk.stable_identity} for disk in selected],
+                "layout_options": {"name": "historical-md"},
+            }
+        },
+        {"mountpoint": "/mnt/hoardarr/historical-md"},
+        reconcile_only=True,
+    )
+    session.flush()
+
+    assert entity is not None
+    assert repairable.lifecycle_state == "managed_member"
+    assert repairable.metadata_json["managed_storage_entity_id"] == entity.id
+    assert retired.lifecycle_state == "retired"
+    assert released.lifecycle_state == "reuse_ready"
+    assert conflicting.metadata_json["managed_storage_entity_id"] == "different-storage"
 
 
 def test_completed_cache_activates_one_landing_backend_and_replays_idempotently(

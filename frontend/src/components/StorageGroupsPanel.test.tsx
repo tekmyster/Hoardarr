@@ -104,6 +104,21 @@ describe("StorageGroupsPanel", () => {
     await waitFor(() => expect(attach).toHaveBeenCalledWith(group.id, storage.id, "/data"));
   });
 
+  it("reloads eligibility when completed storage reconciliation changes the registry", async () => {
+    const managedMember = { ...disk, lifecycle_state: "managed_member", assignable: false };
+    vi.spyOn(api, "storageGroups").mockResolvedValue([{ ...group, backends: [] }]);
+    vi.spyOn(api, "registeredDisks")
+      .mockResolvedValueOnce([disk])
+      .mockResolvedValue([managedMember]);
+    const view = render(<StorageGroupsPanel refreshToken="before" />);
+
+    expect(await screen.findByRole("option", { name: /Media Disk/ })).toBeInTheDocument();
+    view.rerender(<StorageGroupsPanel refreshToken="after" />);
+
+    await waitFor(() => expect(screen.queryByRole("option", { name: /Media Disk/ })).not.toBeInTheDocument());
+    expect(api.registeredDisks).toHaveBeenCalledTimes(2);
+  });
+
   it("shows an honest empty state and creates a stable media namespace", async () => {
     vi.spyOn(api, "storageGroups").mockResolvedValue([]);
     vi.spyOn(api, "registeredDisks").mockResolvedValue([]);

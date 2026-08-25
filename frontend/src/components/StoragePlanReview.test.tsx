@@ -69,4 +69,29 @@ describe("storage final review", () => {
     expect(screen.getByText("4096 B physical")).toBeInTheDocument();
     expect(screen.getAllByText("Yes").length).toBeGreaterThan(0);
   });
+
+  it("describes the real filesystem created on a Linux MD array", () => {
+    render(<BackendStoragePlan storage={{
+      topology: "raid",
+      layout_options: {
+        name: "md-raid5",
+        level: "raid5",
+        filesystem: "ext4",
+        chunk_kib: 512,
+      },
+      format: { mount_options: ["noatime"] },
+      risk: { destructive: true, approval_required: true, message: "Array creation replaces member metadata." },
+      actions: [{ action_id: "layout", type: "storage.layout.ensure", destructive: true }],
+      folders: [],
+      warnings: [],
+    }} />);
+
+    expect(screen.getByRole("heading", { name: "Format" })).toBeInTheDocument();
+    expect(screen.getByText("ext4")).toBeInTheDocument();
+    expect(screen.getByText("Create filesystem on the MD array")).toBeInTheDocument();
+    expect(screen.getByText("Linux MD metadata on each reviewed member")).toBeInTheDocument();
+    expect(screen.getByText("512 KiB array chunk")).toBeInTheDocument();
+    expect(screen.getByText("noatime")).toBeInTheDocument();
+    expect(screen.queryByText("Preserve existing")).not.toBeInTheDocument();
+  });
 });

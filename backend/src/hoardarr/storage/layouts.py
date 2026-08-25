@@ -520,7 +520,11 @@ def layout_commands(
         return [
             CommandSpec(create, 3600, "Creating Linux RAID", False),
             CommandSpec(mkfs, 3600, "Creating array filesystem", False),
-            CommandSpec(("mount", md_path, str(options["mountpoint"])), 120, "Mounting Linux RAID"),
+            CommandSpec(
+                ("mount", "-o", "noatime", md_path, str(options["mountpoint"])),
+                120,
+                "Mounting Linux RAID",
+            ),
         ]
     if topology == "snapraid":
         config = f"/etc/snapraid/{options['name']}.conf"

@@ -524,12 +524,53 @@ def _remove_orphaned_mergerfs_alias(
     session.delete(alias)
 
 
+def _reconcile_managed_members(
+    session: Session,
+    *,
+    member_ids: list[str],
+    entity: StorageEntity,
+    storage_kind: str,
+    reconcile_only: bool,
+) -> None:
+    """Bind reviewed members by stable identity without stealing later ownership.
+
+    Kernel paths are observations and are intentionally absent from this lookup.
+    A worker-start replay may repair a lost metadata commit for a discovered or
+    reserved member, but it must not resurrect a disk that was subsequently
+    retired/released or overwrite a different managed-storage association.
+    """
+
+    allowed_states = {"discovered", "reserved", "managed_member"}
+    if not reconcile_only:
+        allowed_states.add("reuse_ready")
+    for stable_member_id in member_ids:
+        disk = session.scalar(
+            select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_member_id)
+        )
+        if disk is None or disk.lifecycle_state not in allowed_states:
+            continue
+        metadata = disk.metadata_json or {}
+        current_entity_id = metadata.get("managed_storage_entity_id")
+        if (
+            disk.lifecycle_state == "managed_member"
+            and current_entity_id not in {None, entity.id}
+        ):
+            continue
+        disk.lifecycle_state = "managed_member"
+        disk.metadata_json = {
+            **metadata,
+            "managed_storage_entity_id": entity.id,
+            "managed_storage_kind": storage_kind,
+        }
+
+
 def register_completed_storage(
     session: Session,
     plan_document: Mapping[str, Any],
     result: Mapping[str, Any],
     *,
     hardware_snapshot: Mapping[str, Any] | None = None,
+    reconcile_only: bool = False,
 ) -> StorageEntity | None:
     storage = plan_document.get("storage")
     if not isinstance(storage, Mapping):
@@ -658,18 +699,13 @@ def register_completed_storage(
             entity.presentation_device = pool_mountpoint
             entity.capacity_bytes = capacity_bytes
             entity.config_json = {**entity.config_json, **configuration}
-        for stable_member_id in member_ids:
-            disk = session.scalar(
-                select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_member_id)
-            )
-            if disk is None:
-                continue
-            disk.lifecycle_state = "managed_member"
-            disk.metadata_json = {
-                **disk.metadata_json,
-                "managed_storage_entity_id": entity.id,
-                "managed_storage_kind": "mergerfs",
-            }
+        _reconcile_managed_members(
+            session,
+            member_ids=member_ids,
+            entity=entity,
+            storage_kind="mergerfs",
+            reconcile_only=reconcile_only,
+        )
         metric = session.scalar(
             select(MetricEntity).where(
                 MetricEntity.entity_type == "logical_storage",
@@ -778,18 +814,13 @@ def register_completed_storage(
             entity.presentation_device = presentation_device
             entity.capacity_bytes = capacity_bytes
             entity.config_json = {**entity.config_json, **configuration}
-        for stable_member_id in member_ids:
-            disk = session.scalar(
-                select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_member_id)
-            )
-            if disk is None:
-                continue
-            disk.lifecycle_state = "managed_member"
-            disk.metadata_json = {
-                **disk.metadata_json,
-                "managed_storage_entity_id": entity.id,
-                "managed_storage_kind": topology,
-            }
+        _reconcile_managed_members(
+            session,
+            member_ids=member_ids,
+            entity=entity,
+            storage_kind=topology,
+            reconcile_only=reconcile_only,
+        )
         metric = session.scalar(
             select(MetricEntity).where(
                 MetricEntity.entity_type == "logical_storage",

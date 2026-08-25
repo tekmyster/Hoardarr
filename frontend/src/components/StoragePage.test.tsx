@@ -78,9 +78,42 @@ describe("StoragePage", () => {
     await user.click(screen.getByRole("menuitem", { name: /Expand combined storage/i }));
     expect(onDriveAction).toHaveBeenCalledWith("expand", drive.id);
 
-    rerender(<StoragePage {...common} assignedDriveIds={new Set([drive.id])} />);
+    const managedDisk = {
+      id: "physical-member",
+      stable_identity: drive.id,
+      kernel_path: "/dev/sdz",
+      serial: drive.serial,
+      wwn: drive.wwn,
+      vendor: drive.vendor,
+      model: drive.model,
+      capacity_bytes: drive.capacityBytes,
+      media_type: null,
+      health_state: "not_reported",
+      lifecycle_state: "managed_member",
+      assignable: false,
+      last_seen_at: "2026-08-25T04:27:17Z",
+    };
+    rerender(<StoragePage {...common} registeredDisks={[managedDisk]} />);
     expect(screen.queryByLabelText("Actions for /dev/sdb")).not.toBeInTheDocument();
     expect(screen.getByText("Managed")).toBeInTheDocument();
+
+    const mdInventory = {
+      captured_from: "live_host",
+      topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] },
+      active_operations: [],
+      pools: { status: "configured", items: [{
+        id: "md:md-raid5", name: "md-raid5", type: "Linux MD raid5", status: "clean",
+        total_bytes: 12_000_000_000, used_bytes: 0, free_bytes: 12_000_000_000,
+        members: 3, mountpoint: "/mnt/hoardarr/md-raid5", degraded: false,
+        configuration: { quality: "available", array_uuid: "4427560a", level: "raid5", raid_disks: 3, member_paths: ["/dev/sdb"], config_sha256: "a".repeat(64) },
+      }] },
+      shares: { status: "not_configured", items: [] },
+      controllers: { status: "not_reported", items: [], unavailable: [] },
+      enclosures: { status: "not_reported", items: [], unavailable: [] },
+    } as StorageInventory;
+    rerender(<StoragePage {...common} registeredDisks={[managedDisk]} storageInventory={mdInventory} />);
+    expect(screen.getByText("No replacement drive available")).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /CISCO SSD-240G/ })).not.toBeInTheDocument();
 
     rerender(<StoragePage {...common} reservedDriveIds={new Set([drive.id])} />);
     expect(screen.queryByLabelText("Actions for /dev/sdb")).not.toBeInTheDocument();

@@ -91,6 +91,13 @@ def test_linux_md_levels_are_validated_and_commanded(level: str, count: int) -> 
     assert commands[0].argv[0] == "mdadm"
     assert f"--level={level.removeprefix('raid')}" in commands[0].argv
     assert commands[1].argv[:3] == ("mkfs.xfs", "-f", "-K")
+    assert commands[2].argv == (
+        "mount",
+        "-o",
+        "noatime",
+        "/dev/md/vmstore",
+        "/mnt/hoardarr/vmstore",
+    )
 
 
 def test_snapraid_starts_not_synced_and_has_sync_command() -> None:

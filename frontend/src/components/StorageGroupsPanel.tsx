@@ -25,7 +25,7 @@ function formatBytes(value: number): string {
   return `${next.toFixed(next >= 10 ? 1 : 2)} ${unit}`;
 }
 
-export function StorageGroupsPanel() {
+export function StorageGroupsPanel({ refreshToken = "initial" }: { refreshToken?: string }) {
   const [groups, setGroups] = useState<StorageGroupDocument[]>([]);
   const [disks, setDisks] = useState<PhysicalDiskDocument[]>([]);
   const [logicalStorage, setLogicalStorage] = useState<LogicalStorageDocument[]>([]);
@@ -80,7 +80,7 @@ export function StorageGroupsPanel() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [refreshToken]);
 
   useEffect(() => {
     if (

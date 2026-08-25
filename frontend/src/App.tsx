@@ -32,6 +32,7 @@ import type {
   OperationDocument,
   OperationEvent,
   PlanDocument,
+  PhysicalDiskDocument,
   SetupStatus,
   StorageRole,
   StorageExpansionSelection,
@@ -206,6 +207,7 @@ export default function App() {
   const [mergerFsInventory, setMergerFsInventory] = useState<MergerFsInventory | null>(null);
   const [storageInventory, setStorageInventory] = useState<StorageInventory | null>(null);
   const [storageGroups, setStorageGroups] = useState<StorageGroupDocument[]>([]);
+  const [registeredDisks, setRegisteredDisks] = useState<PhysicalDiskDocument[]>([]);
   const [expansionSelection, setExpansionSelection] = useState<StorageExpansionSelection | null>(null);
   const [mergerFsTarget, setMergerFsTarget] = useState("");
   const [mergerFsName, setMergerFsName] = useState("combined-storage");
@@ -395,7 +397,7 @@ export default function App() {
   }
 
   async function loadAuthenticatedData(firstRun: boolean): Promise<void> {
-    const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundStorageGroups, foundWizards, foundOperations, foundIntegrations, foundFleetSettings] = await Promise.all([
+    const [onboarding, foundInterfaces, managedNetwork, latestSnapshot, foundMergerFs, foundStorage, foundStorageGroups, foundRegisteredDisks, foundWizards, foundOperations, foundIntegrations, foundFleetSettings] = await Promise.all([
         api.onboarding(),
         api.networkInterfaces(),
         api.networkingStatus(),
@@ -403,6 +405,7 @@ export default function App() {
         api.mergerfsInventory(),
         api.storageInventory(),
         api.storageGroups(),
+        api.registeredDisks(),
         api.listWizards(),
         api.listOperations(),
         api.integrations(),
@@ -498,6 +501,7 @@ export default function App() {
     setMergerFsInventory(foundMergerFs);
     setStorageInventory(foundStorage);
     setStorageGroups(foundStorageGroups);
+    setRegisteredDisks(foundRegisteredDisks);
     setIntegrations(foundIntegrations);
     if (foundFleetSettings) {
       setFleetSettings(foundFleetSettings);
@@ -944,10 +948,14 @@ export default function App() {
     setStatus("Scanning controllers, enclosures, and drives…");
     try {
       const found = await api.discoverHardware();
-      const foundStorage = await api.storageInventory();
+      const [foundStorage, foundRegisteredDisks] = await Promise.all([
+        api.storageInventory(),
+        api.registeredDisks(),
+      ]);
       const foundDrives = drivesFromSnapshot(found);
       setSnapshot(found);
       setStorageInventory(foundStorage);
+      setRegisteredDisks(foundRegisteredDisks);
       const selectableDrives = foundDrives.filter((drive) => drive.selectable);
       setSelectedDriveIds(selectableDrives.length === 1 ? [selectableDrives[0].id] : []);
       if (wizard && (wizard.status === "draft" || wizard.status === "review")) {
@@ -1743,16 +1751,18 @@ export default function App() {
       : "/data";
     try {
       if (wizard) await api.completeWizard(wizard.id);
-      const [found, foundMergerFs, foundStorage, foundGroups] = await Promise.all([
+      const [found, foundMergerFs, foundStorage, foundGroups, foundRegisteredDisks] = await Promise.all([
         api.discoverHardware(),
         api.mergerfsInventory(),
         api.storageInventory(),
         api.storageGroups(),
+        api.registeredDisks(),
       ]);
       setSnapshot(found);
       setMergerFsInventory(foundMergerFs);
       setStorageInventory(foundStorage);
       setStorageGroups(foundGroups);
+      setRegisteredDisks(foundRegisteredDisks);
       if (wizard) setSavedWizards((items) => items.filter((item) => item.id !== wizard.id));
       resetStorageDraftState();
       setStorageOperation(null);
@@ -2497,6 +2507,7 @@ export default function App() {
         onResumeDraft={(draftId) => void resumeStorageDraft(draftId)}
         onDiscardDraft={(draftId) => void discardSavedStorageDraft(draftId)}
         reservedDriveIds={activeReservedDriveIds}
+        registeredDisks={registeredDisks}
         storageInventory={storageInventory}
         activeOperation={storageOperation}
         operationProgress={storageProgress}
@@ -2654,8 +2665,16 @@ export function BackendStoragePlan({ storage }: { storage: Record<string, unknow
   if (!storage) return null;
   const format = objectValue(storage.format);
   const risk = objectValue(storage.risk);
+  const topology = String(storage.topology ?? "Not specified");
+  const layoutOptions = objectValue(storage.layout_options);
   const actions = Array.isArray(storage.actions) ? storage.actions.map(objectValue) : [];
-  const createsFilesystem = actions.some((action) => action.type === "filesystem.create");
+  const createsMdFilesystem = topology === "raid";
+  const createsFilesystem = createsMdFilesystem || actions.some((action) => action.type === "filesystem.create");
+  const reviewedFilesystem = createsMdFilesystem ? String(layoutOptions.filesystem ?? "Not specified") : String(format.filesystem ?? "Not specified");
+  const reviewedFormatMethod = createsMdFilesystem ? "Create filesystem on the MD array" : createsFilesystem ? "Quick format" : "Not applicable";
+  const reviewedPartitioning = createsMdFilesystem ? "Linux MD metadata on each reviewed member" : createsFilesystem ? String(format.partition_table ?? "None") : "No creation planned";
+  const reviewedAlignment = createsMdFilesystem && layoutOptions.chunk_kib ? `${Number(layoutOptions.chunk_kib).toLocaleString()} KiB array chunk` : createsFilesystem && format.alignment_bytes ? `${Number(format.alignment_bytes).toLocaleString()} bytes` : "Not applicable";
+  const reviewedMountOptions = Array.isArray(format.mount_options) && format.mount_options.length ? format.mount_options.map(String).join(", ") : "Filesystem defaults";
   const folders = Array.isArray(storage.folders) ? storage.folders.map(String) : [];
   const warnings = Array.isArray(storage.warnings) ? storage.warnings.map(objectValue) : [];
   const intake = objectValue(storage.intake_tests);
@@ -2673,8 +2692,8 @@ export function BackendStoragePlan({ storage }: { storage: Record<string, unknow
         <div><ReviewLine label="Target" value={String(expansionTarget.mountpoint ?? "New storage")} mono /><ReviewLine label="Exact geometry" value={Object.entries(expansionConfiguration).map(([key, value]) => `${key}=${String(value)}`).join(" · ") || "Not specified"} /><ReviewLine label="Discovery SHA-256" value={String(expansion.hardware_snapshot_sha256 ?? "Not reported")} mono /></div>
       </div>
     </div>}
-    <div className="review-grid plan-storage-grid"><div><h3>Layout</h3><ReviewLine label="Type" value={String(storage.topology ?? "Not specified")} /><ReviewLine label="Drive checks" value={selectedChecks.length ? selectedChecks.join(", ") : "None"} /><ReviewLine label="Snapshots" value={storage.snapshots === true ? "Enabled" : "Disabled"} /><ReviewLine label="Encryption" value={String(storage.encryption ?? "Not specified")} /></div><div><h3>Account</h3><ReviewLine label="Media identity" value={String(objectValue(storage.service_account).username ?? "Not specified")} /><ReviewLine label="Access model" value={String(objectValue(storage.file_access).acl_model ?? "Not specified")} /></div></div>
-    <div className="review-grid plan-storage-grid"><div><h3>{createsFilesystem ? "Format" : "Filesystem handling"}</h3><ReviewLine label="Filesystem" value={createsFilesystem ? String(format.filesystem ?? "Not specified") : "Preserve existing"} /><ReviewLine label="Format method" value={createsFilesystem ? "Quick format" : "Not applicable"} /><ReviewLine label="Partition table" value={createsFilesystem ? String(format.partition_table ?? "None") : "No creation planned"} /><ReviewLine label="Alignment" value={createsFilesystem && format.alignment_bytes ? `${Number(format.alignment_bytes).toLocaleString()} bytes` : "Not applicable"} /><ReviewLine label="Allocation unit" value={createsFilesystem && format.allocation_unit_bytes ? `${Number(format.allocation_unit_bytes).toLocaleString()} bytes` : "Not applicable"} /></div><div><h3>Risk</h3><ReviewLine label="Destructive" value={risk.destructive === true ? "Yes" : risk.destructive === false ? "No" : "Not declared"} /><ReviewLine label="Approval required" value={risk.approval_required === true ? "Yes" : risk.approval_required === false ? "No" : "Not declared"} /><p>{String(risk.message ?? "No risk message was supplied.")}</p></div></div>
+    <div className="review-grid plan-storage-grid"><div><h3>Layout</h3><ReviewLine label="Type" value={topology} /><ReviewLine label="Drive checks" value={selectedChecks.length ? selectedChecks.join(", ") : "None"} /><ReviewLine label="Snapshots" value={storage.snapshots === true ? "Enabled" : "Disabled"} /><ReviewLine label="Encryption" value={String(storage.encryption ?? "Not specified")} /></div><div><h3>Account</h3><ReviewLine label="Media identity" value={String(objectValue(storage.service_account).username ?? "Not specified")} /><ReviewLine label="Access model" value={String(objectValue(storage.file_access).acl_model ?? "Not specified")} /></div></div>
+    <div className="review-grid plan-storage-grid"><div><h3>{createsFilesystem ? "Format" : "Filesystem handling"}</h3><ReviewLine label="Filesystem" value={createsFilesystem ? reviewedFilesystem : "Preserve existing"} /><ReviewLine label="Format method" value={reviewedFormatMethod} /><ReviewLine label={createsMdFilesystem ? "Member metadata" : "Partition table"} value={reviewedPartitioning} /><ReviewLine label="Alignment" value={reviewedAlignment} /><ReviewLine label="Allocation unit" value={createsMdFilesystem ? "Filesystem default" : createsFilesystem && format.allocation_unit_bytes ? `${Number(format.allocation_unit_bytes).toLocaleString()} bytes` : "Not applicable"} /><ReviewLine label="Mount options" value={createsFilesystem ? reviewedMountOptions : "Not applicable"} /></div><div><h3>Risk</h3><ReviewLine label="Destructive" value={risk.destructive === true ? "Yes" : risk.destructive === false ? "No" : "Not declared"} /><ReviewLine label="Approval required" value={risk.approval_required === true ? "Yes" : risk.approval_required === false ? "No" : "Not declared"} /><p>{String(risk.message ?? "No risk message was supplied.")}</p></div></div>
     <h3>Actions</h3><div className="table-scroll"><table className="data-table"><thead><tr><th>Action ID</th><th>Type</th><th>Device</th><th>Destructive</th></tr></thead><tbody>{actions.map((action, index) => <tr key={String(action.action_id ?? index)}><td><code>{String(action.action_id ?? "Unavailable")}</code></td><td>{String(action.type ?? "Unavailable")}</td><td><code>{String(action.device_id ?? "—")}</code></td><td>{actionDestructiveLabel(action, risk.destructive === true)}</td></tr>)}</tbody></table></div>
     <h3>Folders</h3><div className="folder-list">{folders.map((folder) => <code key={folder}>{folder}</code>)}</div>
     {warnings.map((warning, index) => <Notice key={String(warning.code ?? index)} tone="warning" title={String(warning.code ?? "Storage warning")}>{String(warning.message ?? "Review this warning.")}</Notice>)}
