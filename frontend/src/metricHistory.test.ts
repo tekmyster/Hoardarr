@@ -48,6 +48,30 @@ describe("metric history presentation contract", () => {
     expect(resolveMetricHistoryEntity(entities, { entityType: "host", sourceSurface: "overview" })?.id).toBe("host");
   });
 
+  it("treats an explicit stable identity as authoritative even when the name matches", () => {
+    const entities = [
+      { id: "reported", entity_type: "drive", stable_id: "wwn:reported", display_name: "Media SSD" },
+      { id: "other", entity_type: "drive", stable_id: "wwn:other", display_name: "Other SSD" },
+    ] as MetricEntity[];
+    expect(resolveMetricHistoryEntity(entities, {
+      entityType: "drive",
+      stableId: "wwn:missing",
+      displayName: "Media SSD",
+      sourceSurface: "storage",
+    })).toBeNull();
+  });
+
+  it("refuses the sole same-type entity when an explicit stable identity is absent", () => {
+    const entities = [
+      { id: "only-drive", entity_type: "drive", stable_id: "wwn:reported", display_name: "Only SSD" },
+    ] as MetricEntity[];
+    expect(resolveMetricHistoryEntity(entities, {
+      entityType: "drive",
+      stableId: "wwn:missing",
+      sourceSurface: "storage",
+    })).toBeNull();
+  });
+
   it("preserves null/unavailable samples as disconnected graph segments", () => {
     const document = history({
       points: [

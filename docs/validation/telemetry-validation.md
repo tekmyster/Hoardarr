@@ -418,3 +418,23 @@ selected real entity/provider reports them; unavailable values remain honest. Th
 run makes no physical-hardware, beta-deployment, or provider-certification claim.
 KPIUI-05, KPIUI-06, KPIUI-08, KPIUI-18, KPIUI-20, and dependent rows were not
 started.
+
+### KPIUI-15 fail-closed identity correction — 2026-08-25
+
+Supervisor review identified that a supplied but missing stable ID could still fall
+through to a matching display name or sole same-type entity. The resolver now treats
+every non-empty stable ID as authoritative: exact type + stable ID or no match. An
+unresolved contextual selection clears and suppresses current cards, persistent
+history, and advanced analysis; invalidates/aborts prior history work; disables the
+metric/range/graph controls; and issues no history or analytics request for a
+different entity. The storage selector remains available so the user can explicitly
+choose different reported storage. That recovery is labelled as an explicit choice,
+not a substitute for the missing requested identity.
+
+Focused resolver/component coverage proves both prohibited resolver fallbacks, zero
+history/top/endurance/anomaly requests and no retained/default values while blocked,
+then one valid history request after explicit recovery. Final results after the
+correction were 21/21 focused frontend tests, 203/203 complete frontend tests, a
+clean TypeScript production build, 1/1 focused Chromium, and two complete
+retry-disabled Chromium passes at 41/41 each. The existing 200-visit/200-range-change
+memory soak remained bounded in both complete passes.

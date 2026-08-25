@@ -25,8 +25,7 @@ export function resolveMetricHistoryEntity(
   if (!context) return null;
   const sameType = entities.filter((entity) => entity.entity_type === context.entityType);
   if (context.stableId) {
-    const exact = sameType.find((entity) => entity.stable_id === context.stableId);
-    if (exact) return exact;
+    return sameType.find((entity) => entity.stable_id === context.stableId) ?? null;
   }
   if (context.displayName) {
     const exactNames = sameType.filter((entity) => entity.display_name === context.displayName);

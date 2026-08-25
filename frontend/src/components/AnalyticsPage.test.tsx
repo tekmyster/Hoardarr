@@ -353,6 +353,58 @@ describe("AnalyticsPage", () => {
     expect(screen.getByText(/800/)).toBeInTheDocument();
   });
 
+  it("fails closed for an unresolved stable identity and recovers only after explicit selection", async () => {
+    const licensedCatalog: MetricCatalogDocument = {
+      ...catalog,
+      entitlements: {
+        ...catalog.entitlements,
+        state: "valid",
+        capabilities: ["metrics.analytics.performance", "metrics.analytics.endurance", "metrics.analytics.anomaly"],
+      },
+    };
+    vi.spyOn(api, "metricCatalog").mockResolvedValue(licensedCatalog);
+    vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: sample.timestamp, items: [sample], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    const topSpy = vi.spyOn(api, "topMetrics").mockResolvedValue([]);
+    const enduranceSpy = vi.spyOn(api, "enduranceForecast").mockResolvedValue({ forecast: { status: "insufficient_history", methodology: "No observations." } });
+    const anomalySpy = vi.spyOn(api, "telemetryAnomalies").mockResolvedValue([]);
+    const historySpy = vi.spyOn(api, "metricHistory").mockResolvedValue({
+      entity,
+      metric_id: sample.metric_id,
+      unit: sample.unit,
+      resolution: "raw",
+      start: "2026-08-22T10:00:00Z",
+      end: "2026-08-22T11:00:00Z",
+      points: [{ timestamp: sample.timestamp, value: sample.value, quality: "available" }],
+    });
+
+    render(<AnalyticsPage context={{
+      entityType: "drive",
+      stableId: "wwn:missing",
+      displayName: entity.display_name,
+      metricId: sample.metric_id,
+      sourceSurface: "storage",
+    }} />);
+
+    expect(await screen.findByText("Storage item is not currently reported")).toBeInTheDocument();
+    expect(screen.getByLabelText("Storage item")).toHaveValue("");
+    expect(screen.getByLabelText("Metric")).toBeDisabled();
+    expect(screen.getByText("No history was requested because the specified storage identity is unavailable.")).toBeInTheDocument();
+    expect(screen.queryByText("1 MiB/s")).not.toBeInTheDocument();
+    expect(historySpy).not.toHaveBeenCalled();
+    expect(topSpy).not.toHaveBeenCalled();
+    expect(enduranceSpy).not.toHaveBeenCalled();
+    expect(anomalySpy).not.toHaveBeenCalled();
+
+    await userEvent.selectOptions(screen.getByLabelText("Storage item"), entity.id);
+    await waitFor(() => expect(historySpy).toHaveBeenCalledTimes(1));
+    expect(historySpy).toHaveBeenCalledWith(expect.objectContaining({ entityId: entity.id, metricId: sample.metric_id }));
+    expect(await screen.findByText("1 MiB/s", { selector: ".history-buckets td" })).toBeInTheDocument();
+    expect(screen.getByText(/Showing only the different item you selected explicitly/)).toBeInTheDocument();
+  });
+
   it("aborts replaced history requests and ignores a late obsolete response", async () => {
     const second: MetricEntity = { ...entity, id: "entity-2", stable_id: "wwn:two", display_name: "Second SSD" };
     vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);

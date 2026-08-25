@@ -52,9 +52,10 @@ that owns the entity. Overview opens the observed host, Storage opens an exact d
 or pool, Health opens an exact drive/controller/enclosure/pool, and Controller
 Redundancy keeps each physical path separate. The contextual navigation contract is
 `MetricHistoryContext`; it carries the stable entity ID, entity type, display name,
-metric ID, and source surface. Resolution is fail closed: an exact type and stable ID
-is preferred, a display-name match is accepted only when unique, and an ambiguous
-name does not select a substitute entity.
+metric ID, and source surface. Resolution is fail closed: when the context supplies
+a non-empty stable ID, exact type + stable ID is authoritative and any miss returns
+no entity. A unique display-name or sole-same-type fallback is considered only for a
+context that supplies no stable ID; an ambiguous name never selects a substitute.
 
 The applicable catalog inventory is the checked-in 101-row catalog rather than a UI
 list. KPIUI-15 currently exposes applicable definitions for these entity classes:
