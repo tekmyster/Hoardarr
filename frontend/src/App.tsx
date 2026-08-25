@@ -1098,7 +1098,7 @@ export default function App() {
         }
       } else if (activeStep === 4) {
         if (!portability.length) throw new Error("Choose Windows, macOS, or Hoardarr-managed Linux storage.");
-        if (mode === "guided") applyRecommendedLayout();
+        if (mode === "guided" && storageRole !== "download-cache") applyRecommendedLayout();
       } else if (activeStep === 5) {
         if (storageRole === "mergerfs") mergerFsAnswer();
         if (storageRole === "zfs" || storageRole === "raid" || storageRole === "snapraid" || storageRole === "mixed") layoutOptionsAnswer(storageRole);
@@ -1678,6 +1678,7 @@ export default function App() {
       if (effectiveAction === "import" || effectiveAction === "test") setPreserveData(true);
       if (effectiveAction === "configure" || effectiveAction === "cache" || effectiveAction === "expand") setPreserveData(false);
       if (effectiveAction === "cache") {
+        setPurpose("downloads");
         setCacheBackingGroupId((current) => eligibleCacheBackingGroups.some((group) => group.id === current) ? current : eligibleCacheBackingGroups[0]?.id ?? "");
         setConnectivitySkipped(true);
       }

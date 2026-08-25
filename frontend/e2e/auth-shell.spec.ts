@@ -579,6 +579,51 @@ test.describe("production sign-in shell", () => {
     await expect(dialog.getByLabel("TRIM or discard")).toBeVisible();
   });
 
+  test("binds a Guided download tier to verified managed media storage", async ({ page }) => {
+    await storageWizardServer(page);
+    const now = new Date().toISOString();
+    await page.route("**/api/v1/storage/groups", (route) => route.fulfill({ json: { items: [{
+      id: "media-group",
+      name: "Media Library",
+      namespace_path: "/data",
+      purpose: "media",
+      state: "active",
+      policy: { placement: "most_free_space" },
+      namespace: { quality: "available", available: true, reason: "Verified exact managed mount." },
+      backends: [{
+        id: "media-backend",
+        stable_identity: "zfs:media",
+        physical_disk_id: null,
+        storage_entity_id: "storage-media",
+        namespace_path: "/data",
+        role: "data",
+        lifecycle_state: "preferred_write",
+      }],
+      events: [],
+      created_at: now,
+      updated_at: now,
+    }] } }));
+
+    await page.goto("/");
+    await page.locator('nav[aria-label="Primary navigation"] button').filter({ hasText: "Storage" }).first().click();
+    await page.getByLabel("Actions for /dev/sdb").click();
+    await page.getByRole("menuitem", { name: /Use for downloads\/cache/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    await expect(dialog.getByRole("heading", { name: "Check drive condition" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+    await expect(dialog.getByRole("heading", { name: "Tell us how the drives will be used" })).toBeVisible();
+    await expect(dialog.getByRole("radio", { name: /Downloads and temporary work/ })).toBeChecked();
+    await dialog.getByRole("button", { name: "Continue" }).click();
+
+    await expect(dialog.getByRole("heading", { name: "Choose a storage layout" })).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Where should completed downloads go?" })).toBeVisible();
+    await expect(dialog.getByLabel("Media Storage Group")).toHaveValue("media-group");
+    await expect(dialog.getByLabel("Fast download path")).toHaveValue("/data/downloads");
+    await expect(dialog.getByText("Existing media remains unchanged")).toBeVisible();
+    await expect(dialog.getByText(/Keep completed torrents on the fast tier while seeding/i)).toBeVisible();
+  });
+
   test("opens a snapshot-bound expansion recommendation in the real storage wizard", async ({ page }) => {
     await storageWizardServer(page);
     await page.route("**/api/v1/storage/mergerfs", (route) => route.fulfill({ json: {
