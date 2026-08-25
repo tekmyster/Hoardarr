@@ -275,11 +275,15 @@ export default function App() {
             setStatus("Drive checks completed. Review the recorded results, then close.");
             return;
           }
-          setStatus("Storage was built and verified successfully. Preparing file-access credentials…");
-          try {
-            await provisionServiceAccountAtFinish();
-          } catch (caught) {
-            if (!cancelled) setError(`Storage is ready, but the file-access credential could not be created: ${messageFromError(caught)}`);
+          if (provisionedServiceUsername === serviceUsername) {
+            setStatus("Storage was built and verified successfully. The reviewed file-access identity is ready.");
+          } else {
+            setStatus("Storage was built and verified successfully. Preparing file-access credentials…");
+            try {
+              await provisionServiceAccountAtFinish();
+            } catch (caught) {
+              if (!cancelled) setError(`Storage is ready, but the file-access credential could not be created: ${messageFromError(caught)}`);
+            }
           }
           return;
         }
@@ -1147,6 +1151,16 @@ export default function App() {
         await api.recordConsent(wizard, plan, snapshot.sha256, consentPhrase, selectedDriveIds);
         setConsentRecorded(true);
       }
+      // Directory and SMB actions run inside the durable storage operation and
+      // intentionally fail closed when their reviewed service identity does not
+      // exist.  Create that narrowly scoped, non-login identity after consent
+      // but before queueing the operation so ACL/share finalization can complete
+      // in the same checkpointed workflow.  The generated credential remains
+      // hidden until the storage operation succeeds.
+      if (storageRole !== "test" && provisionedServiceUsername !== serviceUsername) {
+        setStatus("Preparing the reviewed file-access identity…");
+        await provisionServiceAccountAtFinish();
+      }
       const operation = await api.startStorageApply(wizard);
       setStorageOperation(operation);
       setStorageProgress({
@@ -1177,6 +1191,10 @@ export default function App() {
     setError(null);
     setStatus("Checking the durable storage checkpoint…");
     try {
+      if (storageRole !== "test" && provisionedServiceUsername !== serviceUsername) {
+        setStatus("Preparing the reviewed file-access identity before resuming…");
+        await provisionServiceAccountAtFinish();
+      }
       const operation = await api.resumeOperation(storageOperation.id);
       setStorageOperation(operation);
       setStorageProgress((current) => current ? {
@@ -2160,7 +2178,7 @@ export default function App() {
             <Field label="Password" hint="Any non-empty password is accepted; no complexity rules are imposed."><div className="password-field-with-eye"><input aria-label="Media application password" type={showServicePassword ? "text" : "password"} value={servicePassword} onChange={(event) => { setServicePassword(event.target.value); setProvisionedServiceUsername(null); }} autoComplete="new-password" /><button type="button" className="credential-eye-button" aria-label={showServicePassword ? "Hide media application password" : "Show media application password"} aria-pressed={showServicePassword} onClick={() => setShowServicePassword((shown) => !shown)}><EyeIcon crossed={showServicePassword} /></button></div></Field>
             <Field label="Confirm password"><div className="password-field-with-eye"><input aria-label="Confirm media application password" type={showServicePasswordConfirmation ? "text" : "password"} value={servicePasswordConfirmation} onChange={(event) => { setServicePasswordConfirmation(event.target.value); setProvisionedServiceUsername(null); }} autoComplete="new-password" /><button type="button" className="credential-eye-button" aria-label={showServicePasswordConfirmation ? "Hide confirmation password" : "Show confirmation password"} aria-pressed={showServicePasswordConfirmation} onClick={() => setShowServicePasswordConfirmation((shown) => !shown)}><EyeIcon crossed={showServicePasswordConfirmation} /></button></div></Field>
           </div>}
-          <Notice tone="info" title="Created only when setup finishes">Hoardarr will create this account on the final wizard step. If Hoardarr generates the password, that final page is the only place it will be displayed.</Notice>
+          <Notice tone="info" title="Created only after final approval">Hoardarr creates this non-login identity after you approve the immutable plan and before its folder permissions are applied. If Hoardarr generates the password, it is displayed only after the storage build completes.</Notice>
           <Notice tone="info" title="No shell or administrator access">This identity can modify media and download folders. It does not receive a login shell or Hoardarr administrator rights.</Notice>
         </Card>
         <Card title="Windows file access" description="SMB provides Windows-style user and group permissions for human access.">
@@ -2272,7 +2290,7 @@ export default function App() {
           {serviceCredentialMode === "provide" && <Notice tone="success" title="Your password is active">Hoardarr does not display or store the password you supplied.</Notice>}
           {generatedPasswordCopyConfirmed && <Notice tone="success" title="Password saved and removed">You explicitly confirmed that the generated password was saved. Hoardarr permanently removed it from this page and cannot display it again.</Notice>}
         </Card>}
-        {storageRole !== "test" && storageOperation?.status === "succeeded" && generatedServicePassword && <Card title="Save your generated password" description="Storage completed first. This is the only time Hoardarr will display this credential, and it starts hidden.">
+        {storageRole !== "test" && storageOperation?.status === "succeeded" && generatedServicePassword && <Card title="Save your generated password" description="Storage is complete. This is the only time Hoardarr will display this credential, and it starts hidden.">
           <OneTimePassword password={generatedServicePassword} onSavedConfirmed={confirmGeneratedPasswordSaved} onCopyError={() => setError("The browser could not copy the password. Use the eye button, select the password, and copy it manually. Hoardarr will keep showing it until you explicitly confirm that it is saved.")} />
           <Notice tone="warning" title="Verify before confirming">Mobile browsers can report a successful copy incorrectly. Paste the password into your password manager and verify it, then select <strong>I saved this password</strong>. Only that explicit confirmation removes it.</Notice>
         </Card>}
