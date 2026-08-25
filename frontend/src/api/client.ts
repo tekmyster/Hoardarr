@@ -1280,9 +1280,10 @@ class HoardarrApi {
     });
   }
 
-  async confirmManagedNetwork(token: string): Promise<void> {
+  async confirmManagedNetwork(token: string, signal?: AbortSignal): Promise<void> {
     await this.request("/networking/confirm", {
       method: "POST",
+      signal,
       body: JSON.stringify({ token }),
     });
   }

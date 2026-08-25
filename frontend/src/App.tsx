@@ -26,6 +26,7 @@ import type {
   LibraryChoice,
   MergerFsInventory,
   NetworkInterface,
+  ManagedNetworkApplyResult,
   NetworkMode,
   NetworkPlanResponse,
   OperationDocument,
@@ -73,6 +74,32 @@ const LIBRARY_DEFAULTS: LibraryChoice[] = [
 function messageFromError(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   return error instanceof Error ? error.message : "The request could not be completed.";
+}
+
+async function confirmManagedNetworkAfterReconnect(
+  pending: ManagedNetworkApplyResult,
+): Promise<void> {
+  const retryDeadline = Date.now() + Math.max(5, pending.confirm_within_seconds - 10) * 1000;
+  let lastError: unknown = new Error("The network change could not be confirmed.");
+  // The apply response is intentionally delivered before the host changes its
+  // addresses. Give activation a brief head start, then retry through a bounded
+  // reconnect window. Each attempt has its own timeout so one stale TCP
+  // connection cannot consume the entire rollback safety period.
+  await new Promise((resolve) => window.setTimeout(resolve, 750));
+  while (Date.now() < retryDeadline) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 4_000);
+    try {
+      await api.confirmManagedNetwork(pending.token, controller.signal);
+      return;
+    } catch (caught) {
+      lastError = caught;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+  }
+  throw lastError;
 }
 
 function speedLabel(speed: number | null): string {
@@ -990,7 +1017,7 @@ export default function App() {
         }
         const pending = await api.applyManagedNetwork(configuration, preview.sha256, changed);
         setNetworkConfirmationPending(true);
-        await api.confirmManagedNetwork(pending.token);
+        await confirmManagedNetworkAfterReconnect(pending);
         setNetworkConfirmationPending(false);
         setNetworkPlan(null);
         setStatus("Network settings applied.");
@@ -1929,7 +1956,7 @@ export default function App() {
       }
       const pending = await api.applyManagedNetwork(configuration, currentPlan.sha256, networkChangedComponents);
       setNetworkConfirmationPending(true);
-      await api.confirmManagedNetwork(pending.token);
+      await confirmManagedNetworkAfterReconnect(pending);
       setNetworkConfirmationPending(false);
       setNetworkPlan(null);
       setNetworkChangedComponents([]);

@@ -847,6 +847,7 @@ def apply(
     *,
     paths: Paths = DEFAULT_PATHS,
     runner: Runner = subprocess.run,
+    activate: bool = True,
 ) -> dict[str, Any]:
     configuration = _configuration_with_preserved_secrets(configuration, paths)
     requested_components = _changed_components(changed_components)
@@ -872,6 +873,7 @@ def apply(
         "changed_components": list(components),
         "previous_host": previous_host,
         "previous_services": previous_services,
+        "activation_state": "prepared",
     }
     _atomic_write(paths.pending, json.dumps(pending, sort_keys=True), 0o600)
     try:
@@ -892,7 +894,8 @@ def apply(
             ],
             runner=runner,
         )
-        _activate(configuration, paths, components, runner=runner)
+        if activate:
+            activate_pending(token, paths=paths, runner=runner)
     except Exception:
         with contextlib.suppress(Exception):
             _restore(paths, token)
@@ -912,6 +915,55 @@ def apply(
     }
 
 
+def activate_pending(
+    token: str, *, paths: Paths = DEFAULT_PATHS, runner: Runner = subprocess.run
+) -> dict[str, Any]:
+    """Activate a prepared network change after its API response is deliverable.
+
+    Applying an address synchronously inside the request can tear down the TCP
+    connection before the browser receives its confirmation token.  The API
+    prepares and validates the configuration first, returns the token, and then
+    calls this bounded background step.  Direct executor callers retain the
+    original synchronous behavior through ``apply(activate=True)``.
+    """
+
+    try:
+        pending = json.loads(paths.pending.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise NetworkFailure(
+            "network_confirmation_missing", "No network change is awaiting activation."
+        ) from exc
+    if pending.get("token") != token:
+        raise NetworkFailure(
+            "network_confirmation_invalid", "The network activation token is invalid."
+        )
+    if pending.get("activation_state") == "active":
+        return {"state": "active"}
+    try:
+        configuration = ManagedNetworkRequest.model_validate(pending["configuration"])
+        components = _changed_components(pending.get("changed_components"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise NetworkFailure(
+            "network_pending_invalid", "The pending network change is invalid."
+        ) from exc
+    try:
+        _activate(configuration, paths, components, runner=runner)
+    except Exception:
+        with contextlib.suppress(Exception):
+            _restore(paths, token)
+            if "server" in components:
+                _restore_host_properties(pending.get("previous_host", {}), runner=runner)
+            if "network" in components:
+                _run([_command("netplan"), "apply"], runner=runner, check=False, timeout=180)
+            _restore_service_states(pending.get("previous_services", {}), components, runner=runner)
+        paths.pending.unlink(missing_ok=True)
+        shutil.rmtree(paths.rollback_root / token, ignore_errors=True)
+        raise
+    pending["activation_state"] = "active"
+    _atomic_write(paths.pending, json.dumps(pending, sort_keys=True), 0o600)
+    return {"state": "active"}
+
+
 def confirm(
     token: str, *, paths: Paths = DEFAULT_PATHS, runner: Runner = subprocess.run
 ) -> dict[str, Any]:
@@ -924,6 +976,11 @@ def confirm(
     if pending.get("token") != token:
         raise NetworkFailure(
             "network_confirmation_invalid", "The network confirmation token is invalid."
+        )
+    if pending.get("activation_state") != "active":
+        raise NetworkFailure(
+            "network_activation_pending",
+            "The network change is still activating. Retry confirmation shortly.",
         )
     unit = f"hoardarr-network-rollback-{token}"
     _run([_command("systemctl"), "stop", f"{unit}.timer"], runner=runner, check=False)

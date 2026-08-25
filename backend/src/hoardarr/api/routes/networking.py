@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 
 from hoardarr.api.dependencies import authenticated_principal, require_state_scope
 from hoardarr.api.networking_schemas import (
@@ -12,6 +12,7 @@ from hoardarr.api.problem import Problem
 from hoardarr.auth.service import Principal
 from hoardarr.networking.executor import (
     NetworkFailure,
+    activate_pending,
     apply,
     build_plan,
     confirm,
@@ -47,10 +48,18 @@ def networking_plan(
 @router.post("/apply")
 def networking_apply(
     payload: ManagedNetworkApplyRequest,
+    background_tasks: BackgroundTasks,
     _principal: Principal = Depends(require_state_scope("admin")),
 ) -> dict[str, object]:
     try:
-        return apply(payload.configuration, payload.plan_sha256, payload.changed_components)
+        pending = apply(
+            payload.configuration,
+            payload.plan_sha256,
+            payload.changed_components,
+            activate=False,
+        )
+        background_tasks.add_task(activate_pending, str(pending["token"]))
+        return pending
     except NetworkFailure as exc:
         raise _problem(exc) from exc
 

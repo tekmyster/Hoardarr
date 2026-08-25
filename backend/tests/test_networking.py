@@ -126,6 +126,53 @@ def test_apply_requires_confirmation_before_committing(
     assert not paths.pending.exists()
 
 
+def test_deferred_network_activation_delivers_token_before_confirmation(
+    tmp_path: Path,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    paths = executor.Paths(
+        state_root=tmp_path / "state",
+        netplan=tmp_path / "etc/netplan/99-hoardarr.yaml",
+        timesyncd=tmp_path / "etc/systemd/timesyncd.conf.d/60-hoardarr.conf",
+        rsyslog=tmp_path / "etc/rsyslog.d/60-hoardarr.conf",
+        snmpd=tmp_path / "etc/snmp/snmpd.conf",
+        nftables_main=tmp_path / "etc/nftables.conf",
+        nftables=tmp_path / "etc/nftables.d/60-hoardarr.nft",
+        lldpd=tmp_path / "etc/lldpd.d/60-hoardarr.conf",
+        lldpd_service=tmp_path / "etc/systemd/lldpd.conf",
+    )
+    commands: list[list[str]] = []
+
+    def runner(command, **_kwargs):  # type: ignore[no-untyped-def]
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(executor, "_command", lambda name: name)
+    monkeypatch.setattr(executor, "capabilities", lambda: {"available": True, "tools": {}})
+    monkeypatch.setattr(
+        executor,
+        "_selected_interfaces",
+        lambda _configuration: [{"id": "enp5s0f0", "mac_address": "00:11:22:33:44:55"}],
+    )
+    planned = executor.build_plan(configuration())
+
+    pending = executor.apply(
+        configuration(), planned["sha256"], paths=paths, runner=runner, activate=False
+    )
+
+    assert pending["state"] == "pending_confirmation"
+    assert not any(command[:2] == ["netplan", "apply"] for command in commands)
+    with pytest.raises(executor.NetworkFailure) as not_active:
+        executor.confirm(pending["token"], paths=paths, runner=runner)
+    assert not_active.value.code == "network_activation_pending"
+
+    executor.activate_pending(pending["token"], paths=paths, runner=runner)
+    assert any(command[:2] == ["netplan", "apply"] for command in commands)
+    executor.confirm(pending["token"], paths=paths, runner=runner)
+    assert paths.state.exists()
+    assert not paths.pending.exists()
+
+
 def test_ntp_only_apply_does_not_touch_network_or_other_services(
     tmp_path: Path,
     monkeypatch,  # type: ignore[no-untyped-def]
