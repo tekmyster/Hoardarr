@@ -1620,6 +1620,23 @@ def test_directory_access_includes_intermediate_folders_and_ignores_umask(
     assert applied == [(Path(path), 1234) for path in result]
 
 
+def test_missing_storage_access_account_is_a_resumable_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingAccountProvider:
+        @staticmethod
+        def getpwnam(_username: str) -> object:
+            raise KeyError("missing")
+
+    monkeypatch.setattr(executor, "pwd", MissingAccountProvider())
+
+    with pytest.raises(ExecutorFailure) as failure:
+        executor._service_account_group_id("media")
+
+    assert failure.value.code == "storage_access_account_missing"
+    assert failure.value.needs_attention is True
+
+
 def test_mergerfs_branch_traversal_is_group_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

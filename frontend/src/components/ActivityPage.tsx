@@ -39,6 +39,10 @@ export function ActivityPage() {
       ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item) && typeof (item as Record<string, unknown>).action_id === "string" && String((item as Record<string, unknown>).action_id).includes("smart"))
       : [];
   }, [selected]);
+  const storageCheckpointCanResume = selected?.kind === "storage.apply" && (
+    selected.status === "needs_attention"
+    || (selected.status === "failed" && progress?.state === "needs_attention")
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -98,7 +102,7 @@ export function ActivityPage() {
   }, [selected?.id, selected?.status]);
 
   async function resumeSelected(): Promise<void> {
-    if (!selected || selected.status !== "needs_attention") return;
+    if (!selected || !storageCheckpointCanResume) return;
     setResuming(true);
     setError(null);
     try {
@@ -128,8 +132,8 @@ export function ActivityPage() {
       {progress && <StorageOperationNotices notices={progress.notices} />}
       {smartResults.length > 0 && <div className="table-scroll" aria-label="SMART self-test history"><h3>SMART self-test result</h3><table className="data-table"><thead><tr><th>Drive</th><th>Test</th><th>Result</th><th>Detail</th></tr></thead><tbody>{smartResults.map((result) => <tr key={String(result.action_id)}><td><code>{String(result.device_id ?? "Not reported")}</code></td><td>{String(result.action_id).includes("extended") ? "Long / extended" : "Short"}</td><td><StatusBadge status={String(result.outcome ?? "not reported").replace("_", " ")} /></td><td>{String(result.message ?? result.code ?? "Not reported")}</td></tr>)}</tbody></table></div>}
       {selected.error && <Notice tone="danger" title={selected.error.code ?? "Operation failed"}>{selected.error.detail ?? selected.error.message ?? "The operation needs attention."}</Notice>}
-      {selected.status === "needs_attention" && selected.error?.code === "storage_access_account_missing" && <Notice tone="warning" title="Create the reviewed media account first">Open Settings, create the media account named in the reviewed storage plan, then return here and resume from the durable checkpoint. Storage will not be rebuilt.</Notice>}
-      {selected.status === "needs_attention" && <div className="button-row"><button type="button" className="button button-primary" disabled={resuming} onClick={() => void resumeSelected()}>{resuming ? "Resuming…" : "Resume from safe checkpoint"}</button></div>}
+      {storageCheckpointCanResume && selected.error?.code === "storage_access_account_missing" && <Notice tone="warning" title="Create the reviewed media account first">Open Settings, create the media account named in the reviewed storage plan, then return here and resume from the durable checkpoint. Storage will not be rebuilt.</Notice>}
+      {storageCheckpointCanResume && <div className="button-row"><button type="button" className="button button-primary" disabled={resuming} onClick={() => void resumeSelected()}>{resuming ? "Resuming…" : "Resume from safe checkpoint"}</button></div>}
       {events.length ? <ol className="activity-event-list">{events.map((event) => <li key={event.sequence}><time>{formatDate(event.created_at)}</time><strong>{event.type}</strong><span>{event.message}</span></li>)}</ol> : <p>No events have been recorded for this operation.</p>}
     </Card>}
   </div>;

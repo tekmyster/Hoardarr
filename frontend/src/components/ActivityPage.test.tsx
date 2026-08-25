@@ -15,7 +15,7 @@ describe("ActivityPage recovery", () => {
     const operation = {
       id: "11111111-1111-4111-8111-111111111111",
       kind: "storage.apply",
-      status: "needs_attention",
+      status: "failed",
       created_at: "2026-08-25T00:00:00Z",
       updated_at: "2026-08-25T00:01:00Z",
       result: null,

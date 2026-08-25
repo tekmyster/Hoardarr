@@ -1784,6 +1784,7 @@ def _service_account_group_id(username: str) -> int:
         raise ExecutorFailure(
             "storage_access_account_missing",
             "The planned file-access account does not exist. No permissions were changed.",
+            needs_attention=True,
         ) from exc
     if account.pw_uid == 0:
         raise ExecutorFailure(
