@@ -43,6 +43,7 @@ from hoardarr.telemetry.analytics import (
 from hoardarr.telemetry.catalog import CATALOG_BY_ID, METRICS, catalog_document
 from hoardarr.telemetry.collectors import (
     ResetSafeCounterRates,
+    StorageCollector,
     _reading,
     _weighted_io_time,
     mergerfs_imbalance,
@@ -244,6 +245,47 @@ def test_weighted_io_time_and_mergerfs_imbalance_are_source_backed(tmp_path: Pat
     imbalance, members = mergerfs_imbalance(["/one", "/two", "/three"], statvfs=fake_statvfs)
     assert imbalance == 60.0
     assert len(members) == 3
+
+
+def test_storage_collector_normalizes_provider_not_reported_numbers() -> None:
+    class Sampler:
+        @staticmethod
+        def sample(**_kwargs: object) -> dict[str, object]:
+            return {
+                "summary": {},
+                "drives": [],
+                "pools": [
+                    {
+                        "id": "zfs:media",
+                        "name": "media",
+                        "type": "ZFS",
+                        "metrics": {},
+                    }
+                ],
+            }
+
+    collector = StorageCollector(sampler=Sampler())  # type: ignore[arg-type]
+    readings = collector.collect(
+        hardware_snapshot={"disks": []},
+        inventory={
+            "pools": {
+                "items": [
+                    {
+                        "id": "zfs:media",
+                        "type": "ZFS",
+                        "total_bytes": 1_000,
+                        "used_bytes": 250,
+                        "free_bytes": 750,
+                        "progress_percent": "Not reported",
+                    }
+                ]
+            }
+        },
+    )
+
+    progress = next(item for item in readings if item.metric_id == "pool.scrub.progress")
+    assert progress.value is None
+    assert progress.quality == "not_reported"
 
 
 def test_read_ratio_and_multipath_failovers_use_durable_exact_transitions(tmp_path: Path) -> None:

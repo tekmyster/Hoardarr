@@ -320,6 +320,14 @@ def _first_reported(primary: object, fallback: float | int | None) -> float | in
     return fallback
 
 
+def _reported_number(value: object) -> float | int | None:
+    """Keep provider display sentinels out of normalized numeric metrics."""
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
 def _queue_depth(device_name: str, root: Path = Path("/sys/class/block")) -> int | None:
     try:
         fields = (root / device_name / "inflight").read_text(encoding="utf-8").split()
@@ -715,7 +723,7 @@ class StorageCollector:
                     _reading(
                         entity,
                         metric_id,
-                        inventory_pool.get(key),
+                        _reported_number(inventory_pool.get(key)),
                         observed_at=timestamp,
                         source="pool provider",
                         interval=max(30, self.interval_seconds),
