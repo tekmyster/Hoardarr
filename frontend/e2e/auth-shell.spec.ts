@@ -301,7 +301,6 @@ async function storageWizardServer(page: Page, options: { firstDriveContainsData
 
 async function unconfiguredServer(page: Page): Promise<void> {
   await authenticatedEmptyServer(page);
-  await page.unroute("**/*");
   let claimed = false;
   let fleetHardwareEnabled = true;
   let fleetCountry: string | null = "US";
@@ -378,7 +377,7 @@ async function unconfiguredServer(page: Page): Promise<void> {
       activity: { operations: [] }, applications: { connections: [] }, alerts: [],
     });
     if (pathname.endsWith("/system/resources")) return json({ captured_at: new Date().toISOString(), processor: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, volumes: [], network: { interfaces: [] }, storage: { performance: null } });
-    return route.continue();
+    return route.fallback();
   });
 }
 
