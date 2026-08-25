@@ -360,7 +360,7 @@ async function unconfiguredServer(page: Page): Promise<void> {
     });
     if (pathname.endsWith("/onboarding/network/interfaces")) return json({ items: [{ id: "enp1s0", name: "enp1s0", model: "Test Ethernet", mac: "00:11:22:33:44:55", link: "up", speed_mbps: 1000, is_physical: true, warnings: [] }] });
     if (pathname.endsWith("/networking/plan")) return json({ plan: { apply_available: true, blockers: [], warnings: [], changed_components: ["server", "network", "ntp", "discovery"] }, sha256: "a".repeat(64) });
-    if (pathname.endsWith("/networking/apply")) return json({ state: "pending_confirmation", token: "b".repeat(32), changed_components: ["server", "network", "ntp", "discovery"] });
+    if (pathname.endsWith("/networking/apply")) return json({ state: "pending_confirmation", token: "b".repeat(32), confirm_within_seconds: 120, changed_components: ["server", "network", "ntp", "discovery"] });
     if (pathname.endsWith("/networking/confirm")) return route.fulfill({ status: 204 });
     if (pathname.endsWith("/networking")) return json({ configuration: null, pending_confirmation: false, capabilities: { available: true, tools: {} }, interfaces: [], current: { hostname: "hoardarr", timezone: "UTC", addresses: {}, default_interface: "enp1s0", default_gateway: null } });
     if (pathname.endsWith("/hardware/snapshots/latest")) return route.fulfill({ status: 404, json: { title: "Not found" } });
