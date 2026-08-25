@@ -45,6 +45,14 @@ from hoardarr.migration_identity import (
 )
 from hoardarr.operations.worker import run_forever, run_once
 
+_IDENTITY_MIGRATION_OFFLINE_UNITS = (
+    "hoardarr-api.service",
+    "hoardarr-worker.service",
+    "hoardarr-storage-status.service",
+    "hoardarr-account-executor.service",
+    "hoardarr-storage-executor.service",
+)
+
 
 def _migrate(settings: Settings) -> None:
     database_initialized = sqlite_database_has_schema(settings.database_url)
@@ -224,11 +232,12 @@ def _identity_migration_command(args: argparse.Namespace) -> None:
         )
         print(json.dumps(failure_result(exc), sort_keys=True))
         raise SystemExit(exc.exit_code)
-    active = _active_units(("hoardarr-api.service", "hoardarr-worker.service"))
+    active = _active_units(_IDENTITY_MIGRATION_OFFLINE_UNITS)
     if active:
         exc = IdentityMigrationError(
             "services_active",
-            "Stop the Hoardarr API and worker before hardware identity migration.",
+            "Stop all Hoardarr API, worker, storage-status, account-executor, and "
+            "storage-executor services before hardware identity migration.",
         )
         print(json.dumps(failure_result(exc), sort_keys=True))
         raise SystemExit(exc.exit_code)

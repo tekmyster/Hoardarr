@@ -81,6 +81,82 @@ def test_identity_cli_dry_run_apply_and_local_root_enforcement(
     engine.dispose()
 
 
+@pytest.mark.parametrize(
+    "active_unit",
+    [
+        "hoardarr-api.service",
+        "hoardarr-worker.service",
+        "hoardarr-storage-status.service",
+        "hoardarr-account-executor.service",
+        "hoardarr-storage-executor.service",
+    ],
+)
+def test_identity_cli_rejects_each_active_writer_before_database_access(
+    active_unit: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected_units = (
+        "hoardarr-api.service",
+        "hoardarr-worker.service",
+        "hoardarr-storage-status.service",
+        "hoardarr-account-executor.service",
+        "hoardarr-storage-executor.service",
+    )
+    observed_units: list[tuple[str, ...]] = []
+
+    def active_units(units: tuple[str, ...]) -> list[str]:
+        observed_units.append(units)
+        return [active_unit]
+
+    def database_access_forbidden() -> Settings:
+        raise AssertionError("service gate must reject before database configuration is loaded")
+
+    manifest = tmp_path / "private-identity-map.json"
+    monkeypatch.setattr(cli, "_is_root", lambda: True)
+    monkeypatch.setattr(cli, "_active_units", active_units)
+    monkeypatch.setattr(cli, "Settings", database_access_forbidden)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hoardarr",
+            "migrate-hardware-identities",
+            "--manifest",
+            str(manifest),
+            "--expected-database-sha256",
+            "a" * 64,
+            "--dry-run",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as denied:
+        cli.main()
+
+    assert denied.value.code == 3
+    assert observed_units == [expected_units]
+    output = capsys.readouterr().out
+    expected_output = {
+        "schema_version": 1,
+        "status": "rejected",
+        "error": {
+            "code": "services_active",
+            "message": (
+                "Stop all Hoardarr API, worker, storage-status, account-executor, and "
+                "storage-executor services before hardware identity migration."
+            ),
+        },
+        "mapped_count": 0,
+        "rejected_count": 1,
+    }
+    assert json.loads(output) == expected_output
+    assert output == json.dumps(expected_output, sort_keys=True) + "\n"
+    assert active_unit not in output
+    assert str(manifest) not in output
+    assert "a" * 64 not in output
+
+
 def test_session_cli_json_contract_count_precondition_and_redaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
