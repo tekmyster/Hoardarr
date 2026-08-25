@@ -22,6 +22,7 @@ from hoardarr.db.models import (
     OperationEvent,
     PhysicalDisk,
     Plan,
+    PlanApproval,
     StorageVolume,
     WizardSession,
     utc_now,
@@ -172,6 +173,123 @@ def test_legacy_failed_storage_apply_requires_executor_needs_attention_checkpoin
             "resume_attempt": 1,
             "legacy_failed_checkpoint_reconciled": True,
         }
+
+
+def test_checkpoint_resume_uses_immutable_plan_after_wizard_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    snapshot_payload = {"schema_version": 1, "disks": []}
+    snapshot_sha = document_hash(snapshot_payload)
+    device_ids = ["wwn:6000c290000000000000000000000001"]
+    device_binding_sha = document_hash(
+        [{"id": device_ids[0], "serial": "SAFE-RESUME", "size_bytes": 12_000_000_000}]
+    )
+    document = {
+        "apply_available": True,
+        "blockers": [],
+        "storage": {
+            "risk": {"approval_required": True},
+            "snapshot_binding": {
+                "snapshot_id": "resume-snapshot",
+                "snapshot_sha256": snapshot_sha,
+                "device_binding_sha256": device_binding_sha,
+                "selected_device_ids": device_ids,
+            },
+        },
+    }
+    plan_sha = document_hash(document)
+    wizard = WizardSession(
+        id="cancelled-resume-wizard",
+        workflow="storage.add",
+        status="cancelled",
+        revision=5,
+        current_step="cancelled",
+        plan_id=None,
+    )
+    snapshot = HardwareSnapshot(
+        id="resume-snapshot",
+        operation_id="cancelled-resume-operation",
+        detector_schema_version=1,
+        source="fixture",
+        payload_json=snapshot_payload,
+        sha256=snapshot_sha,
+    )
+    plan = Plan(
+        id="cancelled-resume-plan",
+        wizard_session_id=wizard.id,
+        revision=4,
+        kind="storage.add",
+        document_json=document,
+        sha256=plan_sha,
+    )
+    approval = PlanApproval(
+        id="cancelled-resume-approval",
+        plan_id=plan.id,
+        wizard_session_id=wizard.id,
+        wizard_revision=4,
+        plan_sha256=plan_sha,
+        hardware_snapshot_id=snapshot.id,
+        hardware_snapshot_sha256=snapshot_sha,
+        device_binding_sha256=device_binding_sha,
+        selected_device_ids_json=device_ids,
+        confirmation_sha256=document_hash({"confirmation": "I AGREE"}),
+        actor_type="browser_session",
+        actor_id="test-user",
+    )
+    request = {
+        "schema_version": 1,
+        "wizard_id": wizard.id,
+        "wizard_revision": 4,
+        "plan_id": plan.id,
+        "plan_sha256": plan_sha,
+    }
+    operation = Operation(
+        id="cancelled-resume-operation",
+        kind="storage.apply",
+        status="needs_attention",
+        actor_type="browser_session",
+        actor_id="test-user",
+        resource_type="wizard_session",
+        resource_id=wizard.id,
+        idempotency_key="cancelled-resume-operation",
+        request_sha256=document_hash(request),
+        request_json=request,
+        result_json={"resume_requested": True, "resume_attempt": 1},
+    )
+    with session_factory() as session, session.begin():
+        session.add_all([wizard, operation])
+    with session_factory() as session, session.begin():
+        session.add_all([snapshot, plan])
+    with session_factory() as session, session.begin():
+        session.add(approval)
+
+    calls: list[dict[str, Any]] = []
+
+    def resume_applier(_socket: object, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"operation_id": operation.id, "topology": "zfs", "mountpoint": "/data"}
+
+    with session_factory() as session, session.begin():
+        stored = session.get(Operation, operation.id)
+        assert stored is not None
+        stored.status = "queued"
+
+    assert run_once(
+        session_factory=session_factory,
+        settings=settings,
+        secret_box=SecretBox(b"a" * 32),
+        worker_id="resume-worker",
+        storage_applier=resume_applier,
+    )
+    assert calls[0]["resume"] is True
+    assert calls[0]["plan_sha256"] == plan_sha
+    assert calls[0]["approval"]["selected_device_ids"] == device_ids
+    with session_factory() as session:
+        stored = session.get(Operation, operation.id)
+        stored_wizard = session.get(WizardSession, wizard.id)
+        assert stored is not None and stored.status == "succeeded"
+        assert stored_wizard is not None and stored_wizard.status == "cancelled"
 
 
 def test_volume_worker_persists_executor_result_under_stable_provider_identity(

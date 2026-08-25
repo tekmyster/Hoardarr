@@ -1239,18 +1239,32 @@ def _execute_storage(
     ):
         raise WorkFailure("invalid_operation_request", "The storage operation request is invalid")
     with session_factory() as session, session.begin():
+        operation = session.get(Operation, item.operation_id)
+        resume_requested = bool(
+            operation is not None
+            and isinstance(operation.result_json, dict)
+            and operation.result_json.get("resume_requested") is True
+        )
         wizard = session.get(WizardSession, wizard_id)
         plan = session.get(Plan, plan_id)
-        if (
+        immutable_plan_invalid = (
             wizard is None
             or plan is None
-            or wizard.plan_id != plan.id
-            or wizard.revision != revision
             or plan.revision != revision
             or plan.wizard_session_id != wizard.id
             or plan.sha256 != plan_sha256
             or document_hash(plan.document_json) != plan_sha256
-        ):
+        )
+        current_draft_invalid = (
+            not resume_requested
+            and (
+                wizard is None
+                or plan is None
+                or wizard.plan_id != plan.id
+                or wizard.revision != revision
+            )
+        )
+        if immutable_plan_invalid or current_draft_invalid:
             raise WorkFailure(
                 "storage_plan_changed", "The storage plan changed before execution; review it again"
             )
@@ -1259,20 +1273,41 @@ def _execute_storage(
             or plan.document_json.get("blockers") != []
         ):
             raise WorkFailure("storage_plan_blocked", "The storage plan is not executable")
-        approval_status = plan_approval_status(session, wizard_id=wizard.id)
-        if approval_status["required"] and not approval_status["valid"]:
-            raise WorkFailure(
-                "destructive_approval_changed",
-                "Destructive approval is no longer valid; review the storage plan again",
-            )
+        storage_document = plan.document_json.get("storage")
+        risk = storage_document.get("risk") if isinstance(storage_document, Mapping) else None
+        approval_required = isinstance(risk, Mapping) and risk.get("approval_required") is True
+        if resume_requested:
+            approval_status = {"required": approval_required, "valid": not approval_required}
+        else:
+            approval_status = plan_approval_status(session, wizard_id=wizard.id)
         approval_document: dict[str, Any] | None = None
         if approval_status["required"]:
             approval = session.scalar(select(PlanApproval).where(PlanApproval.plan_id == plan.id))
-            if approval is None:
+            binding = (
+                storage_document.get("snapshot_binding")
+                if isinstance(storage_document, Mapping)
+                else None
+            )
+            immutable_approval_invalid = (
+                approval is None
+                or not isinstance(binding, Mapping)
+                or approval.wizard_revision != revision
+                or approval.plan_sha256 != plan_sha256
+                or approval.hardware_snapshot_id != binding.get("snapshot_id")
+                or approval.hardware_snapshot_sha256 != binding.get("snapshot_sha256")
+                or approval.device_binding_sha256 != binding.get("device_binding_sha256")
+                or approval.selected_device_ids_json != binding.get("selected_device_ids")
+                or approval.confirmation_sha256
+                != document_hash({"confirmation": "I AGREE"})
+            )
+            if immutable_approval_invalid or (
+                not resume_requested and not approval_status["valid"]
+            ):
                 raise WorkFailure(
                     "destructive_approval_changed",
                     "Destructive approval is no longer valid; review the storage plan again",
                 )
+            assert approval is not None
             approval_document = {
                 "approval_id": approval.id,
                 "plan_sha256": approval.plan_sha256,
@@ -1286,12 +1321,6 @@ def _execute_storage(
                 "confirmation_sha256": approval.confirmation_sha256,
             }
         plan_document = deepcopy(plan.document_json)
-        operation = session.get(Operation, item.operation_id)
-        resume_requested = bool(
-            operation is not None
-            and isinstance(operation.result_json, dict)
-            and operation.result_json.get("resume_requested") is True
-        )
     try:
         result = storage_applier(
             settings.storage_executor_socket,
@@ -2010,12 +2039,17 @@ def _finalize_success(
         if isinstance(execution, StorageExecution):
             wizard = session.get(WizardSession, execution.wizard_id)
             plan = session.get(Plan, execution.plan_id)
+            resume_requested = bool(
+                isinstance(operation.result_json, dict)
+                and operation.result_json.get("resume_requested") is True
+            )
             if (
                 wizard is None
                 or plan is None
-                or wizard.plan_id != plan.id
+                or plan.wizard_session_id != wizard.id
                 or plan.sha256 != execution.plan_sha256
                 or document_hash(plan.document_json) != execution.plan_sha256
+                or (not resume_requested and wizard.plan_id != plan.id)
             ):
                 fail_operation(
                     session,
@@ -2025,8 +2059,13 @@ def _finalize_success(
                     needs_attention=True,
                 )
                 return
-            wizard.status = "applied"
-            wizard.updated_at = utc_now()
+            # A safe checkpoint resume is bound to the operation's immutable plan and
+            # executor journal, not to the continued presence of an editable wizard.
+            # Preserve an explicitly cancelled wizard while still registering the
+            # storage that the executor demonstrably completed.
+            if wizard.status != "cancelled":
+                wizard.status = "applied"
+                wizard.updated_at = utc_now()
             snapshot = session.scalar(
                 select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
             )
