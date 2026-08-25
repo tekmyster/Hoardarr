@@ -46,7 +46,11 @@ function Ensure-VirtualDataDisks {
 
     # These are ordinary thin VMDKs. This helper deliberately has no RDM/device-path option.
     # SCSI 0:0 is the appliance OS disk; lab data starts on a separate controller.
-    $desired = @(12, 12, 12, 8)
+    # The first four disks retain the accepted mergerFS/ZFS/landing topology. The
+    # three additional 6-GiB disks are the bounded provider-validation set used
+    # for real Linux MD on B and SnapRAID on A. Existing disks are validated in
+    # exact controller/unit order and are never resized or replaced here.
+    $desired = @(12, 12, 12, 8, 6, 6, 6)
     $controller = Get-ScsiController -VM $Vm | Where-Object { $_.ExtensionData.BusNumber -eq 1 }
     if (-not $controller) {
         $expectedOsFilename = "[$($Datastore.Name)] $($Vm.Name)/$($Vm.Name).vmdk"
