@@ -842,6 +842,91 @@ def test_storage_resume_checkpoints_post_layout_work_without_progress_drift(
     assert [command[0] for command in commands].count("setfattr") == 1
 
 
+def test_zfs_resume_after_layout_never_replays_pool_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = "44444444-4444-4444-8444-444444444444"
+    device_ids = ["wwn:zfs-a", "wwn:zfs-b", "wwn:zfs-c"]
+    live_devices = {
+        identity: {
+            **_live_disk(),
+            "id": identity,
+            "stable_identity": identity,
+            "kernel_path": f"/dev/sd{suffix}",
+        }
+        for identity, suffix in zip(device_ids, ("x", "y", "z"), strict=True)
+    }
+    options = {
+        "name": "media",
+        "mountpoint": "/data",
+        "vdevs": [{"type": "raidz1", "device_ids": device_ids}],
+        "ashift": 12,
+        "recordsize": "1M",
+        "compression": "lz4",
+        "scrub_schedule": "monthly",
+        "snapshots": {"enabled": False, "retention": 0},
+        "special": [],
+        "cache": [],
+        "log": [],
+    }
+    document = {
+        "presentation_root": "/data",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "zfs",
+            "selected_devices": [
+                {**_selected_device(), "id": identity, "stable_identity": identity}
+                for identity in device_ids
+            ],
+            "actions": [
+                {
+                    "action_id": "storage-layout",
+                    "type": "storage.layout.ensure",
+                    "topology": "zfs",
+                    "device_ids": device_ids,
+                    "purpose": "media",
+                    "layout_options": options,
+                    "destructive": True,
+                }
+            ],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "layout_options": options,
+            "service_account": {"username": "media"},
+        },
+    }
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        fstab=tmp_path / "fstab",
+        mount_root=tmp_path / "mounts",
+    )
+    commands: list[list[str]] = []
+    journal = {
+        "completed_steps": 2,
+        "total_steps": 4,
+        "completed_actions": ["storage-layout", "runtime:layout"],
+        "notices": [],
+    }
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: live_devices)
+    monkeypatch.setattr(executor, "_resume_revalidate", lambda *_args: live_devices)
+    monkeypatch.setattr(executor, "_safe_mountpoint", lambda _value: tmp_path / "data")
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+
+    result = executor._execute_actions(
+        operation_id=operation_id,
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": list(live_devices.values())},
+        runner=lambda command, _timeout: commands.append(command),
+        journal=journal,
+        resume=True,
+    )
+
+    assert result["topology"] == "zfs"
+    assert not any(command[:2] == ["zpool", "create"] for command in commands)
+    assert "runtime:fstab" in journal["completed_actions"]
+    assert journal["completed_steps"] == journal["total_steps"]
+
+
 @pytest.mark.parametrize(
     ("role", "fail_command"),
     [("data", None), ("parity", None), ("data", "status"), ("data", "sync")],

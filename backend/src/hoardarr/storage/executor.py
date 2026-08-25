@@ -2622,7 +2622,16 @@ def _execute_actions(
 
     presentation_root = _safe_mountpoint(str(document["presentation_root"]))
     layout_checkpoint = "runtime:layout"
-    layout_is_persisted = layout_checkpoint in completed and "runtime:fstab" in completed
+    # ZFS persists its own mountpoint and pool geometry.  A post-layout failure
+    # (for example while creating media folders) can therefore leave the pool
+    # fully built while the generic fstab checkpoint is still pending.  Never
+    # replay ``zpool create`` in that state: resume the remaining configuration
+    # from the immutable executor journal and let the empty fstab phase complete
+    # normally.  Other layouts still require their fstab checkpoint because the
+    # branch/bind/md mount declarations are part of the durable layout.
+    layout_is_persisted = layout_checkpoint in completed and (
+        "runtime:fstab" in completed or topology == "zfs"
+    )
     if not layout_is_persisted:
         journal["phase"] = "Building the selected storage layout"
         journal["current_action"] = {"id": "layout", "type": "storage.layout.apply"}
