@@ -1103,6 +1103,64 @@ def _ensure_not_active(paths: Paths, devices: Mapping[str, Mapping[str, Any]]) -
             )
 
 
+def _ensure_expected_raid_holders(
+    paths: Paths,
+    devices: Mapping[str, Mapping[str, Any]],
+    options: Mapping[str, Any],
+) -> None:
+    """Verify that an in-progress MD build owns every reviewed member.
+
+    Once ``mdadm --create`` succeeds, the selected member disks deliberately
+    acquire an MD holder.  Re-running the generic inactive-device check at
+    that point rejects Hoardarr's own array and leaves the operation halfway
+    through.  Subsequent filesystem and mount commands instead require every
+    stable identity to remain present and to belong to one common MD array
+    with the reviewed level and member count.
+    """
+
+    holder_sets: list[set[str]] = []
+    try:
+        for disk in devices.values():
+            holder_root = paths.sys_class_block / _block_name(_kernel_path(disk)) / "holders"
+            holder_sets.append({entry.name for entry in holder_root.iterdir()})
+    except OSError as exc:
+        raise ExecutorFailure(
+            "raid_membership_unknown",
+            "The new Linux RAID membership could not be verified safely.",
+            needs_attention=True,
+        ) from exc
+    if not holder_sets or any(len(items) != 1 for items in holder_sets):
+        raise ExecutorFailure(
+            "raid_membership_changed",
+            "The new Linux RAID does not contain every reviewed drive exactly once.",
+            needs_attention=True,
+        )
+    holder_names = set().union(*holder_sets)
+    if len(holder_names) != 1:
+        raise ExecutorFailure(
+            "raid_membership_changed",
+            "The reviewed drives no longer belong to one Linux RAID array.",
+            needs_attention=True,
+        )
+    holder = next(iter(holder_names))
+    md_root = paths.sys_class_block / holder / "md"
+    try:
+        observed_level = (md_root / "level").read_text(encoding="utf-8").strip()
+        observed_members = int((md_root / "raid_disks").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError) as exc:
+        raise ExecutorFailure(
+            "raid_membership_unknown",
+            "The new Linux RAID geometry could not be verified safely.",
+            needs_attention=True,
+        ) from exc
+    if observed_level != options.get("level") or observed_members != len(devices):
+        raise ExecutorFailure(
+            "raid_geometry_changed",
+            "The new Linux RAID geometry differs from the reviewed plan.",
+            needs_attention=True,
+        )
+
+
 def _validate_plan(
     request: Mapping[str, Any],
     *,
@@ -3144,9 +3202,27 @@ def _execute_actions(
                 commands = layout_commands(topology, options, stable_paths)
             except LayoutError as exc:
                 raise ExecutorFailure("layout_options_invalid", str(exc)) from exc
-            for command in commands:
-                devices = _revalidate(document, inventory_provider, paths)
-                runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
+            raid_mutation_started = False
+            try:
+                for command_index, command in enumerate(commands):
+                    if topology == "raid" and command_index > 0:
+                        devices = _selected_live_devices(document, inventory_provider())
+                        _ensure_expected_raid_holders(paths, devices, options)
+                    else:
+                        devices = _revalidate(document, inventory_provider, paths)
+                    runner([_tool(command.argv[0]), *command.argv[1:]], command.timeout_seconds)
+                    if topology == "raid" and command_index == 0:
+                        raid_mutation_started = True
+            except ExecutorFailure as exc:
+                if topology == "raid" and raid_mutation_started and not exc.needs_attention:
+                    raise ExecutorFailure(
+                        "raid_layout_needs_attention",
+                        "Linux RAID creation started, but the filesystem or mount did not "
+                        "complete. The reviewed member identities remain protected; inspect "
+                        "the array before retrying.",
+                        needs_attention=True,
+                    ) from exc
+                raise
         if topology == "zfs":
             if expansion_kind != "add_zfs_vdev":
                 _install_storage_timer(

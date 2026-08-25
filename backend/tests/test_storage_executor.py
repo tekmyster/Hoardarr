@@ -572,6 +572,143 @@ def test_runtime_mergerfs_member_names_require_exact_persistent_paths() -> None:
         )
 
 
+def test_expected_raid_holders_require_one_reviewed_array(tmp_path: Path) -> None:
+    sys_class_block = tmp_path / "sys" / "class" / "block"
+    devices = {
+        "wwn:one": {"kernel_path": "/dev/sde"},
+        "wwn:two": {"kernel_path": "/dev/sdf"},
+        "wwn:three": {"kernel_path": "/dev/sdg"},
+    }
+    for name in ("sde", "sdf", "sdg"):
+        holders = sys_class_block / name / "holders"
+        holders.mkdir(parents=True)
+        (holders / "md127").touch()
+    md_root = sys_class_block / "md127" / "md"
+    md_root.mkdir(parents=True)
+    (md_root / "level").write_text("raid5\n", encoding="utf-8")
+    (md_root / "raid_disks").write_text("3\n", encoding="utf-8")
+
+    executor._ensure_expected_raid_holders(
+        Paths(sys_class_block=sys_class_block),
+        devices,
+        {"level": "raid5"},
+    )
+
+    (md_root / "level").write_text("raid6\n", encoding="utf-8")
+    with pytest.raises(ExecutorFailure) as raised:
+        executor._ensure_expected_raid_holders(
+            Paths(sys_class_block=sys_class_block),
+            devices,
+            {"level": "raid5"},
+        )
+    assert raised.value.code == "raid_geometry_changed"
+    assert raised.value.needs_attention is True
+
+
+def test_raid_layout_revalidates_expected_holders_after_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = "11111111-1111-4111-8111-111111111111"
+    device_ids = ["wwn:one", "wwn:two", "wwn:three"]
+    devices = {
+        identifier: {
+            "id": identifier,
+            "stable_identity": True,
+            "kernel_path": f"/dev/sd{letter}",
+        }
+        for identifier, letter in zip(device_ids, "efg", strict=True)
+    }
+    document = {
+        "presentation_root": "/mnt/hoardarr/md-raid5",
+        "actions": {"directories": [], "connectivity": []},
+        "storage": {
+            "topology": "raid",
+            "selected_devices": [
+                {"id": identifier, "stable_identity": True} for identifier in device_ids
+            ],
+            "actions": [
+                {
+                    "action_id": "storage-layout",
+                    "type": "storage.layout.ensure",
+                    "topology": "raid",
+                    "device_ids": device_ids,
+                    "purpose": "archive",
+                    "destructive": True,
+                }
+            ],
+            "format": {"mount_options": [], "trim": {"enabled": False}},
+            "layout_options": {
+                "name": "md-raid5",
+                "mountpoint": "/mnt/hoardarr/md-raid5",
+                "level": "raid5",
+                "filesystem": "ext4",
+                "device_ids": device_ids,
+            },
+        },
+    }
+    paths = Paths(
+        transaction_root=tmp_path / "transactions",
+        fstab=tmp_path / "fstab",
+        mount_root=tmp_path / "mounts",
+    )
+    paths.fstab.write_text("", encoding="utf-8")
+    commands: list[list[str]] = []
+    inactive_revalidations: list[bool] = []
+    holder_revalidations: list[bool] = []
+    command_revalidations: list[tuple[str, int, int]] = []
+
+    def inactive(*_args: object) -> dict[str, dict[str, object]]:
+        inactive_revalidations.append(True)
+        return devices
+
+    monkeypatch.setattr(executor, "_revalidate", inactive)
+    monkeypatch.setattr(executor, "_selected_live_devices", lambda *_args: devices)
+    monkeypatch.setattr(
+        executor,
+        "_ensure_expected_raid_holders",
+        lambda *_args: holder_revalidations.append(True),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_stable_path",
+        lambda _paths, disk: Path(f"/dev/disk/by-id/{disk['id'].replace(':', '-') }"),
+    )
+    monkeypatch.setattr(executor, "_safe_mountpoint", lambda _value: tmp_path / "raid")
+    monkeypatch.setattr(executor, "_tool", lambda name: name)
+    monkeypatch.setattr(executor, "_blkid_value", lambda *_args: "raid-filesystem-uuid")
+    monkeypatch.setattr(
+        executor,
+        "layout_commands",
+        lambda *_args: [
+            CommandSpec(("mdadm", "--create", "/dev/md/md-raid5"), 30, "create", False),
+            CommandSpec(("mkfs.ext4", "/dev/md/md-raid5"), 30, "format", False),
+            CommandSpec(("mount", "/dev/md/md-raid5"), 30, "mount"),
+        ],
+    )
+
+    executor._execute_actions(
+        operation_id=operation_id,
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": list(devices.values())},
+        runner=lambda command, _timeout: (
+            commands.append(command),
+            command_revalidations.append(
+                (command[0], len(inactive_revalidations), len(holder_revalidations))
+            ),
+        ),
+        journal={"completed_steps": 0, "notices": []},
+    )
+
+    assert [command[0] for command in commands[:3]] == ["mdadm", "mkfs.ext4", "mount"]
+    assert command_revalidations[:3] == [
+        ("mdadm", 4, 0),
+        ("mkfs.ext4", 4, 1),
+        ("mount", 4, 2),
+    ]
+    assert len(holder_revalidations) == 2
+
+
 def test_existing_mergerfs_expansion_preserves_mount_and_persists_one_updated_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
