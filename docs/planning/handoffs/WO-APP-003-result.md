@@ -7,6 +7,10 @@
   `423f94af63438a1ccac56f1bc84411e353905117`.
 - **Implementation commit:** `18b6594137f4cf143f7b81e719c2d61c89f4dcba`
   (`Add fail-closed migration identity and session tooling`).
+- **Supervisor correction commit:** `a15e5f4c7323f23a0ef7f54a1ae2c2e9872a5496`
+  (`Harden identity migration service quiescence`). This extends the identity-migration offline
+  gate to every accepted Hoardarr writer/observer service; it does not change the separately
+  designed API-only session-revocation gate.
 - Added the required local CLI contracts:
 
   ```text
@@ -132,7 +136,9 @@ Identity exit codes:
 
 Identity transaction boundary:
 
-1. Require local root and inactive `hoardarr-api.service` / `hoardarr-worker.service` on systemd.
+1. Require local root and all five accepted Hoardarr writers/observers to be inactive on systemd:
+   `hoardarr-api.service`, `hoardarr-worker.service`, `hoardarr-storage-status.service`,
+   `hoardarr-account-executor.service`, and `hoardarr-storage-executor.service`.
 2. Require current migrations, a checkpointed SQLite main database, and exact file SHA-256.
 3. `BEGIN IMMEDIATE` for apply.
 4. Re-read every disk/evidence/ownership/active-use predicate.
@@ -143,6 +149,26 @@ Identity transaction boundary:
 
 Dry-run opens no write transaction, explicitly rolls its read session back, and compares the
 database SHA-256 again before returning. The deterministic fixture proves byte-for-byte equality.
+
+An active identity-migration service gate returns exit `3` and this exact bounded result for each
+of the five units; the active unit, manifest path, and supplied database digest are not echoed:
+
+```json
+{
+  "error": {
+    "code": "services_active",
+    "message": "Stop all Hoardarr API, worker, storage-status, account-executor, and storage-executor services before hardware identity migration."
+  },
+  "mapped_count": 0,
+  "rejected_count": 1,
+  "schema_version": 1,
+  "status": "rejected"
+}
+```
+
+The CLI test replaces `Settings()` with a fail-fast sentinel and proves this rejection happens
+before database configuration or access. It also asserts that the probed tuple is exactly the
+five-unit set above. The API-only session gate remains `hoardarr-api.service` and was not widened.
 
 Session success JSON is:
 
@@ -203,15 +229,18 @@ All commands ran from `backend` unless stated otherwise.
 | Command/check | Result |
 |---|---|
 | focused identity/session/CLI suite | `30 passed` before final integration refinements |
-| final focused ownership/regression suite (`test_migration_identity`, `test_session_admin`, `test_cli_migration_admin`, `test_storage_groups`, `test_enterprise_telemetry`, `test_migrations`) | `94 passed` |
+| original final focused ownership/regression suite (`test_migration_identity`, `test_session_admin`, `test_cli_migration_admin`, `test_storage_groups`, `test_enterprise_telemetry`, `test_migrations`) | `94 passed` |
+| supervisor-correction CLI suite (`test_cli_migration_admin`) | `8 passed`; five parametrized active-unit cases all executed |
+| supervisor-correction focused ownership/regression suite (same six files) | `99 passed`, 1 existing dependency deprecation warning, 15.45 s |
 | `python -m ruff check src tests` | passed |
 | `python -m compileall -q src tests` | passed |
-| scoped mypy 1.17.1 (`--follow-imports=skip --disable-error-code=attr-defined`) on the new migration domain, auth service, and CLI | passed, no issues |
+| scoped mypy 1.17.1 (`--follow-imports=skip --disable-error-code=attr-defined`) on corrected CLI/test paths | passed, no issues |
 | final complete backend pass 1, fresh pytest process | `679 passed, 13 skipped`, 1 dependency deprecation warning, 63.54 s |
 | final complete backend pass 2, fresh pytest process | `679 passed, 13 skipped`, 1 dependency deprecation warning, 64.76 s |
+| supervisor-correction complete backend pass, fresh pytest process | `684 passed, 13 skipped`, 1 dependency deprecation warning, 65.45 s |
 | migration upgrade suite | included in both full passes; new alias table asserted at head |
-| `uv build --wheel` | passed; `hoardarr-0.3.11-py3-none-any.whl`, 533,165 bytes |
-| isolated install/console smoke from the built wheel | passed; both new command families present in `hoardarr --help` |
+| supervisor-correction `uv build --wheel` | passed; `hoardarr-0.3.11-py3-none-any.whl`, 533,303 bytes |
+| supervisor-correction isolated install/console smoke | passed; direct installed-CLI readback shows both command families |
 
 Built-wheel evidence (temporary validation artifact, not committed):
 
@@ -220,11 +249,26 @@ path: C:\Users\dmessana\AppData\Local\Temp\hoardarr-wo-app-003-b971405a59104f029
 sha256: 4ba6d1d3c94a27133db79cc94142786d63fe0514ba6e128c3b029309632f2f54
 ```
 
+Supervisor-correction built-wheel and scoped-source evidence:
+
+```text
+wheel path: C:\Users\dmessana\AppData\Local\Temp\hoardarr-wo-app-003-followup-6f50d97eec6a4af586d9c666921aef20\hoardarr-0.3.11-py3-none-any.whl
+wheel sha256: 3483db0d867e5f46b34089484ab41b964fb6a659cda0d5dd55a5a5f3d3f8a2de
+backend/src/hoardarr/cli.py sha256: 007d4053e5ebaea773d79b7bf4d4e295f2b8c66696f64d328aa1c77fc0ac53a1
+backend/tests/test_cli_migration_admin.py sha256: 9c0402cbc8528249713c85d565da54f0b564bcedbcc316224370a12097883e98
+```
+
 The 13 full-suite skips are pre-existing Linux descriptor/ownership/mount-path tests. Every new
 WO-APP-003 safety assertion executed on Windows against real SQLite transactions; none is skipped.
 An initial full-suite launch was deliberately terminated by an accidentally supplied one-second
 shell timeout and produced no valid test result. It was replaced by the two clean complete passes
 above; there was no test discrepancy.
+
+During correction validation, an initial isolated `uvx mypy` invocation did not include project
+dependencies and reported import-not-found errors only. It was repeated with the editable project
+and pytest dependencies and passed. The first PowerShell wheel-smoke assertion used array
+`-notmatch` incorrectly after the wheel installed successfully; direct invocation of the installed
+CLI then proved both help contracts. Neither harness correction changed product code.
 
 Files in implementation commit:
 
@@ -240,6 +284,13 @@ backend/tests/test_cli_migration_admin.py
 backend/tests/test_migration_identity.py
 backend/tests/test_migrations.py
 backend/tests/test_session_admin.py
+```
+
+Files in supervisor correction commit:
+
+```text
+backend/src/hoardarr/cli.py
+backend/tests/test_cli_migration_admin.py
 ```
 
 ## Defects
@@ -269,12 +320,16 @@ Final repository state at handoff writing:
 - Branch: `rc/0.3.11-validation`.
 - Scoped implementation: committed cleanly at
   `18b6594137f4cf143f7b81e719c2d61c89f4dcba`.
+- Scoped supervisor correction: committed cleanly at
+  `a15e5f4c7323f23a0ef7f54a1ae2c2e9872a5496`.
 - The inherited dirty worktree remains present and unmodified outside the scoped paths. This
   handoff is the only new post-implementation work-order artifact.
 
 ## Next action
 
-Supervisor should independently review commit
-`18b6594137f4cf143f7b81e719c2d61c89f4dcba`, reproduce the focused/full checks, inspect the strict
-manifest and JSON contracts, and accept or reject WO-APP-003. Do not execute either command against
-an appliance and do not begin LAB-10 without a separately authorized mutation work order.
+Supervisor should independently review commits
+`18b6594137f4cf143f7b81e719c2d61c89f4dcba` and
+`a15e5f4c7323f23a0ef7f54a1ae2c2e9872a5496`, reproduce the focused/full checks, inspect the strict
+manifest and JSON contracts including the five-service offline gate, and accept or reject
+WO-APP-003. Do not execute either command against an appliance and do not begin LAB-10 without a
+separately authorized mutation work order.
