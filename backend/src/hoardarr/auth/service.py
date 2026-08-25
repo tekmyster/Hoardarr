@@ -6,10 +6,10 @@ import re
 import secrets
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from argon2 import PasswordHasher
+from argon2 import PasswordHasher, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
@@ -53,6 +53,28 @@ class SessionRevocationError(AuthenticationError):
         self.exit_code = exit_code
 
 
+class PasswordResetError(AuthenticationError):
+    def __init__(
+        self,
+        code: str,
+        safe_message: str,
+        *,
+        expected_active_sessions: int,
+        observed_active_sessions: int = 0,
+        user_id: str | None = None,
+        username: str | None = None,
+        exit_code: int = 3,
+    ) -> None:
+        super().__init__(safe_message)
+        self.code = code
+        self.safe_message = safe_message
+        self.expected_active_sessions = expected_active_sessions
+        self.observed_active_sessions = observed_active_sessions
+        self.user_id = user_id
+        self.username = username
+        self.exit_code = exit_code
+
+
 @dataclass(frozen=True)
 class IssuedSession:
     session: AuthSession
@@ -69,6 +91,17 @@ class Principal:
     scopes: frozenset[str]
     session_id: str | None = None
     api_token_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PasswordResetSnapshot:
+    user_id: str
+    username: str
+    is_admin: bool
+    is_active: bool
+    password_hash: str = field(repr=False)
+    password_hash_version: str = field(repr=False)
+    observed_active_sessions: int
 
 
 def hash_token(value: str) -> str:
@@ -167,7 +200,7 @@ def authenticate_password(session: Session, username: str, password: str) -> Use
         PASSWORD_HASHER.verify(stored, password)
     except (InvalidHashError, VerificationError, VerifyMismatchError) as exc:
         raise AuthenticationError("invalid username or password") from exc
-    if user is None:
+    if user is None or not user.is_active:
         raise AuthenticationError("invalid username or password")
     return user
 
@@ -211,7 +244,7 @@ def principal_from_session(session: Session, raw_token: str) -> Principal | None
     if record is None or _aware(record.expires_at) <= utc_now():
         return None
     user = session.get(User, record.user_id)
-    if user is None:
+    if user is None or not user.is_active:
         return None
     if _aware(record.last_seen_at) < utc_now() - timedelta(minutes=5):
         record.last_seen_at = utc_now()
@@ -230,7 +263,7 @@ def principal_from_api_token(session: Session, raw_token: str) -> Principal | No
     if record is None or (record.expires_at and _aware(record.expires_at) <= utc_now()):
         return None
     user = session.get(User, record.user_id)
-    if user is None:
+    if user is None or not user.is_active:
         return None
     if record.last_used_at is None or _aware(record.last_used_at) < utc_now() - timedelta(
         minutes=5
@@ -258,6 +291,7 @@ def revoke_session(session: Session, session_id: str) -> bool:
 SESSION_REVOCATION_REASON_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 LOCAL_CONSOLE_ACTOR_ID = "00000000-0000-0000-0000-000000000000"
 SessionRevocationHook = Callable[[str, Session], None]
+PasswordResetHook = Callable[[str, Session], None]
 
 
 def active_session_count(session: Session, *, now: datetime | None = None) -> int:
@@ -271,6 +305,392 @@ def active_session_count(session: Session, *, now: datetime | None = None) -> in
         )
         or 0
     )
+
+
+def active_user_session_count(
+    session: Session,
+    *,
+    user_id: str,
+    now: datetime | None = None,
+) -> int:
+    """Count one user's sessions at the authentication expiry boundary."""
+    observed_at = now or utc_now()
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(AuthSession)
+            .where(
+                AuthSession.user_id == user_id,
+                AuthSession.expires_at > observed_at,
+            )
+        )
+        or 0
+    )
+
+
+def _password_hash_version(value: str) -> str:
+    try:
+        parameters = extract_parameters(value)
+    except InvalidHashError as exc:
+        raise PasswordResetError(
+            "password_verifier_unsupported",
+            "The account password verifier is not supported for a protected reset.",
+            expected_active_sessions=0,
+            exit_code=4,
+        ) from exc
+    return f"{parameters.type.name.casefold()}-v{parameters.version}"
+
+
+def _password_reset_users(session: Session, normalized_username: str) -> list[User]:
+    return list(
+        session.scalars(
+            select(User).where(User.username == normalized_username).limit(2)
+        )
+    )
+
+
+def inspect_administrator_password_reset(
+    session: Session,
+    *,
+    username: str,
+    expected_active_sessions: int,
+) -> PasswordResetSnapshot:
+    """Resolve a reset target without consuming or accepting the new password."""
+    if not 0 <= expected_active_sessions <= 1_000_000:
+        raise PasswordResetError(
+            "expected_active_sessions_invalid",
+            "Expected active-session count must be between 0 and 1,000,000.",
+            expected_active_sessions=expected_active_sessions,
+            exit_code=2,
+        )
+    try:
+        normalized = normalize_username(username)
+    except AuthenticationError as exc:
+        raise PasswordResetError(
+            "username_invalid",
+            "Username must be an exact normalized Hoardarr username.",
+            expected_active_sessions=expected_active_sessions,
+            exit_code=2,
+        ) from exc
+    users = _password_reset_users(session, normalized)
+    if not users:
+        raise PasswordResetError(
+            "user_not_found",
+            "The exact active administrator account was not found.",
+            expected_active_sessions=expected_active_sessions,
+            username=normalized,
+            exit_code=4,
+        )
+    if len(users) != 1:
+        raise PasswordResetError(
+            "user_ambiguous",
+            "The username did not resolve to exactly one account.",
+            expected_active_sessions=expected_active_sessions,
+            username=normalized,
+            exit_code=4,
+        )
+    user = users[0]
+    if not user.is_active:
+        raise PasswordResetError(
+            "user_disabled",
+            "The exact administrator account is disabled.",
+            expected_active_sessions=expected_active_sessions,
+            user_id=user.id,
+            username=user.username,
+            exit_code=4,
+        )
+    if not user.is_admin:
+        raise PasswordResetError(
+            "user_role_unexpected",
+            "The exact account is not a Hoardarr administrator.",
+            expected_active_sessions=expected_active_sessions,
+            user_id=user.id,
+            username=user.username,
+            exit_code=4,
+        )
+    try:
+        version = _password_hash_version(user.password_hash)
+    except PasswordResetError as exc:
+        exc.expected_active_sessions = expected_active_sessions
+        exc.user_id = user.id
+        exc.username = user.username
+        raise
+    observed_at = utc_now()
+    observed = active_user_session_count(session, user_id=user.id, now=observed_at)
+    if observed != expected_active_sessions:
+        raise PasswordResetError(
+            "active_session_count_mismatch",
+            "Active-session count does not match the supplied precondition.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=observed,
+            user_id=user.id,
+            username=user.username,
+            exit_code=4,
+        )
+    return PasswordResetSnapshot(
+        user_id=user.id,
+        username=user.username,
+        is_admin=user.is_admin,
+        is_active=user.is_active,
+        password_hash=user.password_hash,
+        password_hash_version=version,
+        observed_active_sessions=observed,
+    )
+
+
+def reset_administrator_password(
+    session: Session,
+    *,
+    snapshot: PasswordResetSnapshot,
+    expected_active_sessions: int,
+    new_password: str,
+    failure_hook: PasswordResetHook | None = None,
+) -> dict[str, object]:
+    """Reset one administrator and revoke only its active sessions atomically."""
+    if snapshot.observed_active_sessions != expected_active_sessions:
+        raise PasswordResetError(
+            "active_session_count_drift",
+            "Active-session preflight no longer matches the requested reset.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=snapshot.observed_active_sessions,
+            user_id=snapshot.user_id,
+            username=snapshot.username,
+            exit_code=4,
+        )
+    try:
+        validate_password(new_password)
+    except AuthenticationError as exc:
+        raise PasswordResetError(
+            "password_invalid",
+            "The new password does not satisfy the local account password policy.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=snapshot.observed_active_sessions,
+            user_id=snapshot.user_id,
+            username=snapshot.username,
+            exit_code=2,
+        ) from exc
+
+    users = _password_reset_users(session, snapshot.username)
+    if len(users) != 1:
+        raise PasswordResetError(
+            "user_identity_drift",
+            "The account identity changed after reset preflight.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=snapshot.observed_active_sessions,
+            user_id=snapshot.user_id,
+            username=snapshot.username,
+            exit_code=4,
+        )
+    user = users[0]
+    try:
+        current_hash_version = _password_hash_version(user.password_hash)
+    except PasswordResetError as exc:
+        exc.expected_active_sessions = expected_active_sessions
+        exc.observed_active_sessions = snapshot.observed_active_sessions
+        exc.user_id = snapshot.user_id
+        exc.username = snapshot.username
+        raise
+    if (
+        user.id != snapshot.user_id
+        or user.username != snapshot.username
+        or user.is_admin != snapshot.is_admin
+        or user.is_active != snapshot.is_active
+        or not user.is_admin
+        or not user.is_active
+        or not hmac.compare_digest(user.password_hash, snapshot.password_hash)
+        or current_hash_version != snapshot.password_hash_version
+    ):
+        raise PasswordResetError(
+            "user_identity_drift",
+            "The account identity changed after reset preflight.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=snapshot.observed_active_sessions,
+            user_id=snapshot.user_id,
+            username=snapshot.username,
+            exit_code=4,
+        )
+
+    now = utc_now()
+    observed = active_user_session_count(session, user_id=user.id, now=now)
+    if observed != expected_active_sessions:
+        raise PasswordResetError(
+            "active_session_count_drift",
+            "Active-session count changed after reset preflight.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=observed,
+            user_id=user.id,
+            username=user.username,
+            exit_code=4,
+        )
+    if failure_hook is not None:
+        failure_hook("after_count", session)
+    rechecked = active_user_session_count(session, user_id=user.id, now=now)
+    if rechecked != expected_active_sessions:
+        raise PasswordResetError(
+            "active_session_count_drift",
+            "Active-session count changed inside the protected transaction.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=rechecked,
+            user_id=user.id,
+            username=user.username,
+            exit_code=4,
+        )
+
+    try:
+        if PASSWORD_HASHER.verify(user.password_hash, new_password):
+            raise PasswordResetError(
+                "password_unchanged",
+                "The new password must differ from the current password.",
+                expected_active_sessions=expected_active_sessions,
+                observed_active_sessions=observed,
+                user_id=user.id,
+                username=user.username,
+                exit_code=4,
+            )
+    except VerifyMismatchError:
+        pass
+    except PasswordResetError:
+        raise
+    except (InvalidHashError, VerificationError) as exc:
+        raise PasswordResetError(
+            "password_verifier_unsupported",
+            "The account password verifier is not supported for a protected reset.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=observed,
+            user_id=user.id,
+            username=user.username,
+            exit_code=4,
+        ) from exc
+
+    new_password_hash = PASSWORD_HASHER.hash(new_password)
+    updated = session.execute(
+        update(User)
+        .where(
+            User.id == snapshot.user_id,
+            User.username == snapshot.username,
+            User.is_admin.is_(True),
+            User.is_active.is_(True),
+            User.password_hash == snapshot.password_hash,
+        )
+        .values(password_hash=new_password_hash)
+        .execution_options(synchronize_session=False)
+    )
+    if int(getattr(updated, "rowcount", 0) or 0) != 1:
+        raise PasswordResetError(
+            "password_update_mismatch",
+            "The exact administrator password row could not be updated.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=observed,
+            user_id=user.id,
+            username=user.username,
+            exit_code=5,
+        )
+    session.expire(user, ["password_hash"])
+    if failure_hook is not None:
+        failure_hook("after_password_update", session)
+
+    deleted = session.execute(
+        delete(AuthSession).where(
+            AuthSession.user_id == user.id,
+            AuthSession.expires_at > now,
+        )
+    )
+    revoked = int(getattr(deleted, "rowcount", 0) or 0)
+    if revoked != expected_active_sessions:
+        raise PasswordResetError(
+            "session_delete_mismatch",
+            "The exact active-session set could not be revoked.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=observed,
+            user_id=user.id,
+            username=user.username,
+            exit_code=5,
+        )
+    if failure_hook is not None:
+        failure_hook("after_session_delete", session)
+
+    expired_preserved = int(
+        session.scalar(
+            select(func.count())
+            .select_from(AuthSession)
+            .where(
+                AuthSession.user_id == user.id,
+                AuthSession.expires_at <= now,
+            )
+        )
+        or 0
+    )
+    from hoardarr.audit.service import record_audit
+
+    event = record_audit(
+        session,
+        principal=Principal(
+            user_id=LOCAL_CONSOLE_ACTOR_ID,
+            username="local-console",
+            is_admin=True,
+            auth_type="local_console",
+            scopes=frozenset({"admin"}),
+        ),
+        action="auth.password.reset",
+        outcome="succeeded",
+        correlation_id=str(uuid.uuid4()),
+        target_type="user",
+        target_id=user.id,
+        details={
+            "expected_active_sessions": expected_active_sessions,
+            "observed_active_sessions": observed,
+            "revoked_active_sessions": revoked,
+            "preserved_expired_sessions": expired_preserved,
+        },
+    )
+    session.flush()
+    if failure_hook is not None:
+        failure_hook("after_audit", session)
+
+    session.expire(user, ["password_hash"])
+    readback = session.get(User, user.id)
+    try:
+        hash_valid = bool(
+            readback is not None
+            and not hmac.compare_digest(readback.password_hash, snapshot.password_hash)
+            and PASSWORD_HASHER.verify(readback.password_hash, new_password)
+            and not PASSWORD_HASHER.check_needs_rehash(readback.password_hash)
+        )
+    except (InvalidHashError, VerificationError, VerifyMismatchError):
+        hash_valid = False
+    if not hash_valid:
+        raise PasswordResetError(
+            "password_readback_failed",
+            "Password reset readback failed.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=observed,
+            user_id=user.id,
+            username=user.username,
+            exit_code=5,
+        )
+    remaining = active_user_session_count(session, user_id=user.id, now=now)
+    if remaining != 0:
+        raise PasswordResetError(
+            "session_readback_failed",
+            "Active-session readback was not zero after password reset.",
+            expected_active_sessions=expected_active_sessions,
+            observed_active_sessions=remaining,
+            user_id=user.id,
+            username=user.username,
+            exit_code=5,
+        )
+    return {
+        "schema_version": 1,
+        "status": "succeeded",
+        "user_id": user.id,
+        "username": user.username,
+        "expected_active_sessions": expected_active_sessions,
+        "observed_active_sessions": observed,
+        "revoked_active_sessions": revoked,
+        "remaining_active_sessions": remaining,
+        "preserved_expired_sessions": expired_preserved,
+        "audit_event_id": event.id,
+    }
 
 
 def revoke_all_active_sessions(

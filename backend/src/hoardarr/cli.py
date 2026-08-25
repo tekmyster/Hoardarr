@@ -17,10 +17,13 @@ from sqlalchemy import text
 from hoardarr.api.app import create_app
 from hoardarr.auth.service import (
     AuthenticationError,
+    PasswordResetError,
     SessionRevocationError,
     SetupUnavailableError,
     create_initial_owner,
+    inspect_administrator_password_reset,
     issue_setup_token,
+    reset_administrator_password,
     revoke_all_active_sessions,
 )
 from hoardarr.backups.service import (
@@ -377,6 +380,173 @@ def _revoke_all_sessions_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def _reset_password_command(args: argparse.Namespace) -> None:
+    def rejected(
+        code: str,
+        message: str,
+        *,
+        expected: int = 0,
+        observed: int = 0,
+        user_id: str | None = None,
+        username: str | None = None,
+        exit_code: int = 3,
+    ) -> None:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "rejected",
+                    "user_id": user_id,
+                    "username": username,
+                    "expected_active_sessions": expected,
+                    "observed_active_sessions": observed,
+                    "revoked_active_sessions": 0,
+                    "remaining_active_sessions": observed,
+                    "preserved_expired_sessions": None,
+                    "audit_event_id": None,
+                    "error": {"code": code, "message": message},
+                },
+                sort_keys=True,
+            )
+        )
+        raise SystemExit(exit_code)
+
+    try:
+        expected = int(args.expected_active_sessions)
+    except (TypeError, ValueError):
+        rejected(
+            "expected_active_sessions_invalid",
+            "Expected active-session count must be an integer.",
+            exit_code=2,
+        )
+    if not _is_root():
+        rejected(
+            "local_root_required",
+            "Administrator password reset must run as local root.",
+            expected=expected,
+        )
+    if _active_units(("hoardarr-api.service",)):
+        rejected(
+            "api_service_active",
+            "Stop or quiesce the Hoardarr API before administrator password reset.",
+            expected=expected,
+        )
+
+    engine = None
+    snapshot = None
+    new_password: str | None = None
+    try:
+        settings = Settings()
+        database_path = sqlite_database_path(settings.database_url)
+        if database_path is None:
+            rejected(
+                "database_unsupported",
+                "Administrator password reset requires the Hoardarr SQLite database.",
+                expected=expected,
+                exit_code=4,
+            )
+        if not database_path.exists() or not database_path.is_file():
+            rejected(
+                "database_unavailable",
+                "The Hoardarr SQLite database is unavailable.",
+                expected=expected,
+                exit_code=4,
+            )
+        engine = create_database_engine(settings.database_url)
+        if not database_is_current(engine, settings.database_url):
+            rejected(
+                "database_migration_required",
+                "Database migrations are not current; run hoardarr-migrate first.",
+                expected=expected,
+                exit_code=4,
+            )
+        factory = create_session_factory(engine)
+        with factory() as session:
+            snapshot = inspect_administrator_password_reset(
+                session,
+                username=args.username,
+                expected_active_sessions=expected,
+            )
+
+        try:
+            new_password = _read_password(bool(args.password_stdin))
+        except AuthenticationError:
+            rejected(
+                "password_invalid",
+                "The new password does not satisfy the local account password policy.",
+                expected=expected,
+                observed=snapshot.observed_active_sessions,
+                user_id=snapshot.user_id,
+                username=snapshot.username,
+                exit_code=2,
+            )
+
+        with factory() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            commit_started = False
+            try:
+                assert new_password is not None
+                result = reset_administrator_password(
+                    session,
+                    snapshot=snapshot,
+                    expected_active_sessions=expected,
+                    new_password=new_password,
+                )
+                commit_started = True
+                session.commit()
+            except PasswordResetError:
+                session.rollback()
+                raise
+            except Exception:
+                session.rollback()
+                if commit_started:
+                    rejected(
+                        "password_reset_commit_uncertain",
+                        "Password reset commit could not be confirmed; do not retry automatically.",
+                        expected=expected,
+                        observed=snapshot.observed_active_sessions,
+                        user_id=snapshot.user_id,
+                        username=snapshot.username,
+                        exit_code=6,
+                    )
+                rejected(
+                    "password_reset_failed",
+                    "Administrator password reset failed and was rolled back.",
+                    expected=expected,
+                    observed=snapshot.observed_active_sessions,
+                    user_id=snapshot.user_id,
+                    username=snapshot.username,
+                    exit_code=5,
+                )
+    except PasswordResetError as exc:
+        rejected(
+            exc.code,
+            exc.safe_message,
+            expected=exc.expected_active_sessions,
+            observed=exc.observed_active_sessions,
+            user_id=exc.user_id,
+            username=exc.username,
+            exit_code=exc.exit_code,
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        rejected(
+            "password_reset_failed",
+            "Administrator password reset failed and made no confirmed change.",
+            expected=expected,
+            observed=snapshot.observed_active_sessions if snapshot is not None else 0,
+            user_id=snapshot.user_id if snapshot is not None else None,
+            username=snapshot.username if snapshot is not None else None,
+            exit_code=5,
+        )
+    finally:
+        new_password = None
+        if engine is not None:
+            engine.dispose()
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="hoardarr", description="Manage this Hoardarr server")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -449,6 +619,14 @@ def main() -> None:
     revoke_all.add_argument("--reason", required=True)
     revoke_all.add_argument("--expected-count", required=True)
     revoke_all.add_argument("--json", action="store_true", required=True)
+    reset_password = auth_commands.add_parser(
+        "reset-password",
+        help="atomically reset one administrator password and revoke its active sessions",
+    )
+    reset_password.add_argument("--username", required=True)
+    reset_password.add_argument("--expected-active-sessions", required=True)
+    reset_password.add_argument("--password-stdin", action="store_true", required=True)
+    reset_password.add_argument("--json", action="store_true", required=True)
     args = parser.parse_args()
     if args.command == "setup":
         if not 60 <= args.ttl <= 3600:
@@ -462,6 +640,8 @@ def main() -> None:
         _identity_migration_command(args)
     elif args.command == "auth" and args.auth_command == "revoke-all-sessions":
         _revoke_all_sessions_command(args)
+    elif args.command == "auth" and args.auth_command == "reset-password":
+        _reset_password_command(args)
 
 
 def setup_token_main() -> None:
