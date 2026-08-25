@@ -150,6 +150,53 @@ def test_managed_identity_state_is_bounded_to_valid_exact_udev_fields(tmp_path: 
     assert 'ENV{DM_MULTIPATH_DEVICE_PATH}=="1"' in policy
 
 
+def test_managed_md_identity_sources_are_exact_sysfs_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sys_class_block = tmp_path / "sys" / "class" / "block"
+    slaves = sys_class_block / "md127" / "slaves"
+    slaves.mkdir(parents=True)
+    for name in ("sdf", "sde", "sdg"):
+        (slaves / name).touch()
+
+    monkeypatch.setattr(
+        quarantine,
+        "_command",
+        lambda argv, **_kwargs: "raid5\n" if argv[0] == "lsblk" else "",
+    )
+
+    sources = quarantine._managed_identity_sources(
+        Path("/dev/md127"),
+        sys_class_block=sys_class_block,
+        dev_root=tmp_path / "dev",
+    )
+
+    assert sources == [
+        tmp_path / "dev" / "sde",
+        tmp_path / "dev" / "sdf",
+        tmp_path / "dev" / "sdg",
+    ]
+
+
+def test_managed_md_identity_sources_fail_closed_without_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slaves = tmp_path / "sys" / "class" / "block" / "md127" / "slaves"
+    slaves.mkdir(parents=True)
+    monkeypatch.setattr(
+        quarantine,
+        "_command",
+        lambda argv, **_kwargs: "raid5\n" if argv[0] == "lsblk" else "",
+    )
+
+    with pytest.raises(quarantine.QuarantineError) as raised:
+        quarantine._managed_identity_sources(
+            Path("/dev/md127"), sys_class_block=tmp_path / "sys" / "class" / "block"
+        )
+
+    assert raised.value.code == "managed_md_members_unavailable"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX device links and mount paths")
 def test_reconcile_managed_storage_releases_only_exact_managed_filesystems(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

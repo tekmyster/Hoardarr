@@ -517,6 +517,39 @@ def _identity_from_properties(properties: Mapping[str, str]) -> tuple[str, str]:
     )
 
 
+def _managed_identity_sources(
+    device: Path,
+    *,
+    sys_class_block: Path = Path("/sys/class/block"),
+    dev_root: Path = Path("/dev"),
+) -> list[Path]:
+    """Return exact hardware devices whose identities authorize a managed filesystem."""
+    device_type = _command(
+        ["lsblk", "--noheadings", "--output", "TYPE", os.fspath(device)]
+    ).strip()
+    if device_type != "md" and not device_type.startswith("raid"):
+        return [device]
+
+    slaves = sys_class_block / device.name / "slaves"
+    try:
+        member_names = sorted(item.name for item in slaves.iterdir())
+    except OSError as exc:
+        raise QuarantineError(
+            "managed_md_members_unavailable",
+            "A managed Linux MD filesystem has no readable member identity mapping.",
+        ) from exc
+    if not member_names:
+        raise QuarantineError(
+            "managed_md_members_unavailable",
+            "A managed Linux MD filesystem has no readable member identity mapping.",
+        )
+    if any(_BLOCK_NAME_RE.fullmatch(name) is None for name in member_names):
+        raise QuarantineError(
+            "managed_identity_invalid", "A managed Linux MD member name is invalid."
+        )
+    return [dev_root / name for name in member_names]
+
+
 def managed_identity_from_device(device: Mapping[str, Any]) -> tuple[str, str]:
     """Translate a reviewed detector identity to an exact udev match."""
     identity = device.get("identity") if isinstance(device.get("identity"), Mapping) else {}
@@ -627,6 +660,8 @@ def reconcile_managed_storage(
     state_path: Path = MANAGED_STORAGE_STATE,
     rule_path: Path = MANAGED_UDEV_RULE,
     dev_by_uuid: Path = Path("/dev/disk/by-uuid"),
+    sys_class_block: Path = Path("/sys/class/block"),
+    dev_root: Path = Path("/dev"),
     activate: bool = False,
 ) -> dict[str, Any]:
     """Release only Hoardarr-managed filesystems from deny-by-default quarantine."""
@@ -664,7 +699,12 @@ def reconcile_managed_storage(
             parent = Path("/dev") / parent_name
         else:
             parent = device
-        identities.add(_identity_from_properties(_udev_properties(os.fspath(parent))))
+        identity_sources = _managed_identity_sources(
+            parent, sys_class_block=sys_class_block, dev_root=dev_root
+        )
+        for source in identity_sources:
+            identities.add(_identity_from_properties(_udev_properties(os.fspath(source))))
+            trigger_names.add(os.fspath(source))
         trigger_names.update({os.fspath(parent), os.fspath(device)})
 
     ordered = persist_managed_identities(
