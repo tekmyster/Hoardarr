@@ -358,6 +358,133 @@ def create_group(
     return group
 
 
+def _namespace_availability(
+    group: StorageGroup, backends: list[StorageBackend]
+) -> dict[str, str | bool | None]:
+    """Report whether the advertised application path is backed by managed storage.
+
+    A database namespace is not evidence that Linux can actually serve files at
+    that path.  Only an exact activated backend path or an exact mount is
+    reported as available.  This deliberately rejects an ordinary directory on
+    the root filesystem as a usable media namespace.
+    """
+
+    if os.name != "posix":
+        return {"quality": "not_reported", "available": None, "reason": "platform"}
+    path = group.namespace_path
+    active = [
+        item
+        for item in backends
+        if item.lifecycle_state
+        in {"active", "preferred_write", "draining", "verifying", "read_only"}
+    ]
+    for backend in active:
+        activation = (backend.config_json or {}).get("activation")
+        if backend.namespace_path == path and isinstance(activation, dict):
+            evidence = activation.get("evidence")
+            if isinstance(evidence, dict) and evidence.get("identity_match") is True:
+                return {
+                    "quality": "available",
+                    "available": True,
+                    "reason": "verified_backend_path",
+                }
+    if _mount_source_for(path) is not None:
+        return {"quality": "available", "available": True, "reason": "exact_mount"}
+    return {
+        "quality": "temporarily_unavailable",
+        "available": False,
+        "reason": "path_missing" if not Path(path).exists() else "not_a_managed_mount",
+    }
+
+
+def reconcile_group_namespace(
+    session: Session,
+    *,
+    group_id: str,
+    backend_id: str,
+    principal: Principal,
+) -> StorageGroup:
+    """Repair an unused, unavailable group path to one verified backend mount.
+
+    This is intentionally narrow.  It never mounts, moves, copies, or deletes
+    anything and refuses to change an existing path because applications may
+    already depend on it.  It is for the onboarding case where a group was
+    created with a placeholder path before an existing managed pool was chosen.
+    """
+
+    group = session.get(StorageGroup, group_id)
+    backend = session.get(StorageBackend, backend_id)
+    if group is None or backend is None or backend.storage_group_id != group.id:
+        raise StorageGroupError("backend_not_found", "The Storage Group backend does not exist.")
+    siblings = list(
+        session.scalars(select(StorageBackend).where(StorageBackend.storage_group_id == group.id))
+    )
+    usable = [item for item in siblings if item.lifecycle_state != "reuse_ready"]
+    if len(usable) != 1 or usable[0].id != backend.id:
+        raise StorageGroupError(
+            "namespace_reconciliation_ambiguous",
+            "Automatic path repair requires exactly one managed backend.",
+        )
+    if backend.lifecycle_state not in {"active", "preferred_write"}:
+        raise StorageGroupError(
+            "namespace_backend_not_active", "Verify and activate the managed storage first."
+        )
+    activation = (backend.config_json or {}).get("activation")
+    evidence = activation.get("evidence") if isinstance(activation, dict) else None
+    target = backend.namespace_path
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("identity_match") is not True
+        or evidence.get("exact_mount") is not True
+        or not isinstance(target, str)
+        or evidence.get("path") != target
+    ):
+        raise StorageGroupError(
+            "namespace_identity_unverified",
+            "The backend does not have verified mounted-storage identity evidence.",
+        )
+    current_status = _namespace_availability(group, siblings)
+    if current_status["available"] is not False:
+        raise StorageGroupError(
+            "namespace_already_available",
+            "The current Storage Group path is already available and will not be changed.",
+        )
+    if Path(group.namespace_path).exists():
+        raise StorageGroupError(
+            "namespace_path_in_use",
+            "The current Storage Group path exists and cannot be changed automatically.",
+        )
+    target_status = inspect_backend_activation(
+        target,
+        expected_kernel_path=None,
+        expected_entity_mountpoint=target if backend.storage_entity_id else None,
+    )
+    if (
+        target_status.get("identity_match") is not True
+        or target_status.get("filesystem_device") != evidence.get("filesystem_device")
+        or target_status.get("mount_source") != evidence.get("mount_source")
+    ):
+        raise StorageGroupError(
+            "namespace_identity_changed",
+            "The verified backend mount changed before namespace reconciliation.",
+        )
+    previous = group.namespace_path
+    group.namespace_path = normalize_namespace(target)
+    _event(
+        session,
+        group=group,
+        backend=backend,
+        principal=principal,
+        event_type="storage_group_namespace_reconciled",
+        previous_state=previous,
+        resulting_state=group.namespace_path,
+        reason="Unavailable placeholder replaced with the verified managed-storage mount.",
+        details={"previous_namespace": previous, "backend_id": backend.id},
+    )
+    session.flush()
+    return group
+
+
 def register_disk(session: Session, observation: dict[str, Any]) -> tuple[PhysicalDisk, bool]:
     stable_identity = str(observation.get("stable_identity") or "").strip()
     if len(stable_identity) < 3:
@@ -987,6 +1114,7 @@ def group_documents(session: Session) -> list[dict[str, Any]]:
                 "purpose": group.purpose,
                 "state": group.state,
                 "policy": group.policy_json,
+                "namespace": _namespace_availability(group, backends),
                 "backends": [
                     {
                         "id": item.id,

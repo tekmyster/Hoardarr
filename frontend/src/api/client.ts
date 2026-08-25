@@ -707,6 +707,20 @@ class HoardarrApi {
     return result.item;
   }
 
+  async reconcileStorageGroupNamespace(
+    groupId: string,
+    backendId: string,
+  ): Promise<StorageGroupDocument> {
+    const result = await this.request<{ item: StorageGroupDocument }>(
+      `/storage/groups/${encodeURIComponent(groupId)}/namespace/reconcile`,
+      {
+        method: "POST",
+        body: JSON.stringify({ backend_id: backendId, confirmation: "USE VERIFIED PATH" }),
+      },
+    );
+    return result.item;
+  }
+
   async assignStorageGroupEntity(
     groupId: string,
     storageEntityId: string,

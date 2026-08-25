@@ -130,6 +130,58 @@ describe("StorageGroupsPanel", () => {
     }));
   });
 
+  it("defaults the first group to the one detected managed-storage mount", async () => {
+    const managed: LogicalStorageDocument = {
+      id: "88888888-8888-4888-8888-888888888888",
+      name: "media",
+      stable_identity: "zfs:media",
+      storage_kind: "zfs",
+      provider: "zfs",
+      redundancy_capable: false,
+      filesystem_uuid: null,
+      mountpoint: "/data",
+      presentation_device: "media",
+      topology_state: "not_applicable",
+      capacity_bytes: 24_000_000_000,
+      paths: [],
+    };
+    vi.spyOn(api, "storageGroups").mockResolvedValue([]);
+    vi.spyOn(api, "registeredDisks").mockResolvedValue([]);
+    vi.mocked(api.logicalStorage).mockResolvedValue([managed]);
+    render(<StorageGroupsPanel />);
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /Stable media path/ })).toHaveValue("/data"));
+    expect(screen.getByText("Uses the mounted path of the detected managed storage.")).toBeInTheDocument();
+  });
+
+  it("repairs an unavailable placeholder only through the verified backend action", async () => {
+    const unavailable: StorageGroupDocument = {
+      ...group,
+      namespace: { quality: "temporarily_unavailable", available: false, reason: "path_missing" },
+      backends: [{
+        ...group.backends[0],
+        storage_entity_id: "88888888-8888-4888-8888-888888888888",
+        physical_disk_id: null,
+        namespace_path: "/data",
+        lifecycle_state: "preferred_write",
+      }],
+    };
+    vi.spyOn(api, "storageGroups")
+      .mockResolvedValueOnce([unavailable])
+      .mockResolvedValueOnce([{ ...unavailable, namespace_path: "/data", namespace: { quality: "available", available: true, reason: "verified_backend_path" } }]);
+    vi.spyOn(api, "registeredDisks").mockResolvedValue([]);
+    const reconcile = vi.spyOn(api, "reconcileStorageGroupNamespace").mockResolvedValue({
+      ...unavailable,
+      namespace_path: "/data",
+    });
+    const user = userEvent.setup();
+    render(<StorageGroupsPanel />);
+
+    expect(await screen.findByText("Stable media path is not available")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Use verified storage path /data" }));
+    await waitFor(() => expect(reconcile).toHaveBeenCalledWith(unavailable.id, unavailable.backends[0].id));
+  });
+
   it("renders lifecycle state and activates an assigned backend", async () => {
     vi.spyOn(api, "storageGroups").mockResolvedValue([group]);
     vi.spyOn(api, "registeredDisks").mockResolvedValue([disk]);

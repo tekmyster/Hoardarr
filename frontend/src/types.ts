@@ -854,6 +854,11 @@ export interface StorageGroupDocument {
   purpose: string;
   state: string;
   policy: Record<string, unknown>;
+  namespace?: {
+    quality: "available" | "temporarily_unavailable" | "not_reported";
+    available: boolean | null;
+    reason: string;
+  };
   backends: Array<{
     id: string;
     stable_identity: string;

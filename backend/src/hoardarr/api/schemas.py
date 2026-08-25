@@ -632,6 +632,11 @@ class StorageGroupCreateRequest(StrictModel):
     purpose: Literal["media", "downloads", "archive", "backup", "general"] = "media"
 
 
+class StorageGroupNamespaceReconcileRequest(StrictModel):
+    backend_id: str = Field(min_length=36, max_length=36)
+    confirmation: Literal["USE VERIFIED PATH"]
+
+
 class PhysicalDiskObservationRequest(StrictModel):
     stable_identity: str = Field(min_length=3, max_length=512)
     kernel_path: str | None = Field(default=None, max_length=4096)

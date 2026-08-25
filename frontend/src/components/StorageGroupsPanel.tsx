@@ -38,6 +38,7 @@ export function StorageGroupsPanel() {
   const [createOpen, setCreateOpen] = useState(true);
   const [name, setName] = useState("");
   const [namespacePath, setNamespacePath] = useState("/srv/hoardarr/media");
+  const [namespaceTouched, setNamespaceTouched] = useState(false);
   const [purpose, setPurpose] = useState<Purpose>("media");
   const [selectedDisks, setSelectedDisks] = useState<Record<string, string>>(Object.create(null));
   const [selectedStorage, setSelectedStorage] = useState<Record<string, string>>(Object.create(null));
@@ -80,6 +81,17 @@ export function StorageGroupsPanel() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (
+      !namespaceTouched
+      && groups.length === 0
+      && logicalStorage.length === 1
+      && logicalStorage[0].mountpoint
+    ) {
+      setNamespacePath(logicalStorage[0].mountpoint);
+    }
+  }, [groups.length, logicalStorage, namespaceTouched]);
 
   useEffect(() => {
     if (!drainOperation || ["succeeded", "failed", "cancelled", "needs_attention"].includes(drainOperation.status)) return;
@@ -308,6 +320,19 @@ export function StorageGroupsPanel() {
     }
   };
 
+  const reconcileNamespace = async (groupId: string, backendId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.reconcileStorageGroupNamespace(groupId, backendId);
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The stable media path could not be reconciled.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return <Card
     title="Storage Groups"
     description="Keep one stable media path while disks are added, preferred for new files, drained, or retired."
@@ -326,7 +351,7 @@ export function StorageGroupsPanel() {
       </button>
       {createOpen && <div id="storage-group-create-form" className="form-grid storage-group-form">
         <label>Name<input value={name} maxLength={128} onChange={(event) => setName(event.target.value)} placeholder="Media" /></label>
-        <label>Stable media path<input value={namespacePath} maxLength={4096} onChange={(event) => setNamespacePath(event.target.value)} /></label>
+        <label>Stable media path<input value={namespacePath} maxLength={4096} onChange={(event) => { setNamespaceTouched(true); setNamespacePath(event.target.value); }} /><small>{logicalStorage.length === 1 && logicalStorage[0].mountpoint === namespacePath ? "Uses the mounted path of the detected managed storage." : "Applications use this path; choose an existing managed mount unless new storage will be created here."}</small></label>
         <label>Used for<select value={purpose} onChange={(event) => setPurpose(event.target.value as Purpose)}><option value="media">Movies, TV, and music</option><option value="downloads">Downloads and temporary work</option><option value="archive">Archive</option><option value="backup">Backup</option><option value="general">General files</option></select></label>
         <button type="button" className="button button-primary" disabled={busy || !name.trim()} onClick={() => void create()}>Create group</button>
       </div>}
@@ -345,6 +370,10 @@ export function StorageGroupsPanel() {
       {groups.map((group) => <section className="storage-group" key={group.id} aria-labelledby={`storage-group-${group.id}`}>
         <header><div><h3 id={`storage-group-${group.id}`}>{group.name}</h3><code>{group.namespace_path}</code></div><StatusBadge status={group.state} /></header>
         <p>{group.purpose === "media" ? "Media libraries" : group.purpose} · New-write placement follows the preferred healthy backend.</p>
+        {group.namespace?.available === false && (() => {
+          const candidates = group.backends.filter((backend) => ["active", "preferred_write"].includes(backend.lifecycle_state) && Boolean(backend.namespace_path));
+          return <Notice tone="warning" title="Stable media path is not available"><p><code>{group.namespace_path}</code> is not a managed mount. Hoardarr will not send Plex or ARR applications to an empty path on the system disk.</p>{candidates.length === 1 && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void reconcileNamespace(group.id, candidates[0].id)}>Use verified storage path {candidates[0].namespace_path}</button>}</Notice>;
+        })()}
         {group.backends.length === 0 ? <p className="muted">No backends assigned.</p> : <div className="table-scroll"><table className="data-table"><thead><tr><th>Backend identity</th><th>Role</th><th>Lifecycle</th><th>Placement and lifecycle</th></tr></thead><tbody>{group.backends.map((backend) => {
           const drainDestinations = group.backends.filter((item) => item.id !== backend.id && ["active", "preferred_write"].includes(item.lifecycle_state) && ["data", "archive"].includes(item.role));
           return <tr key={backend.id}><td><code>{backend.stable_identity}</code><small>{backend.namespace_path || "Mount path not configured"}</small></td><td>{backend.role}</td><td><StatusBadge status={backend.lifecycle_state.replace("_", " ")} /></td><td>{backend.lifecycle_state === "assigned" ? <button className="button button-secondary" type="button" disabled={busy} onClick={() => void previewActivation(group.id, backend.id)}>Review activation</button> : backend.lifecycle_state === "active" ? <div className="button-row"><button className="button button-secondary" type="button" disabled={busy} onClick={() => void transition(group.id, backend.id, "preferred_write")}>Prefer new files here</button><button className="button button-secondary" type="button" disabled={busy || drainDestinations.length === 0 || !backend.namespace_path} onClick={() => void previewDrain(group, backend.id)}>Preview drain</button></div> : backend.lifecycle_state === "preferred_write" ? <div><span>Preferred for new files</span><button className="button button-secondary" type="button" disabled={busy || drainDestinations.length === 0 || !backend.namespace_path} onClick={() => void previewDrain(group, backend.id)}>Preview drain</button></div> : backend.lifecycle_state === "retired" ? <div>{releaseBackendId === backend.id ? <div className="form-grid compact-form"><p>The verified source is retired. Releasing removes only its Hoardarr assignment; it does not erase, format, mount, or wipe the disk.</p><label>Type RELEASE to make this disk available<input aria-label="Release retired disk confirmation" value={releaseConfirmation} onChange={(event) => setReleaseConfirmation(event.target.value)} autoComplete="off" /></label><div className="button-row"><button className="button button-primary" type="button" disabled={busy || releaseConfirmation !== "RELEASE"} onClick={() => void releaseForReuse(group.id, backend.id)}>Release for reuse</button><button className="button button-secondary" type="button" disabled={busy} onClick={() => { setReleaseBackendId(null); setReleaseConfirmation(""); }}>Cancel</button></div></div> : <button className="button button-secondary" type="button" disabled={busy} onClick={() => { setReleaseBackendId(backend.id); setReleaseConfirmation(""); }}>Release retired disk</button>}</div> : "Managed by lifecycle operation"}</td></tr>;

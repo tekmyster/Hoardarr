@@ -18,6 +18,7 @@ from hoardarr.storage.groups import (
     disk_documents,
     group_documents,
     normalize_namespace,
+    reconcile_group_namespace,
     register_disk,
     release_retired_backend,
     set_disk_reservation,
@@ -44,6 +45,86 @@ def test_namespace_is_absolute_bounded_and_cannot_traverse() -> None:
             assert exc.code == "invalid_namespace"
         else:
             raise AssertionError(f"unsafe namespace accepted: {unsafe!r}")
+
+
+def test_unavailable_placeholder_can_reconcile_only_to_verified_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    actor = principal()
+    evidence = {
+        "path": "/data",
+        "filesystem_device": 101,
+        "mount_source": "media",
+        "exact_mount": True,
+        "identity_match": True,
+        "identity_basis": "registered logical-storage mount",
+        "total_bytes": 10_000,
+        "free_bytes": 9_000,
+    }
+    monkeypatch.setattr(
+        group_service,
+        "_namespace_availability",
+        lambda *_args: {
+            "quality": "temporarily_unavailable",
+            "available": False,
+            "reason": "path_missing",
+        },
+    )
+    monkeypatch.setattr(group_service.Path, "exists", lambda _self: False)
+    monkeypatch.setattr(
+        group_service, "inspect_backend_activation", lambda *_args, **_kwargs: dict(evidence)
+    )
+    with Session(engine) as session:
+        group = create_group(
+            session,
+            name="Media",
+            namespace_path="/srv/hoardarr/media",
+            purpose="media",
+            principal=actor,
+        )
+        entity = group_service.StorageEntity(
+            name="media",
+            stable_identity="zfs:media",
+            storage_kind="zfs",
+            mountpoint="/data",
+            presentation_device="media",
+            capacity_bytes=10_000,
+            topology_state="not_applicable",
+            provider="zfs",
+            config_json={},
+        )
+        session.add(entity)
+        session.flush()
+        backend = assign_backend(
+            session,
+            group_id=group.id,
+            physical_disk_id=None,
+            storage_entity_id=entity.id,
+            namespace_path="/data",
+            role="data",
+            principal=actor,
+        )
+        backend.lifecycle_state = "preferred_write"
+        backend.config_json = {
+            "activation": {"plan_sha256": "a" * 64, "evidence": dict(evidence)}
+        }
+        reconciled = reconcile_group_namespace(
+            session,
+            group_id=group.id,
+            backend_id=backend.id,
+            principal=actor,
+        )
+        assert reconciled.namespace_path == "/data"
+        event = session.scalar(
+            select(StorageLifecycleEvent).where(
+                StorageLifecycleEvent.event_type == "storage_group_namespace_reconciled"
+            )
+        )
+        assert event is not None
+        assert event.previous_state == "/srv/hoardarr/media"
+        assert event.resulting_state == "/data"
 
 
 def test_disk_registry_preserves_identity_across_kernel_path_changes() -> None:

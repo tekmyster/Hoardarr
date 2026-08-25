@@ -90,6 +90,21 @@ path exist. It shows the immutable-plan facts, requires exact `I AGREE` approval
 operation, and displays real phase/file/byte/rate/ETA progress with pause/resume and final report.
 The stable Storage Group namespace remains unchanged when the source backend is retired.
 
+## Namespace availability
+
+The namespace stored in SQLite is not itself proof that Linux can serve files there. Group API
+documents therefore report `namespace.quality`, `namespace.available`, and a concrete reason. On
+Linux, Hoardarr reports the path available only when it is the identity-verified path of an active
+backend or an exact mount. A missing path and an ordinary directory on the system filesystem are
+reported unavailable rather than treated as media storage.
+
+When the first group is created after an existing managed pool has been discovered, the UI defaults
+to that pool's actual mountpoint. A legacy or interrupted onboarding flow may instead contain a
+missing placeholder path. Hoardarr can reconcile that metadata to the real backend mount only when
+there is exactly one active backend, its immutable activation evidence is still current, and the old
+path does not exist. The operation never mounts, copies, moves, formats, or deletes anything. It
+refuses to change any path that already exists because applications may depend on it.
+
 The isolated Linux proof uses two purpose-created loop-backed ext4 filesystems. It writes and hashes
 four deterministic files, pauses and resumes the job, simulates a worker crash after inventory,
 recovers the stale operation from its durable manifest, finishes verification, retires the source,

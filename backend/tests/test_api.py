@@ -99,6 +99,79 @@ def _state_headers(csrf: str, **extra: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf, **extra}
 
 
+def test_storage_group_namespace_reconciliation_is_authenticated_and_identity_bound(
+    api_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, app, setup_token, _secret_box = api_runtime
+    endpoint = "/api/v1/storage/groups/00000000-0000-4000-8000-000000000000/namespace/reconcile"
+    assert client.post(endpoint, json={}).status_code == 401
+    csrf = _claim_owner(client, setup_token)
+    headers = _state_headers(csrf)
+    created = client.post(
+        "/api/v1/storage/groups",
+        headers=headers,
+        json={"name": "Media", "namespace_path": "/srv/hoardarr/media", "purpose": "media"},
+    )
+    assert created.status_code == 201, created.text
+    group_id = created.json()["item"]["id"]
+    evidence = {
+        "path": "/data",
+        "filesystem_device": 101,
+        "mount_source": "media",
+        "exact_mount": True,
+        "identity_match": True,
+        "identity_basis": "registered logical-storage mount",
+        "total_bytes": 10_000,
+        "free_bytes": 9_000,
+    }
+    with app.state.session_factory() as session, session.begin():
+        entity = StorageEntity(
+            name="media",
+            stable_identity="zfs:media",
+            storage_kind="zfs",
+            mountpoint="/data",
+            presentation_device="media",
+            capacity_bytes=10_000,
+            topology_state="not_applicable",
+            provider="zfs",
+            config_json={},
+        )
+        session.add(entity)
+        session.flush()
+        backend = StorageBackend(
+            storage_group_id=group_id,
+            storage_entity_id=entity.id,
+            stable_identity="storage:zfs:media",
+            namespace_path="/data",
+            role="data",
+            lifecycle_state="preferred_write",
+            config_json={"activation": {"plan_sha256": "a" * 64, "evidence": evidence}},
+        )
+        session.add(backend)
+        session.flush()
+        backend_id = backend.id
+    monkeypatch.setattr(
+        group_service,
+        "_namespace_availability",
+        lambda *_args: {
+            "quality": "temporarily_unavailable",
+            "available": False,
+            "reason": "path_missing",
+        },
+    )
+    monkeypatch.setattr(group_service.Path, "exists", lambda _self: False)
+    monkeypatch.setattr(
+        group_service, "inspect_backend_activation", lambda *_args, **_kwargs: dict(evidence)
+    )
+    response = client.post(
+        f"/api/v1/storage/groups/{group_id}/namespace/reconcile",
+        headers=headers,
+        json={"backend_id": backend_id, "confirmation": "USE VERIFIED PATH"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["item"]["namespace_path"] == "/data"
+
+
 def test_storage_volume_inventory_requires_authentication_and_returns_provider_identity(
     api_runtime: Any,
 ) -> None:

@@ -38,6 +38,7 @@ from hoardarr.api.schemas import (
     StorageDrainApplyRequest,
     StorageDrainPreviewRequest,
     StorageGroupCreateRequest,
+    StorageGroupNamespaceReconcileRequest,
     StorageRedundancyApplyRequest,
     StorageRedundancyPreviewRequest,
     StorageVolumeApplyRequest,
@@ -97,6 +98,7 @@ from hoardarr.storage.groups import (
     create_group,
     disk_documents,
     group_documents,
+    reconcile_group_namespace,
     register_disk,
     release_retired_backend,
     set_disk_reservation,
@@ -656,6 +658,38 @@ def add_storage_backend(
         details={"group_id": group_id, "stable_identity": backend.stable_identity},
     )
     return {"item": next(item for item in group_documents(session) if item["id"] == group_id)}
+
+
+@router.post("/groups/{group_id}/namespace/reconcile")
+def reconcile_storage_group_namespace(
+    group_id: str,
+    payload: StorageGroupNamespaceReconcileRequest,
+    request: Request,
+    principal: Principal = Depends(require_state_scope("operate")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Replace only an unavailable placeholder with one verified backend mount."""
+
+    try:
+        group = reconcile_group_namespace(
+            session,
+            group_id=group_id,
+            backend_id=payload.backend_id,
+            principal=principal,
+        )
+    except StorageGroupError as exc:
+        raise _group_problem(exc) from exc
+    record_audit(
+        session,
+        principal=principal,
+        action="storage.group.namespace_reconcile",
+        outcome="succeeded",
+        correlation_id=request.state.request_id,
+        target_type="storage_group",
+        target_id=group.id,
+        details={"namespace_path": group.namespace_path, "backend_id": payload.backend_id},
+    )
+    return {"item": next(item for item in group_documents(session) if item["id"] == group.id)}
 
 
 @router.post("/groups/{group_id}/backends/{backend_id}/transition")
