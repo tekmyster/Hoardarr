@@ -121,7 +121,17 @@ export function layoutChoicesForDrive(drive: Drive | undefined, mode: WizardMode
   if (!drive) return [...base, ...ADVANCED_USB_CHOICES];
   const usb = drive.connection.bus.toLowerCase() === "usb" || drive.connection.transport.toLowerCase().includes("usb");
   if (usb) return [...base, ...ADVANCED_USB_CHOICES];
-  return [...base, ...ADVANCED_USB_CHOICES.map((choice) => ({ ...choice, warning: undefined }))];
+  const directDescriptions: Partial<Record<StorageRole, string>> = {
+    zfs: "Use these drives in an exact ZFS vdev layout.",
+    raid: "Use these drives in an exact Linux MD RAID layout.",
+    snapraid: "Assign exact data and parity roles in a SnapRAID configuration.",
+    mixed: "Build separate protected pools and present them through one mergerFS path.",
+  };
+  return [...base, ...ADVANCED_USB_CHOICES.map((choice) => ({
+    ...choice,
+    description: directDescriptions[choice.id] ?? choice.description,
+    warning: undefined,
+  }))];
 }
 
 export function driveMayContainData(drive: Drive): boolean {

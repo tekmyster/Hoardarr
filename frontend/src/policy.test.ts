@@ -28,6 +28,14 @@ describe("guided storage policy", () => {
     expect(layoutChoicesForDrive(directDrive, "guided", false, 1).map((choice) => choice.id)).not.toContain("zfs");
   });
 
+  it("does not describe direct-attached Advanced layouts as USB overrides", () => {
+    const directDrive = { ...demoDrive, connection: { bus: "SAS", transport: "sas/mpt3sas" } };
+    const choices = layoutChoicesForDrive(directDrive, "advanced");
+    expect(choices.find((choice) => choice.id === "zfs")?.description).toMatch(/exact ZFS vdev/i);
+    expect(choices.find((choice) => choice.id === "zfs")?.description).not.toMatch(/USB/i);
+    expect(choices.find((choice) => choice.id === "raid")?.description).not.toMatch(/USB/i);
+  });
+
   it("recommends mergerFS plus SnapRAID for expandable four-drive media storage", () => {
     const drives = [0, 1, 2, 3].map((index) => ({
       ...demoDrive,

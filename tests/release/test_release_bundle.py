@@ -109,11 +109,18 @@ class VersionConsistencyTests(unittest.TestCase):
     def test_release_installer_reconciles_managed_mounts_before_runtime_start(self):
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
 
+        prepare = '"${QUARANTINE_CLI_LINK}" prepare --yes'
         reconcile = '"${QUARANTINE_CLI_LINK}" reconcile-managed --yes --activate'
+        self.assertIn(prepare, installer)
         self.assertIn(reconcile, installer)
+        self.assertLess(installer.index(prepare), installer.index(reconcile))
         self.assertLess(
             installer.index(reconcile),
             installer.rindex("systemctl start hoardarr-account-executor.service"),
+        )
+        self.assertIn(
+            "drive quarantine could not be prepared; the previous runtime was restored",
+            installer,
         )
         self.assertIn(
             "managed storage could not be reconciled; the previous runtime was restored",

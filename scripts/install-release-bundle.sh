@@ -768,6 +768,17 @@ apply_release() {
     atomic_symlink "current/packaging/hardware" "${LIB_ROOT}/hardware"
     install_runtime_wrapper "${CLI_LINK}" cli
     install_runtime_wrapper "${QUARANTINE_CLI_LINK}" storage-quarantine
+    # A first appliance install cannot safely execute a storage plan until the
+    # host-bound deny-by-default policies and their checksum attestation exist.
+    # Upgrades preserve an existing attestation; a missing one is prepared
+    # before any Hoardarr runtime service is allowed to start.  Preparation is
+    # fail-closed and restores the previous release on an upgrade failure.
+    if [[ ! -f /var/lib/hoardarr/storage-executor/quarantine.json ]]; then
+        if ! "${QUARANTINE_CLI_LINK}" prepare --yes; then
+            restore_previous_release "${previous_release}" || true
+            die "drive quarantine could not be prepared; the previous runtime was restored"
+        fi
+    fi
     # Direct-to-latest upgrades may already contain Hoardarr-managed fstab
     # blocks created before managed drives were released from startup
     # quarantine. Reconcile only those exact blocks, add explicit mergerFS
