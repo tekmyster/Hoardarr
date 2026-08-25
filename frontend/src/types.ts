@@ -1751,6 +1751,7 @@ export interface OverviewDocument {
 }
 
 export type MetricQuality = "available" | "not_reported" | "unsupported" | "temporarily_unavailable" | "stale" | "estimated" | "derived";
+export type MetricClassification = "raw" | "derived" | "estimated";
 
 export interface MetricDefinition {
   id: string;
@@ -1796,6 +1797,16 @@ export interface MetricSampleDocument {
   labels: Record<string, string>;
   capability: string | null;
   error_code: string | null;
+  classification?: MetricClassification;
+  provenance?: {
+    provider: string;
+    observed_at: string;
+    ingested_at: string;
+    collection_interval_seconds: number;
+    unit: string;
+    metric_kind: "raw" | "derived";
+    classification: MetricClassification;
+  };
 }
 
 export interface EntitlementDocument {
@@ -1834,12 +1845,19 @@ export interface MetricHistoryDocument {
   displayed_points?: number;
   available_points?: number;
   maximum_points?: number;
+  metric_source?: string;
+  metric_kind?: "raw" | "derived";
+  formula?: string | null;
+  minimum_collection_interval_seconds?: number;
   start: string;
   end: string;
   points: Array<{
     timestamp: string;
     value: number | string | null;
     quality: MetricQuality;
+    source?: string;
+    source_scope?: "observed_provider" | "metric_definition";
+    mean?: number | null;
     minimum?: number | null;
     maximum?: number | null;
     p50?: number | null;

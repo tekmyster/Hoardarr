@@ -56,6 +56,22 @@ const catalog: MetricCatalogDocument = {
       test_evidence: "test",
       entitled: false,
     },
+    {
+      id: "health.overall",
+      name: "Overall health",
+      entity_types: ["drive"],
+      unit: "state",
+      kind: "raw",
+      source: "SMART/provider-reported health",
+      minimum_interval_seconds: 300,
+      capability: null,
+      retention_class: "health",
+      aggregation: "state_transition",
+      availability: "When the provider reports health",
+      formula: null,
+      test_evidence: "test",
+      entitled: true,
+    },
   ],
   quality_states: ["available", "not_reported", "unsupported", "temporarily_unavailable", "stale", "estimated", "derived"],
   entitlements: {
@@ -84,6 +100,16 @@ const sample: MetricSampleDocument = {
   labels: {},
   capability: null,
   error_code: null,
+  classification: "raw",
+  provenance: {
+    provider: "Linux block counters",
+    observed_at: "2026-08-22T11:00:00Z",
+    ingested_at: "2026-08-22T11:00:01Z",
+    collection_interval_seconds: 5,
+    unit: "bytes_per_second",
+    metric_kind: "raw",
+    classification: "raw",
+  },
 };
 
 const historySettings = {
@@ -139,6 +165,9 @@ describe("AnalyticsPage", () => {
     await userEvent.click(screen.getAllByText("About this metric")[0]);
     expect(screen.getAllByText("Linux block counters", { selector: "dd" }).length).toBeGreaterThan(0);
     await waitFor(() => expect(api.metricHistory).toHaveBeenCalled());
+    await userEvent.click(screen.getByText("Source and quality"));
+    expect(screen.getByText("Available", { selector: "dd" })).toBeInTheDocument();
+    expect(screen.getAllByText("raw", { selector: "dd" }).length).toBeGreaterThan(0);
   });
 
   it("shows missing readings honestly", async () => {
@@ -148,8 +177,77 @@ describe("AnalyticsPage", () => {
     vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
     vi.spyOn(api, "metricHistory").mockResolvedValue({ entity, metric_id: sample.metric_id, unit: sample.unit, resolution: "raw", start: "2026-08-22T10:00:00Z", end: "2026-08-22T11:00:00Z", points: [] });
     render(<AnalyticsPage />);
-    expect(await screen.findByText("Not reported")).toBeInTheDocument();
+    expect(await screen.findByText("Not reported", { selector: ".analytics-kpi > strong" })).toBeInTheDocument();
     expect(screen.getByText("No stored readings are available for this selection.")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Source and quality"));
+    expect(screen.getByText("The provider did not report a value.")).toBeInTheDocument();
+  });
+
+  it("renders peak-preserving rollup boundaries and accessible bucket semantics", async () => {
+    vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
+    vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: sample.timestamp, items: [sample], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    vi.spyOn(api, "metricHistory").mockResolvedValue({
+      entity, metric_id: sample.metric_id, unit: sample.unit, resolution: "hour", source_resolution: "hour", raw: false,
+      metric_source: "Linux block counters", metric_kind: "raw", aggregation_method: "first/last/minimum/maximum/mean/count",
+      points_returned: 2, displayed_points: 2, maximum_points: 800,
+      start: "2026-08-22T09:00:00Z", end: "2026-08-22T11:00:00Z",
+      points: [
+        { timestamp: "2026-08-22T09:00:00Z", value: 5, mean: 5, minimum: 1, maximum: 90, first: 2, last: 8, sample_count: 12, interval_seconds: 3600, quality: "derived", source: "Linux block counters", source_scope: "metric_definition" },
+        { timestamp: "2026-08-22T10:00:00Z", value: null, mean: null, minimum: null, maximum: null, sample_count: 0, interval_seconds: 3600, quality: "temporarily_unavailable" },
+      ],
+    });
+    const { container } = render(<AnalyticsPage />);
+    expect(await screen.findByRole("img", { name: "Read throughput numeric history" })).toBeInTheDocument();
+    expect(container.querySelector(".rollup-minimum")).not.toBeNull();
+    expect(container.querySelector(".rollup-maximum")).not.toBeNull();
+    expect(screen.getByText(/1 B\/s \/ 90 B\/s/)).toBeInTheDocument();
+    expect(screen.getByText(/1 unavailable values are gaps, not zero/)).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Graph details"));
+    expect(screen.getByText(/Historical rollup; values are aggregates/)).toBeInTheDocument();
+    expect(screen.getByText(/first\/last\/minimum\/maximum\/mean\/count/)).toBeInTheDocument();
+  });
+
+  it("renders ordered categorical states and transition counts without a numeric graph", async () => {
+    vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
+    vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);
+    vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: sample.timestamp, items: [sample], restricted_capabilities: [] });
+    vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+    vi.spyOn(api, "telemetrySettings").mockResolvedValue(historySettings);
+    vi.spyOn(api, "metricHistory").mockImplementation(async ({ metricId }) => metricId === "health.overall" ? {
+      entity, metric_id: metricId, unit: "state", resolution: "hour", raw: false,
+      start: "2026-08-22T09:00:00Z", end: "2026-08-22T11:00:00Z",
+      points: [
+        { timestamp: "2026-08-22T09:00:00Z", value: "healthy", states: ["healthy", "degraded", "healthy"], transition_count: 2, sample_count: 3, quality: "derived" },
+        { timestamp: "2026-08-22T10:00:00Z", value: null, states: [], transition_count: 0, quality: "unsupported" },
+      ],
+    } : { entity, metric_id: sample.metric_id, unit: sample.unit, resolution: "raw", start: "2026-08-22T10:00:00Z", end: "2026-08-22T11:00:00Z", points: [] });
+    render(<AnalyticsPage />);
+    await screen.findByText("No stored readings are available for this selection.");
+    await userEvent.selectOptions(screen.getByLabelText("Metric"), "health.overall");
+    expect(await screen.findByRole("region", { name: "Overall health state timeline" })).toBeInTheDocument();
+    expect(screen.getByText("2 transitions · Derived")).toBeInTheDocument();
+    expect(screen.getByText("Unsupported", { selector: ".state-history li span" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Overall health numeric history/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps stale, derived, and estimated classifications visible with methodology", async () => {
+    for (const quality of ["stale", "derived", "estimated"] as const) {
+      vi.spyOn(api, "metricCatalog").mockResolvedValue(catalog);
+      vi.spyOn(api, "metricEntities").mockResolvedValue([entity]);
+      vi.spyOn(api, "currentMetrics").mockResolvedValue({ captured_at: sample.timestamp, items: [{ ...sample, quality, classification: quality === "stale" ? "raw" : quality }], restricted_capabilities: [] });
+      vi.spyOn(api, "metricAlerts").mockResolvedValue([]);
+      vi.spyOn(api, "metricHistory").mockResolvedValue({ entity, metric_id: sample.metric_id, unit: sample.unit, resolution: "raw", start: sample.timestamp, end: sample.timestamp, points: [] });
+      const rendered = render(<AnalyticsPage />);
+      expect(await screen.findByText(quality === "stale" ? "Stale" : quality === "derived" ? "Derived" : "Estimated", { selector: ".analytics-kpi > div:first-child small" })).toBeInTheDocument();
+      await userEvent.click(screen.getByText("Source and quality"));
+      if (quality === "estimated") expect(screen.getByText(/Provider estimate/)).toBeInTheDocument();
+      if (quality === "stale") expect(screen.getByText(/older than the live freshness limit/)).toBeInTheDocument();
+      rendered.unmount();
+      vi.restoreAllMocks();
+    }
   });
 
   it("acknowledges and temporarily suppresses a real backend alert", async () => {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
@@ -127,6 +128,12 @@ class MetricReading:
             for key, value in self.labels.items()
         ):
             raise ValueError("metric labels contain an invalid value")
+        if self.error_code is not None and (
+            not self.error_code
+            or len(self.error_code) > 96
+            or re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", self.error_code) is None
+        ):
+            raise ValueError("metric error code is invalid")
 
     @property
     def normalized_time(self) -> datetime:

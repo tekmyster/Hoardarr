@@ -9,12 +9,12 @@ const HISTORY_SAMPLES = 60;
 
 interface HistoryPoint {
   at: number;
-  read: number;
-  write: number;
-  readIops: number;
-  writeIops: number;
-  readWait: number;
-  writeWait: number;
+  read: number | null;
+  write: number | null;
+  readIops: number | null;
+  writeIops: number | null;
+  readWait: number | null;
+  writeWait: number | null;
 }
 
 function bytes(value: number | null | undefined): string {
@@ -52,44 +52,62 @@ function Kpis({ metrics, writesToday }: { metrics: StoragePerformanceMetrics; wr
   </div>;
 }
 
-function path(values: number[], maximum: number): string {
-  if (!values.length) return "";
+function path(values: Array<number | null>, maximum: number): string {
+  if (!values.some((value) => value !== null)) return "";
+  let connected = false;
   return values.map((value, index) => {
+    if (value === null) {
+      connected = false;
+      return "";
+    }
     const x = values.length === 1 ? 100 : index * 100 / (values.length - 1);
     const y = 36 - Math.min(36, value * 36 / maximum);
-    return `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
+    const command = connected ? "L" : "M";
+    connected = true;
+    return `${command}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).filter(Boolean).join(" ");
 }
 
-function LiveGraph({ title, primaryLabel, secondaryLabel, primary, secondary, formatter }: {
+function LiveGraph({ title, primaryLabel, secondaryLabel, primary, secondary, history, formatter }: {
   title: string;
   primaryLabel: string;
   secondaryLabel: string;
-  primary: number[];
-  secondary: number[];
+  primary: Array<number | null>;
+  secondary: Array<number | null>;
+  history: HistoryPoint[];
   formatter: (value: number) => string;
 }) {
-  const observedMaximum = Math.max(0, ...primary, ...secondary);
+  const available = [...primary, ...secondary].filter((value): value is number => value !== null);
+  const observedMaximum = Math.max(0, ...available);
   const maximum = Math.max(1, observedMaximum);
+  const unavailable = [...primary, ...secondary].filter((value) => value === null).length;
   return <figure className="storage-live-chart">
-    <figcaption><strong>{title}</strong><span>Peak {formatter(observedMaximum)}</span></figcaption>
-    <svg viewBox="0 0 100 36" preserveAspectRatio="none" role="img" aria-label={`${title}, live two-minute history`}>
+    <figcaption><strong>{title}</strong><span>{available.length ? `Peak ${formatter(observedMaximum)}` : "Peak not reported"}</span></figcaption>
+    {available.length ? <svg viewBox="0 0 100 36" preserveAspectRatio="none" role="img" aria-label={`${title}, live session history${unavailable ? ` with ${unavailable} unavailable values shown as gaps` : ""}`}>
       <line x1="0" y1="18" x2="100" y2="18" />
       <path className="chart-primary" d={path(primary, maximum)} />
       <path className="chart-secondary" d={path(secondary, maximum)} />
-    </svg>
-    <div className="storage-chart-legend"><span className="primary">{primaryLabel}</span><span className="secondary">{secondaryLabel}</span><small>Live history</small></div>
+    </svg> : <p className="empty-state compact-empty">No reported samples in this live session.</p>}
+    <div className="storage-chart-legend"><span className="primary">{primaryLabel}</span><span className="secondary">{secondaryLabel}</span><small>Live session only · {REFRESH_MS / 1000}s target cadence · up to {HISTORY_SAMPLES} samples · linux_block_counters{history.length ? ` · ${new Date(history[0].at).toLocaleTimeString()}–${new Date(history.at(-1)?.at ?? history[0].at).toLocaleTimeString()}` : ""}</small></div>
   </figure>;
 }
 
-function simpleState(metrics: StoragePerformanceMetrics): { label: string; tone: string } {
-  const throughput = (metrics.read_bytes_per_second ?? 0) + (metrics.write_bytes_per_second ?? 0);
-  const wait = Math.max(metrics.read_wait_ms ?? 0, metrics.write_wait_ms ?? 0);
-  if (wait >= 100) return { label: "Slow response", tone: "bad" };
-  if (wait >= 30) return { label: "Response delay", tone: "warning" };
-  if ((metrics.utilization_percent ?? 0) >= 80) return { label: "Busy", tone: "warning" };
-  if (throughput < 1024) return { label: "Idle", tone: "" };
-  return { label: "Active", tone: "good" };
+export function storageLoadState(metrics: StoragePerformanceMetrics): { label: string; tone: string; methodology: string } {
+  const waits = [metrics.read_wait_ms, metrics.write_wait_ms].filter((value): value is number => value !== null);
+  const wait = waits.length ? Math.max(...waits) : null;
+  const methodology = "Derived from this live Linux block-counter sample: severe response delay at ≥100 ms; response delay at ≥30 ms; busy at ≥80% utilization; idle only when both read and write throughput are reported and total <1 KiB/s; otherwise active when reported throughput is ≥1 KiB/s. Missing inputs are not treated as zero.";
+  if (wait !== null && wait >= 100) return { label: "Severe response delay", tone: "bad", methodology };
+  if (wait !== null && wait >= 30) return { label: "Response delay", tone: "warning", methodology };
+  if (metrics.utilization_percent !== null && metrics.utilization_percent >= 80) return { label: "Busy", tone: "warning", methodology };
+  const read = metrics.read_bytes_per_second;
+  const write = metrics.write_bytes_per_second;
+  if (read !== null && write !== null) {
+    return read + write < 1024
+      ? { label: "Idle", tone: "", methodology }
+      : { label: "Active", tone: "good", methodology };
+  }
+  if ((read ?? 0) >= 1024 || (write ?? 0) >= 1024) return { label: "Active", tone: "good", methodology };
+  return { label: "Not reported", tone: "", methodology };
 }
 
 export function StoragePerformance() {
@@ -97,55 +115,67 @@ export function StoragePerformance() {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const active = useRef(false);
+  const lifetimeController = useRef<AbortController | null>(null);
 
   async function refresh() {
     if (active.current) return;
     active.current = true;
     try {
-      const reading = await api.storageTelemetry();
+      const reading = await api.storageTelemetry(lifetimeController.current?.signal);
       setData(reading);
       if (reading.summary.sample_seconds !== null) {
         setHistory((current) => appendBounded(current, {
           at: Date.now(),
-          read: reading.summary.read_bytes_per_second ?? 0,
-          write: reading.summary.write_bytes_per_second ?? 0,
-          readIops: reading.summary.read_iops ?? 0,
-          writeIops: reading.summary.write_iops ?? 0,
-          readWait: reading.summary.read_wait_ms ?? 0,
-          writeWait: reading.summary.write_wait_ms ?? 0,
+          read: reading.summary.read_bytes_per_second,
+          write: reading.summary.write_bytes_per_second,
+          readIops: reading.summary.read_iops,
+          writeIops: reading.summary.write_iops,
+          readWait: reading.summary.read_wait_ms,
+          writeWait: reading.summary.write_wait_ms,
         }, HISTORY_SAMPLES));
       }
       setError(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Storage performance could not be loaded.");
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+        setHistory((current) => appendBounded(current, {
+          at: Date.now(), read: null, write: null, readIops: null, writeIops: null, readWait: null, writeWait: null,
+        }, HISTORY_SAMPLES));
+        setError(caught instanceof Error ? caught.message : "Storage performance could not be loaded.");
+      }
     } finally {
       active.current = false;
     }
   }
 
   useEffect(() => {
+    lifetimeController.current = new AbortController();
     void refresh();
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void refresh();
     }, REFRESH_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      lifetimeController.current?.abort();
+      lifetimeController.current = null;
+      window.clearInterval(timer);
+    };
   }, []);
 
-  const state = useMemo(() => data ? simpleState(data.summary) : null, [data]);
+  const state = useMemo(() => data ? storageLoadState(data.summary) : null, [data]);
   const individualDrives = data?.drives.filter((drive) => drive.pool_ids.length === 0) ?? [];
   const pooledDrives = data?.drives.filter((drive) => drive.pool_ids.length > 0) ?? [];
 
   return <Card title="Storage performance" description="Live readings refresh every two seconds.">
     {error && <Notice tone="warning" title="Live readings unavailable">{error}</Notice>}
     {state && <div className={`storage-simple-state ${state.tone}`}><span aria-hidden="true" />{state.label}</div>}
+    {state && <details className="metric-methodology"><summary>How this live state is calculated</summary><p>{state.methodology}</p><dl><div><dt>Source</dt><dd>{data?.source ?? "Not reported"}</dd></div><div><dt>Observed</dt><dd>{data?.captured_at ? new Date(data.captured_at).toLocaleString() : "Not reported"}</dd></div><div><dt>Classification</dt><dd>Derived live-session state</dd></div></dl></details>}
     {!data || data.summary.sample_seconds === null
       ? <p>Collecting the first storage reading…</p>
       : <Kpis metrics={data.summary} writesToday={data.summary.writes_today_bytes} />}
 
     {history.length > 0 && <div className="storage-live-charts">
-      <LiveGraph title="Bandwidth" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.read)} secondary={history.map((item) => item.write)} formatter={(value) => `${bytes(value)}/s`} />
-      <LiveGraph title="Operations" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.readIops)} secondary={history.map((item) => item.writeIops)} formatter={(value) => `${number(value)} IOPS`} />
-      <LiveGraph title="Response time" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.readWait)} secondary={history.map((item) => item.writeWait)} formatter={(value) => `${number(value)} ms`} />
+      <LiveGraph title="Bandwidth" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.read)} secondary={history.map((item) => item.write)} history={history} formatter={(value) => `${bytes(value)}/s`} />
+      <LiveGraph title="Operations" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.readIops)} secondary={history.map((item) => item.writeIops)} history={history} formatter={(value) => `${number(value)} IOPS`} />
+      <LiveGraph title="Response time" primaryLabel="Read" secondaryLabel="Write" primary={history.map((item) => item.readWait)} secondary={history.map((item) => item.writeWait)} history={history} formatter={(value) => `${number(value)} ms`} />
     </div>}
 
     <details className="storage-performance-details">

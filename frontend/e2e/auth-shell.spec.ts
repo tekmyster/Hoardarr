@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { mkdir } from "node:fs/promises";
 
 async function configuredButSignedOut(page: Page): Promise<void> {
   await page.route("**/setup/status", (route) => route.fulfill({ json: { configured: true, claim_available: false } }));
@@ -60,7 +61,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
       network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: new Date().toISOString(), detail: null, neighbors: [] } },
       activity: { operations: [] }, applications: { connections: [] }, alerts: [],
     });
-    if (pathname.endsWith("/system/resources")) return json({ captured_at: new Date().toISOString(), processor: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, volumes: [], network: { interfaces: [] }, storage: { performance: null } });
+    if (pathname.endsWith("/system/resources")) return json({ captured_at: new Date().toISOString(), source: "live", cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, network: { interfaces: [] }, storage: { system_volume: null, performance: null } });
     if (pathname.endsWith("/storage/telemetry")) return json({ captured_at: new Date().toISOString(), summary: { sample_seconds: null, writes_today_bytes: 0 }, drives: [], pools: [] });
     if (pathname.endsWith("/storage/transfers/summary")) return json({ operations: [], tiers: [], summary: { queued_bytes: 0, running_bytes: 0, retained_for_seeding_bytes: 0, failed_operations: 0, observed_bytes_per_second: null, rate_sample_count: 0, estimated_queued_seconds: null, estimate_quality: "not_reported", estimate_methodology: "No measured transfer history is available." } });
     if (pathname.endsWith("/telemetry/catalog")) return json({
@@ -72,6 +73,7 @@ async function authenticatedEmptyServer(page: Page): Promise<void> {
     if (pathname.endsWith("/telemetry/current")) return json({ captured_at: new Date().toISOString(), items: [{ metric_id: "io.read.bytes_per_second", name: "Read throughput", entity: { id: "entity-drive-1", entity_type: "drive", stable_id: "wwn:test", display_name: "Test SSD", labels: {}, topology: {}, first_seen_at: new Date().toISOString(), last_seen_at: new Date().toISOString() }, timestamp: new Date().toISOString(), value: 1048576, unit: "bytes_per_second", source: "Linux block counters", collection_interval_seconds: 5, quality: "available", raw: true, labels: {}, capability: null, error_code: null }], restricted_capabilities: [] });
     if (pathname.endsWith("/telemetry/alerts")) return json({ items: [] });
     if (pathname.endsWith("/telemetry/settings")) return json({ collection: { fast_interval_seconds: 5, device_interval_seconds: 300, hardware_interval_seconds: 900 }, history: { recent_resolution_seconds: 5, recent_retention_hours: 48, medium_resolution_seconds: 3600, medium_retention_days: 90, long_resolution_seconds: 86400, long_retention_days: 730, maximum_graph_points: 1200, maximum_series: 16, maximum_observations: 20000 }, storage: { database_bytes: 4096, oldest_raw_history: null, oldest_retained_history: null, entity_count: 1, estimated_bytes_per_day: 1024, estimate_method: "estimate", last_cleanup: null, next_cleanup: null, cleanup_batch_size: 10000 }, extended_history: { entitled: false, capability: "metrics.history.extended" } });
+    if (pathname.endsWith("/fleet-telemetry/settings")) return json({ hardware_enabled: false, enhanced_enabled: false, content_enabled: false, installation_id: "browser-fixture", endpoint: "https://hoardarr.com/api/v1/fleet", connection_status: "disabled", credential_fingerprint: null, last_successful_upload: null, last_attempted_upload: null, last_error: null, schema_version: 1, country_code: null, timezone: "UTC", location_detection_method: "os_timezone", location_confirmed: false, policy: {}, preview: {} });
     if (pathname.endsWith("/telemetry/history")) return json({ entity: { id: "entity-drive-1", entity_type: "drive", stable_id: "wwn:test", display_name: "Test SSD", labels: {}, topology: {}, first_seen_at: new Date().toISOString(), last_seen_at: new Date().toISOString() }, metric_id: "io.read.bytes_per_second", unit: "bytes_per_second", resolution: "raw", requested_resolution: "auto", source_resolution: "raw", aggregation_method: "raw samples", raw: true, points_returned: 1, displayed_points: 1, start: new Date(Date.now() - 3600000).toISOString(), end: new Date().toISOString(), points: [{ timestamp: new Date().toISOString(), value: 1048576, quality: "available", raw: true, interval_seconds: 5 }] });
     return route.continue();
   });
@@ -376,7 +378,7 @@ async function unconfiguredServer(page: Page): Promise<void> {
       network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: new Date().toISOString(), detail: null, neighbors: [] } },
       activity: { operations: [] }, applications: { connections: [] }, alerts: [],
     });
-    if (pathname.endsWith("/system/resources")) return json({ captured_at: new Date().toISOString(), processor: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, volumes: [], network: { interfaces: [] }, storage: { performance: null } });
+    if (pathname.endsWith("/system/resources")) return json({ captured_at: new Date().toISOString(), source: "live", cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, network: { interfaces: [] }, storage: { system_volume: null, performance: null } });
     return route.fallback();
   });
 }
@@ -1332,11 +1334,125 @@ test.describe("production sign-in shell", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Analytics" }).click();
     await expect(page.getByRole("heading", { name: "Storage Analytics" })).toBeVisible();
-    await expect(page.getByText("1 MiB/s")).toBeVisible();
-    await page.getByText("About this metric").first().click();
-    await expect(page.getByText("Linux block counters", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("1 MiB/s").first()).toBeVisible();
+    const metricHelp = page.locator("details.metric-help").first();
+    await metricHelp.locator("summary").click();
+    await expect(metricHelp.getByText("Linux block counters", { exact: true })).toBeVisible();
     await page.getByLabel("Graph").selectOption("bars");
     await expect(page.locator(".graph-bars rect")).toHaveCount(1);
+  });
+
+  test("renders the seven quality states, numeric rollup envelope, and categorical timeline", async ({ page }) => {
+    await authenticatedEmptyServer(page);
+    const evidenceDirectory = "test-results/WO-KPIUI-002";
+    await mkdir(evidenceDirectory, { recursive: true });
+    const observedAt = "2026-08-25T14:00:00Z";
+    const entity = {
+      id: "entity-kpi-quality-evidence",
+      entity_type: "drive",
+      stable_id: "fixture:kpi-quality-evidence",
+      display_name: "KPI QUALITY TEST DATA — TEST SSD",
+      labels: { evidence_scope: "deterministic_test_fixture" },
+      topology: {},
+      first_seen_at: observedAt,
+      last_seen_at: observedAt,
+    };
+    const definitions = [
+      ["io.read.bytes_per_second", "Available read throughput", "bytes_per_second", "raw", null],
+      ["io.write.bytes_per_second", "Not-reported write throughput", "bytes_per_second", "raw", null],
+      ["io.read.iops", "Unsupported read IOPS", "operations_per_second", "raw", null],
+      ["io.write.iops", "Temporarily unavailable write IOPS", "operations_per_second", "raw", null],
+      ["io.read.latency", "Stale read latency", "milliseconds", "raw", null],
+      ["io.write.latency", "Estimated write latency", "milliseconds", "raw", null],
+      ["io.queue.depth", "Derived queue depth", "count", "derived", "read operations plus write operations divided by completed sampling intervals"],
+      ["health.overall", "Health state", "state", "raw", null],
+    ].map(([id, name, unit, kind, formula]) => ({
+      id, name, entity_types: ["drive"], unit, kind,
+      source: "Deterministic KPI test provider", minimum_interval_seconds: 5,
+      capability: null, retention_class: "recent", aggregation: unit === "state" ? "last" : "mean",
+      availability: "Deterministic browser evidence only", formula, test_evidence: "WO-KPIUI-002 browser evidence",
+      entitled: true,
+    }));
+    const qualityReadings = [
+      ["io.read.bytes_per_second", "Available read throughput", 1_048_576, "bytes_per_second", "available", null, "raw"],
+      ["io.write.bytes_per_second", "Not-reported write throughput", null, "bytes_per_second", "not_reported", null, "raw"],
+      ["io.read.iops", "Unsupported read IOPS", null, "operations_per_second", "unsupported", null, "raw"],
+      ["io.write.iops", "Temporarily unavailable write IOPS", null, "operations_per_second", "temporarily_unavailable", "provider_timeout", "raw"],
+      ["io.read.latency", "Stale read latency", 12, "milliseconds", "stale", null, "raw"],
+      ["io.write.latency", "Estimated write latency", 4.5, "milliseconds", "estimated", null, "estimated"],
+      ["io.queue.depth", "Derived queue depth", 6, "count", "derived", null, "derived"],
+    ].map(([metricId, name, value, unit, quality, errorCode, classification]) => ({
+      metric_id: metricId, name, entity, timestamp: observedAt, value, unit,
+      source: "Deterministic KPI test provider", collection_interval_seconds: 5,
+      quality, raw: classification === "raw", classification, labels: {}, capability: null,
+      error_code: errorCode,
+      provenance: {
+        provider: "Deterministic KPI test provider", observed_at: observedAt,
+        ingested_at: "2026-08-25T14:00:01Z", collection_interval_seconds: 5,
+        unit, metric_kind: classification === "derived" ? "derived" : "raw", classification,
+      },
+    }));
+    await page.route("**/api/v1/telemetry/catalog", (route) => route.fulfill({ json: {
+      items: definitions,
+      quality_states: ["available", "not_reported", "unsupported", "temporarily_unavailable", "stale", "estimated", "derived"],
+      entitlements: { state: "unlicensed", capabilities: [], expires_at: null, license_id: null, detail: "Basic telemetry is active.", validated_at: observedAt, cached: false, basic_metrics_available: true },
+    } }));
+    await page.route("**/api/v1/telemetry/entities**", (route) => route.fulfill({ json: { items: [entity] } }));
+    await page.route("**/api/v1/telemetry/current**", (route) => route.fulfill({ json: { captured_at: observedAt, items: qualityReadings, restricted_capabilities: [] } }));
+    await page.route("**/api/v1/telemetry/history**", (route) => {
+      const requestedMetric = new URL(route.request().url()).searchParams.get("metric_id");
+      const common = {
+        entity, metric_id: requestedMetric, requested_resolution: "auto", source_resolution: "hourly",
+        resolution: "hourly", aggregation_method: requestedMetric === "health.overall" ? "ordered state transitions" : "time-weighted mean with minimum/maximum envelope",
+        raw: false, points_returned: 2, displayed_points: 2, maximum_points: 800,
+        start: "2026-08-25T12:00:00Z", end: "2026-08-25T14:00:00Z",
+        metric_source: "Deterministic KPI test provider", metric_kind: "raw", formula: null,
+      };
+      if (requestedMetric === "health.overall") return route.fulfill({ json: {
+        ...common, unit: "state", points: [
+          { timestamp: "2026-08-25T12:00:00Z", value: "healthy", quality: "available", raw: false, interval_seconds: 3600, states: ["healthy", "degraded", "healthy"], transition_count: 2, source: "Deterministic KPI test provider", source_scope: "metric_definition" },
+          { timestamp: "2026-08-25T13:00:00Z", value: "healthy", quality: "available", raw: false, interval_seconds: 3600, states: ["healthy"], transition_count: 0, source: "Deterministic KPI test provider", source_scope: "metric_definition" },
+        ],
+      } });
+      return route.fulfill({ json: {
+        ...common, unit: "bytes_per_second", points: [
+          { timestamp: "2026-08-25T12:00:00Z", value: 2_000_000, mean: 2_000_000, minimum: 250_000, maximum: 8_000_000, first: 1_000_000, last: 3_000_000, sample_count: 12, quality: "available", raw: false, interval_seconds: 3600, source: "Deterministic KPI test provider", source_scope: "metric_definition" },
+          { timestamp: "2026-08-25T13:00:00Z", value: null, mean: null, minimum: null, maximum: null, first: null, last: null, sample_count: 0, quality: "temporarily_unavailable", raw: false, interval_seconds: 3600, source: "Deterministic KPI test provider", source_scope: "metric_definition" },
+        ],
+      } });
+    });
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Analytics" }).click();
+    await expect(page.getByLabel("Storage item")).toHaveValue("entity-kpi-quality-evidence");
+    await expect(page.locator(".analytics-kpi").first()).toContainText("KPI QUALITY TEST DATA — TEST SSD");
+    for (const label of ["Available · live observation", "Not reported", "Unsupported", "Temporarily unavailable", "Stale", "Estimated", "Derived"]) {
+      await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+    }
+    await expect(page.getByRole("img", { name: "Available read throughput numeric history" })).toBeVisible();
+    await page.getByText("Accessible bucket values").click();
+    await expect(page.getByRole("columnheader", { name: "Min / max" })).toBeVisible();
+    await expect(page.getByText("244.1 KiB/s / 7.6 MiB/s")).toBeVisible();
+    await page.screenshot({ path: `${evidenceDirectory}/desktop-light-quality-rollup.png`, fullPage: true });
+
+    await page.getByLabel("Metric").selectOption("health.overall");
+    await expect(page.getByRole("region", { name: "Health state state timeline" })).toBeVisible();
+    await expect(page.getByText("States are shown in observed order.")).toBeVisible();
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.screenshot({ path: `${evidenceDirectory}/desktop-dark-state-timeline.png`, fullPage: true });
+
+    await page.setViewportSize({ width: 320, height: 900 });
+    await page.screenshot({ path: `${evidenceDirectory}/mobile-320-state-timeline.png`, fullPage: true });
+    await page.getByLabel("Metric").selectOption("io.read.bytes_per_second");
+    const bucketDisclosure = page.getByText("Accessible bucket values", { exact: true });
+    await bucketDisclosure.focus();
+    await expect(bucketDisclosure).toBeFocused();
+    await expect(page.getByRole("columnheader", { name: "Min / max" })).not.toBeVisible();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("columnheader", { name: "Min / max" })).toBeVisible();
+    await page.screenshot({ path: `${evidenceDirectory}/mobile-320-keyboard-focus.png`, fullPage: false });
   });
 
   test("creates and verifies a real remote-backup target workflow", async ({ page }) => {

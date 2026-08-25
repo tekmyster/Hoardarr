@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { historyEnvelopeValues, historyMeanValues, nullablePath, qualityHasValue, qualityLabel } from "../metricHistory";
 import type {
   LogicalStorageDocument,
   MetricEntity,
@@ -43,26 +44,12 @@ function stateLabel(storage: LogicalStorageDocument): string {
 }
 
 function formatMetric(sample: MetricSampleDocument | undefined): string {
-  if (!sample || sample.value === null || sample.quality !== "available") return "Not reported";
+  if (!sample || sample.value === null || !qualityHasValue(sample.quality)) return "Not reported";
   if (typeof sample.value === "string") return sample.value;
   if (sample.unit === "bytes_per_second") return `${humanCapacity(sample.value)}/s`;
   if (sample.unit === "milliseconds") return `${sample.value.toFixed(1)} ms`;
   if (sample.unit === "operations_per_second") return `${sample.value.toFixed(0)} IOPS`;
   return `${sample.value}`;
-}
-
-function chartPath(history: MetricHistoryDocument): string {
-  const numeric = history.points.map((point) => typeof point.value === "number" ? point.value : null);
-  const present = numeric.filter((value): value is number => value !== null);
-  if (present.length === 0) return "";
-  const minimum = Math.min(...present);
-  const maximum = Math.max(...present);
-  const range = maximum - minimum || 1;
-  return numeric.map((value, index) => {
-    const x = numeric.length === 1 ? 0 : index / (numeric.length - 1) * 100;
-    const y = value === null ? 30 : 28 - (value - minimum) / range * 26;
-    return `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
 }
 
 function PathGraph({
@@ -87,11 +74,19 @@ function PathGraph({
     "node_recovered",
     "redundancy_restored",
   ].includes(event.event_type));
+  const values = series.flatMap((item) => historyMeanValues(item.history)).filter((value): value is number => value !== null);
+  const domain = values.length ? { minimum: Math.min(...values), maximum: Math.max(...values) } : undefined;
   return <figure className="redundancy-graph">
-    <figcaption><strong>{label}</strong><span>{unit}</span></figcaption>
+    <figcaption><strong>{label}</strong><span>{unit} · {series.length > 1 ? "per path; not summed" : "reported entity"}</span></figcaption>
     {series.length === 0 ? <p className="empty-state compact-empty">No stored path readings.</p> : <>
       <svg viewBox="0 0 100 30" preserveAspectRatio="none" role="img" aria-label={`${label} by controller path`}>
-        {series.map((item, index) => <path className={`path-series series-${index % 8}`} key={item.entity.id} d={chartPath(item.history)} />)}
+        {series.map((item, index) => {
+          const envelope = historyEnvelopeValues(item.history);
+          return <g key={item.entity.id}>
+            {envelope && <><path className={`path-series rollup-boundary series-${index % 8}`} d={nullablePath(envelope.minimum, 30, 2, domain)} /><path className={`path-series rollup-boundary series-${index % 8}`} d={nullablePath(envelope.maximum, 30, 2, domain)} /></>}
+            <path className={`path-series series-${index % 8}`} d={nullablePath(historyMeanValues(item.history), 30, 2, domain)} />
+          </g>;
+        })}
         {end > start && annotations.map((event) => {
           const at = new Date(event.occurred_at).getTime();
           if (at < start || at > end) return null;
@@ -100,9 +95,28 @@ function PathGraph({
         })}
       </svg>
       <div className="graph-legend">{series.map((item, index) => <span key={item.entity.id}><i className={`series-${index % 8}`} />{item.entity.display_name}</span>)}</div>
+      <details className="graph-diagnostics"><summary>Graph sources and resolution</summary><ul>{series.map((item) => <li key={item.entity.id}><strong>{item.entity.display_name}</strong>: {item.history.metric_source ?? item.history.points.find((point) => point.source)?.source ?? "Source not reported"} · {item.history.source_resolution ?? item.history.resolution} · {item.history.raw === false ? "aggregated buckets with minimum/maximum boundaries" : "raw observations"} · {item.history.points.length} points</li>)}</ul></details>
       {annotations.length > 0 && <small>Vertical markers show failover, path loss, and recovery events.</small>}
     </>}
   </figure>;
+}
+
+function LogicalMetric({ label, sample }: { label: string; sample: MetricSampleDocument | undefined }) {
+  return <article><small>{label}</small><strong>{formatMetric(sample)}</strong><span className={`metric-quality quality-${sample?.quality ?? "not_reported"}`}>{sample ? qualityLabel(sample.quality) : "Not reported"}</span><small>{sample ? `${sample.source} · observed ${new Date(sample.timestamp).toLocaleString()} · ${sample.collection_interval_seconds}s interval` : "No authoritative logical-storage observation"}</small></article>;
+}
+
+function PathLiveMetrics({ entity, samples }: { entity: MetricEntity; samples: Map<string, MetricSampleDocument> }) {
+  const metricIds = ["io.read.bytes_per_second", "io.write.bytes_per_second", "io.read.iops", "io.read.latency"];
+  const readings = metricIds.map((metricId) => samples.get(`${entity.id}:${metricId}`));
+  const provenance = readings.find((sample) => sample);
+  return <div className="path-live-kpis" aria-label={`${entity.display_name} per-path metrics`}>
+    <span>{formatMetric(readings[0])} read</span>
+    <span>{formatMetric(readings[1])} write</span>
+    <span>{formatMetric(readings[2])} read</span>
+    <span>{formatMetric(readings[3])} latency</span>
+    <small>Per-path only · values are not a logical-storage total</small>
+    <small>{provenance ? `Source: ${provenance.source} · observed ${new Date(provenance.timestamp).toLocaleString()} · ${provenance.collection_interval_seconds}s interval` : "Source not reported · no per-path observation"}</small>
+  </div>;
 }
 
 function Topology({ storage }: { storage: LogicalStorageDocument }) {
@@ -228,13 +242,9 @@ export function ControllerRedundancyDetail({
     last_failover: null,
     time_degraded_seconds: 0,
   };
-  const aggregate = (metricId: string): string => {
-    const values = entities.map((entity) => samples.get(`${entity.id}:${metricId}`)).filter(Boolean) as MetricSampleDocument[];
-    if (!values.length || values.some((sample) => typeof sample.value !== "number" || sample.quality !== "available")) return "Not reported";
-    const total = values.reduce((sum, sample) => sum + Number(sample.value), 0);
-    const unit = values[0].unit;
-    return formatMetric({ ...values[0], value: total, unit });
-  };
+  const logicalSample = (metricId: string): MetricSampleDocument | undefined => logicalEntity
+    ? samples.get(`${logicalEntity.id}:${metricId}`)
+    : undefined;
   const nodeRole = storage.ownership_state
     ? storage.ownership_state.replaceAll("_", " ")
     : "Not reported";
@@ -264,10 +274,14 @@ export function ControllerRedundancyDetail({
         <article><small>Failovers today</small><strong>{summary.failovers_today}</strong></article>
         <article><small>Last failover</small><strong>{summary.last_failover ? new Date(summary.last_failover).toLocaleString() : "Never"}</strong></article>
         <article><small>Time degraded</small><strong>{summary.time_degraded_seconds ? `${Math.floor(summary.time_degraded_seconds / 3600)}h ${Math.floor(summary.time_degraded_seconds % 3600 / 60)}m` : "None"}</strong></article>
-        <article><small>Current throughput</small><strong>{aggregate("io.read.bytes_per_second")} read · {aggregate("io.write.bytes_per_second")} write</strong></article>
-        <article><small>Current IOPS</small><strong>{aggregate("io.read.iops")} read · {aggregate("io.write.iops")} write</strong></article>
-        <article><small>Latency</small><strong>{aggregate("io.read.latency")} read · {aggregate("io.write.latency")} write</strong></article>
+        <LogicalMetric label="Logical read throughput" sample={logicalSample("io.read.bytes_per_second")} />
+        <LogicalMetric label="Logical write throughput" sample={logicalSample("io.write.bytes_per_second")} />
+        <LogicalMetric label="Logical read IOPS" sample={logicalSample("io.read.iops")} />
+        <LogicalMetric label="Logical write IOPS" sample={logicalSample("io.write.iops")} />
+        <LogicalMetric label="Logical read latency" sample={logicalSample("io.read.latency")} />
+        <LogicalMetric label="Logical write latency" sample={logicalSample("io.write.latency")} />
       </div>
+      <p className="field-hint">Logical totals and response time are shown only from an authoritative logical-storage observation. Per-path counters below are never summed because active paths can observe the same I/O.</p>
       {storage.storage_scope === "external_shared" && <p className="field-hint">This view shows telemetry collected by {storage.node_name ?? "this node"}. Open {storage.peer_node ?? "the peer node"} to compare its live activity; Hoardarr does not infer peer IO or ownership from this node's counters.</p>}
       <Topology storage={storage} />
       <div className="redundancy-actions">
@@ -295,7 +309,7 @@ export function ControllerRedundancyDetail({
         <div><dt>Initiator</dt><dd>{display(path.metadata?.initiator)}</dd></div>
         <div><dt>Target</dt><dd>{display(path.metadata?.target)}</dd></div>
       </dl>
-      {entities.filter((entity) => entity.stable_id.endsWith(path.stable_path_identity)).map((entity) => <div className="path-live-kpis" key={entity.id}><span>{formatMetric(samples.get(`${entity.id}:io.read.bytes_per_second`))} read</span><span>{formatMetric(samples.get(`${entity.id}:io.write.bytes_per_second`))} write</span><span>{formatMetric(samples.get(`${entity.id}:io.read.iops`))} read</span><span>{formatMetric(samples.get(`${entity.id}:io.read.latency`))} latency</span></div>)}
+      {entities.filter((entity) => entity.stable_id.endsWith(path.stable_path_identity)).map((entity) => <PathLiveMetrics key={entity.id} entity={entity} samples={samples} />)}
     </article>)}</div>}
 
     {tab === "performance" && <div className="redundancy-graphs">{METRICS.map((metric) => <PathGraph key={metric.id} label={metric.label} unit={metric.unit} events={events} series={entities.map((entity) => ({ entity, history: histories[`${entity.id}:${metric.id}`] })).filter((item): item is { entity: MetricEntity; history: MetricHistoryDocument } => Boolean(item.history))} />)}

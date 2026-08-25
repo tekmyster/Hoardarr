@@ -136,6 +136,13 @@ def entity_document(entity: MetricEntity) -> dict[str, Any]:
 
 def sample_document(sample: MetricSample, entity: MetricEntity) -> dict[str, Any]:
     definition = CATALOG_BY_ID[sample.metric_id]
+    classification = (
+        "estimated"
+        if sample.quality == "estimated"
+        else "derived"
+        if definition.kind == "derived" or sample.quality == "derived"
+        else "raw"
+    )
     return {
         "metric_id": sample.metric_id,
         "name": definition.name,
@@ -150,6 +157,19 @@ def sample_document(sample: MetricSample, entity: MetricEntity) -> dict[str, Any
         "labels": sample.labels_json,
         "capability": definition.capability,
         "error_code": sample.error_code,
+        # Only protected sample columns and the checked-in catalog contribute to
+        # operational provenance. Entity/sample labels remain descriptive
+        # metadata and cannot upgrade a configured value into an observation.
+        "classification": classification,
+        "provenance": {
+            "provider": sample.source,
+            "observed_at": aware(sample.observed_at),
+            "ingested_at": aware(sample.ingested_at),
+            "collection_interval_seconds": sample.collection_interval_seconds,
+            "unit": definition.unit,
+            "metric_kind": definition.kind,
+            "classification": classification,
+        },
     }
 
 
@@ -212,8 +232,20 @@ def history(
     limit: int,
 ) -> dict[str, Any]:
     entity = session.get(MetricEntity, entity_id)
+    definition = CATALOG_BY_ID[metric_id]
     if entity is None:
-        return {"entity": None, "metric_id": metric_id, "resolution": resolution, "points": []}
+        return {
+            "entity": None,
+            "metric_id": metric_id,
+            "unit": definition.unit,
+            "resolution": resolution,
+            "source_resolution": resolution,
+            "metric_source": definition.source,
+            "metric_kind": definition.kind,
+            "formula": definition.formula,
+            "minimum_collection_interval_seconds": definition.minimum_interval_seconds,
+            "points": [],
+        }
     if resolution == "raw":
         rows = session.scalars(
             select(MetricSample)
@@ -232,6 +264,7 @@ def history(
                 "value": row.value_text if row.value_text is not None else row.value,
                 "quality": row.quality,
                 "source": row.source,
+                "source_scope": "observed_provider",
                 "raw": True,
                 "interval_seconds": row.collection_interval_seconds,
             }
@@ -255,6 +288,7 @@ def history(
             {
                 "timestamp": aware(row.period_start),
                 "value": row.last_text if row.last_text is not None else row.mean,
+                "mean": row.mean,
                 "first": row.first_text if row.first_text is not None else row.first,
                 "minimum": row.minimum,
                 "maximum": row.maximum,
@@ -268,19 +302,28 @@ def history(
                 "interval_seconds": 3600 if resolution == "hour" else 86400,
                 "transition_count": row.transition_count,
                 "states": row.states_json,
+                # Raw observations may have been removed by retention. The
+                # checked-in metric definition remains the honest source family;
+                # it is not presented as an exact per-sample provider value.
+                "source": definition.source,
+                "source_scope": "metric_definition",
             }
             for row in rows
         ]
     return {
         "entity": entity_document(entity),
         "metric_id": metric_id,
-        "unit": CATALOG_BY_ID[metric_id].unit,
+        "unit": definition.unit,
         "resolution": resolution,
         "source_resolution": resolution,
         "aggregation_method": (
             "raw samples" if resolution == "raw" else "first/last/minimum/maximum/mean/count"
         ),
         "raw": resolution == "raw",
+        "metric_source": definition.source,
+        "metric_kind": definition.kind,
+        "formula": definition.formula,
+        "minimum_collection_interval_seconds": definition.minimum_interval_seconds,
         "start": start,
         "end": end,
         "points_returned": len(points),

@@ -194,6 +194,84 @@ def test_sample_quality_never_turns_missing_into_zero() -> None:
         reading("drive.media_errors", -1, now)
     with pytest.raises(ValueError, match="timezone"):
         reading("drive.temperature", 20, datetime.now())
+    with pytest.raises(ValueError, match="error code"):
+        MetricReading(
+            entity=EntityReading("drive", "wwn:test", "Test drive"),
+            metric_id="drive.temperature",
+            observed_at=now,
+            value=None,
+            quality="temporarily_unavailable",
+            source="test provider",
+            collection_interval_seconds=300,
+            error_code="smartctl failed: password=hunter2",
+        )
+
+
+def test_all_quality_states_and_provenance_round_trip_without_label_escalation(
+    tmp_path: Path,
+) -> None:
+    _settings, engine, factory = runtime(tmp_path)
+    now = datetime.now(UTC).replace(microsecond=0)
+    qualities = {
+        "available": 21,
+        "not_reported": None,
+        "unsupported": None,
+        "temporarily_unavailable": None,
+        "stale": 22,
+        "estimated": 23,
+        "derived": 24,
+    }
+    samples = []
+    for index, (quality, value) in enumerate(qualities.items()):
+        samples.append(
+            MetricReading(
+                entity=EntityReading(
+                    "drive",
+                    f"wwn:quality-{index}",
+                    f"Quality {quality}",
+                    labels={
+                        "source": "user configured source",
+                        "health": "healthy",
+                        "capacity": "999999999999",
+                        "owner": "active",
+                    },
+                ),
+                metric_id="drive.temperature",
+                observed_at=now + timedelta(microseconds=index),
+                value=value,
+                quality=quality,  # type: ignore[arg-type]
+                source="authoritative provider",
+                collection_interval_seconds=300,
+                labels={"value": "0", "quality": "available", "source": "form input"},
+                error_code=("provider_timeout" if quality == "temporarily_unavailable" else None),
+            )
+        )
+
+    with factory() as session, session.begin():
+        ingest(session, samples)
+    with factory() as session:
+        documents = current_samples(session)
+
+    by_name = {item["entity"]["display_name"]: item for item in documents}
+    assert {item["quality"] for item in documents} == set(qualities)
+    for quality, expected in qualities.items():
+        document = by_name[f"Quality {quality}"]
+        assert document["value"] == expected
+        assert document["source"] == "authoritative provider"
+        assert document["unit"] == "celsius"
+        assert document["collection_interval_seconds"] == 300
+        assert document["timestamp"] == now + timedelta(
+            microseconds=list(qualities).index(quality)
+        )
+        assert document["provenance"]["provider"] == "authoritative provider"
+        assert document["provenance"]["observed_at"] == document["timestamp"]
+        assert document["provenance"]["unit"] == "celsius"
+        assert document["provenance"]["classification"] == (
+            "estimated" if quality == "estimated" else "derived" if quality == "derived" else "raw"
+        )
+        assert document["entity"]["labels"]["health"] == "healthy"
+        assert document["labels"]["source"] == "form input"
+    engine.dispose()
 
 
 def test_counter_rates_handle_reset_duplicate_clock_and_identity_change() -> None:
@@ -746,6 +824,42 @@ def test_rollups_preserve_numeric_envelopes_and_health_transitions(tmp_path: Pat
         assert state.mean is None
         assert state.states_json == ["healthy", "degraded", "healthy"]
         assert state.transition_count == 2
+        numeric_document = history(
+            session,
+            entity_id=numeric.entity_id,
+            metric_id="drive.temperature",
+            start=observed - timedelta(minutes=1),
+            end=observed + timedelta(hours=1),
+            resolution="hour",
+            limit=10,
+        )
+        numeric_point = numeric_document["points"][0]
+        assert numeric_point["value"] == 130 / 3
+        assert numeric_point["mean"] == 130 / 3
+        assert (
+            numeric_point["first"],
+            numeric_point["minimum"],
+            numeric_point["maximum"],
+            numeric_point["last"],
+        ) == (20, 20, 80, 30)
+        assert numeric_point["sample_count"] == 3
+        assert numeric_point["source_scope"] == "metric_definition"
+        assert numeric_document["metric_source"] == "SMART/NVMe"
+        assert numeric_document["metric_kind"] == "raw"
+
+        state_document = history(
+            session,
+            entity_id=state.entity_id,
+            metric_id="health.overall",
+            start=observed - timedelta(minutes=1),
+            end=observed + timedelta(hours=1),
+            resolution="hour",
+            limit=10,
+        )
+        state_point = state_document["points"][0]
+        assert state_point["states"] == ["healthy", "degraded", "healthy"]
+        assert state_point["transition_count"] == 2
+        assert state_point["mean"] is None
     engine.dispose()
 
 

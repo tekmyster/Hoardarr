@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import type { OverviewDocument, ResourceUsageDocument } from "../types";
-import { networkRates, OverviewDashboard } from "./OverviewDashboard";
+import { networkRates, OverviewDashboard, storageActivityState } from "./OverviewDashboard";
 
 const overview: OverviewDocument = {
   captured_at: "2026-08-20T15:00:00Z",
@@ -91,6 +91,25 @@ describe("OverviewDashboard", () => {
     const reset = resourceReading(1);
     reset.captured_at = "2026-08-20T15:00:06Z";
     expect(networkRates(second.sample, reset)).toMatchObject({ received: null, sent: null });
+
+    const missingCounter = resourceReading(30);
+    missingCounter.captured_at = "2026-08-20T15:00:08Z";
+    missingCounter.network.interfaces[0].bytes_received = null;
+    const unavailable = networkRates(second.sample, missingCounter);
+    expect(unavailable).toMatchObject({ received: null, sent: null });
+    expect(unavailable.sample.counters).toBeNull();
+
+    const changedInterfaceSet = resourceReading(40);
+    changedInterfaceSet.captured_at = "2026-08-20T15:00:10Z";
+    changedInterfaceSet.network.interfaces.push({ name: "eth1", up: true, bytes_received: 100, bytes_sent: 50 });
+    expect(networkRates(second.sample, changedInterfaceSet)).toMatchObject({ received: null, sent: null });
+  });
+
+  it("does not call partial or missing storage throughput idle", () => {
+    expect(storageActivityState(null, null)).toBe("Not reported");
+    expect(storageActivityState(0, null)).toBe("Not reported");
+    expect(storageActivityState(0, 0)).toBe("Idle");
+    expect(storageActivityState(null, 1)).toBe("Active");
   });
   it("updates processor, memory, and storage from the lightweight live reading", async () => {
     vi.useFakeTimers();
@@ -113,7 +132,8 @@ describe("OverviewDashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "+ Connected Switches & Devices" }));
     expect(screen.getByText("core-9500")).toBeInTheDocument();
     expect(screen.getByText(/FortyGigabitEthernet1\/0\/1/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Network bandwidth live history")).toBeInTheDocument();
+    expect(screen.getByText(/source: psutil per-interface monotonic counters/)).toBeInTheDocument();
+    expect(screen.getByText("No reported samples in this live session.")).toBeInTheDocument();
 
     await act(async () => {
       vi.advanceTimersByTime(2_000);
@@ -137,6 +157,7 @@ describe("OverviewDashboard", () => {
     });
 
     expect(screen.getByText("Collecting the first storage reading.")).toBeInTheDocument();
+    expect(screen.queryByText("Idle")).not.toBeInTheDocument();
   });
 
   it("supports keyboard panel changes and persists the exact layout", async () => {

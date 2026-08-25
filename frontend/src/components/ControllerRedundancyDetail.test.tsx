@@ -102,7 +102,7 @@ const events: StorageRedundancyEventDocument[] = [{
 }];
 
 function currentMetrics(): CurrentMetricsDocument {
-  const items = entities.flatMap((entity) => [
+  const pathItems = entities.flatMap((entity) => [
     ["io.read.bytes_per_second", 120_000_000, "bytes_per_second"],
     ["io.write.bytes_per_second", 80_000_000, "bytes_per_second"],
     ["io.read.iops", 240, "operations_per_second"],
@@ -124,8 +124,30 @@ function currentMetrics(): CurrentMetricsDocument {
     capability: null,
     error_code: null,
   })));
+  const logicalItems = [
+    ["io.read.bytes_per_second", 175_000_000, "bytes_per_second"],
+    ["io.write.bytes_per_second", 95_000_000, "bytes_per_second"],
+    ["io.read.iops", 300, "operations_per_second"],
+    ["io.write.iops", 175, "operations_per_second"],
+    ["io.read.latency", 4.2, "milliseconds"],
+    ["io.write.latency", 5.3, "milliseconds"],
+  ].map(([metricId, value, unit]) => ({
+    metric_id: String(metricId),
+    name: String(metricId),
+    entity: logicalEntity,
+    timestamp: "2026-08-22T15:00:00Z",
+    value: Number(value),
+    unit: String(unit),
+    source: "dm-multipath logical map counters",
+    collection_interval_seconds: 5,
+    quality: "available" as const,
+    raw: true,
+    labels: {},
+    capability: null,
+    error_code: null,
+  }));
   return {
-    items,
+    items: [...pathItems, ...logicalItems],
     captured_at: "2026-08-22T15:00:00Z",
     restricted_capabilities: [],
   };
@@ -168,6 +190,9 @@ describe("ControllerRedundancyDetail", () => {
     expect(screen.getByText("serving")).toBeInTheDocument();
     expect(screen.getByText("Node B")).toBeInTheDocument();
     expect(screen.getByText(/does not infer peer IO or ownership/i)).toBeInTheDocument();
+    expect(screen.getByText("Logical read latency").closest("article")).toHaveTextContent("4.2 ms");
+    expect(screen.getByText("Logical read latency").closest("article")).toHaveTextContent("dm-multipath logical map counters");
+    expect(screen.getByText(/Per-path counters below are never summed/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Controllers & paths" }));
     expect(screen.getByText("Controller A")).toBeInTheDocument();
@@ -177,6 +202,7 @@ describe("ControllerRedundancyDetail", () => {
     expect(await screen.findByRole("img", { name: "Read throughput by controller path" })).toBeInTheDocument();
     await waitFor(() => expect(api.metricHistory).toHaveBeenCalledTimes(14));
     expect(screen.getAllByText(/Vertical markers show failover/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/per path; not summed/).length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByRole("button", { name: "Events" }));
     expect(screen.getByText("controller failover")).toBeInTheDocument();

@@ -441,7 +441,7 @@ async function storageLifecycleServer(page: Page) {
     if (pathname.endsWith("/storage/inventory")) return json({ captured_from: "live_host", topology: { status: "not_available", nodes: [], links: [], enclosures: [], direct_attached_drive_ids: [] }, active_operations: [], pools: { status: "configured", items: [{ id: "zfs:tank", name: "tank", type: "ZFS", status: "online", total_bytes: 1_000_000_000_000, used_bytes: 100_000_000_000, free_bytes: 900_000_000_000, members: 2, mountpoint: "/tank", pool_guid: "1234567890123456789", degraded: false }] }, shares: { status: "not_configured", items: [] }, controllers: { status: "Not reported", items: [], unavailable: [] } });
     if (pathname.endsWith("/integrations") || pathname.endsWith("/wizards")) return json({ items: [] });
     if (pathname.endsWith("/system/overview")) return json({ captured_at: now, source: "live", system: { hostname: "hoardarr", application: "Hoardarr", version: "0.3.11", database_ready: true, booted_at: null, uptime_seconds: 60, cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, boot_volume: null, temperatures: [] }, storage: { snapshot: null, drive_count: 2, raw_capacity_bytes: 2_000_000_000_000, health: "healthy", pools: { status: "not_configured", items: [] }, shares: { status: "not_configured", items: [] } }, network: { interfaces: [], discovery: { status: "no_neighbors", source: null, captured_at: now, detail: null, neighbors: [] } }, activity: { operations: [] }, applications: { connections: [] }, alerts: [] });
-    if (pathname.endsWith("/system/resources")) return json({ captured_at: now, processor: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, volumes: [], network: { interfaces: [] }, storage: { performance: null } });
+    if (pathname.endsWith("/system/resources")) return json({ captured_at: now, source: "live", cpu: { used_percent: 1, logical_processors: 2, physical_cores: 1 }, memory: { total_bytes: 1024, available_bytes: 512, used_bytes: 512, used_percent: 50 }, network: { interfaces: [] }, storage: { system_volume: null, performance: null } });
     if (pathname.endsWith("/storage/telemetry")) return json({ captured_at: now, summary: { sample_seconds: null, writes_today_bytes: 0 }, drives: [], pools: [] });
     return route.continue();
   });
@@ -577,7 +577,8 @@ test("reviews and completes a bounded read-only foreign inventory in the real St
   await page.getByText("Inspect storage from another system").click();
   await expect(page.getByText("Standalone filesystem")).toBeVisible();
   await expect(page.getByText("Archive intake source detected")).toBeVisible();
-  await expect(page.getByText("Not reported").first()).toBeVisible();
+  const foreignCandidate = page.locator(".foreign-candidate").filter({ hasText: "Standalone filesystem" });
+  await expect(foreignCandidate.getByText("Not reported").first()).toBeVisible();
   await page.getByRole("button", { name: "Review read-only inspection" }).click();
   await expect(page.getByText("No storage configuration will change")).toBeVisible();
   await expect(page.getByText("100,000 entries")).toBeVisible();

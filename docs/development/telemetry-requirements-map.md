@@ -35,12 +35,55 @@ The implementation will preserve the existing live documents for compatibility w
 
 The production implementation now resides in `hoardarr.telemetry` with schema
 revisions `0005_enterprise_telemetry`, `0006_metric_alert_rules`, and
-`0007_telemetry_rollup_details`. The generated 98-row catalog is
-`docs/telemetry/metric-catalog.json`. All 98 definitions have production
+`0007_telemetry_rollup_details`. The generated 101-row catalog is
+`docs/telemetry/metric-catalog.json`. All 101 definitions have production
 collector or derivation paths and explicit implementation/physical-validation
 status. Collection, persistence, rendering, entitlements, forecasts, anomalies,
 alerts, reporting/export, query budgeting, bounded live history, progressive
 compression, retention, provider backpressure, and lifecycle cleanup are
 exercised by backend, frontend, accessibility, Playwright, scale, and soak tests.
 Exact outcomes and the remaining Linux and physical-hardware boundaries are recorded in
+`docs/validation/telemetry-validation.md`.
+
+## Operational WebUI provenance and quality contract (KPIUI-03/KPIUI-04)
+
+The operational WebUI now uses one explicit contract from persisted observation
+through rendering:
+
+- `sample_document()` builds provider, observation/ingestion time, collection
+  interval, unit, metric kind, and raw/derived/estimated classification only from
+  protected sample columns and the checked-in catalog. Labels remain descriptive
+  metadata and cannot upgrade a configured or user-entered value into an observed
+  operational fact.
+- `available`, `not_reported`, `unsupported`, `temporarily_unavailable`, `stale`,
+  `estimated`, and `derived` survive ingestion/API/UI round-trip. Unavailable
+  qualities carry `null`; they never render as zero or false idle. Error detail is
+  a bounded sanitized provider code, not raw command output.
+- Overview and Storage live histories are nullable, bounded session buffers.
+  Failed/missing refreshes add gaps. Their labels say `Live session only`, target
+  cadence, maximum sample count, source, and observed range.
+- Browser-side network rates are calculated only when the same complete set of
+  up interfaces reports monotonic counters across a positive elapsed interval.
+  Missing counters, reset counters, duplicate timestamps, or membership changes
+  produce a gap rather than an invented rate.
+- Historical numeric rollups display the stored mean together with accessible
+  first/last/minimum/maximum/count fields. The chart draws peak-preserving
+  minimum/maximum boundaries only for aggregates. Raw samples have no envelope.
+  Missing buckets remain gaps.
+- Categorical history is an ordered state/transition timeline. It is never
+  averaged or converted to a number.
+- Per-path series remain per-path. The logical-storage summary uses only
+  authoritative logical-storage observations; path throughput, IOPS, and latency
+  are not summed, and unlike latency samples are never averaged into a claimed
+  aggregate.
+- Derived and estimated cards expose classification, source, time, interval,
+  quality, unavailable reason, and formula/provider methodology.
+
+Implementation is shared by `frontend/src/metricHistory.ts`, the Overview,
+Storage Performance, Analytics, and Controller Redundancy components, and the
+normalized telemetry documents in `backend/src/hoardarr/telemetry/store.py`.
+The deterministic `frontend/e2e/kpiui_preview_server.py` launcher uses the real
+FastAPI/SQLite/ingestion/frontend stack, labels its only entity as test evidence,
+and never touches storage devices. Exact unit, browser, and artifact evidence is
+recorded under the KPIUI-03/KPIUI-04 section of
 `docs/validation/telemetry-validation.md`.

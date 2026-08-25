@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { historyEnvelopeValues, historyHasCategoricalValues, historyMeanValues, nullablePath, qualityHasValue, qualityLabel, sampleClassification, stateTimeline } from "../metricHistory";
 import type { EntitlementDocument, LatencyAnalyticsDocument, MetricAlertDocument, MetricDefinition, MetricEntity, MetricHistoryDocument, MetricSampleDocument, TelemetryForecastDocument, TelemetrySettingsDocument } from "../types";
 import { Notice } from "./ui";
 
@@ -25,35 +26,14 @@ function displayValue(value: number | string | null, unit: string): string {
 }
 
 function qualityText(value: MetricSampleDocument): string {
-  if (value.quality === "available") return "Live";
-  return value.quality.replaceAll("_", " ");
+  return value.quality === "available" ? "Available · live observation" : qualityLabel(value.quality);
 }
 
-function path(values: Array<number | null>): string {
-  const available = values.filter((value): value is number => value !== null);
-  if (!available.length) return "";
-  const minimum = Math.min(...available);
-  const maximum = Math.max(...available);
-  const spread = Math.max(1e-9, maximum - minimum);
-  let previousAvailable = false;
-  return values.map((value, index) => {
-    if (value === null) {
-      previousAvailable = false;
-      return "";
-    }
-    const x = values.length === 1 ? 0 : index * 100 / (values.length - 1);
-    const y = 28 - (value - minimum) / spread * 26;
-    const command = previousAvailable ? "L" : "M";
-    previousAvailable = true;
-    return `${command}${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
-}
-
-function bars(values: Array<number | null>): Array<{ x: number; y: number; height: number } | null> {
+function bars(values: Array<number | null>, domain?: { minimum: number; maximum: number }): Array<{ x: number; y: number; height: number } | null> {
   const available = values.filter((value): value is number => value !== null);
   if (!available.length) return values.map(() => null);
-  const minimum = Math.min(...available);
-  const spread = Math.max(1e-9, Math.max(...available) - minimum);
+  const minimum = domain?.minimum ?? Math.min(...available);
+  const spread = Math.max(1e-9, (domain?.maximum ?? Math.max(...available)) - minimum);
   return values.map((value, index) => value === null ? null : {
     x: index * 100 / values.length,
     y: 29 - (value - minimum) / spread * 27,
@@ -63,6 +43,74 @@ function bars(values: Array<number | null>): Array<{ x: number; y: number; heigh
 
 function MetricHelp({ metric }: { metric: MetricDefinition }) {
   return <details className="metric-help"><summary>About this metric</summary><dl><div><dt>Source</dt><dd>{metric.source}</dd></div><div><dt>Collected</dt><dd>Every {metric.minimum_interval_seconds} seconds or slower when the source is expensive</dd></div><div><dt>Value</dt><dd>{metric.kind === "derived" ? "Calculated" : "Reported"} · {metric.unit.replaceAll("_", " ")}</dd></div>{metric.formula && <div><dt>Calculation</dt><dd>{metric.formula}</dd></div>}<div><dt>Availability</dt><dd>{metric.availability}</dd></div>{metric.implementation_status && <div><dt>Support</dt><dd>{metric.implementation_status.toLowerCase().replaceAll("_", " ")}</dd></div>}</dl></details>;
+}
+
+function MetricProvenance({ sample, definition }: { sample: MetricSampleDocument; definition?: MetricDefinition }) {
+  const classification = sampleClassification(sample, definition);
+  const reason = sample.error_code
+    ? sample.error_code.replaceAll("_", " ")
+    : sample.quality === "unsupported"
+      ? "The provider does not support this metric."
+      : sample.quality === "not_reported"
+        ? "The provider did not report a value."
+        : sample.quality === "temporarily_unavailable"
+          ? "The provider could not collect this observation."
+          : sample.quality === "stale"
+            ? "The last observation is older than the live freshness limit."
+            : null;
+  return <details className="metric-provenance"><summary>Source and quality</summary><dl>
+    <div><dt>Provider</dt><dd>{sample.provenance?.provider ?? sample.source}</dd></div>
+    <div><dt>Observed</dt><dd>{new Date(sample.provenance?.observed_at ?? sample.timestamp).toLocaleString()}</dd></div>
+    <div><dt>Collection interval</dt><dd>{sample.provenance?.collection_interval_seconds ?? sample.collection_interval_seconds} seconds</dd></div>
+    <div><dt>Unit</dt><dd>{sample.provenance?.unit ?? sample.unit}</dd></div>
+    <div><dt>Classification</dt><dd>{classification}</dd></div>
+    <div><dt>Quality</dt><dd>{qualityLabel(sample.quality)}</dd></div>
+    {reason && <div><dt>Unavailable reason</dt><dd>{reason}</dd></div>}
+    {(classification === "derived" || classification === "estimated") && <div><dt>Methodology</dt><dd>{definition?.formula ?? (classification === "estimated" ? "Provider estimate; exact inputs were not reported." : "Derived by the named provider from its reported inputs.")}</dd></div>}
+  </dl></details>;
+}
+
+function NumericHistory({ history, label, graphType, unit }: { history: MetricHistoryDocument; label: string; graphType: "line" | "bars"; unit: string }) {
+  const values = historyMeanValues(history);
+  const envelope = historyEnvelopeValues(history);
+  const domainValues = [...values, ...(envelope?.minimum ?? []), ...(envelope?.maximum ?? [])].filter((value): value is number => value !== null);
+  const domain = domainValues.length ? { minimum: Math.min(...domainValues), maximum: Math.max(...domainValues) } : undefined;
+  const gapCount = values.filter((value) => value === null).length;
+  const descriptionId = `history-description-${history.metric_id.replaceAll(".", "-")}`;
+  return <figure className={`analytics-chart graph-${graphType}`}>
+    <figcaption>{label}<small>{history.raw === false ? "Bucket mean with peak-preserving minimum/maximum boundaries" : "Raw observations"}</small></figcaption>
+    {domainValues.length ? <svg viewBox="0 0 100 30" preserveAspectRatio="none" role="img" aria-label={`${label} numeric history`} aria-describedby={descriptionId}>
+      {envelope && <g className="rollup-envelope" aria-hidden="true"><path className="rollup-minimum" d={nullablePath(envelope.minimum, 30, 2, domain)} /><path className="rollup-maximum" d={nullablePath(envelope.maximum, 30, 2, domain)} /></g>}
+      {graphType === "line" ? <path className="history-mean" d={nullablePath(values, 30, 2, domain)} /> : bars(values, domain).map((bar, index) => bar === null ? null : <rect key={history.points[index].timestamp} x={bar.x} y={bar.y} width={Math.max(.2, 90 / history.points.length)} height={bar.height} />)}
+    </svg> : <p className="empty-state">No reported numeric values are available in these buckets.</p>}
+    <p className="visually-hidden" id={descriptionId}>{history.points.length} bounded points. {gapCount} unavailable values are gaps, not zero. {history.raw === false ? "Minimum and maximum boundaries preserve bucket peaks around the mean." : "No rollup envelope is drawn for raw observations."}</p>
+    <div><span>{new Date(history.start).toLocaleString()}</span><span>{new Date(history.end).toLocaleString()}</span></div>
+    <details className="history-buckets"><summary>Accessible bucket values</summary><div className="table-scroll"><table className="data-table"><thead><tr><th scope="col">Time</th><th scope="col">{history.raw === false ? "Mean" : "Value"}</th>{history.raw === false && <><th scope="col">Min / max</th><th scope="col">First / last</th><th scope="col">Samples</th></>}<th scope="col">Quality</th></tr></thead><tbody>{history.points.map((point) => <tr key={point.timestamp}><td>{new Date(point.timestamp).toLocaleString()}</td><td>{displayValue(qualityHasValue(point.quality) ? point.mean ?? point.value : null, unit)}</td>{history.raw === false && <><td>{displayValue(point.minimum ?? null, unit)} / {displayValue(point.maximum ?? null, unit)}</td><td>{displayValue(point.first ?? null, unit)} / {displayValue(point.last ?? null, unit)}</td><td>{point.sample_count ?? "Not reported"}</td></>}<td>{qualityLabel(point.quality)}</td></tr>)}</tbody></table></div></details>
+  </figure>;
+}
+
+function CategoricalHistory({ history, label }: { history: MetricHistoryDocument; label: string }) {
+  const buckets = stateTimeline(history);
+  return <section className="state-history" aria-label={`${label} state timeline`}>
+    <h4>{label} state timeline</h4>
+    <p>States are shown in observed order. They are never averaged or converted to invented numeric values.</p>
+    <ol>{buckets.map((bucket) => <li key={bucket.timestamp} className={`quality-${bucket.quality}`}><time>{new Date(bucket.timestamp).toLocaleString()}</time><div>{bucket.states.length ? bucket.states.map((state, index) => <span key={`${state}:${index}`}>{state.replaceAll("_", " ")}{index < bucket.states.length - 1 ? <b aria-label="then">→</b> : null}</span>) : <span>{qualityLabel(bucket.quality)}</span>}</div><small>{bucket.transitionCount} transition{bucket.transitionCount === 1 ? "" : "s"} · {qualityLabel(bucket.quality)}</small></li>)}</ol>
+  </section>;
+}
+
+function HistoryDiagnostics({ history }: { history: MetricHistoryDocument }) {
+  const rolled = history.raw === false;
+  const interval = history.points.find((point) => point.interval_seconds)?.interval_seconds;
+  return <details className="graph-diagnostics"><summary>Graph details</summary><dl>
+    <div><dt>Range</dt><dd>{new Date(history.start).toLocaleString()} – {new Date(history.end).toLocaleString()}</dd></div>
+    <div><dt>Metric source</dt><dd>{history.metric_source ?? history.points.find((point) => point.source)?.source ?? "Not reported"}</dd></div>
+    <div><dt>Resolution</dt><dd>{history.source_resolution ?? history.resolution}{interval ? ` · ${interval} second buckets` : ""}</dd></div>
+    <div><dt>Representation</dt><dd>{rolled ? "Historical rollup; values are aggregates" : "Raw observations"}</dd></div>
+    <div><dt>Points</dt><dd>{history.points_returned ?? history.points.length} returned · {history.displayed_points ?? history.points.length} displayed · maximum {history.maximum_points ?? MAX_DISPLAY_POINTS}</dd></div>
+    {history.aggregation_method && <div><dt>Aggregation</dt><dd>{history.aggregation_method}</dd></div>}
+    <div><dt>Metric classification</dt><dd>{history.metric_kind ?? "Not reported"}</dd></div>
+    {history.formula && <div><dt>Formula</dt><dd>{history.formula}</dd></div>}
+  </dl></details>;
 }
 
 export function AnalyticsPage() {
@@ -207,13 +255,13 @@ export function AnalyticsPage() {
   const performance = entityMetrics.filter((item) => item.metric_id.startsWith("io.")).slice(0, 8);
   const capacity = entityMetrics.filter((item) => item.metric_id.startsWith("capacity.") || item.metric_id.startsWith("storage.")).slice(0, 6);
   const health = entityMetrics.filter((item) => item.metric_id.startsWith("health.") || item.metric_id.startsWith("drive.")).slice(0, 8);
-  const historyValues = history?.points.map((point) => typeof point.value === "number" ? point.value : null) ?? [];
+  const categoricalHistory = history ? selectedDefinition?.unit === "state" || historyHasCategoricalValues(history) : false;
 
   function metricCards(items: MetricSampleDocument[]) {
     if (!items.length) return <p className="empty-state">No readings have been reported for this entity.</p>;
     return <div className="analytics-kpi-grid">{items.map((item) => {
       const definition = definitionMap.get(item.metric_id);
-      return <article className={`analytics-kpi quality-${item.quality}`} key={`${item.entity.id}:${item.metric_id}`}><div><span>{item.name}</span><small>{qualityText(item)}</small></div><strong>{displayValue(item.value, item.unit)}</strong><small>{item.entity.display_name} · {new Date(item.timestamp).toLocaleTimeString()}</small>{definition && <MetricHelp metric={definition} />}</article>;
+      return <article className={`analytics-kpi quality-${item.quality}`} key={`${item.entity.id}:${item.metric_id}`}><div><span>{item.name}</span><small>{qualityText(item)}</small></div><strong>{displayValue(qualityHasValue(item.quality) ? item.value : null, item.unit)}</strong><small>{item.entity.display_name} · {new Date(item.timestamp).toLocaleTimeString()}</small><MetricProvenance sample={item} definition={definition} />{definition && <MetricHelp metric={definition} />}</article>;
     })}</div>;
   }
 
@@ -225,7 +273,7 @@ export function AnalyticsPage() {
     <section className="analytics-section"><h3>Performance</h3>{metricCards(performance)}</section>
     <section className="analytics-section"><h3>Capacity</h3>{metricCards(capacity)}</section>
     <section className="analytics-section"><h3>Health and endurance</h3>{metricCards(health)}</section>
-    <section className="analytics-section"><div className="section-title-row"><h3>History</h3>{history && <span>{history.points.length} points</span>}</div>{history?.points.length ? <figure className={`analytics-chart graph-${graphType}`}><figcaption>{selectedDefinition?.name ?? selectedMetric}</figcaption><svg viewBox="0 0 100 30" preserveAspectRatio="none" role="img" aria-label={`${selectedDefinition?.name ?? selectedMetric} history`}>{graphType === "line" ? <path d={path(historyValues)} /> : bars(historyValues).map((bar, index) => bar === null ? null : <rect key={history.points[index].timestamp} x={bar.x} y={bar.y} width={Math.max(.2, 90 / history.points.length)} height={bar.height} />)}</svg><div><span>{new Date(history.start).toLocaleString()}</span><span>{new Date(history.end).toLocaleString()}</span></div><details className="graph-diagnostics"><summary>Graph details</summary><dl><div><dt>Range</dt><dd>{new Date(history.start).toLocaleString()} – {new Date(history.end).toLocaleString()}</dd></div><div><dt>Source</dt><dd>{history.source_resolution ?? history.resolution} · {history.raw === false ? "aggregated" : "raw"}</dd></div><div><dt>Points</dt><dd>{history.points_returned ?? history.points.length} returned · {history.displayed_points ?? history.points.length} displayed</dd></div>{history.aggregation_method && <div><dt>Compression</dt><dd>{history.aggregation_method}</dd></div>}</dl></details></figure> : <p className="empty-state">No stored readings are available for this selection.</p>}{selectedDefinition && <MetricHelp metric={selectedDefinition} />}</section>
+    <section className="analytics-section"><div className="section-title-row"><h3>History</h3>{history && <span>{history.points.length} points</span>}</div>{history?.points.length ? <>{categoricalHistory ? <CategoricalHistory history={history} label={selectedDefinition?.name ?? selectedMetric} /> : <NumericHistory history={history} label={selectedDefinition?.name ?? selectedMetric} graphType={graphType} unit={selectedDefinition?.unit ?? history.unit} />}<HistoryDiagnostics history={history} /></> : <p className="empty-state">No stored readings are available for this selection.</p>}{selectedDefinition && <MetricHelp metric={selectedDefinition} />}</section>
     {(forecast || latency || topItems.length > 0 || anomalies.length > 0) && <section className="analytics-section"><h3>Advanced analysis</h3><div className="analytics-kpi-grid">{forecast && <article className="analytics-kpi"><span>Capacity forecast</span><strong>{forecast.status.replaceAll("_", " ")}</strong><small>{forecast.methodology}</small></article>}{latency && <article className="analytics-kpi"><span>Latency distribution</span><strong>{latency.p95 === null ? "Not reported" : `${latency.p95.toFixed(2)} ms P95`}</strong><small>{latency.samples} stored observations · P50 {latency.p50 ?? "Not reported"} · P99 {latency.p99 ?? "Not reported"}</small></article>}{topItems.slice(0, 5).map((item, index) => <article className="analytics-kpi" key={`top:${item.entity.id}`}><span>#{index + 1} {item.entity.display_name}</span><strong>{displayValue(item.value, item.unit)}</strong><small>{item.name}</small></article>)}</div>{anomalies.length > 0 && <div className="analytics-alert-list">{anomalies.slice(0, 10).map((item, index) => <article className="analytics-alert warning" key={`${String(item.metric_id)}:${index}`}><strong>{String((item.entity as { display_name?: string })?.display_name ?? "Storage")}</strong><span>{String(item.explanation ?? "Performance outside recent baseline")}</span></article>)}</div>}</section>}
     <section className="analytics-section"><h3>Active alerts</h3>{alerts.length ? <div className="analytics-alert-list">{alerts.map((alert) => <article key={alert.id} className={`analytics-alert ${alert.severity}`}><strong>{alert.entity.display_name}</strong><span>{definitionMap.get(alert.metric_id)?.name ?? alert.metric_id}</span><small>{alert.lifecycle_state.replaceAll("_", " ")} · Started {new Date(alert.started_at).toLocaleString()}</small>{alert.suppressed_until && alert.lifecycle_state === "suppressed" && <small>Suppressed until {new Date(alert.suppressed_until).toLocaleString()}</small>}{alert.runbook && <details><summary>What to do</summary><strong>{alert.runbook.title}</strong><p>{alert.runbook.summary}</p><ol>{alert.runbook.actions.map((action) => <li key={action}>{action}</li>)}</ol><small>Based on: {alert.runbook.evidence.join(", ")}</small></details>}<div className="form-actions">{alert.acknowledged_at === null && <button className="button button-secondary" type="button" disabled={alertBusy !== null} onClick={() => void updateAlert("acknowledge", alert.id)}>Acknowledge</button>}{alert.lifecycle_state === "suppressed" ? <button className="button button-secondary" type="button" disabled={alertBusy !== null} onClick={() => void updateAlert("unsuppress", alert.id)}>End suppression</button> : <button className="button button-secondary" type="button" disabled={alertBusy !== null} onClick={() => void updateAlert("suppress", alert.id)}>Suppress for 1 hour</button>}</div></article>)}</div> : <p className="empty-state">No active telemetry alerts.</p>}</section>
     <section className="analytics-section"><h3>History policy</h3>{historySettings ? <dl className="analytics-policy"><div><dt>Live collection</dt><dd>{historySettings.collection.fast_interval_seconds} seconds</dd></div><div><dt>Recent history</dt><dd>{historySettings.history.recent_resolution_seconds}-second detail for {historySettings.history.recent_retention_hours} hours</dd></div><div><dt>Medium history</dt><dd>Hourly for {historySettings.history.medium_retention_days} days</dd></div><div><dt>Long history</dt><dd>Daily for {historySettings.history.long_retention_days} days</dd></div><div><dt>Graph limit</dt><dd>{historySettings.history.maximum_graph_points.toLocaleString()} points</dd></div><div><dt>Telemetry database</dt><dd>{displayValue(historySettings.storage.database_bytes, "bytes")}</dd></div><div><dt>Estimated growth</dt><dd>{displayValue(historySettings.storage.estimated_bytes_per_day, "bytes")}/day (estimate)</dd></div><div><dt>Oldest history</dt><dd>{historySettings.storage.oldest_retained_history ? new Date(historySettings.storage.oldest_retained_history).toLocaleString() : "Not reported"}</dd></div><div><dt>Next cleanup</dt><dd>{historySettings.storage.next_cleanup ? new Date(historySettings.storage.next_cleanup).toLocaleString() : "Not reported"}</dd></div><div><dt>Extended history</dt><dd>{historySettings.extended_history.entitled ? "Available" : "Unavailable"}</dd></div></dl> : <p className="empty-state">History settings are temporarily unavailable.</p>}</section>

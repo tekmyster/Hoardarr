@@ -375,18 +375,18 @@ class HoardarrApi {
     return this.request<SetupStatus>("/setup/status");
   }
 
-  async overview(): Promise<OverviewDocument> {
+  async overview(signal?: AbortSignal): Promise<OverviewDocument> {
     if (demoMode) {
       throw new ApiError(503, "Live Overview data is unavailable because this browser session is not connected to the Hoardarr API.");
     }
-    return this.request<OverviewDocument>("/system/overview");
+    return this.request<OverviewDocument>("/system/overview", { signal });
   }
 
-  async resourceUsage(): Promise<ResourceUsageDocument> {
+  async resourceUsage(signal?: AbortSignal): Promise<ResourceUsageDocument> {
     if (demoMode) {
       throw new ApiError(503, "Live resource usage is unavailable because this browser session is not connected to the Hoardarr API.");
     }
-    return this.request<ResourceUsageDocument>("/system/resources");
+    return this.request<ResourceUsageDocument>("/system/resources", { signal });
   }
 
   async mergerfsInventory(): Promise<MergerFsInventory> {
@@ -399,9 +399,9 @@ class HoardarrApi {
     return this.request<StorageInventory>("/storage/inventory");
   }
 
-  async storageTelemetry(): Promise<StorageTelemetryDocument> {
+  async storageTelemetry(signal?: AbortSignal): Promise<StorageTelemetryDocument> {
     if (demoMode) throw new ApiError(503, "Live storage performance is unavailable in demo mode.");
-    return this.request<StorageTelemetryDocument>("/storage/telemetry");
+    return this.request<StorageTelemetryDocument>("/storage/telemetry", { signal });
   }
 
   async logicalStorage(signal?: AbortSignal): Promise<LogicalStorageDocument[]> {

@@ -18,18 +18,18 @@ const OVERVIEW_REFRESH_INTERVAL_MS = 30_000;
 const RESOURCE_HISTORY_SAMPLES = 60;
 
 interface ResourceHistoryPoint {
-  cpu: number;
-  memory: number;
-  read: number;
-  write: number;
-  networkReceived: number;
-  networkSent: number;
+  at: number;
+  cpu: number | null;
+  memory: number | null;
+  read: number | null;
+  write: number | null;
+  networkReceived: number | null;
+  networkSent: number | null;
 }
 
 interface NetworkCounterSample {
   capturedAtMs: number;
-  received: number;
-  sent: number;
+  counters: Record<string, { received: number; sent: number }> | null;
 }
 
 export function networkRates(
@@ -37,21 +37,45 @@ export function networkRates(
   reading: ResourceUsageDocument,
 ): { sample: NetworkCounterSample; received: number | null; sent: number | null } {
   const capturedAtMs = Date.parse(reading.captured_at);
-  const interfaces = reading.network.interfaces.filter((item) => item.up !== false);
-  const received = interfaces.reduce((total, item) => total + (item.bytes_received ?? 0), 0);
-  const sent = interfaces.reduce((total, item) => total + (item.bytes_sent ?? 0), 0);
-  const sample = { capturedAtMs, received, sent };
+  const interfaces = reading.network.interfaces.filter((item) => item.up === true);
+  const complete = interfaces.length > 0 && interfaces.every((item) =>
+    item.bytes_received !== null && item.bytes_sent !== null,
+  );
+  const counters = complete ? Object.fromEntries(interfaces.map((item) => [item.name, {
+    received: item.bytes_received as number,
+    sent: item.bytes_sent as number,
+  }])) : null;
+  const sample = { capturedAtMs, counters };
   const elapsed = previous && Number.isFinite(capturedAtMs)
     ? (capturedAtMs - previous.capturedAtMs) / 1000
     : 0;
-  if (!previous || elapsed <= 0 || received < previous.received || sent < previous.sent) {
+  const names = counters ? Object.keys(counters).sort() : [];
+  const previousNames = previous?.counters ? Object.keys(previous.counters).sort() : [];
+  if (!previous?.counters || !counters || elapsed <= 0 || names.join("\0") !== previousNames.join("\0")) {
     return { sample, received: null, sent: null };
+  }
+  let received = 0;
+  let sent = 0;
+  for (const name of names) {
+    const current = counters[name];
+    const earlier = previous.counters[name];
+    if (current.received < earlier.received || current.sent < earlier.sent) {
+      return { sample, received: null, sent: null };
+    }
+    received += current.received - earlier.received;
+    sent += current.sent - earlier.sent;
   }
   return {
     sample,
-    received: (received - previous.received) / elapsed,
-    sent: (sent - previous.sent) / elapsed,
+    received: received / elapsed,
+    sent: sent / elapsed,
   };
+}
+
+export function storageActivityState(read: number | null, write: number | null): "Active" | "Idle" | "Not reported" {
+  if ((read ?? 0) > 0 || (write ?? 0) > 0) return "Active";
+  if (read !== null && write !== null) return "Idle";
+  return "Not reported";
 }
 
 const PANEL_NAMES: Record<DashboardPanelId, string> = {
@@ -128,23 +152,35 @@ function EmptyReading({ children }: { children: ReactNode }) {
   return <div className="overview-unavailable"><span aria-hidden="true">—</span><p>{children}</p></div>;
 }
 
-function miniPath(values: number[], maximum: number): string {
-  if (!values.length) return "";
+function miniPath(values: Array<number | null>, maximum: number): string {
+  if (!values.some((value) => value !== null)) return "";
+  let connected = false;
   return values.map((value, index) => {
+    if (value === null) {
+      connected = false;
+      return "";
+    }
     const x = values.length === 1 ? 100 : index * 100 / (values.length - 1);
     const y = 24 - Math.min(24, value * 24 / Math.max(1, maximum));
-    return `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
+    const command = connected ? "L" : "M";
+    connected = true;
+    return `${command}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).filter(Boolean).join(" ");
 }
 
-function MiniGraph({ label, primary, secondary, percent = false }: { label: string; primary: number[]; secondary?: number[]; percent?: boolean }) {
-  const maximum = percent ? 100 : Math.max(1, ...primary, ...(secondary ?? []));
+function MiniGraph({ label, primary, secondary, history, source, percent = false }: { label: string; primary: Array<number | null>; secondary?: Array<number | null>; history: ResourceHistoryPoint[]; source: string; percent?: boolean }) {
+  const present = [...primary, ...(secondary ?? [])].filter((value): value is number => value !== null);
+  const maximum = percent ? 100 : Math.max(1, ...present);
+  const unavailable = primary.filter((value) => value === null).length + (secondary?.filter((value) => value === null).length ?? 0);
+  const start = history[0]?.at;
+  const end = history.at(-1)?.at;
   return <figure className="overview-live-chart">
     <figcaption>{label}</figcaption>
-    <svg viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label={`${label} live history`}>
+    {present.length > 0 ? <svg viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label={`${label} live session history${unavailable ? ` with ${unavailable} unavailable values shown as gaps` : ""}`}>
       <path className="chart-primary" d={miniPath(primary, maximum)} />
       {secondary && <path className="chart-secondary" d={miniPath(secondary, maximum)} />}
-    </svg>
+    </svg> : <p className="empty-state compact-empty">No reported samples in this live session.</p>}
+    <small>Live session only · {RESOURCE_REFRESH_INTERVAL_MS / 1000}s target cadence · up to {RESOURCE_HISTORY_SAMPLES} samples · source: {source}{start && end ? ` · ${new Date(start).toLocaleTimeString()}–${new Date(end).toLocaleTimeString()}` : ""}</small>
   </figure>;
 }
 
@@ -158,21 +194,23 @@ function panelBody(panel: DashboardPanelId, data: OverviewDocument | null, resou
       <MetricBar label="Processor" value={cpu.used_percent} detail={`${cpu.physical_cores ?? "Not reported"} physical cores · ${cpu.logical_processors ?? "Not reported"} logical processors`} />
       <MetricBar label="Memory" value={memory.used_percent} detail={`${formatBytes(memory.used_bytes)} used of ${formatBytes(memory.total_bytes)}`} />
       <MetricBar label="System disk" value={systemVolume?.used_percent ?? null} detail={systemVolume ? `${formatBytes(systemVolume.used_bytes)} used of ${formatBytes(systemVolume.total_bytes)} at ${systemVolume.mountpoint}` : "System disk usage was not reported"} />
-      {history.length > 0 && <div className="overview-chart-grid"><MiniGraph label="Processor" primary={history.map((item) => item.cpu)} percent /><MiniGraph label="Memory" primary={history.map((item) => item.memory)} percent /></div>}
+      <p className="field-hint">Source: psutil host resource collector · observed {formatDate(resources?.captured_at ?? data?.captured_at)}</p>
+      {history.length > 0 && <div className="overview-chart-grid"><MiniGraph label="Processor" primary={history.map((item) => item.cpu)} history={history} source="psutil live resource collector" percent /><MiniGraph label="Memory" primary={history.map((item) => item.memory)} history={history} source="psutil live resource collector" percent /></div>}
     </div>;
   }
   if (panel === "storage-performance") {
     const performance = resources?.storage.performance;
     if (!performance || performance.summary.sample_seconds === null) return <EmptyReading>{loadError ?? "Collecting the first storage reading."}</EmptyReading>;
     const metrics = performance.summary;
-    const active = (metrics.read_bytes_per_second ?? 0) + (metrics.write_bytes_per_second ?? 0) > 0;
+    const activity = storageActivityState(metrics.read_bytes_per_second, metrics.write_bytes_per_second);
     return <><div className="storage-kpi-grid compact">
-        <div><span>Current activity</span><strong>{active ? "Active" : "Idle"}</strong></div>
+        <div><span>Current activity</span><strong>{activity}</strong></div>
         <div><span>Read</span><strong>{formatRate(metrics.read_bytes_per_second)}</strong></div>
         <div><span>Write</span><strong>{formatRate(metrics.write_bytes_per_second)}</strong></div>
         <div><span>Writes today</span><strong>{formatBytes(metrics.writes_today_bytes)}</strong></div>
       </div>
-      {history.length > 0 && <div className="storage-overview-chart"><MiniGraph label="Bandwidth" primary={history.map((item) => item.read)} secondary={history.map((item) => item.write)} /></div>}
+      {history.length > 0 && <div className="storage-overview-chart"><MiniGraph label="Bandwidth" primary={history.map((item) => item.read)} secondary={history.map((item) => item.write)} history={history} source={performance.source} /></div>}
+      <p className="field-hint">Source: {performance.source} · observed {formatDate(resources?.captured_at)} · rates are reset-safe derivatives of Linux block counters.</p>
       <details><summary>Advanced details</summary><div className="storage-kpi-grid compact"><div><span>Read IOPS</span><strong>{formatNumber(metrics.read_iops)}</strong></div><div><span>Write IOPS</span><strong>{formatNumber(metrics.write_iops)}</strong></div><div><span>Read wait</span><strong>{formatNumber(metrics.read_wait_ms, " ms")}</strong></div><div><span>Write wait</span><strong>{formatNumber(metrics.write_wait_ms, " ms")}</strong></div><div><span>Busy</span><strong>{formatNumber(metrics.utilization_percent, "%")}</strong></div></div></details>
     </>;
   }
@@ -209,7 +247,7 @@ function panelBody(panel: DashboardPanelId, data: OverviewDocument | null, resou
   }
   if (panel === "network") {
     if (!data.network.interfaces.length) return <EmptyReading>No network interfaces were reported by the host.</EmptyReading>;
-    return <div className="overview-stack"><div className="overview-list">{data.network.interfaces.map((item) => <div key={item.name} className="overview-list-row"><div><strong>{item.name}</strong><small>{formatSpeed(item.speed_mbps)} · MTU {item.mtu ?? "not reported"}</small></div><div className="overview-list-values"><span className={`overview-state ${item.up === true ? "good" : item.up === false ? "bad" : ""}`}>{item.up === true ? "Up" : item.up === false ? "Down" : "Not reported"}</span><small>↓ {formatBytes(item.bytes_received)} · ↑ {formatBytes(item.bytes_sent)}</small></div></div>)}</div>{history.length > 0 && <MiniGraph label="Network bandwidth" primary={history.map((item) => item.networkReceived)} secondary={history.map((item) => item.networkSent)} />}</div>;
+    return <div className="overview-stack"><div className="overview-list">{data.network.interfaces.map((item) => <div key={item.name} className="overview-list-row"><div><strong>{item.name}</strong><small>{formatSpeed(item.speed_mbps)} · MTU {item.mtu ?? "not reported"}</small></div><div className="overview-list-values"><span className={`overview-state ${item.up === true ? "good" : item.up === false ? "bad" : ""}`}>{item.up === true ? "Up" : item.up === false ? "Down" : "Not reported"}</span><small>↓ {formatBytes(item.bytes_received)} · ↑ {formatBytes(item.bytes_sent)}</small></div></div>)}</div><p className="field-hint">Source: psutil per-interface monotonic byte counters · current values are cumulative, while the graph uses reset-safe elapsed-time rates only when the same reported interfaces are present.</p>{history.length > 0 && <MiniGraph label="Network bandwidth" primary={history.map((item) => item.networkReceived)} secondary={history.map((item) => item.networkSent)} history={history} source="psutil per-interface monotonic counters" />}</div>;
   }
   if (panel === "neighbors") {
     const discovery = data.network.discovery;
@@ -249,19 +287,20 @@ export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageI
   const [logicalStorage, setLogicalStorage] = useState<LogicalStorageDocument[]>([]);
   const resourceRequestActive = useRef(false);
   const previousNetworkCounters = useRef<NetworkCounterSample | null>(null);
+  const lifetimeController = useRef<AbortController | null>(null);
   const hiddenPanels = useMemo(() => DASHBOARD_PANEL_IDS.filter((panel) => !panels.includes(panel)), [panels]);
 
   async function refreshOverview() {
     try {
       const [reading, storage] = await Promise.all([
-        api.overview(),
-        api.logicalStorage().catch(() => [] as LogicalStorageDocument[]),
+        api.overview(lifetimeController.current?.signal),
+        api.logicalStorage(lifetimeController.current?.signal).catch(() => [] as LogicalStorageDocument[]),
       ]);
       setData(reading);
       setLogicalStorage(storage);
       setLoadError(null);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "The live Overview reading could not be loaded.");
+      if (!(error instanceof DOMException && error.name === "AbortError")) setLoadError(error instanceof Error ? error.message : "The live Overview reading could not be loaded.");
     }
   }
 
@@ -269,24 +308,28 @@ export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageI
     if (resourceRequestActive.current) return;
     resourceRequestActive.current = true;
     try {
-      const reading = await api.resourceUsage();
+      const reading = await api.resourceUsage(lifetimeController.current?.signal);
       setResources(reading);
       const network = networkRates(previousNetworkCounters.current, reading);
       previousNetworkCounters.current = network.sample;
       const storagePerformance = reading.storage.performance;
-      if (storagePerformance?.summary.sample_seconds !== null && storagePerformance?.summary.sample_seconds !== undefined) {
-        setResourceHistory((current) => appendBounded(current, {
-          cpu: reading.cpu.used_percent ?? 0,
-          memory: reading.memory.used_percent ?? 0,
-          read: storagePerformance.summary.read_bytes_per_second ?? 0,
-          write: storagePerformance.summary.write_bytes_per_second ?? 0,
-          networkReceived: network.received ?? 0,
-          networkSent: network.sent ?? 0,
-        }, RESOURCE_HISTORY_SAMPLES));
-      }
+      setResourceHistory((current) => appendBounded(current, {
+        at: Date.parse(reading.captured_at),
+        cpu: reading.cpu.used_percent,
+        memory: reading.memory.used_percent,
+        read: storagePerformance?.summary.sample_seconds == null ? null : storagePerformance.summary.read_bytes_per_second,
+        write: storagePerformance?.summary.sample_seconds == null ? null : storagePerformance.summary.write_bytes_per_second,
+        networkReceived: network.received,
+        networkSent: network.sent,
+      }, RESOURCE_HISTORY_SAMPLES));
       setResourceError(null);
     } catch (error) {
-      setResourceError(error instanceof Error ? error.message : "Live resource usage could not be loaded.");
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setResourceHistory((current) => appendBounded(current, {
+          at: Date.now(), cpu: null, memory: null, read: null, write: null, networkReceived: null, networkSent: null,
+        }, RESOURCE_HISTORY_SAMPLES));
+        setResourceError(error instanceof Error ? error.message : "Live resource usage could not be loaded.");
+      }
     } finally {
       resourceRequestActive.current = false;
     }
@@ -302,6 +345,7 @@ export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageI
   }
 
   useEffect(() => {
+    lifetimeController.current = new AbortController();
     void refreshAll();
     const resourcesTimer = window.setInterval(() => {
       if (document.visibilityState === "visible") void refreshResources();
@@ -314,6 +358,8 @@ export function OverviewDashboard({ onOpenStorage }: { onOpenStorage?: (storageI
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
+      lifetimeController.current?.abort();
+      lifetimeController.current = null;
       window.clearInterval(resourcesTimer);
       window.clearInterval(overviewTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
