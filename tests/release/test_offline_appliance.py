@@ -194,7 +194,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 "cleanup_temporary_masks",
                 "denied_units=(iscsi.service iscsid.service)",
                 'target="$root/target"',
-                "chroot() { printf '%s\\n' \"$*\" >>\"$disable_log\"; }",
+                'chroot() { printf \'%s\\n\' "$*" >>"$disable_log"; }',
                 "disable_unmasked_units",
                 '[[ -L "$lifecycle_safe" && "$(readlink -- "$lifecycle_safe")" == /dev/null ]]',
                 '[[ "$(stat -c %i -- "$lifecycle_safe")" == "$lifecycle_inode" ]]',
@@ -264,7 +264,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 shell_function("cleanup_temporary_masks"),
                 shell_function("cleanup_guard"),
                 shell_function("disable_unmasked_units"),
-                r'''
+                r"""
 root="$1"
 if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -u -- "$root")"; fi
 mkdir -p -- "$root"
@@ -660,7 +660,7 @@ mkdir -- "$policy"
 success_status=0
 cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
 [[ "$success_status" -ne 0 ]]
-''',
+""",
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -722,11 +722,11 @@ Description: Backup program for disk arrays
         self.assertIn("pcp", selected)
         self.assertNotIn("dstat", selected)
 
-    def test_systemd_compatibility_family_is_explicit_and_not_a_product_root(
+    def test_compatibility_families_are_explicit_without_changing_product_roots(
         self,
     ) -> None:
         plan = offline_repo.build_plan()
-        expected = {
+        systemd_members = {
             "systemd",
             "systemd-sysv",
             "systemd-timesyncd",
@@ -739,21 +739,40 @@ Description: Backup program for disk arrays
             "libnss-systemd",
             "systemd-dev",
         }
+        linux_members = {
+            "linux-generic",
+            "linux-image-generic",
+            "linux-headers-generic",
+        }
         self.assertEqual(len(plan.roots), 109)
-        self.assertEqual(len(plan.compatibility_families), 1)
-        family = plan.compatibility_families[0]
-        self.assertEqual(family["id"], "systemd-noble")
-        self.assertEqual(set(family["members"]), expected)
-        self.assertEqual(family["version_policy"], "single-candidate-version")
+        self.assertEqual(len(plan.compatibility_families), 2)
+        families = {family["id"]: family for family in plan.compatibility_families}
+        self.assertEqual(set(families), {"systemd-noble", "linux-meta-noble"})
+        self.assertEqual(set(families["systemd-noble"]["members"]), systemd_members)
+        self.assertEqual(families["systemd-noble"]["exact_dependencies"], {})
+        linux_family = families["linux-meta-noble"]
+        self.assertEqual(set(linux_family["members"]), linux_members)
         self.assertEqual(
-            set(plan.roots),
+            linux_family["exact_dependencies"],
             {
-                item["package"]
-                for item in plan.matrix["candidates"]
-                if item["package"]
+                "linux-generic": (
+                    "linux-image-generic",
+                    "linux-headers-generic",
+                )
             },
         )
-        self.assertTrue(expected - set(plan.roots))
+        self.assertTrue(
+            all(
+                family["version_policy"] == "single-candidate-version"
+                for family in families.values()
+            )
+        )
+        self.assertEqual(
+            set(plan.roots),
+            {item["package"] for item in plan.matrix["candidates"] if item["package"]},
+        )
+        self.assertEqual(set(plan.roots) & linux_members, {"linux-image-generic"})
+        self.assertTrue(systemd_members - set(plan.roots))
 
     def test_compatibility_family_schema_rejects_unsafe_and_duplicate_values(
         self,
@@ -775,12 +794,112 @@ Description: Backup program for disk arrays
             [{**valid[0], "version_policy": "runner-installed"}],
             [{**valid[0], "extra": True}],
             [{**valid[0], "members": []}],
+            [
+                {
+                    **valid[0],
+                    "exact_dependencies": {"not-a-member": ["systemd"]},
+                }
+            ],
+            [
+                {
+                    **valid[0],
+                    "exact_dependencies": {"systemd": ["systemd"]},
+                }
+            ],
+            [
+                {
+                    **valid[0],
+                    "exact_dependencies": {"systemd": ["missing-member"]},
+                }
+            ],
         )
         for value in invalid_values:
-            with self.subTest(value=value), self.assertRaises(
-                offline_repo.OfflineRepositoryError
+            with (
+                self.subTest(value=value),
+                self.assertRaises(offline_repo.OfflineRepositoryError),
             ):
                 offline_repo._compatibility_families(value)
+
+    def test_exact_dependency_parser_is_whitespace_and_alternative_safe(self) -> None:
+        version = "6.8.0-138.138"
+        self.assertEqual(
+            offline_repo._exact_dependency_versions(
+                " linux-image-generic   (= 6.8.0-138.138) , "
+                "linux-headers-generic (= 6.8.0-138.138), "
+                "unrelated:any (>= 1) "
+            ),
+            {
+                "linux-image-generic": version,
+                "linux-headers-generic": version,
+            },
+        )
+        self.assertEqual(
+            offline_repo._exact_dependency_versions(
+                "linux-image-generic (= 6.8.0-138.138) | linux-image-virtual "
+                "(= 6.8.0-138.138), linux-headers-generic (>= 6.8.0-138.138)"
+            ),
+            {},
+        )
+        with self.assertRaisesRegex(
+            offline_repo.OfflineRepositoryError, "unsupported clause"
+        ):
+            offline_repo._exact_dependency_versions("linux-image-generic (6.8.0)")
+
+    def test_linux_meta_dependency_validation_requires_exact_sibling_versions(
+        self,
+    ) -> None:
+        version = "6.8.0-138.138"
+        family = {
+            "id": "linux-meta-noble",
+            "members": (
+                "linux-generic",
+                "linux-image-generic",
+                "linux-headers-generic",
+            ),
+            "version_policy": "single-candidate-version",
+            "exact_dependencies": {
+                "linux-generic": (
+                    "linux-image-generic",
+                    "linux-headers-generic",
+                )
+            },
+        }
+        valid = [
+            {
+                "name": "linux-generic",
+                "version": version,
+                "depends": (
+                    f"linux-image-generic (= {version}), "
+                    f"linux-headers-generic (= {version})"
+                ),
+            }
+        ]
+        offline_repo._validate_family_dependencies((family,), valid)
+        invalid_depends = (
+            f"linux-image-generic (= {version})",
+            (
+                f"linux-image-generic (= {version}), "
+                "linux-headers-generic (= 6.8.0-137.137)"
+            ),
+            (
+                f"linux-image-generic (= {version}), "
+                f"linux-headers-generic (>= {version})"
+            ),
+            (
+                f"linux-image-generic (= {version}), "
+                f"linux-headers-generic (= {version}) | linux-headers-virtual"
+            ),
+        )
+        for depends in invalid_depends:
+            with (
+                self.subTest(depends=depends),
+                self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "depend exactly"
+                ),
+            ):
+                offline_repo._validate_family_dependencies(
+                    (family,), [{**valid[0], "depends": depends}]
+                )
 
     def test_download_closure_pins_roots_and_complete_family_at_one_version(
         self,
@@ -824,7 +943,9 @@ Description: Backup program for disk arrays
 
             with (
                 mock.patch.object(
-                    offline_repo, "_candidate", side_effect=lambda name: candidates[name]
+                    offline_repo,
+                    "_candidate",
+                    side_effect=lambda name: candidates[name],
                 ),
                 mock.patch.object(offline_repo, "_run", side_effect=run) as apt_run,
                 mock.patch.object(offline_repo, "_deb_fields", side_effect=fields),
@@ -833,17 +954,23 @@ Description: Backup program for disk arrays
 
         argv = apt_run.call_args.args[0]
         self.assertEqual(roots, {"root-package": "1.0"})
-        self.assertEqual(families["systemd-noble"], {
-            "systemd": "255.4-1ubuntu8.17",
-            "systemd-sysv": "255.4-1ubuntu8.17",
-        })
+        self.assertEqual(
+            families["systemd-noble"],
+            {
+                "systemd": "255.4-1ubuntu8.17",
+                "systemd-sysv": "255.4-1ubuntu8.17",
+            },
+        )
         self.assertEqual(len(debs), 3)
-        self.assertEqual(argv[-4:], [
-            "install",
-            "root-package=1.0",
-            "systemd=255.4-1ubuntu8.17",
-            "systemd-sysv=255.4-1ubuntu8.17",
-        ])
+        self.assertEqual(
+            argv[-4:],
+            [
+                "install",
+                "root-package=1.0",
+                "systemd=255.4-1ubuntu8.17",
+                "systemd-sysv=255.4-1ubuntu8.17",
+            ],
+        )
 
     def test_download_closure_rejects_family_version_mismatch_and_omission(
         self,
@@ -860,16 +987,20 @@ Description: Backup program for disk arrays
             matrix={},
             policy={},
         )
-        with mock.patch.object(
-            offline_repo,
-            "_candidate",
-            side_effect=lambda name: {
-                "root-package": "1.0",
-                "systemd": "8.17",
-                "systemd-sysv": "8.12",
-            }[name],
-        ), tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
-            offline_repo.OfflineRepositoryError, "candidate versions differ"
+        with (
+            mock.patch.object(
+                offline_repo,
+                "_candidate",
+                side_effect=lambda name: {
+                    "root-package": "1.0",
+                    "systemd": "8.17",
+                    "systemd-sysv": "8.12",
+                }[name],
+            ),
+            tempfile.TemporaryDirectory() as temporary,
+            self.assertRaisesRegex(
+                offline_repo.OfflineRepositoryError, "candidate versions differ"
+            ),
         ):
             offline_repo._download_closure(plan, pathlib.Path(temporary))
 
@@ -895,7 +1026,9 @@ Description: Backup program for disk arrays
 
             with (
                 mock.patch.object(
-                    offline_repo, "_candidate", side_effect=lambda name: candidates[name]
+                    offline_repo,
+                    "_candidate",
+                    side_effect=lambda name: candidates[name],
                 ),
                 mock.patch.object(offline_repo, "_run", side_effect=run),
                 mock.patch.object(
@@ -1093,8 +1226,8 @@ Description: Backup program for disk arrays
             ),
             3,
         )
-        self.assertIn('$RUNNER_TEMP/ci-signing-key', workflow)
-        self.assertIn('$RUNNER_TEMP/ubuntu-vulnerability-status.json', workflow)
+        self.assertIn("$RUNNER_TEMP/ci-signing-key", workflow)
+        self.assertIn("$RUNNER_TEMP/ubuntu-vulnerability-status.json", workflow)
         self.assertIn("-nic none", harness)
         self.assertIn("readonly=on", harness)
         self.assertIn("protected-before.sha256", harness)
@@ -1139,17 +1272,21 @@ Description: Backup program for disk arrays
         self.assertEqual(user_data.count(exact_argv), 1)
         self.assertIn('pipeline_status=("${PIPESTATUS[@]}")', user_data)
         self.assertIn('payload_status="${pipeline_status[0]}"', user_data)
-        self.assertIn('[[ "${pipeline_status[1]}" -eq 0 ]] || capture_ok=false', user_data)
+        self.assertIn(
+            '[[ "${pipeline_status[1]}" -eq 0 ]] || capture_ok=false', user_data
+        )
         self.assertIn('exit "$payload_status"', user_data)
         payload_tail = user_data.split('pipeline_status=("${PIPESTATUS[@]}")', 1)[1]
         self.assertNotIn("set -e", payload_tail.split('exit "$payload_status"', 1)[0])
         self.assertIn("/target/var/log/hoardarr-offline-payload.log", user_data)
         self.assertIn("[[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]", user_data)
         self.assertIn("stty -F /dev/ttyS0 -opost || exit 126", user_data)
-        self.assertIn("stty -F /dev/ttyS0 -a | grep -qw -- -opost || exit 127", user_data)
+        self.assertIn(
+            "stty -F /dev/ttyS0 -a | grep -qw -- -opost || exit 127", user_data
+        )
         self.assertNotIn("|| true", payload_tail.split('exit "$payload_status"', 1)[0])
         for required_operation in (
-            'emit_both HOARDARR_OFFLINE_PAYLOAD_END || capture_ok=false',
+            "emit_both HOARDARR_OFFLINE_PAYLOAD_END || capture_ok=false",
             'emit_both "HOARDARR_OFFLINE_PAYLOAD_EXIT=$payload_status" || capture_ok=false',
             'sync "$target_log" || capture_ok=false',
             'target_size="$(wc -c <"$target_log")" || capture_ok=false',
@@ -1173,7 +1310,9 @@ Description: Backup program for disk arrays
     def test_payload_capture_parser_is_fail_closed(self) -> None:
         parser = ROOT / "tests" / "appliance" / "parse-offline-payload-capture.py"
 
-        def run_capture(serial: bytes) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+        def run_capture(
+            serial: bytes,
+        ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
             temporary = tempfile.TemporaryDirectory()
             self.addCleanup(temporary.cleanup)
             root = pathlib.Path(temporary.name)
@@ -1213,7 +1352,8 @@ Description: Backup program for disk arrays
         nonzero, nonzero_root = run_capture(complete(17))
         self.assertEqual(nonzero.returncode, 10)
         self.assertEqual(
-            json.loads((nonzero_root / "capture.json").read_text())["payload_status"], 17
+            json.loads((nonzero_root / "capture.json").read_text())["payload_status"],
+            17,
         )
         self.assertIn(b"decisive failure", (nonzero_root / "target.log").read_bytes())
 
@@ -1224,12 +1364,15 @@ Description: Backup program for disk arrays
         self.assertEqual(crlf.returncode, 10)
         crlf_metadata = json.loads((crlf_root / "capture.json").read_text())
         self.assertEqual(crlf_metadata["serial_transform"], "onlcr_crlf")
-        expected_target = complete(17).split(b"prefix\n", 1)[1].split(
-            b"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=", 1
-        )[0]
+        expected_target = (
+            complete(17)
+            .split(b"prefix\n", 1)[1]
+            .split(b"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=", 1)[0]
+        )
         self.assertEqual((crlf_root / "target.log").read_bytes(), expected_target)
         self.assertEqual(
-            crlf_metadata["target_log_sha256"], hashlib.sha256(expected_target).hexdigest()
+            crlf_metadata["target_log_sha256"],
+            hashlib.sha256(expected_target).hexdigest(),
         )
         absent, _ = run_capture(b"")
         self.assertEqual(absent.returncode, 20)
@@ -1279,11 +1422,155 @@ Description: Backup program for disk arrays
             harness,
         )
         self.assertNotIn(
-            "payload_parser_status == 0 )); then\n            payload_failure_observed", harness
+            "payload_parser_status == 0 )); then\n            payload_failure_observed",
+            harness,
         )
         parser_guard = harness.split('if [[ "$diagnostic_mode" == true ]]; then', 1)[1]
         self.assertIn('payload_capture_parser="$script_root/', parser_guard)
-        self.assertNotIn("parse-offline-payload-capture.py", harness.split(parser_guard, 1)[0])
+        self.assertNotIn(
+            "parse-offline-payload-capture.py", harness.split(parser_guard, 1)[0]
+        )
+
+    def test_two_compatibility_families_emit_deterministic_verifiable_evidence(
+        self,
+    ) -> None:
+        required = (
+            "dists/noble/InRelease",
+            "dists/noble/Release",
+            "dists/noble/Release.gpg",
+            "dists/noble/main/binary-amd64/Packages.gz",
+            "evidence/SBOM.cdx.json",
+            "evidence/provenance.json",
+            "evidence/root-package-versions.txt",
+            "evidence/vulnerability-status.json",
+            "hoardarr-offline-archive-keyring.gpg",
+        )
+        version = "candidate-version-from-apt"
+        families = (
+            {
+                "id": "systemd-noble",
+                "members": ("udev", "systemd-dev"),
+                "version_policy": "single-candidate-version",
+                "exact_dependencies": {},
+            },
+            {
+                "id": "linux-meta-noble",
+                "members": (
+                    "linux-generic",
+                    "linux-image-generic",
+                    "linux-headers-generic",
+                ),
+                "version_policy": "single-candidate-version",
+                "exact_dependencies": {
+                    "linux-generic": (
+                        "linux-image-generic",
+                        "linux-headers-generic",
+                    )
+                },
+            },
+        )
+        declarations = [
+            {
+                "id": "systemd-noble",
+                "members": ["udev", "systemd-dev"],
+                "version_policy": "single-candidate-version",
+            },
+            {
+                "id": "linux-meta-noble",
+                "members": [
+                    "linux-generic",
+                    "linux-image-generic",
+                    "linux-headers-generic",
+                ],
+                "version_policy": "single-candidate-version",
+                "exact_dependencies": {
+                    "linux-generic": [
+                        "linux-image-generic",
+                        "linux-headers-generic",
+                    ]
+                },
+            },
+        ]
+        plan = offline_repo.PackagePlan(
+            roots=("linux-image-generic",),
+            compatibility_families=families,
+            matrix={"compatibility_families": declarations},
+            policy={},
+        )
+        dependency = (
+            f"linux-image-generic (= {version}), linux-headers-generic (= {version})"
+        )
+        records = [
+            {"name": "udev", "version": version, "architecture": "amd64"},
+            {"name": "systemd-dev", "version": version, "architecture": "all"},
+            {
+                "name": "linux-generic",
+                "version": version,
+                "architecture": "amd64",
+                "declared_dependencies": {"depends": dependency},
+            },
+            {
+                "name": "linux-image-generic",
+                "version": version,
+                "architecture": "amd64",
+            },
+            {
+                "name": "linux-headers-generic",
+                "version": version,
+                "architecture": "amd64",
+            },
+        ]
+        family_versions = {
+            family["id"]: {member: version for member in family["members"]}
+            for family in families
+        }
+        evidence = offline_repo._resolved_family_evidence(
+            plan, family_versions, records
+        )
+        self.assertEqual(
+            evidence,
+            offline_repo._resolved_family_evidence(plan, family_versions, records),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for relative in required:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative, encoding="utf-8")
+            packages = "".join(
+                f"Package: {record['name']}\nVersion: {version}\n"
+                f"Architecture: {record['architecture']}\n\n"
+                for record in records
+            )
+            (root / "dists/noble/main/binary-amd64/Packages").write_text(
+                packages, encoding="utf-8"
+            )
+            (root / "evidence/package-manifest.json").write_text(
+                json.dumps({"schema_version": 1, "packages": records}),
+                encoding="utf-8",
+            )
+            (root / "evidence/compatibility-matrix.json").write_text(
+                json.dumps(plan.matrix), encoding="utf-8"
+            )
+            (root / "evidence/compatibility-families.json").write_text(
+                json.dumps(evidence), encoding="utf-8"
+            )
+            offline_repo._write_tree_manifest(root)
+            with mock.patch.object(offline_repo.shutil, "which", return_value=None):
+                offline_repo.verify_repository(root)
+                records[2]["declared_dependencies"]["depends"] = (
+                    f"linux-image-generic (= {version}) | linux-image-virtual, "
+                    f"linux-headers-generic (= {version})"
+                )
+                (root / "evidence/package-manifest.json").write_text(
+                    json.dumps({"schema_version": 1, "packages": records}),
+                    encoding="utf-8",
+                )
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "depend exactly"
+                ):
+                    offline_repo.verify_repository(root)
 
     def test_repository_tree_verification_rejects_tampering(self) -> None:
         required = (
@@ -1321,7 +1608,7 @@ Description: Backup program for disk arrays
                                 "name": "systemd-dev",
                                 "version": "8.17",
                                 "architecture": "all",
-                            }
+                            },
                         ],
                     }
                 ),
@@ -1448,7 +1735,9 @@ Description: Backup program for disk arrays
                     json.dumps(package_document), encoding="utf-8"
                 )
                 packages_path.write_text(
-                    packages_document.replace("Architecture: all", "Architecture: i386"),
+                    packages_document.replace(
+                        "Architecture: all", "Architecture: i386"
+                    ),
                     encoding="utf-8",
                 )
                 offline_repo._write_tree_manifest(root)
@@ -1457,7 +1746,9 @@ Description: Backup program for disk arrays
                 ):
                     offline_repo.verify_repository(root)
                 package_document["packages"][1]["architecture"] = "all"
-                package_document["packages"].append(dict(package_document["packages"][1]))
+                package_document["packages"].append(
+                    dict(package_document["packages"][1])
+                )
                 package_manifest_path.write_text(
                     json.dumps(package_document), encoding="utf-8"
                 )

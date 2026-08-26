@@ -27,6 +27,11 @@ OWNER_INTAKE_PATH = ROOT / "packaging" / "offline" / "owner-workbook-intake.json
 PROVIDERS_PATH = ROOT / "packaging" / "hardware" / "providers.json"
 VENDOR_PATH = ROOT / "packaging" / "hardware" / "vendor-tools.json"
 PACKAGE_RE = re.compile(r"^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?$")
+DEPENDENCY_RE = re.compile(
+    r"^(?P<name>[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?)"
+    r"(?:\s+\((?P<operator><<|<=|=|>=|>>)\s*(?P<version>[^\s()]+)\))?"
+    r"(?:\s+\[[^\[\]]+\])?(?:\s+<[^<>]+>)*$"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DISPOSITIONS = {
     "included-and-installed",
@@ -94,18 +99,18 @@ def _string_list(value: Any, label: str) -> list[str]:
 
 def _compatibility_families(value: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list) or not value:
-        raise OfflineRepositoryError(
-            "compatibility_families must be a non-empty list"
-        )
+        raise OfflineRepositoryError("compatibility_families must be a non-empty list")
     families: list[dict[str, Any]] = []
     family_ids: set[str] = set()
     all_members: set[str] = set()
     for number, item in enumerate(value, 1):
-        if not isinstance(item, dict) or set(item) != {
-            "id",
-            "members",
-            "version_policy",
-        }:
+        required_keys = {"id", "members", "version_policy"}
+        allowed_keys = required_keys | {"exact_dependencies"}
+        if (
+            not isinstance(item, dict)
+            or not required_keys <= set(item)
+            or set(item) - allowed_keys
+        ):
             raise OfflineRepositoryError(
                 f"compatibility family {number} has an invalid schema"
             )
@@ -136,6 +141,32 @@ def _compatibility_families(value: Any) -> tuple[dict[str, Any], ...]:
             raise OfflineRepositoryError(
                 f"compatibility family {identifier} has an unsupported version policy"
             )
+        exact_dependencies = item.get("exact_dependencies", {})
+        if not isinstance(exact_dependencies, dict):
+            raise OfflineRepositoryError(
+                f"compatibility family {identifier} exact_dependencies must be an object"
+            )
+        normalized_dependencies: dict[str, tuple[str, ...]] = {}
+        for package, dependencies in exact_dependencies.items():
+            if package not in members:
+                raise OfflineRepositoryError(
+                    f"compatibility family {identifier} dependency source is not a member: "
+                    f"{package!r}"
+                )
+            normalized = _string_list(
+                dependencies,
+                f"compatibility family {identifier} exact dependencies for {package}",
+            )
+            if (
+                not normalized
+                or package in normalized
+                or any(dependency not in members for dependency in normalized)
+            ):
+                raise OfflineRepositoryError(
+                    f"compatibility family {identifier} has invalid exact dependencies "
+                    f"for {package}"
+                )
+            normalized_dependencies[package] = tuple(normalized)
         family_ids.add(identifier)
         all_members.update(members)
         families.append(
@@ -143,6 +174,7 @@ def _compatibility_families(value: Any) -> tuple[dict[str, Any], ...]:
                 "id": identifier,
                 "members": tuple(members),
                 "version_policy": item["version_policy"],
+                "exact_dependencies": normalized_dependencies,
             }
         )
     return tuple(families)
@@ -309,6 +341,18 @@ def build_plan() -> PackagePlan:
                 "id": family["id"],
                 "members": list(family["members"]),
                 "version_policy": family["version_policy"],
+                **(
+                    {
+                        "exact_dependencies": {
+                            package: list(dependencies)
+                            for package, dependencies in family[
+                                "exact_dependencies"
+                            ].items()
+                        }
+                    }
+                    if family["exact_dependencies"]
+                    else {}
+                ),
             }
             for family in compatibility_families
         ],
@@ -449,15 +493,85 @@ def _deb_fields(path: Path) -> dict[str, str]:
     return values
 
 
+def _exact_dependency_versions(depends: str) -> dict[str, str]:
+    """Return unconditional, single-alternative exact dependency versions."""
+    exact: dict[str, str] = {}
+    if not depends.strip():
+        return exact
+    for raw_group in depends.split(","):
+        alternatives = [item.strip() for item in raw_group.split("|")]
+        if not alternatives or any(not item for item in alternatives):
+            raise OfflineRepositoryError("package Depends metadata is malformed")
+        parsed = [DEPENDENCY_RE.fullmatch(item) for item in alternatives]
+        if any(match is None for match in parsed):
+            raise OfflineRepositoryError(
+                f"package Depends metadata has an unsupported clause: {raw_group.strip()!r}"
+            )
+        if len(parsed) != 1:
+            continue
+        match = parsed[0]
+        assert match is not None
+        if match.group("operator") != "=":
+            continue
+        package = match.group("name").split(":", 1)[0]
+        version = match.group("version")
+        assert version is not None
+        if package in exact:
+            raise OfflineRepositoryError(
+                f"package Depends metadata repeats exact dependency: {package}"
+            )
+        exact[package] = version
+    return exact
+
+
+def _validate_family_dependencies(
+    families: Iterable[dict[str, Any]], package_records: Iterable[dict[str, Any]]
+) -> None:
+    records_by_name: dict[str, list[dict[str, Any]]] = {}
+    for record in package_records:
+        name = record.get("name")
+        if isinstance(name, str):
+            records_by_name.setdefault(name, []).append(record)
+    for family in families:
+        for package, required in family.get("exact_dependencies", {}).items():
+            records = records_by_name.get(package, [])
+            if len(records) != 1:
+                raise OfflineRepositoryError(
+                    f"compatibility family {family['id']} requires exactly one "
+                    f"dependency source record for {package}"
+                )
+            record = records[0]
+            version = record.get("version")
+            depends = record.get("depends")
+            if (
+                not isinstance(version, str)
+                or not version
+                or not isinstance(depends, str)
+            ):
+                raise OfflineRepositoryError(
+                    f"compatibility family {family['id']} has incomplete dependency "
+                    f"metadata for {package}"
+                )
+            exact = _exact_dependency_versions(depends)
+            mismatches = [
+                dependency
+                for dependency in required
+                if exact.get(dependency) != version
+            ]
+            if mismatches:
+                raise OfflineRepositoryError(
+                    f"compatibility family {family['id']} requires {package}={version} "
+                    "to depend exactly at that version on: " + ", ".join(mismatches)
+                )
+
+
 def _download_closure(
     plan: PackagePlan, work: Path
 ) -> tuple[dict[str, str], dict[str, dict[str, str]], list[Path]]:
     root_versions = {package: _candidate(package) for package in plan.roots}
     family_versions: dict[str, dict[str, str]] = {}
     for family in plan.compatibility_families:
-        resolved = {
-            package: _candidate(package) for package in family["members"]
-        }
+        resolved = {package: _candidate(package) for package in family["members"]}
         versions = set(resolved.values())
         if len(versions) != 1:
             raise OfflineRepositoryError(
@@ -512,7 +626,9 @@ def _download_closure(
         (record["Package"], record["Architecture"]) for record in downloaded_records
     ]
     if len(identities) != len(set(identities)):
-        raise OfflineRepositoryError("resolved closure contains duplicate binary identity")
+        raise OfflineRepositoryError(
+            "resolved closure contains duplicate binary identity"
+        )
     downloaded = {record["Package"]: record["Version"] for record in downloaded_records}
     missing = sorted(
         {package.split(":", 1)[0] for package in closure_versions} - set(downloaded)
@@ -530,6 +646,17 @@ def _download_closure(
         raise OfflineRepositoryError(
             "resolved closure exact-version mismatch: " + "; ".join(mismatched)
         )
+    _validate_family_dependencies(
+        plan.compatibility_families,
+        (
+            {
+                "name": record["Package"],
+                "version": record["Version"],
+                "depends": record.get("Depends", ""),
+            }
+            for record in downloaded_records
+        ),
+    )
     return root_versions, family_versions, debs
 
 
@@ -561,15 +688,28 @@ def _resolved_family_evidence(
     family_versions: dict[str, dict[str, str]],
     package_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    _validate_family_dependencies(
+        plan.compatibility_families,
+        (
+            {
+                "name": item.get("name"),
+                "version": item.get("version"),
+                "depends": item.get("declared_dependencies", {}).get("depends", "")
+                if isinstance(item.get("declared_dependencies"), dict)
+                else "",
+            }
+            for item in package_records
+        ),
+    )
     package_identities = {
         (item["name"], item["architecture"]) for item in package_records
     }
     if len(package_identities) != len(package_records):
-        raise OfflineRepositoryError("package manifest contains duplicate binary identity")
+        raise OfflineRepositoryError(
+            "package manifest contains duplicate binary identity"
+        )
     family_members = {
-        member
-        for family in plan.compatibility_families
-        for member in family["members"]
+        member for family in plan.compatibility_families for member in family["members"]
     }
     package_identities_by_name: dict[str, list[dict[str, Any]]] = {}
     for item in package_records:
@@ -730,9 +870,7 @@ def _write_repo_metadata(
             }
         )
     package_records.sort(key=lambda item: (item["name"], item["architecture"]))
-    family_evidence = _resolved_family_evidence(
-        plan, family_versions, package_records
-    )
+    family_evidence = _resolved_family_evidence(plan, family_versions, package_records)
     _atomic_json(
         evidence / "package-manifest.json",
         {"schema_version": 1, "packages": package_records},
@@ -888,7 +1026,9 @@ def verify_repository(root: Path) -> None:
     records = package_manifest.get("packages")
     families = family_evidence.get("families")
     if not isinstance(records, list) or not isinstance(families, list):
-        raise OfflineRepositoryError("package or compatibility-family evidence is invalid")
+        raise OfflineRepositoryError(
+            "package or compatibility-family evidence is invalid"
+        )
     manifest_identities_by_name: dict[str, list[tuple[str, str]]] = {}
     manifest_identities: set[tuple[str, str]] = set()
     for record in records:
@@ -899,7 +1039,9 @@ def verify_repository(root: Path) -> None:
             or not isinstance(record.get("architecture"), str)
             or (record["name"], record["architecture"]) in manifest_identities
         ):
-            raise OfflineRepositoryError("package manifest has invalid binary identities")
+            raise OfflineRepositoryError(
+                "package manifest has invalid binary identities"
+            )
         manifest_identities.add((record["name"], record["architecture"]))
         manifest_identities_by_name.setdefault(record["name"], []).append(
             (record["architecture"], record["version"])
@@ -919,24 +1061,31 @@ def verify_repository(root: Path) -> None:
             raise OfflineRepositoryError("repository Packages has incomplete metadata")
         identity = f"{name}:{architecture}"
         if identity in repository_versions:
-            raise OfflineRepositoryError("repository Packages has duplicate binary identity")
+            raise OfflineRepositoryError(
+                "repository Packages has duplicate binary identity"
+            )
         repository_versions[identity] = version
     declarations = compatibility_matrix.get("compatibility_families")
-    if not isinstance(declarations, list):
-        raise OfflineRepositoryError("compatibility matrix omits family declarations")
-    declared_by_id = {
-        item.get("id"): item
-        for item in declarations
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    if len(declared_by_id) != len(declarations):
-        raise OfflineRepositoryError("compatibility matrix has invalid family declarations")
+    declared_families = _compatibility_families(declarations)
+    declared_by_id = {item["id"]: item for item in declared_families}
+    _validate_family_dependencies(
+        declared_families,
+        (
+            {
+                "name": record.get("name"),
+                "version": record.get("version"),
+                "depends": record.get("declared_dependencies", {}).get("depends", "")
+                if isinstance(record.get("declared_dependencies"), dict)
+                else "",
+            }
+            for record in records
+        ),
+    )
     family_ids: set[str] = set()
     for family in families:
         if (
             not isinstance(family, dict)
-            or set(family)
-            != {"id", "members", "resolved_version", "version_policy"}
+            or set(family) != {"id", "members", "resolved_version", "version_policy"}
             or not isinstance(family.get("id"), str)
             or family["id"] in family_ids
             or family.get("version_policy") != "single-candidate-version"
@@ -975,9 +1124,7 @@ def verify_repository(root: Path) -> None:
                 or len(manifest_identities_for_member) != 1
                 or manifest_architecture not in {"all", "amd64"}
                 or manifest_version != member.get("version")
-                or repository_versions.get(
-                    f"{member['name']}:{manifest_architecture}"
-                )
+                or repository_versions.get(f"{member['name']}:{manifest_architecture}")
                 != member.get("version")
             ):
                 raise OfflineRepositoryError(
@@ -988,7 +1135,7 @@ def verify_repository(root: Path) -> None:
         if (
             declaration is None
             or declaration.get("version_policy") != family["version_policy"]
-            or declaration.get("members") != ordered_member_names
+            or list(declaration.get("members", ())) != ordered_member_names
         ):
             raise OfflineRepositoryError(
                 f"compatibility family {family['id']} differs from its declaration"

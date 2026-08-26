@@ -30,6 +30,21 @@
         "systemd-dev"
       ],
       "version_policy": "single-candidate-version"
+    },
+    {
+      "id": "linux-meta-noble",
+      "members": [
+        "linux-generic",
+        "linux-image-generic",
+        "linux-headers-generic"
+      ],
+      "version_policy": "single-candidate-version",
+      "exact_dependencies": {
+        "linux-generic": [
+          "linux-image-generic",
+          "linux-headers-generic"
+        ]
+      }
     }
   ],
   "included_feature_disabled": [
@@ -184,6 +199,8 @@
   "official_evidence": {
     "apt": "https://ubuntu.com/server/docs/how-to/software/package-management/",
     "b3sum": "https://packages.ubuntu.com/noble/b3sum",
+    "linux-generic": "https://packages.ubuntu.com/noble/linux-generic",
+    "linux-headers-generic": "https://packages.ubuntu.com/noble/linux-headers-generic",
     "linux-image-generic": "https://packages.ubuntu.com/noble/linux-image-generic",
     "open-vm-tools": "https://packages.ubuntu.com/noble/open-vm-tools",
     "pcp": "https://packages.ubuntu.com/noble/pcp",
