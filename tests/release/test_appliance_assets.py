@@ -45,6 +45,7 @@ class ApplianceAssetsTests(unittest.TestCase):
     def test_appliance_rewrites_media_checksums_for_every_injected_file(self) -> None:
         builder = (ROOT / "scripts" / "build-appliance.sh").read_text(encoding="utf-8")
         self.assertIn("xorriso -osirrox on -indev \"$base_iso\" -extract /md5sum.txt", builder)
+        self.assertIn('find "$work" -type d -exec chmod u+rwx {} +', builder)
         self.assertIn('update_checksum "$work/user-data" nocloud/user-data', builder)
         self.assertIn('update_checksum "$work/meta-data" nocloud/meta-data', builder)
         self.assertIn(

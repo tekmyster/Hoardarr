@@ -31,7 +31,13 @@ command -v xorriso >/dev/null || { echo "xorriso is required" >&2; exit 1; }
 python3 scripts/build-offline-apt-repository.py verify "$offline_repo"
 
 work="$(mktemp -d -t hoardarr-appliance.XXXXXXXX)"
-cleanup() { rm -rf -- "$work"; }
+cleanup() {
+    # xorriso preserves read-only directory modes from the source ISO. Restore
+    # owner permissions on directories only so the purpose-created tree can be
+    # removed without following or changing any extracted symlink target.
+    find "$work" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    rm -rf -- "$work"
+}
 trap cleanup EXIT
 install -m 0644 "$user_data" "$work/user-data"
 install -m 0644 packaging/appliance/meta-data "$work/meta-data"
