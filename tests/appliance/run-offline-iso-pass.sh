@@ -13,7 +13,7 @@ pass_name="$3"
 [[ ! -e "$output" ]] || { echo "output directory already exists" >&2; exit 1; }
 mkdir -p "$output"
 
-for command_name in qemu-img qemu-system-x86_64 sha256sum timeout; do
+for command_name in qemu-img qemu-system-x86_64 sha256sum timeout python3 ps; do
     command -v "$command_name" >/dev/null || { echo "missing command: $command_name" >&2; exit 1; }
 done
 
@@ -40,35 +40,290 @@ common=(
     -device "virtio-blk-pci,drive=protected2,serial=HOARDARR-PROTECTED-TWO"
 )
 
+diagnostic_mode="${HOARDARR_OFFLINE_DIAGNOSTIC_MODE:-false}"
+[[ "$diagnostic_mode" == true || "$diagnostic_mode" == false ]] || {
+    echo "HOARDARR_OFFLINE_DIAGNOSTIC_MODE must be true or false" >&2
+    exit 2
+}
+
+write_diagnostic_metadata() {
+    local classification="$1"
+    local qemu_exit="$2"
+    local install_end="$3"
+    local elapsed_seconds="$4"
+    python3 - "$output/run.json" "$pass_name" "$diagnostic_mode" "$accelerator" \
+        "$classification" "$qemu_exit" "$install_start" "$install_end" "$elapsed_seconds" \
+        "${first_boot_start:-}" "${first_boot_end:-}" "${first_boot_classification:-not_started}" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    destination,
+    pass_name,
+    diagnostic_mode,
+    accelerator,
+    classification,
+    bounded_runner_exit,
+    install_started,
+    install_finished,
+    elapsed_seconds,
+    first_boot_started,
+    first_boot_finished,
+    first_boot_classification,
+) = sys.argv[1:]
+payload = {
+    "schema_version": 2,
+    "pass": pass_name,
+    "validation_mode": "diagnostic-pass-1" if diagnostic_mode == "true" else "two-pass",
+    "acceptance_eligible": False if diagnostic_mode == "true" else True,
+    "network_device": "absent (-nic none)",
+    "accelerator": accelerator,
+    "kvm_available": accelerator == "kvm",
+    "os_disk_serial": "HOARDARR-OS-DISK",
+    "protected_disk_serials": ["HOARDARR-PROTECTED-ONE", "HOARDARR-PROTECTED-TWO"],
+    "install_bound_seconds": 2700,
+    "first_boot_bound_seconds": 900,
+    "install_classification": classification,
+    "bounded_runner_exit_status": int(bounded_runner_exit),
+    "qemu_exit_status": None if classification == "installer_timeout" else int(bounded_runner_exit),
+    "install_started": install_started,
+    "install_finished": install_finished,
+    "install_elapsed_seconds": int(elapsed_seconds),
+    "first_boot_classification": first_boot_classification,
+    "first_boot_started": first_boot_started or None,
+    "first_boot_finished": first_boot_finished or None,
+}
+pathlib.Path(destination).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+finalize_diagnostic_evidence() {
+    local finalization_failed=0
+    sha256sum "$protected_one" "$protected_two" >"$output/protected-after.sha256" || finalization_failed=1
+    if ! diff -u "$output/protected-before.sha256" "$output/protected-after.sha256" \
+        >"$output/protected-diff.txt"; then
+        finalization_failed=1
+    fi
+    qemu-img info --output=json "$os_disk" >"$output/qemu-img-info.json" \
+        2>"$output/qemu-img-info.stderr" || finalization_failed=1
+    if qemu-img check "$os_disk" >"$output/qemu-img-check.txt" \
+        2>"$output/qemu-img-check.stderr"; then
+        printf '0\n' >"$output/qemu-img-check.exit"
+    else
+        printf '%s\n' "$?" >"$output/qemu-img-check.exit"
+        finalization_failed=1
+    fi
+    if compgen -G "$output/frames/*.ppm" >/dev/null; then
+        find "$output/frames" -maxdepth 1 -type f -name '*.ppm' -printf '%f\0' |
+            sort -z | while IFS= read -r -d '' name; do
+                sha256sum "$output/frames/$name"
+            done >"$output/frames/SHA256SUMS"
+    else
+        : >"$output/frames/SHA256SUMS"
+        finalization_failed=1
+    fi
+    if (( finalization_failed == 0 )); then
+        printf 'complete\n' >"$output/evidence-finalization.txt"
+    else
+        printf 'incomplete\n' >"$output/evidence-finalization.txt"
+    fi
+    if ! find "$output" -type f ! -path "$output/SHA256SUMS" \
+        ! -path "$output/SHA256SUMS.tmp" -printf '%P\0' |
+        sort -z | while IFS= read -r -d '' name; do sha256sum "$output/$name"; done \
+        >"$output/SHA256SUMS.tmp"; then
+        printf 'incomplete\n' >"$output/evidence-finalization.txt"
+        rm -f -- "$output/SHA256SUMS.tmp"
+        return 1
+    fi
+    mv -- "$output/SHA256SUMS.tmp" "$output/SHA256SUMS"
+    return "$finalization_failed"
+}
+
+monitor_snapshot() {
+    local monitor_socket="$1"
+    local frame="$2"
+    local captured_at="$3"
+    python3 - "$monitor_socket" "$frame" "$captured_at" <<'PY'
+import socket
+import sys
+import time
+
+monitor_socket, frame, captured_at = sys.argv[1:]
+commands = ("info status", "info cpus", f'screendump "{frame}"')
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as monitor:
+    monitor.settimeout(3)
+    monitor.connect(monitor_socket)
+    chunks = []
+    try:
+        chunks.append(monitor.recv(65536))
+    except TimeoutError:
+        pass
+    for command in commands:
+        monitor.sendall(command.encode("utf-8") + b"\n")
+        time.sleep(0.35)
+        try:
+            chunks.append(monitor.recv(65536))
+        except TimeoutError:
+            chunks.append(b"<monitor response timed out>\n")
+print(f"[{captured_at}]", flush=True)
+print(b"".join(chunks).decode("utf-8", errors="replace"), flush=True)
+PY
+}
+
+run_diagnostic_installer() {
+    local monitor_socket="$output/installer-monitor.sock"
+    local monitor_log="$output/installer-monitor.log"
+    local process_log="$output/installer-process.tsv"
+    local qemu_stderr="$output/qemu-installer-stderr.log"
+    local frame_number=0
+    local next_frame=0
+    local timed_out=false
+    local qemu_exit=0
+    local now elapsed captured_at frame
+    mkdir -p "$output/frames"
+    : >"$output/installer-serial.log"
+    : >"$monitor_log"
+    printf 'timestamp\telapsed_seconds\tpid\tstate\tcpu_time\tpercent_cpu\trss_kib\tvsz_kib\n' >"$process_log"
+
+    timeout --signal=TERM --kill-after=30s 2700s \
+        qemu-system-x86_64 "${common[@]}" -boot d -cdrom "$iso" -no-reboot \
+        -serial "file:$output/installer-serial.log" \
+        -monitor "unix:$monitor_socket,server=on,wait=off" 2>"$qemu_stderr" &
+    local runner_pid=$!
+    local qemu_pid=""
+    local started_epoch
+    started_epoch="$(date +%s)"
+    for _ in {1..50}; do
+        if [[ -r "/proc/$runner_pid/task/$runner_pid/children" ]]; then
+            read -r qemu_pid _ <"/proc/$runner_pid/task/$runner_pid/children" || true
+        fi
+        [[ -n "$qemu_pid" ]] && break
+        kill -0 "$runner_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    [[ -n "$qemu_pid" ]] || qemu_pid="$runner_pid"
+    {
+        printf 'bounded_runner_pid=%s\n' "$runner_pid"
+        printf 'observed_qemu_pid=%s\n' "$qemu_pid"
+        printf 'qemu_child_discovered=%s\n' "$([[ "$qemu_pid" != "$runner_pid" ]] && echo true || echo false)"
+    } >"$output/process-identities.txt"
+
+    while kill -0 "$runner_pid" 2>/dev/null; do
+        now="$(date +%s)"
+        elapsed=$(( now - started_epoch ))
+        captured_at="$(date --iso-8601=seconds)"
+        ps -p "$qemu_pid" -o pid=,stat=,time=,%cpu=,rss=,vsz= |
+            awk -v timestamp="$captured_at" -v elapsed="$elapsed" \
+                '{print timestamp "\t" elapsed "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6}' \
+                >>"$process_log" || true
+        if (( elapsed >= next_frame )); then
+            printf -v frame '%s/frames/installer-%04d.ppm' "$output" "$frame_number"
+            if monitor_snapshot "$monitor_socket" "$frame" "$captured_at" >>"$monitor_log" 2>&1; then
+                frame_number=$(( frame_number + 1 ))
+                next_frame=$(( elapsed + 60 ))
+            else
+                printf '[%s] monitor snapshot unavailable\n' "$captured_at" >>"$monitor_log"
+                next_frame=$(( elapsed + 10 ))
+            fi
+        fi
+        sleep 5
+    done
+
+    set +e
+    wait "$runner_pid"
+    qemu_exit=$?
+    set -e
+    install_end="$(date --iso-8601=seconds)"
+    elapsed=$(( $(date +%s) - started_epoch ))
+    if (( qemu_exit == 124 || qemu_exit == 137 )); then
+        timed_out=true
+    fi
+    rm -f -- "$monitor_socket"
+
+    if [[ "$timed_out" == true ]]; then
+        write_diagnostic_metadata installer_timeout "$qemu_exit" "$install_end" "$elapsed"
+        if ! finalize_diagnostic_evidence; then
+            echo "diagnostic evidence finalization was incomplete" >&2
+            return 2
+        fi
+        echo "offline installer did not reach its bounded reboot checkpoint" >&2
+        return 1
+    fi
+    if (( qemu_exit != 0 )); then
+        write_diagnostic_metadata installer_unexpected_exit "$qemu_exit" "$install_end" "$elapsed"
+        if ! finalize_diagnostic_evidence; then
+            echo "diagnostic evidence finalization was incomplete" >&2
+            return 2
+        fi
+        echo "offline installer exited unexpectedly" >&2
+        return 1
+    fi
+    diagnostic_qemu_exit="$qemu_exit"
+    diagnostic_install_elapsed="$elapsed"
+    return 0
+}
+
 install_start="$(date --iso-8601=seconds)"
-if ! timeout --signal=TERM --kill-after=30s 45m qemu-system-x86_64 \
-    "${common[@]}" -boot d -cdrom "$iso" -no-reboot \
-    -serial "file:$output/installer-serial.log"; then
-    echo "offline installer did not reach its bounded reboot checkpoint" >&2
-    exit 1
+if [[ "$diagnostic_mode" == true ]]; then
+    if ! run_diagnostic_installer; then
+        exit 1
+    fi
+else
+    if ! timeout --signal=TERM --kill-after=30s 45m qemu-system-x86_64 \
+        "${common[@]}" -boot d -cdrom "$iso" -no-reboot \
+        -serial "file:$output/installer-serial.log"; then
+        echo "offline installer did not reach its bounded reboot checkpoint" >&2
+        exit 1
+    fi
+    install_end="$(date --iso-8601=seconds)"
 fi
-install_end="$(date --iso-8601=seconds)"
 
 first_boot_start="$(date --iso-8601=seconds)"
+first_boot_classification=completed
 if ! timeout --signal=TERM --kill-after=30s 15m qemu-system-x86_64 \
     "${common[@]}" -boot c -no-reboot -serial "file:$output/first-boot-serial.log"; then
-    echo "offline first boot did not shut down within its bound" >&2
-    exit 1
+    first_boot_classification=timeout_or_unexpected_exit
+    if [[ "$diagnostic_mode" != true ]]; then
+        echo "offline first boot did not shut down within its bound" >&2
+        exit 1
+    fi
 fi
 first_boot_end="$(date --iso-8601=seconds)"
-grep -Fq HOARDARR_OFFLINE_READY "$output/first-boot-serial.log" || {
-    echo "offline first boot did not emit the readiness sentinel" >&2
-    exit 1
-}
-grep -Fq HOARDARR_OFFLINE_EVIDENCE_BEGIN "$output/first-boot-serial.log" || {
-    echo "offline first boot did not emit package/service evidence" >&2
-    exit 1
-}
-qemu-img check "$os_disk" >"$output/qemu-img-check.txt"
-sha256sum "$protected_one" "$protected_two" >"$output/protected-after.sha256"
-diff -u "$output/protected-before.sha256" "$output/protected-after.sha256"
+if [[ "$first_boot_classification" == completed ]] && \
+    ! grep -Fq HOARDARR_OFFLINE_READY "$output/first-boot-serial.log"; then
+    first_boot_classification=readiness_sentinel_missing
+    if [[ "$diagnostic_mode" != true ]]; then
+        echo "offline first boot did not emit the readiness sentinel" >&2
+        exit 1
+    fi
+fi
+if [[ "$first_boot_classification" == completed ]] && \
+    ! grep -Fq HOARDARR_OFFLINE_EVIDENCE_BEGIN "$output/first-boot-serial.log"; then
+    first_boot_classification=evidence_sentinel_missing
+    if [[ "$diagnostic_mode" != true ]]; then
+        echo "offline first boot did not emit package/service evidence" >&2
+        exit 1
+    fi
+fi
 
-cat >"$output/run.json" <<EOF
+if [[ "$diagnostic_mode" == true ]]; then
+    write_diagnostic_metadata installer_reboot_checkpoint "$diagnostic_qemu_exit" \
+        "$install_end" "$diagnostic_install_elapsed"
+    if ! finalize_diagnostic_evidence; then
+        echo "diagnostic evidence finalization was incomplete" >&2
+        exit 1
+    fi
+    if [[ "$first_boot_classification" != completed ]]; then
+        echo "offline first boot diagnostic did not complete successfully" >&2
+        exit 1
+    fi
+else
+    qemu-img check "$os_disk" >"$output/qemu-img-check.txt"
+    sha256sum "$protected_one" "$protected_two" >"$output/protected-after.sha256"
+    diff -u "$output/protected-before.sha256" "$output/protected-after.sha256" >"$output/protected-diff.txt"
+
+    cat >"$output/run.json" <<EOF
 {
   "schema_version": 1,
   "pass": "$pass_name",
@@ -82,5 +337,6 @@ cat >"$output/run.json" <<EOF
   "first_boot_finished": "$first_boot_end"
 }
 EOF
-find "$output" -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
-    sort -z | while IFS= read -r -d '' name; do sha256sum "$output/$name"; done >"$output/SHA256SUMS"
+    find "$output" -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
+        sort -z | while IFS= read -r -d '' name; do sha256sum "$output/$name"; done >"$output/SHA256SUMS"
+fi

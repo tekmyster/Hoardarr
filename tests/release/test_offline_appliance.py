@@ -162,7 +162,20 @@ Description: Backup program for disk arrays
         harness = (ROOT / "tests" / "appliance" / "run-offline-iso-pass.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn("pass: [pass-1, pass-2]", workflow)
+        self.assertIn("offline_validation_mode:", workflow)
+        self.assertIn("default: two-pass", workflow)
+        self.assertIn("- diagnostic-pass-1", workflow)
+        self.assertIn(
+            "inputs.offline_validation_mode == 'diagnostic-pass-1'"
+            ' && \'["pass-1"]\' || \'["pass-1","pass-2"]\'',
+            workflow,
+        )
+        self.assertIn("HOARDARR_OFFLINE_DIAGNOSTIC_MODE", workflow)
+        self.assertIn(
+            "'hoardarr-offline-diagnostic-pass-1'"
+            " || format('hoardarr-offline-{0}', matrix.pass)",
+            workflow,
+        )
         self.assertIn("if: github.event_name == 'workflow_dispatch'", workflow)
         self.assertIn("name: hoardarr-offline-install-inputs\n          path: dist", workflow)
         self.assertIn('$RUNNER_TEMP/ci-signing-key', workflow)
@@ -172,6 +185,33 @@ Description: Backup program for disk arrays
         self.assertIn("protected-before.sha256", harness)
         self.assertIn("protected-after.sha256", harness)
         self.assertIn("HOARDARR_OFFLINE_READY", harness)
+        self.assertIn("installer-monitor.log", harness)
+        self.assertIn("installer-process.tsv", harness)
+        self.assertIn("process-identities.txt", harness)
+        self.assertIn("qemu-installer-stderr.log", harness)
+        self.assertIn("qemu-img-info.json", harness)
+        self.assertIn("installer_timeout", harness)
+        self.assertIn("timeout --signal=TERM --kill-after=30s 2700s", harness)
+        self.assertIn('"acceptance_eligible": False', harness)
+        self.assertIn('"bounded_runner_exit_status"', harness)
+        self.assertIn("protected-diff.txt", harness)
+        self.assertIn("frames/SHA256SUMS", harness)
+        self.assertIn("evidence-finalization.txt", harness)
+        self.assertIn("diagnostic evidence finalization was incomplete", harness)
+        diagnostic_body = harness.split("run_diagnostic_installer() {", 1)[1].split(
+            "\n}\n\ninstall_start=", 1
+        )[0]
+        self.assertLess(
+            diagnostic_body.index('wait "$runner_pid"'),
+            diagnostic_body.index("finalize_diagnostic_evidence"),
+        )
+        self.assertIn("timeout --signal=TERM --kill-after=30s 45m", harness)
+        success_path = harness.split('if [[ "$diagnostic_mode" == true ]]; then', 2)[2]
+        self.assertLess(
+            success_path.index("write_diagnostic_metadata installer_reboot_checkpoint"),
+            success_path.index("finalize_diagnostic_evidence"),
+        )
+        self.assertNotIn('cat >"$output/run.json"', success_path.split("else", 1)[0])
 
     def test_repository_tree_verification_rejects_tampering(self) -> None:
         required = (

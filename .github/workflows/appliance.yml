@@ -23,6 +23,14 @@ on:
       base_iso_sha256:
         description: SHA-256 from Ubuntu SHA256SUMS
         required: true
+      offline_validation_mode:
+        description: Two-pass release gate, or one pass-1 diagnostic that cannot satisfy acceptance
+        required: true
+        default: two-pass
+        type: choice
+        options:
+          - two-pass
+          - diagnostic-pass-1
 concurrency:
   group: appliance-${{ github.ref }}
   cancel-in-progress: true
@@ -194,7 +202,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pass: [pass-1, pass-2]
+        pass: ${{ fromJSON(inputs.offline_validation_mode == 'diagnostic-pass-1' && '["pass-1"]' || '["pass-1","pass-2"]') }}
     runs-on: ubuntu-24.04
     env:
       BASE_ISO_URL: ${{ inputs.base_iso_url }}
@@ -221,6 +229,8 @@ jobs:
             tests/appliance/offline-user-data \
             dist/offline-repository
       - name: Execute clean install and first boot with no virtual NIC
+        env:
+          HOARDARR_OFFLINE_DIAGNOSTIC_MODE: ${{ inputs.offline_validation_mode == 'diagnostic-pass-1' && 'true' || 'false' }}
         run: |
           tests/appliance/run-offline-iso-pass.sh \
             hoardarr-offline-test.iso \
@@ -229,7 +239,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hoardarr-offline-${{ matrix.pass }}
+          name: ${{ inputs.offline_validation_mode == 'diagnostic-pass-1' && 'hoardarr-offline-diagnostic-pass-1' || format('hoardarr-offline-{0}', matrix.pass) }}
           retention-days: 14
           path: |
             offline-evidence/${{ matrix.pass }}/**
