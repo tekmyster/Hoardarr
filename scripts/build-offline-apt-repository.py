@@ -571,11 +571,10 @@ def _resolved_family_evidence(
         for family in plan.compatibility_families
         for member in family["members"]
     }
-    package_versions = {
-        item["name"]: item["version"]
-        for item in package_records
-        if item["name"] in family_members
-    }
+    package_identities_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item in package_records:
+        if item["name"] in family_members:
+            package_identities_by_name.setdefault(item["name"], []).append(item)
     resolved_families: list[dict[str, Any]] = []
     for family in plan.compatibility_families:
         resolved = family_versions.get(family["id"])
@@ -587,11 +586,15 @@ def _resolved_family_evidence(
             raise OfflineRepositoryError(
                 f"compatibility family evidence versions differ: {family['id']}"
             )
-        omitted = sorted(
-            package
-            for package, version in resolved.items()
-            if package_versions.get(package) != version
-        )
+        omitted: list[str] = []
+        for package, version in resolved.items():
+            identities = package_identities_by_name.get(package, [])
+            if (
+                len(identities) != 1
+                or identities[0]["architecture"] not in {"all", "amd64"}
+                or identities[0]["version"] != version
+            ):
+                omitted.append(package)
         if omitted:
             raise OfflineRepositoryError(
                 f"package manifest omitted compatibility family members: {omitted!r}"
@@ -886,7 +889,7 @@ def verify_repository(root: Path) -> None:
     families = family_evidence.get("families")
     if not isinstance(records, list) or not isinstance(families, list):
         raise OfflineRepositoryError("package or compatibility-family evidence is invalid")
-    manifest_versions: dict[str, str] = {}
+    manifest_identities_by_name: dict[str, list[tuple[str, str]]] = {}
     manifest_identities: set[tuple[str, str]] = set()
     for record in records:
         if (
@@ -898,9 +901,9 @@ def verify_repository(root: Path) -> None:
         ):
             raise OfflineRepositoryError("package manifest has invalid binary identities")
         manifest_identities.add((record["name"], record["architecture"]))
-        if record["name"] in manifest_versions and manifest_versions[record["name"]] != record["version"]:
-            raise OfflineRepositoryError("package manifest has conflicting package versions")
-        manifest_versions[record["name"]] = record["version"]
+        manifest_identities_by_name.setdefault(record["name"], []).append(
+            (record["architecture"], record["version"])
+        )
     repository_versions: dict[str, str] = {}
     package_index = (root / "dists/noble/main/binary-amd64/Packages").read_text(
         encoding="utf-8"
@@ -947,6 +950,19 @@ def verify_repository(root: Path) -> None:
         member_names: set[str] = set()
         ordered_member_names: list[str] = []
         for member in family["members"]:
+            manifest_identities_for_member = manifest_identities_by_name.get(
+                member.get("name") if isinstance(member, dict) else "", []
+            )
+            manifest_architecture = (
+                manifest_identities_for_member[0][0]
+                if len(manifest_identities_for_member) == 1
+                else ""
+            )
+            manifest_version = (
+                manifest_identities_for_member[0][1]
+                if len(manifest_identities_for_member) == 1
+                else ""
+            )
             if (
                 not isinstance(member, dict)
                 or set(member) != {"name", "version"}
@@ -956,8 +972,12 @@ def verify_repository(root: Path) -> None:
                 or not member["version"]
                 or member["name"] in member_names
                 or member.get("version") != family["resolved_version"]
-                or manifest_versions.get(member["name"]) != member.get("version")
-                or repository_versions.get(f"{member['name']}:amd64")
+                or len(manifest_identities_for_member) != 1
+                or manifest_architecture not in {"all", "amd64"}
+                or manifest_version != member.get("version")
+                or repository_versions.get(
+                    f"{member['name']}:{manifest_architecture}"
+                )
                 != member.get("version")
             ):
                 raise OfflineRepositoryError(

@@ -1292,9 +1292,9 @@ Description: Backup program for disk arrays
                                 "architecture": "amd64",
                             },
                             {
-                                "name": "systemd",
+                                "name": "systemd-dev",
                                 "version": "8.17",
-                                "architecture": "amd64",
+                                "architecture": "all",
                             }
                         ],
                     }
@@ -1306,7 +1306,7 @@ Description: Backup program for disk arrays
                 compatibility_families=(
                     {
                         "id": "systemd-noble",
-                        "members": ("udev", "systemd"),
+                        "members": ("udev", "systemd-dev"),
                         "version_policy": "single-candidate-version",
                     },
                 ),
@@ -1315,13 +1315,13 @@ Description: Backup program for disk arrays
             )
             generated_family_evidence = offline_repo._resolved_family_evidence(
                 nonalphabetical_plan,
-                {"systemd-noble": {"udev": "8.17", "systemd": "8.17"}},
+                {"systemd-noble": {"udev": "8.17", "systemd-dev": "8.17"}},
                 [
                     {"name": "udev", "version": "8.17", "architecture": "amd64"},
                     {
-                        "name": "systemd",
+                        "name": "systemd-dev",
                         "version": "8.17",
-                        "architecture": "amd64",
+                        "architecture": "all",
                     },
                 ],
             )
@@ -1335,7 +1335,7 @@ Description: Backup program for disk arrays
                         "compatibility_families": [
                             {
                                 "id": "systemd-noble",
-                                "members": ["udev", "systemd"],
+                                "members": ["udev", "systemd-dev"],
                                 "version_policy": "single-candidate-version",
                             }
                         ]
@@ -1345,7 +1345,7 @@ Description: Backup program for disk arrays
             )
             (root / "dists/noble/main/binary-amd64/Packages").write_text(
                 "Package: udev\nVersion: 8.17\nArchitecture: amd64\n\n"
-                "Package: systemd\nVersion: 8.17\nArchitecture: amd64\n\n",
+                "Package: systemd-dev\nVersion: 8.17\nArchitecture: all\n\n",
                 encoding="utf-8",
             )
             offline_repo._write_tree_manifest(root)
@@ -1401,6 +1401,50 @@ Description: Backup program for disk arrays
                 )
                 packages_path = root / "dists/noble/main/binary-amd64/Packages"
                 packages_document = packages_path.read_text(encoding="utf-8")
+                package_document["packages"].append(
+                    {
+                        "name": "systemd-dev",
+                        "version": "8.17",
+                        "architecture": "amd64",
+                    }
+                )
+                package_manifest_path.write_text(
+                    json.dumps(package_document), encoding="utf-8"
+                )
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "incomplete or incoherent"
+                ):
+                    offline_repo.verify_repository(root)
+                package_document["packages"].pop()
+                package_document["packages"][1]["architecture"] = "i386"
+                package_manifest_path.write_text(
+                    json.dumps(package_document), encoding="utf-8"
+                )
+                packages_path.write_text(
+                    packages_document.replace("Architecture: all", "Architecture: i386"),
+                    encoding="utf-8",
+                )
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "incomplete or incoherent"
+                ):
+                    offline_repo.verify_repository(root)
+                package_document["packages"][1]["architecture"] = "all"
+                package_document["packages"].append(dict(package_document["packages"][1]))
+                package_manifest_path.write_text(
+                    json.dumps(package_document), encoding="utf-8"
+                )
+                packages_path.write_text(packages_document, encoding="utf-8")
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "invalid binary identities"
+                ):
+                    offline_repo.verify_repository(root)
+                package_document["packages"].pop()
+                package_manifest_path.write_text(
+                    json.dumps(package_document), encoding="utf-8"
+                )
                 packages_path.write_text(
                     packages_document.split("\n\n", 1)[1], encoding="utf-8"
                 )
