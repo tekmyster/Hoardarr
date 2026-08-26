@@ -2,7 +2,7 @@
 
 ## Result
 
-WO-WEB-013-G is **PASS — LOCAL SECRET-FREE HELPER CERTIFIED / NO LIVE OR NETWORK ACCESS**.
+WO-WEB-013-G is **PASS — LOCAL SECRET-FREE HELPER CERTIFIED / NO LIVE INFRASTRUCTURE ACCESS**.
 
 The retained six-file helper bundle separates the Python driver, remote backup shell entrypoint, inverse shell entrypoint, fixed allowlist, structured payload schema and local tests. The exact bundle passed Python parsing/import, shell parsing, JSON/schema structure, encoding/newline, output confinement, deterministic child-rooted backup/archive/readback, adversarial negatives, inverse mocks and structured-transport gates. Two final runs from separate clean disposable roots passed 16/16 with retries disabled and produced identical result bytes, manifest identity and archive identity.
 
@@ -24,7 +24,7 @@ G did not open SSH, perform DNS resolution, access a browser or live service, re
 | clean pass 2 | **PASS** | Final certification root `pass-5-root`: 16/16, zero failures/errors/skips, retries `0`; result SHA-256 `647edce74bf56c73bde835755a7ffe13aa03d9aa76eb7b20ef9f80128ff7424d`. |
 | deterministic identities | **PASS** | Both final runs produced manifest SHA-256 `641336721b4e2c7e532b916fae6e023c70740bb88e6a51bdb74f4e88398dec71` and 641-byte archive SHA-256 `ff790f463c71fb8278f38772a71f0697346af288c0a9173ecde88eaeafe54f92`. |
 | D/F preservation | **PASS** | D `evidence-manifest.json` remains `c9069dce684ba2bd2c1b3dee74d8236abd88ee55e57d188d6eaba8422d373fa8`; F remains `f017abd32f143937c02e4b02de13a648780938228989f0e51dd3d231677c344e`. |
-| prohibited-boundary invariant | **PASS** | Zero network, socket, SSH, browser, NGINX, Apache, Certbot, Cloudflare, service, KeePass or live-system call; zero certificate request; zero live path or repository implementation mutation. |
+| prohibited-boundary invariant | **PASS** | Zero infrastructure/service network, socket, SSH, browser, NGINX, Apache, Certbot, Cloudflare, KeePass or live-system call; zero certificate request; zero live path or repository implementation mutation. The only network operation was the work-order-required Git push after certification. |
 
 ## Evidence
 
