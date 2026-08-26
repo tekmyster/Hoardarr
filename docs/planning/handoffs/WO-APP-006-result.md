@@ -8,7 +8,7 @@ The pre-LINSTOR baseline now builds a complete signed/indexed Ubuntu 24.04 amd64
 
 The authoritative manual run built both CI-only no-network ISOs, but the harness was not executed because `tests/appliance/run-offline-iso-pass.sh` lacks an executable Git mode. Both jobs failed before QEMU installation or protected-media testing with exit `126` / `Permission denied`.
 
-This evidence predates the owner-selected **LINSTOR + DRBD 9 + DRBD Reactor** three-host clustered-storage requirement added to the normative contract while run `32918144601` was already in flight. It contains no claimed LINSTOR/DRBD/Reactor package, kernel-module, Secure Boot/module-signing, or Proxmox-sidecar closure and therefore **cannot close the superseding OWNER-10 contract**.
+This evidence predates the owner-selected **LINSTOR + DRBD 9 + DRBD Reactor + installed-but-disabled LINSTOR Gateway** three-host clustered-storage requirement added to the normative contract while run `32918144601` was already in flight. It contains no claimed LINSTOR/DRBD/Reactor/Gateway package, kernel-module, Secure Boot/module-signing, or offline Proxmox-plugin sidecar closure and therefore **cannot close the superseding OWNER-10 contract**.
 
 Scoped implementation commits:
 
@@ -105,7 +105,7 @@ Manual run `32918144601` artifacts:
 ## Defects
 
 1. `tests/appliance/run-offline-iso-pass.sh` is not executable in the Git checkout. Both no-NIC jobs failed with exit `126` before QEMU; no installation, package readback, service readback, protected-disk hash comparison, WebUI readiness, or first-boot measurement was executed.
-2. The pre-LINSTOR ISO/repository is not a valid closure of the now-superseding clustered-storage contract. LINSTOR, DRBD 9, DRBD Reactor, required kernel/module/Secure-Boot handling and Proxmox-sidecar disposition remain unevidenced.
+2. The pre-LINSTOR ISO/repository is not a valid closure of the now-superseding clustered-storage contract. LINSTOR, DRBD 9, DRBD Reactor, installed-but-disabled LINSTOR Gateway, required kernel/module/Secure-Boot handling and the offline Proxmox-plugin sidecar disposition remain unevidenced.
 3. The CI repository uses an explicit ephemeral test signing identity. A production repository signing key remains an external release input and was not invented or embedded.
 
 ## Blockers
@@ -115,4 +115,4 @@ Manual run `32918144601` artifacts:
 
 ## Next action
 
-Supervisor accepts this pre-change baseline and issues the narrow successor authorization to reconcile LINSTOR + DRBD 9 + DRBD Reactor (including kernel, Secure Boot/module signing and Proxmox sidecar disposition), restore the harness executable Git mode, and run the superseding two-pass no-network validation exactly once.
+Supervisor accepts this pre-change baseline and issues the narrow successor authorization to reconcile LINSTOR + DRBD 9 + DRBD Reactor + installed-but-disabled LINSTOR Gateway (including kernel, Secure Boot/module signing and the offline Proxmox-plugin sidecar disposition), restore the harness executable Git mode, and run the superseding two-pass no-network validation exactly once.
