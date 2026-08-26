@@ -164,6 +164,7 @@ Description: Backup program for disk arrays
         )
         self.assertIn("pass: [pass-1, pass-2]", workflow)
         self.assertIn("if: github.event_name == 'workflow_dispatch'", workflow)
+        self.assertIn("name: hoardarr-offline-install-inputs\n          path: dist", workflow)
         self.assertIn('$RUNNER_TEMP/ci-signing-key', workflow)
         self.assertIn('$RUNNER_TEMP/ubuntu-vulnerability-status.json', workflow)
         self.assertIn("-nic none", harness)
