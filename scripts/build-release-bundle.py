@@ -9,6 +9,7 @@ avoids accidentally shipping Windows or macOS artifacts.
 from __future__ import annotations
 
 import argparse
+import email.parser
 import hashlib
 import importlib.util
 import json
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -97,7 +99,10 @@ def iter_bundle_files(root: Path) -> Iterable[tuple[str, Path]]:
 def write_manifest(root: Path) -> Path:
     """Write a deterministic GNU sha256sum-compatible manifest."""
 
-    entries = [f"{sha256_file(path)}  {relative}\n" for relative, path in iter_bundle_files(root)]
+    entries = [
+        f"{sha256_file(path)}  {relative}\n"
+        for relative, path in iter_bundle_files(root)
+    ]
     if not entries:
         raise BuildError("refusing to create an empty release manifest")
     manifest = root / MANIFEST_NAME
@@ -128,7 +133,9 @@ def verify_manifest(root: Path) -> None:
     if actual != set(expected):
         missing = sorted(set(expected) - actual)
         extra = sorted(actual - set(expected))
-        raise BuildError(f"bundle file set mismatch: missing={missing!r} extra={extra!r}")
+        raise BuildError(
+            f"bundle file set mismatch: missing={missing!r} extra={extra!r}"
+        )
     for relative, path in iter_bundle_files(root):
         if sha256_file(path) != expected[relative]:
             raise BuildError(f"SHA-256 mismatch: {relative}")
@@ -235,6 +242,7 @@ def create_plan(root: Path, output_dir: Path) -> ReleasePlan:
         "requirements/hoardarr.lock",
         "wheels/",
         "frontend/",
+        "evidence/",
         "RELEASE.json",
         MANIFEST_NAME,
     )
@@ -269,17 +277,24 @@ def validate_build_host() -> None:
     failures: list[str] = []
     if sys.platform != "linux":
         failures.append(f"host platform is {sys.platform}, expected linux")
-    if release.get("ID") != TARGET_OS_ID or release.get("VERSION_ID") != TARGET_OS_VERSION:
+    if (
+        release.get("ID") != TARGET_OS_ID
+        or release.get("VERSION_ID") != TARGET_OS_VERSION
+    ):
         failures.append(
             f"host OS is {release.get('ID', 'unknown')} {release.get('VERSION_ID', 'unknown')}, "
             f"expected {TARGET_OS_ID} {TARGET_OS_VERSION}"
         )
     if platform.machine() != TARGET_MACHINE:
-        failures.append(f"host machine is {platform.machine()}, expected {TARGET_MACHINE}")
+        failures.append(
+            f"host machine is {platform.machine()}, expected {TARGET_MACHINE}"
+        )
     if python_version != TARGET_PYTHON:
         failures.append(f"builder Python is {python_version}, expected {TARGET_PYTHON}")
     if importlib.util.find_spec("pip") is None:
-        failures.append("builder interpreter has no pip module (run with Ubuntu /usr/bin/python3)")
+        failures.append(
+            "builder interpreter has no pip module (run with Ubuntu /usr/bin/python3)"
+        )
     if failures:
         raise BuildError("incompatible build host:\n- " + "\n- ".join(failures))
 
@@ -316,13 +331,19 @@ def _copy_tree(source: Path, destination: Path) -> None:
 
 def _copy_release_assets(root: Path, staging: Path) -> None:
     individual = {
-        root / "scripts" / "install-release-bundle.sh": staging / "scripts" / "install.sh",
+        root / "scripts" / "install-release-bundle.sh": staging
+        / "scripts"
+        / "install.sh",
         root / "scripts" / "bootstrap.py": staging / "scripts" / "bootstrap.py",
-        root / "scripts" / "detect-hardware.py": staging / "scripts" / "detect-hardware.py",
+        root / "scripts" / "detect-hardware.py": staging
+        / "scripts"
+        / "detect-hardware.py",
         root / "scripts" / "export-nas-source-evidence.py": staging
         / "scripts"
         / "export-nas-source-evidence.py",
-        root / "packaging" / "config" / "hoardarr.env": staging / "config" / "hoardarr.env",
+        root / "packaging" / "config" / "hoardarr.env": staging
+        / "config"
+        / "hoardarr.env",
     }
     for source, destination in individual.items():
         if not source.is_file() or source.is_symlink():
@@ -374,7 +395,9 @@ def _write_release_metadata(root: Path, staging: Path, plan: ReleasePlan) -> Non
         "built_at": datetime.fromtimestamp(source_epoch, UTC).isoformat(),
     }
     (staging / "RELEASE.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
 
 
@@ -422,15 +445,21 @@ def _build_wheels(root: Path, staging: Path, plan: ReleasePlan, uv: str) -> None
     )
 
     artifacts = sorted(wheels_dir.iterdir())
-    if not artifacts or any(not item.is_file() or item.suffix != ".whl" for item in artifacts):
-        raise BuildError("wheelhouse contains a missing, non-regular, or non-wheel artifact")
+    if not artifacts or any(
+        not item.is_file() or item.suffix != ".whl" for item in artifacts
+    ):
+        raise BuildError(
+            "wheelhouse contains a missing, non-regular, or non-wheel artifact"
+        )
     project_wheels = [item for item in artifacts if item.name.startswith("hoardarr-")]
     if len(project_wheels) != 1:
         raise BuildError(f"expected one Hoardarr wheel, found {len(project_wheels)}")
     project_wheel = project_wheels[0]
     normalized_version = plan.version.replace("-", "_")
     if not project_wheel.name.startswith(f"hoardarr-{normalized_version}-"):
-        raise BuildError(f"Hoardarr wheel version does not match release: {project_wheel.name}")
+        raise BuildError(
+            f"Hoardarr wheel version does not match release: {project_wheel.name}"
+        )
     project_lock = requirements_dir / "hoardarr.lock"
     project_lock.write_text(
         f"hoardarr=={plan.version} --hash=sha256:{sha256_file(project_wheel)}\n",
@@ -445,8 +474,11 @@ def _build_frontend(root: Path, staging: Path, npm: str) -> None:
     package = frontend / "package.json"
     lock = frontend / "package-lock.json"
     if not package.is_file() or not lock.is_file():
-        raise BuildError("frontend/package.json and frontend/package-lock.json are required")
+        raise BuildError(
+            "frontend/package.json and frontend/package-lock.json are required"
+        )
     _run([npm, "ci", "--no-audit", "--no-fund"], cwd=frontend)
+    _collect_frontend_licenses(frontend, staging)
     _run([npm, "run", "build"], cwd=frontend)
     output = frontend / "dist"
     if not (output / "index.html").is_file():
@@ -454,10 +486,237 @@ def _build_frontend(root: Path, staging: Path, npm: str) -> None:
     _copy_tree(output, staging / "frontend")
 
 
+def _safe_evidence_name(value: str) -> str:
+    result = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    if not result or len(result) > 160:
+        raise BuildError(f"unsafe evidence package name: {value!r}")
+    return result
+
+
+def _collect_frontend_licenses(frontend: Path, staging: Path) -> None:
+    lock_path = frontend / "package-lock.json"
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildError(
+            f"could not read frontend package lock for license evidence: {exc}"
+        ) from exc
+    packages = lock.get("packages")
+    if not isinstance(packages, dict):
+        raise BuildError("frontend package lock lacks the packages inventory")
+    destination = staging / "evidence" / "licenses" / "npm"
+    destination.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, object]] = []
+    components: list[dict[str, object]] = []
+    node_modules = (frontend / "node_modules").resolve()
+    for package_path, metadata in sorted(packages.items()):
+        if not package_path or not package_path.startswith("node_modules/"):
+            continue
+        if not isinstance(metadata, dict):
+            raise BuildError(f"invalid package-lock metadata for {package_path}")
+        version = metadata.get("version")
+        if not isinstance(version, str) or not version:
+            raise BuildError(f"package-lock entry lacks a version: {package_path}")
+        name = package_path.removeprefix("node_modules/")
+        unresolved_source = frontend / package_path
+        source = unresolved_source.resolve()
+        if (
+            node_modules not in source.parents
+            or not source.is_dir()
+            or unresolved_source.is_symlink()
+        ):
+            raise BuildError(f"unsafe or missing npm package directory: {package_path}")
+        package_destination = destination / _safe_evidence_name(name)
+        license_files: list[str] = []
+        for candidate in sorted(source.iterdir()):
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            if not re.match(
+                r"^(licen[cs]e|copying|notice)(\..*)?$", candidate.name, re.I
+            ):
+                continue
+            package_destination.mkdir(parents=True, exist_ok=True)
+            target = package_destination / candidate.name
+            shutil.copyfile(candidate, target)
+            license_files.append(target.relative_to(staging).as_posix())
+        license_value = metadata.get("license")
+        records.append(
+            {
+                "ecosystem": "npm",
+                "license": license_value
+                if isinstance(license_value, str)
+                else "not-reported",
+                "license_files": license_files,
+                "name": name,
+                "version": version,
+            }
+        )
+        components.append(
+            {
+                "type": "library",
+                "name": name,
+                "version": version,
+                "purl": f"pkg:npm/{name}@{version}",
+                "licenses": [
+                    {
+                        "license": {
+                            "name": license_value
+                            if isinstance(license_value, str)
+                            else "Not reported"
+                        }
+                    }
+                ],
+            }
+        )
+    if not records:
+        raise BuildError("frontend dependency license inventory is empty")
+    _write_json(
+        staging / "evidence" / "npm-licenses.json", {"schema": 1, "packages": records}
+    )
+    _write_json(staging / "evidence" / "npm-components.json", components)
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _collect_wheel_licenses(staging: Path) -> list[dict[str, object]]:
+    destination = staging / "evidence" / "licenses" / "python"
+    destination.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, object]] = []
+    components: list[dict[str, object]] = []
+    for wheel in sorted((staging / "wheels").glob("*.whl")):
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_paths = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
+            if len(metadata_paths) != 1:
+                raise BuildError(
+                    f"wheel does not contain exactly one METADATA file: {wheel.name}"
+                )
+            message = email.parser.Parser().parsestr(
+                archive.read(metadata_paths[0]).decode("utf-8", errors="strict")
+            )
+            name = message.get("Name")
+            version = message.get("Version")
+            if not name or not version:
+                raise BuildError(f"wheel metadata lacks name/version: {wheel.name}")
+            license_value = (
+                message.get("License-Expression")
+                or message.get("License")
+                or "not-reported"
+            )
+            package_destination = destination / _safe_evidence_name(name)
+            license_files: list[str] = []
+            prefix = metadata_paths[0].removesuffix("METADATA")
+            for member in sorted(archive.namelist()):
+                basename = PurePosixPath(member).name
+                if member.endswith("/") or not member.startswith(prefix):
+                    continue
+                if "/licenses/" not in member and not re.match(
+                    r"^(licen[cs]e|copying|notice)(\..*)?$", basename, re.I
+                ):
+                    continue
+                package_destination.mkdir(parents=True, exist_ok=True)
+                target = package_destination / _safe_evidence_name(basename)
+                target.write_bytes(archive.read(member))
+                license_files.append(target.relative_to(staging).as_posix())
+        records.append(
+            {
+                "ecosystem": "python",
+                "license": license_value,
+                "license_files": license_files,
+                "name": name,
+                "version": version,
+                "wheel": f"wheels/{wheel.name}",
+                "sha256": sha256_file(wheel),
+            }
+        )
+        components.append(
+            {
+                "type": "library",
+                "name": name,
+                "version": version,
+                "purl": f"pkg:pypi/{name}@{version}",
+                "hashes": [{"alg": "SHA-256", "content": sha256_file(wheel)}],
+                "licenses": [{"license": {"name": license_value}}],
+            }
+        )
+    if not records:
+        raise BuildError("Python dependency license inventory is empty")
+    _write_json(
+        staging / "evidence" / "python-licenses.json",
+        {"schema": 1, "packages": records},
+    )
+    return components
+
+
+def _write_release_evidence(root: Path, staging: Path, plan: ReleasePlan) -> None:
+    python_components = _collect_wheel_licenses(staging)
+    npm_components = json.loads(
+        (staging / "evidence" / "npm-components.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(npm_components, list):
+        raise BuildError("npm component evidence is invalid")
+    _write_json(
+        staging / "evidence" / "SBOM.cdx.json",
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "metadata": {
+                "component": {
+                    "type": "application",
+                    "name": "hoardarr",
+                    "version": plan.version,
+                }
+            },
+            "components": python_components + npm_components,
+        },
+    )
+    commit, source_epoch = source_revision(root)
+    _write_json(
+        staging / "evidence" / "provenance.json",
+        {
+            "schema": 1,
+            "source_commit": commit,
+            "source_date_epoch": source_epoch,
+            "target": {
+                "architecture": TARGET_ARCHITECTURE,
+                "os": f"{TARGET_OS_ID}-{TARGET_OS_VERSION}",
+                "python": TARGET_PYTHON,
+            },
+            "inputs": {
+                "backend/uv.lock": sha256_file(root / "backend" / "uv.lock"),
+                "frontend/package-lock.json": sha256_file(
+                    root / "frontend" / "package-lock.json"
+                ),
+            },
+        },
+    )
+    _write_json(
+        staging / "evidence" / "vulnerability-status.json",
+        {
+            "status": "release-build-snapshot-pending",
+            "release_gate": "blocked-until-executed-audits-are-attached-to-the-appliance-evidence",
+            "scope": ["Python locked dependencies", "npm locked dependencies"],
+        },
+    )
+
+
 def _verify_offline_install(staging: Path) -> None:
     """Prove that the wheelhouse can create an importable environment offline."""
 
-    with tempfile.TemporaryDirectory(prefix=".offline-verify-", dir=staging.parent) as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix=".offline-verify-", dir=staging.parent
+    ) as temporary:
         venv = Path(temporary) / "venv"
         _run([sys.executable, "-m", "venv", str(venv)], cwd=staging)
         python = venv / "bin" / "python"
@@ -495,13 +754,16 @@ def build_bundle(root: Path, output_dir: Path, *, uv: str, npm: str) -> Path:
     if destination.exists() or destination.is_symlink():
         raise BuildError(f"release destination already exists: {destination}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f".{plan.bundle_name}-", dir=output_dir) as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix=f".{plan.bundle_name}-", dir=output_dir
+    ) as temporary:
         staging = Path(temporary) / plan.bundle_name
         staging.mkdir()
         _copy_release_assets(root, staging)
         _build_frontend(root, staging, npm)
         _build_wheels(root, staging, plan, uv)
         _write_release_metadata(root, staging, plan)
+        _write_release_evidence(root, staging, plan)
         write_manifest(staging)
         staging.replace(destination)
     return destination
@@ -535,7 +797,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir = root / output_dir
     try:
         if args.command == "plan":
-            print(json.dumps(asdict(create_plan(root, output_dir)), indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    asdict(create_plan(root, output_dir)), indent=2, sort_keys=True
+                )
+            )
             return 0
         destination = build_bundle(root, output_dir, uv=args.uv, npm=args.npm)
         print(f"Release bundle: {destination}")

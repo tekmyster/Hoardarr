@@ -30,6 +30,7 @@
     "open-iscsi",
     "open-vm-tools",
     "pacemaker",
+    "pcp",
     "qemu-guest-agent",
     "rauc",
     "resource-agents-base",
@@ -86,6 +87,12 @@
     "open-iscsi.service",
     "open-vm-tools.service",
     "pacemaker.service",
+    "pmcd.service",
+    "pmie.service",
+    "pmie_check.timer",
+    "pmlogger.service",
+    "pmlogger_check.timer",
+    "pmproxy.service",
     "qemu-guest-agent.service",
     "rauc.service",
     "rpcbind.service",
@@ -111,6 +118,7 @@
   "command_aliases": {
     "b3sum (BLAKE3)": "b3sum",
     "dd": "coreutils",
+    "dstat": "pcp",
     "shred": "coreutils",
     "udev": "udev",
     "wipefs": "util-linux"
@@ -158,6 +166,7 @@
     "apt": "https://ubuntu.com/server/docs/how-to/software/package-management/",
     "b3sum": "https://packages.ubuntu.com/noble/b3sum",
     "open-vm-tools": "https://packages.ubuntu.com/noble/open-vm-tools",
+    "pcp": "https://packages.ubuntu.com/noble/pcp",
     "qemu-guest-agent": "https://packages.ubuntu.com/noble/qemu-guest-agent",
     "redfishtool": "https://packages.ubuntu.com/noble/redfishtool",
     "snapraid": "https://packages.ubuntu.com/noble/snapraid"

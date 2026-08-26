@@ -45,7 +45,7 @@
     {"row": 32, "category": "Storage Performance Testing", "candidate": "hdparm", "required": "Recommended", "purpose": "Quick disk throughput tests", "notes": "Simple read benchmarks", "resolution": "hdparm"},
     {"row": 33, "category": "System Monitoring & Diagnostics", "candidate": "iotop", "required": "Optional", "purpose": "Monitor active disk IO", "notes": "Troubleshooting", "resolution": "iotop-c"},
     {"row": 34, "category": "System Monitoring & Diagnostics", "candidate": "sysstat", "required": "Optional", "purpose": "Provides iostat for disk performance", "notes": "Long-term IO monitoring", "resolution": "sysstat; timers disabled"},
-    {"row": 35, "category": "System Monitoring & Diagnostics", "candidate": "dstat", "required": "Optional", "purpose": "Combined system resource stats", "notes": "Useful diagnostics", "resolution": "dstat"},
+    {"row": 35, "category": "System Monitoring & Diagnostics", "candidate": "dstat", "required": "Optional", "purpose": "Combined system resource stats", "notes": "Useful diagnostics", "resolution": "pcp (Noble provider for the dstat virtual package); PCP services disabled"},
     {"row": 36, "category": "Filesystem Analysis", "candidate": "tree", "required": "Optional", "purpose": "Directory structure analysis", "notes": "Intake preview", "resolution": "tree"},
     {"row": 37, "category": "Filesystem Analysis", "candidate": "ncdu", "required": "Recommended", "purpose": "Interactive disk usage viewer", "notes": "Useful during migrations", "resolution": "ncdu"},
     {"row": 38, "category": "Data Transfer & Progress Tools", "candidate": "pv", "required": "Optional", "purpose": "Pipe viewer for progress tracking", "notes": "Large file copy visibility", "resolution": "pv"},

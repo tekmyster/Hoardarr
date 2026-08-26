@@ -42,6 +42,8 @@ class OfflineApplianceTests(unittest.TestCase):
         self.assertIn("xxhash", selected)
         self.assertIn("lm-sensors", selected)
         self.assertIn("sysstat", selected)
+        self.assertIn("pcp", selected)
+        self.assertNotIn("dstat", selected)
 
     def test_owner_workbook_aliases_and_superseded_container_rows_are_explicit(
         self,
@@ -54,6 +56,7 @@ class OfflineApplianceTests(unittest.TestCase):
         self.assertEqual(matrix["command_aliases"]["dd"], "coreutils")
         self.assertEqual(matrix["command_aliases"]["shred"], "coreutils")
         self.assertEqual(matrix["command_aliases"]["wipefs"], "util-linux")
+        self.assertEqual(matrix["command_aliases"]["dstat"], "pcp")
         intake = json.loads(
             (ROOT / "packaging" / "offline" / "owner-workbook-intake.json").read_text(
                 encoding="utf-8"
@@ -186,6 +189,22 @@ class OfflineApplianceTests(unittest.TestCase):
         self.assertIn("systemctl disable lldpd.service", installer)
         deferred = installer.split('if [[ "${DEFER_SERVICE_START}" == "true" ]]', 1)[1]
         self.assertNotIn("systemctl enable lldpd.service", deferred.split("else", 1)[0])
+
+    def test_release_bundle_emits_dependency_sbom_license_and_provenance_evidence(
+        self,
+    ) -> None:
+        builder = (ROOT / "scripts" / "build-release-bundle.py").read_text(
+            encoding="utf-8"
+        )
+        installer = (ROOT / "scripts" / "install-release-bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('staging / "evidence" / "SBOM.cdx.json"', builder)
+        self.assertIn('staging / "evidence" / "python-licenses.json"', builder)
+        self.assertIn('staging / "evidence" / "npm-licenses.json"', builder)
+        self.assertIn('staging / "evidence" / "provenance.json"', builder)
+        self.assertIn('"evidence/SBOM.cdx.json"', installer)
+        self.assertIn('"evidence/vulnerability-status.json"', installer)
 
 
 if __name__ == "__main__":

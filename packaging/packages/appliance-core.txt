@@ -10,7 +10,6 @@ curl
 cryptsetup
 dmidecode
 dosfstools
-dstat
 e2fsprogs
 ethtool
 exfatprogs
@@ -53,6 +52,7 @@ openssh-server
 partclone
 parted
 pciutils
+pcp
 procps
 pv
 python3.12

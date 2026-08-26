@@ -260,6 +260,11 @@ validate_release_layout() {
         "systemd/hoardarr-storage-status.service"
         "systemd/hoardarr-lldpd.conf"
         "docs/backend.md"
+        "evidence/SBOM.cdx.json"
+        "evidence/npm-licenses.json"
+        "evidence/provenance.json"
+        "evidence/python-licenses.json"
+        "evidence/vulnerability-status.json"
         "frontend/index.html"
     )
     for required in "${required_files[@]}"; do

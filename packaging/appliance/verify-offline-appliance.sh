@@ -37,7 +37,7 @@ apt-get \
 
 required_commands=(
     b3sum blkid btrfs cryptsetup exportfs fio fcoeadm iostat iscsiadm jq lsof
-    lsscsi mergerfs multipath ncdu nvme pv rclone rsync sg_ses smartctl snapraid
+    dstat lsscsi mergerfs multipath ncdu nvme pv rclone rsync sg_ses smartctl snapraid
     targetcli xxhsum zpool
 )
 missing_commands=()

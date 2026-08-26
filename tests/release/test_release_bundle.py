@@ -18,7 +18,9 @@ INSTALLER_PATH = ROOT / "scripts" / "install-release-bundle.sh"
 
 
 def load_builder():
-    spec = importlib.util.spec_from_file_location("hoardarr_release_builder", BUILDER_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "hoardarr_release_builder", BUILDER_PATH
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError("could not load release builder")
     module = importlib.util.module_from_spec(spec)
@@ -33,9 +35,9 @@ builder = load_builder()
 class VersionConsistencyTests(unittest.TestCase):
     def test_release_package_and_ui_versions_match(self):
         project_version = str(
-            tomllib.loads((ROOT / "backend" / "pyproject.toml").read_text(encoding="utf-8"))[
-                "project"
-            ]["version"]
+            tomllib.loads(
+                (ROOT / "backend" / "pyproject.toml").read_text(encoding="utf-8")
+            )["project"]["version"]
         )
         frontend_version = json.loads(
             (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
@@ -47,7 +49,9 @@ class VersionConsistencyTests(unittest.TestCase):
             (ROOT / "backend" / "uv.lock").read_text(encoding="utf-8")
         )
         locked_backend = next(
-            package for package in backend_lock["package"] if package["name"] == "hoardarr"
+            package
+            for package in backend_lock["package"]
+            if package["name"] == "hoardarr"
         )
         namespace: dict[str, object] = {}
         exec(
@@ -96,9 +100,9 @@ class VersionConsistencyTests(unittest.TestCase):
 
     def test_release_installer_enforces_neighbor_discovery_runtime(self):
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
-        drop_in = (
-            ROOT / "packaging" / "systemd" / "hoardarr-lldpd.conf"
-        ).read_text(encoding="utf-8")
+        drop_in = (ROOT / "packaging" / "systemd" / "hoardarr-lldpd.conf").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('grep -Fxq "lldpd"', installer)
         self.assertIn("ensure_neighbor_discovery", installer)
@@ -215,7 +219,9 @@ class ManifestTests(unittest.TestCase):
         for value in rejected:
             with self.subTest(value=value), self.assertRaises(builder.BuildError):
                 builder.safe_relative_path(value)
-        self.assertEqual(str(builder.safe_relative_path("a/b-c_1.json")), "a/b-c_1.json")
+        self.assertEqual(
+            str(builder.safe_relative_path("a/b-c_1.json")), "a/b-c_1.json"
+        )
 
 
 class RequirementsTests(unittest.TestCase):
@@ -262,6 +268,7 @@ class BuildPlanTests(unittest.TestCase):
             self.assertIn("scripts/export-nas-source-evidence.py", plan.copied_paths)
             self.assertIn("packages/", plan.copied_paths)
             self.assertIn("frontend/", plan.copied_paths)
+            self.assertIn("evidence/", plan.copied_paths)
             self.assertFalse(output.exists())
 
     def test_installed_detector_and_hardware_manifests_share_release_root(self):
@@ -273,7 +280,9 @@ class BuildPlanTests(unittest.TestCase):
         self.assertIn('"${stage}/packaging/hardware/${relative}"', installer)
         self.assertIn('"${stage}/packaging/packages/${relative}"', installer)
         self.assertIn('"${stage}/scripts/bootstrap.py"', installer)
-        self.assertIn('atomic_symlink "current/packaging" "${LIB_ROOT}/packaging"', installer)
+        self.assertIn(
+            'atomic_symlink "current/packaging" "${LIB_ROOT}/packaging"', installer
+        )
         self.assertIn('install_runtime_wrapper "${CLI_LINK}" cli', installer)
         self.assertIn("python -m hoardarr.runtime", installer)
         self.assertIn('"${stage}/frontend/${relative}"', installer)
@@ -292,7 +301,13 @@ class BuildPlanTests(unittest.TestCase):
                     "--format",
                     "json",
                     "--fixture",
-                    str(ROOT / "tests" / "fixtures" / "hardware" / "hyperv-usb-cisco-ssd.json"),
+                    str(
+                        ROOT
+                        / "tests"
+                        / "fixtures"
+                        / "hardware"
+                        / "hyperv-usb-cisco-ssd.json"
+                    ),
                 ],
                 check=True,
                 capture_output=True,
@@ -302,7 +317,9 @@ class BuildPlanTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["source"]["kind"], "fixture")
-            self.assertTrue(any(disk["kernel_name"] == "sdb" for disk in payload["disks"]))
+            self.assertTrue(
+                any(disk["kernel_name"] == "sdb" for disk in payload["disks"])
+            )
 
     def test_installer_serializes_apply_and_rejects_root_service_identity(self):
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
@@ -310,7 +327,9 @@ class BuildPlanTests(unittest.TestCase):
         self.assertIn('readonly RUNTIME_ROOT="/run/hoardarr"', installer)
         self.assertIn('install -d -o root -g root -m 0755 "${RUNTIME_ROOT}"', installer)
         self.assertIn("stat -c '%u:%g:%a'", installer)
-        self.assertIn('( ! -f "${INSTALL_LOCK_PATH}" || -L "${INSTALL_LOCK_PATH}" )', installer)
+        self.assertIn(
+            '( ! -f "${INSTALL_LOCK_PATH}" || -L "${INSTALL_LOCK_PATH}" )', installer
+        )
         self.assertIn('flock --exclusive --nonblock "${INSTALL_LOCK_FD}"', installer)
         self.assertLess(
             installer.index(
@@ -318,36 +337,46 @@ class BuildPlanTests(unittest.TestCase):
             ),
             installer.index('stage_release "${expected_manifest}"'),
         )
-        self.assertIn('((uid > 0)) || die "existing hoardarr account must not use UID 0"', installer)
-        self.assertIn('((gid > 0)) || die "existing hoardarr account must not use GID 0"', installer)
-        self.assertIn('--preserve-existing-login-account', installer)
-        self.assertIn('--defer-service-start', installer)
         self.assertIn(
-            '--defer-service-start is only allowed for a first appliance installation',
+            '((uid > 0)) || die "existing hoardarr account must not use UID 0"',
             installer,
         )
         self.assertIn(
-            'Database migration and runtime readiness will be enforced by systemd on boot.',
+            '((gid > 0)) || die "existing hoardarr account must not use GID 0"',
+            installer,
+        )
+        self.assertIn("--preserve-existing-login-account", installer)
+        self.assertIn("--defer-service-start", installer)
+        self.assertIn(
+            "--defer-service-start is only allowed for a first appliance installation",
             installer,
         )
         self.assertIn(
-            'Validating an offline appliance target; runtime PID 1 checks are deferred to first boot.',
+            "Database migration and runtime readiness will be enforced by systemd on boot.",
             installer,
         )
         self.assertIn(
-            '[[ "${PRESERVE_EXISTING_LOGIN_ACCOUNT}" == "true" ]]', installer
+            "Validating an offline appliance target; runtime PID 1 checks are deferred to first boot.",
+            installer,
         )
+        self.assertIn('[[ "${PRESERVE_EXISTING_LOGIN_ACCOUNT}" == "true" ]]', installer)
         self.assertIn(
             "Preserving existing hoardarr administrator login for this legacy development host.",
             installer,
         )
-        self.assertIn('usermod --lock --shell /usr/sbin/nologin hoardarr', installer)
+        self.assertIn("usermod --lock --shell /usr/sbin/nologin hoardarr", installer)
 
     def test_plan_cli_does_not_create_output_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "planned-output"
             result = subprocess.run(
-                [sys.executable, str(BUILDER_PATH), "plan", "--output-dir", str(output)],
+                [
+                    sys.executable,
+                    str(BUILDER_PATH),
+                    "plan",
+                    "--output-dir",
+                    str(output),
+                ],
                 cwd=ROOT,
                 check=True,
                 capture_output=True,
@@ -359,7 +388,11 @@ class BuildPlanTests(unittest.TestCase):
 
 
 def is_supported_installer_test_host() -> bool:
-    if shutil.which("bash") is None or sys.platform != "linux" or platform.machine() != "x86_64":
+    if (
+        shutil.which("bash") is None
+        or sys.platform != "linux"
+        or platform.machine() != "x86_64"
+    ):
         return False
     try:
         values = {}
@@ -397,6 +430,7 @@ class InstallerPlanTests(unittest.TestCase):
                 "hardware",
                 "packages",
                 "frontend",
+                "evidence",
             ):
                 (bundle / directory).mkdir(parents=True, exist_ok=True)
             shutil.copy2(INSTALLER_PATH, bundle / "scripts" / "install.sh")
@@ -409,7 +443,9 @@ class InstallerPlanTests(unittest.TestCase):
             (bundle / "config" / "hoardarr.env").write_text(
                 "HOARDARR_BIND_HOST=127.0.0.1\n", encoding="utf-8"
             )
-            (bundle / "scripts" / "detect-hardware.py").write_text("pass\n", encoding="utf-8")
+            (bundle / "scripts" / "detect-hardware.py").write_text(
+                "pass\n", encoding="utf-8"
+            )
             (bundle / "scripts" / "bootstrap.py").write_text("pass\n", encoding="utf-8")
             for package_manifest in (
                 "appliance-core.txt",
@@ -418,7 +454,7 @@ class InstallerPlanTests(unittest.TestCase):
                 "versions.env",
             ):
                 (bundle / "packages" / package_manifest).write_text(
-                    "attr\nlldpd\nmergerfs\nsamba\n"
+                    "attr\nlldpd\nmergerfs\nsamba\nsnapraid\n"
                     if package_manifest == "appliance-core.txt"
                     else "placeholder\n",
                     encoding="utf-8",
@@ -441,8 +477,20 @@ class InstallerPlanTests(unittest.TestCase):
             (bundle / "frontend" / "index.html").write_text(
                 "<!doctype html><title>Hoardarr</title>\n", encoding="utf-8"
             )
-            (bundle / "wheels" / "fake-1-py3-none-any.whl").write_text("wheel\n", encoding="utf-8")
-            (bundle / "hardware" / "providers.json").write_text("{}\n", encoding="utf-8")
+            (bundle / "wheels" / "fake-1-py3-none-any.whl").write_text(
+                "wheel\n", encoding="utf-8"
+            )
+            (bundle / "hardware" / "providers.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            for evidence in (
+                "SBOM.cdx.json",
+                "npm-licenses.json",
+                "provenance.json",
+                "python-licenses.json",
+                "vulnerability-status.json",
+            ):
+                (bundle / "evidence" / evidence).write_text("{}\n", encoding="utf-8")
             release = {
                 "schema": 1,
                 "name": "hoardarr",
