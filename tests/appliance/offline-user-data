@@ -32,7 +32,48 @@ autoinstall:
     - curtin in-target --target=/target -- mkdir -p /opt/hoardarr-install /usr/local/lib/hoardarr
     - cp /cdrom/hoardarr/install-offline-payload.sh /target/opt/hoardarr-install/install-offline-payload.sh
     - chmod 0755 /target/opt/hoardarr-install/install-offline-payload.sh
-    - /cdrom/hoardarr/install-offline-payload.sh /target /cdrom/hoardarr/offline-repository
+    - |
+      bash -c '
+        set -uo pipefail
+        target_log=/target/var/log/hoardarr-offline-payload.log
+        [[ -d /target && ! -L /target ]] || exit 120
+        install -d -m 0755 /target/var/log || exit 121
+        : >"$target_log" || exit 122
+        [[ -f "$target_log" && ! -L "$target_log" && -w "$target_log" ]] || exit 123
+        [[ -c /dev/ttyS0 && -w /dev/ttyS0 ]] || exit 124
+        stty -F /dev/ttyS0 -opost || exit 126
+        stty -F /dev/ttyS0 -a | grep -qw -- -opost || exit 127
+        emit_both() {
+          printf "%s\n" "$1" | tee -a "$target_log" /dev/ttyS0 >/dev/null
+        }
+        emit_both HOARDARR_OFFLINE_PAYLOAD_BEGIN || exit 125
+        set +e
+        /cdrom/hoardarr/install-offline-payload.sh /target /cdrom/hoardarr/offline-repository 2>&1 | tee -a "$target_log" /dev/ttyS0
+        pipeline_status=("${PIPESTATUS[@]}")
+        payload_status="${pipeline_status[0]}"
+        capture_ok=true
+        [[ "${pipeline_status[1]}" -eq 0 ]] || capture_ok=false
+        emit_both "" || capture_ok=false
+        emit_both HOARDARR_OFFLINE_PAYLOAD_END || capture_ok=false
+        emit_both "HOARDARR_OFFLINE_PAYLOAD_EXIT=$payload_status" || capture_ok=false
+        sync "$target_log" || capture_ok=false
+        if [[ "$capture_ok" == true ]]; then
+          target_size="$(wc -c <"$target_log")" || capture_ok=false
+        fi
+        if [[ "$capture_ok" == true ]]; then
+          target_sha256="$(sha256sum "$target_log" | cut -d" " -f1)" || capture_ok=false
+        fi
+        if [[ "$capture_ok" == true ]]; then
+          printf "%s\n" "HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=$target_size" >/dev/ttyS0 || capture_ok=false
+        fi
+        if [[ "$capture_ok" == true ]]; then
+          printf "%s\n" "HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SHA256=$target_sha256" >/dev/ttyS0 || capture_ok=false
+        fi
+        if [[ "$capture_ok" == true ]]; then
+          printf "%s\n" HOARDARR_OFFLINE_PAYLOAD_CAPTURE_COMPLETE >/dev/ttyS0 || capture_ok=false
+        fi
+        exit "$payload_status"
+      '
     - cp /cdrom/hoardarr/verify-offline-appliance.sh /target/usr/local/lib/hoardarr/verify-offline-appliance.sh
     - chmod 0755 /target/usr/local/lib/hoardarr/verify-offline-appliance.sh
     - cp /cdrom/hoardarr/hoardarr-release.tar.gz /target/opt/hoardarr-install/release.tar.gz

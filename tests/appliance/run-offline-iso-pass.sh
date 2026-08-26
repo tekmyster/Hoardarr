@@ -16,7 +16,6 @@ mkdir -p "$output"
 for command_name in qemu-img qemu-system-x86_64 sha256sum timeout python3 ps; do
     command -v "$command_name" >/dev/null || { echo "missing command: $command_name" >&2; exit 1; }
 done
-
 os_disk="$output/os.qcow2"
 protected_one="$output/protected-one.raw"
 protected_two="$output/protected-two.raw"
@@ -45,6 +44,15 @@ diagnostic_mode="${HOARDARR_OFFLINE_DIAGNOSTIC_MODE:-false}"
     echo "HOARDARR_OFFLINE_DIAGNOSTIC_MODE must be true or false" >&2
     exit 2
 }
+payload_capture_parser=""
+if [[ "$diagnostic_mode" == true ]]; then
+    script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    payload_capture_parser="$script_root/parse-offline-payload-capture.py"
+    [[ -f "$payload_capture_parser" && ! -L "$payload_capture_parser" ]] || {
+        echo "offline payload capture parser is missing" >&2
+        exit 1
+    }
+fi
 
 write_diagnostic_metadata() {
     local classification="$1"
@@ -94,6 +102,9 @@ payload = {
     "first_boot_started": first_boot_started or None,
     "first_boot_finished": first_boot_finished or None,
 }
+capture_path = pathlib.Path(destination).with_name("offline-payload-capture.json")
+if capture_path.is_file():
+    payload["offline_payload_capture"] = json.loads(capture_path.read_text(encoding="utf-8"))
 pathlib.Path(destination).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
 }
@@ -152,7 +163,7 @@ import time
 monitor_socket, frame, captured_at = sys.argv[1:]
 commands = ("info status", "info cpus", f'screendump "{frame}"')
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as monitor:
-    monitor.settimeout(3)
+    monitor.settimeout(1)
     monitor.connect(monitor_socket)
     chunks = []
     try:
@@ -161,7 +172,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as monitor:
         pass
     for command in commands:
         monitor.sendall(command.encode("utf-8") + b"\n")
-        time.sleep(0.35)
+        time.sleep(0.2)
         try:
             chunks.append(monitor.recv(65536))
         except TimeoutError:
@@ -179,8 +190,10 @@ run_diagnostic_installer() {
     local frame_number=0
     local next_frame=0
     local timed_out=false
+    local payload_failure_observed=false
+    local payload_capture_invalid=false
     local qemu_exit=0
-    local now elapsed captured_at frame
+    local now elapsed captured_at frame payload_parser_status
     mkdir -p "$output/frames"
     : >"$output/installer-serial.log"
     : >"$monitor_log"
@@ -227,9 +240,46 @@ run_diagnostic_installer() {
                 next_frame=$(( elapsed + 10 ))
             fi
         fi
+        set +e
+        python3 "$payload_capture_parser" \
+            "$output/installer-serial.log" \
+            "$output/offline-payload-console.log" \
+            "$output/offline-payload-target-log.reconstructed.log" \
+            "$output/offline-payload-capture.json" \
+            2>"$output/offline-payload-capture-parser.stderr"
+        payload_parser_status=$?
+        set -e
+        if (( payload_parser_status == 10 )); then
+            payload_failure_observed=true
+            sleep 5
+            captured_at="$(date --iso-8601=seconds)"
+            elapsed=$(( $(date +%s) - started_epoch ))
+            printf -v frame '%s/frames/installer-%04d.ppm' "$output" "$frame_number"
+            if monitor_snapshot "$monitor_socket" "$frame" "$captured_at" \
+                >>"$monitor_log" 2>&1; then
+                frame_number=$(( frame_number + 1 ))
+            else
+                payload_capture_invalid=true
+            fi
+            ps -p "$qemu_pid" -o pid=,stat=,time=,%cpu=,rss=,vsz= |
+                awk -v timestamp="$captured_at" -v elapsed="$elapsed" \
+                    '{print timestamp "\t" elapsed "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6}' \
+                    >>"$process_log" || payload_capture_invalid=true
+            break
+        elif (( payload_parser_status == 21 )); then
+            payload_capture_invalid=true
+        fi
         sleep 5
     done
 
+    if [[ "$payload_failure_observed" == true ]]; then
+        kill -TERM "$qemu_pid" 2>/dev/null || true
+        for _ in {1..3}; do
+            kill -0 "$qemu_pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -KILL "$qemu_pid" 2>/dev/null || true
+    fi
     set +e
     wait "$runner_pid"
     qemu_exit=$?
@@ -240,6 +290,41 @@ run_diagnostic_installer() {
         timed_out=true
     fi
     rm -f -- "$monitor_socket"
+
+    if [[ "$payload_failure_observed" != true ]]; then
+        set +e
+        python3 "$payload_capture_parser" \
+            "$output/installer-serial.log" \
+            "$output/offline-payload-console.log" \
+            "$output/offline-payload-target-log.reconstructed.log" \
+            "$output/offline-payload-capture.json" \
+            2>"$output/offline-payload-capture-parser.stderr"
+        payload_parser_status=$?
+        set -e
+        if (( payload_parser_status == 10 )); then
+            payload_failure_observed=true
+        elif (( payload_parser_status == 21 )); then
+            payload_capture_invalid=true
+        fi
+    fi
+
+    if [[ "$payload_failure_observed" == true && "$payload_capture_invalid" != true ]]; then
+        write_diagnostic_metadata offline_payload_failure_observed "$qemu_exit" "$install_end" "$elapsed"
+        if ! finalize_diagnostic_evidence; then
+            echo "diagnostic evidence finalization was incomplete" >&2
+            return 2
+        fi
+        echo "offline payload failure was captured exactly" >&2
+        return 1
+    fi
+    if [[ "$payload_capture_invalid" == true ]]; then
+        write_diagnostic_metadata offline_payload_capture_invalid "$qemu_exit" "$install_end" "$elapsed"
+        if ! finalize_diagnostic_evidence; then
+            echo "diagnostic evidence finalization was incomplete" >&2
+        fi
+        echo "offline payload capture was malformed or inconsistent" >&2
+        return 2
+    fi
 
     if [[ "$timed_out" == true ]]; then
         write_diagnostic_metadata installer_timeout "$qemu_exit" "$install_end" "$elapsed"

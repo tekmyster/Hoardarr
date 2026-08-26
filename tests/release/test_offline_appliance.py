@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -212,6 +214,163 @@ Description: Backup program for disk arrays
             success_path.index("finalize_diagnostic_evidence"),
         )
         self.assertNotIn('cat >"$output/run.json"', success_path.split("else", 1)[0])
+
+    def test_ci_payload_wrapper_preserves_exact_argv_and_status(self) -> None:
+        user_data = (ROOT / "tests" / "appliance" / "offline-user-data").read_text(
+            encoding="utf-8"
+        )
+        exact_argv = (
+            "/cdrom/hoardarr/install-offline-payload.sh "
+            "/target /cdrom/hoardarr/offline-repository"
+        )
+        self.assertEqual(user_data.count(exact_argv), 1)
+        self.assertIn('pipeline_status=("${PIPESTATUS[@]}")', user_data)
+        self.assertIn('payload_status="${pipeline_status[0]}"', user_data)
+        self.assertIn('[[ "${pipeline_status[1]}" -eq 0 ]] || capture_ok=false', user_data)
+        self.assertIn('exit "$payload_status"', user_data)
+        payload_tail = user_data.split('pipeline_status=("${PIPESTATUS[@]}")', 1)[1]
+        self.assertNotIn("set -e", payload_tail.split('exit "$payload_status"', 1)[0])
+        self.assertIn("/target/var/log/hoardarr-offline-payload.log", user_data)
+        self.assertIn("[[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]", user_data)
+        self.assertIn("stty -F /dev/ttyS0 -opost || exit 126", user_data)
+        self.assertIn("stty -F /dev/ttyS0 -a | grep -qw -- -opost || exit 127", user_data)
+        self.assertNotIn("|| true", payload_tail.split('exit "$payload_status"', 1)[0])
+        for required_operation in (
+            'emit_both HOARDARR_OFFLINE_PAYLOAD_END || capture_ok=false',
+            'emit_both "HOARDARR_OFFLINE_PAYLOAD_EXIT=$payload_status" || capture_ok=false',
+            'sync "$target_log" || capture_ok=false',
+            'target_size="$(wc -c <"$target_log")" || capture_ok=false',
+            'target_sha256="$(sha256sum "$target_log" | cut -d" " -f1)" || capture_ok=false',
+        ):
+            self.assertIn(required_operation, user_data)
+        complete_guard = user_data.rsplit(
+            'printf "%s\\n" HOARDARR_OFFLINE_PAYLOAD_CAPTURE_COMPLETE', 1
+        )[0].rsplit('if [[ "$capture_ok" == true ]]', 1)
+        self.assertEqual(len(complete_guard), 2)
+        for marker in (
+            "HOARDARR_OFFLINE_PAYLOAD_BEGIN",
+            "HOARDARR_OFFLINE_PAYLOAD_END",
+            "HOARDARR_OFFLINE_PAYLOAD_EXIT=",
+            "HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=",
+            "HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SHA256=",
+            "HOARDARR_OFFLINE_PAYLOAD_CAPTURE_COMPLETE",
+        ):
+            self.assertIn(marker, user_data)
+
+    def test_payload_capture_parser_is_fail_closed(self) -> None:
+        parser = ROOT / "tests" / "appliance" / "parse-offline-payload-capture.py"
+
+        def run_capture(serial: bytes) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            root = pathlib.Path(temporary.name)
+            serial_path = root / "serial.log"
+            serial_path.write_bytes(serial)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(parser),
+                    str(serial_path),
+                    str(root / "console.log"),
+                    str(root / "target.log"),
+                    str(root / "capture.json"),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            return result, root
+
+        def complete(status: int, payload: bytes = b"decisive failure\n") -> bytes:
+            target = (
+                b"HOARDARR_OFFLINE_PAYLOAD_BEGIN\n"
+                + payload
+                + b"HOARDARR_OFFLINE_PAYLOAD_END\n"
+                + f"HOARDARR_OFFLINE_PAYLOAD_EXIT={status}\n".encode()
+            )
+            return (
+                b"prefix\n"
+                + target
+                + f"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE={len(target)}\n".encode()
+                + b"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SHA256="
+                + hashlib.sha256(target).hexdigest().encode()
+                + b"\nHOARDARR_OFFLINE_PAYLOAD_CAPTURE_COMPLETE\n"
+            )
+
+        nonzero, nonzero_root = run_capture(complete(17))
+        self.assertEqual(nonzero.returncode, 10)
+        self.assertEqual(
+            json.loads((nonzero_root / "capture.json").read_text())["payload_status"], 17
+        )
+        self.assertIn(b"decisive failure", (nonzero_root / "target.log").read_bytes())
+
+        zero, _ = run_capture(complete(0))
+        self.assertEqual(zero.returncode, 0)
+        crlf_stream = complete(17).replace(b"\n", b"\r\n")
+        crlf, crlf_root = run_capture(crlf_stream)
+        self.assertEqual(crlf.returncode, 10)
+        crlf_metadata = json.loads((crlf_root / "capture.json").read_text())
+        self.assertEqual(crlf_metadata["serial_transform"], "onlcr_crlf")
+        expected_target = complete(17).split(b"prefix\n", 1)[1].split(
+            b"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=", 1
+        )[0]
+        self.assertEqual((crlf_root / "target.log").read_bytes(), expected_target)
+        self.assertEqual(
+            crlf_metadata["target_log_sha256"], hashlib.sha256(expected_target).hexdigest()
+        )
+        absent, _ = run_capture(b"")
+        self.assertEqual(absent.returncode, 20)
+        partial, _ = run_capture(b"HOARDARR_OFFLINE_PAYLOAD_BEGIN\n")
+        self.assertEqual(partial.returncode, 20)
+        malformed_bytes = complete(1).replace(
+            b"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=",
+            b"HOARDARR_OFFLINE_PAYLOAD_TARGET_LOG_SIZE=999",
+        )
+        malformed, malformed_root = run_capture(malformed_bytes)
+        self.assertEqual(malformed.returncode, 21)
+        self.assertFalse((malformed_root / "capture.json").exists())
+        duplicate, _ = run_capture(
+            complete(1).replace(
+                b"HOARDARR_OFFLINE_PAYLOAD_BEGIN\n",
+                b"HOARDARR_OFFLINE_PAYLOAD_BEGIN\nHOARDARR_OFFLINE_PAYLOAD_BEGIN\n",
+            )
+        )
+        self.assertEqual(duplicate.returncode, 21)
+        duplicate_complete, _ = run_capture(
+            complete(1) + b"HOARDARR_OFFLINE_PAYLOAD_CAPTURE_COMPLETE\n"
+        )
+        self.assertEqual(duplicate_complete.returncode, 21)
+        malformed_then_complete, malformed_then_root = run_capture(
+            malformed_bytes + complete(1)
+        )
+        self.assertEqual(malformed_then_complete.returncode, 21)
+        self.assertFalse((malformed_then_root / "capture.json").exists())
+        arbitrary_cr, arbitrary_cr_root = run_capture(
+            complete(1).replace(b"decisive failure", b"decisive\rfailure")
+        )
+        self.assertEqual(arbitrary_cr.returncode, 21)
+        self.assertFalse((arbitrary_cr_root / "capture.json").exists())
+
+    def test_diagnostic_early_stop_requires_valid_nonzero_capture(self) -> None:
+        harness = (ROOT / "tests" / "appliance" / "run-offline-iso-pass.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("if (( payload_parser_status == 10 )); then", harness)
+        self.assertIn("payload_failure_observed=true\n            sleep 5", harness)
+        self.assertIn("for _ in {1..3}; do", harness)
+        self.assertIn('if [[ "$payload_failure_observed" == true ]]', harness)
+        self.assertIn("offline_payload_failure_observed", harness)
+        self.assertIn("offline_payload_capture_invalid", harness)
+        self.assertIn(
+            'if [[ "$payload_failure_observed" == true && "$payload_capture_invalid" != true ]]',
+            harness,
+        )
+        self.assertNotIn(
+            "payload_parser_status == 0 )); then\n            payload_failure_observed", harness
+        )
+        parser_guard = harness.split('if [[ "$diagnostic_mode" == true ]]; then', 1)[1]
+        self.assertIn('payload_capture_parser="$script_root/', parser_guard)
+        self.assertNotIn("parse-offline-payload-capture.py", harness.split(parser_guard, 1)[0])
 
     def test_repository_tree_verification_rejects_tampering(self) -> None:
         required = (
