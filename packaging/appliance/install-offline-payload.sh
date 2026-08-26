@@ -609,6 +609,9 @@ declare -A temporary_mask_inodes=()
 temporary_masks_cleanup_complete=false
 policy_cleanup_complete=false
 service_guard_cleanup_complete=false
+package_transaction_started=false
+denied_units_finalized=false
+service_readback_complete=false
 declare -A preserved_unit_masks=()
 declare -A preserved_unit_mask_inodes=()
 declare -A preserved_package_aliases=()
@@ -616,6 +619,19 @@ declare -A preserved_package_alias_inodes=()
 declare -A preserved_package_alias_targets=()
 declare -A preserved_package_alias_canonical_units=()
 declare -A policy_guarded_canonical_units=()
+declare -A policy_guarded_absent_units=()
+recovery_guard_files=()
+recovery_guard_created_directories=()
+declare -A recovery_guard_file_inodes=()
+declare -A recovery_guard_contents=()
+declare -A recovery_guard_condition_paths=()
+declare -A recovery_guard_directory_inodes=()
+declare -A recovery_guard_paths_by_unit=()
+declare -A recovery_guard_path_owners=()
+declare -A recovery_guard_paths_retained=()
+declare -A recovery_guard_retained_states=()
+recovery_guards_cleanup_complete=false
+recovery_guard_authorization_root="$mask_root/.hoardarr-service-start-authorized"
 entry_is_root_owned() {
     [[ "$(stat -c %u:%g -- "$1")" == 0:0 ]]
 }
@@ -743,6 +759,261 @@ validate_preserved_unit_objects() {
     done
     return "$status"
 }
+prepare_recovery_unit_guard() {
+    local unit="$1"
+    local guarded_unit="$unit"
+    local directory
+    local path
+    local inode
+    local temporary
+    local parent
+    local condition_path
+    local guard_content
+    [[ ! -e "$recovery_guard_authorization_root" && \
+        ! -L "$recovery_guard_authorization_root" ]] || {
+        echo "offline install recovery authorization root unexpectedly exists" >&2
+        return 1
+    }
+    for parent in "$target/etc" "$target/etc/systemd" "$mask_root"; do
+        [[ -d "$parent" && ! -L "$parent" ]] || {
+            echo "offline install recovery guard parent is unsafe: $parent" >&2
+            return 1
+        }
+        entry_is_root_owned "$parent" || {
+            echo "offline install recovery guard parent is not root-owned: $parent" >&2
+            return 1
+        }
+    done
+    if [[ "$unit" == iscsi.service && \
+        -n "${preserved_package_aliases[iscsi.service]+present}" ]]; then
+        guarded_unit=open-iscsi.service
+    fi
+    if [[ "$unit" == open-iscsi.service && \
+        -n "${preserved_package_aliases[iscsi.service]+present}" ]]; then
+        guarded_unit=open-iscsi.service
+    fi
+    directory="$mask_root/$guarded_unit.d"
+    path="$directory/90-hoardarr-offline-recovery.conf"
+    condition_path="/etc/systemd/system/.hoardarr-service-start-authorized/$guarded_unit"
+    guard_content="$(printf '[Unit]\nConditionPathExists=%s\n' "$condition_path")"$'\n'
+    recovery_guard_paths_by_unit["$unit"]="$path"
+    if [[ -n "${recovery_guard_path_owners[$path]+present}" ]]; then
+        return 0
+    fi
+    if [[ -e "$path" || -L "$path" ]]; then
+        echo "offline install refuses to replace a pre-existing recovery guard: $unit" >&2
+        return 1
+    fi
+    if [[ -e "$directory" || -L "$directory" ]]; then
+        [[ -d "$directory" && ! -L "$directory" ]] || {
+            echo "offline install recovery guard directory is unsafe: $unit" >&2
+            return 1
+        }
+        entry_is_root_owned "$directory" || {
+            echo "offline install recovery guard directory is not root-owned: $unit" >&2
+            return 1
+        }
+    else
+        if ! mkdir -- "$directory"; then
+            return 1
+        fi
+        inode="$(stat -c %i -- "$directory")" || {
+            if ! rmdir -- "$directory" 2>/dev/null; then
+                echo "offline install cannot roll back recovery guard directory: $unit" >&2
+            fi
+            return 1
+        }
+        recovery_guard_directory_inodes["$directory"]="$inode"
+        recovery_guard_created_directories+=("$directory")
+    fi
+    temporary="$(mktemp --tmpdir="$directory" .hoardarr-recovery.XXXXXX)" || return 1
+    if ! printf '%s' "$guard_content" >"$temporary" || \
+        ! chmod 0644 -- "$temporary"; then
+        rm -f -- "$temporary" || return 1
+        return 1
+    fi
+    inode="$(stat -c %i -- "$temporary")" || {
+        rm -f -- "$temporary" || return 1
+        return 1
+    }
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+        rm -f -- "$temporary" || return 1
+        return 1
+    }
+    if ! mv -n -- "$temporary" "$path"; then
+        rm -f -- "$temporary" || return 1
+        return 1
+    fi
+    if [[ -e "$temporary" || -L "$temporary" ]]; then
+        rm -f -- "$temporary" || return 1
+        return 1
+    fi
+    recovery_guard_file_inodes["$path"]="$inode"
+    recovery_guard_contents["$path"]="$guard_content"
+    recovery_guard_condition_paths["$path"]="$condition_path"
+    recovery_guard_files+=("$path")
+    recovery_guard_path_owners["$path"]="$unit"
+    [[ -f "$path" && ! -L "$path" && "$(cat -- "$path")"$'\n' == \
+        "$guard_content" && "$(stat -c %i -- "$path")" == "$inode" ]] || return 1
+    entry_is_root_owned "$path" || return 1
+}
+validate_recovery_unit_guards() {
+    local path
+    for path in "${recovery_guard_files[@]}"; do
+        [[ -n "${recovery_guard_file_inodes[$path]-}" && -f "$path" && ! -L "$path" && \
+            "$(stat -c %i -- "$path")" == "${recovery_guard_file_inodes[$path]}" && \
+            -n "${recovery_guard_contents[$path]-}" && \
+            "$(cat -- "$path")"$'\n' == "${recovery_guard_contents[$path]}" ]] || {
+            echo "offline install recovery guard changed: $path" >&2
+            return 1
+        }
+        entry_is_root_owned "$path" || return 1
+    done
+}
+retain_recovery_unit_guards() {
+    local path
+    local receipt="$state_root/service-guard-recovery.txt"
+    validate_recovery_unit_guards || return 1
+    : >"$receipt" || return 1
+    printf 'service guards retained: finalization=%s readback=%s\n' \
+        "$denied_units_finalized" "$service_readback_complete" >>"$receipt" || return 1
+    for path in "${recovery_guard_files[@]}"; do
+        printf 'recovery_guard\t%s\t%s\t%s\n' \
+            "${recovery_guard_file_inodes[$path]}" \
+            "$(sha256sum -- "$path" | awk '{print $1}')" "$path" \
+            >>"$receipt" || return 1
+    done
+    sync -f "$receipt" 2>/dev/null || return 1
+}
+remove_recovery_unit_guards() {
+    local index
+    local path
+    local directory
+    local status=0
+    local remaining_files=()
+    local remaining_directories=()
+    validate_recovery_unit_guards || return 1
+    for (( index=${#recovery_guard_files[@]}-1; index>=0; index-- )); do
+        path="${recovery_guard_files[$index]}"
+        if [[ -n "${recovery_guard_paths_retained[$path]+present}" ]]; then
+            remaining_files=("$path" "${remaining_files[@]}")
+            continue
+        fi
+        if ! rm -f -- "$path"; then
+            status=1
+            remaining_files=("$path" "${remaining_files[@]}")
+            continue
+        fi
+        unset 'recovery_guard_file_inodes[$path]' 'recovery_guard_path_owners[$path]' \
+            'recovery_guard_contents[$path]' 'recovery_guard_condition_paths[$path]'
+    done
+    recovery_guard_files=("${remaining_files[@]}")
+    (( status == 0 )) || return "$status"
+    for (( index=${#recovery_guard_created_directories[@]}-1; index>=0; index-- )); do
+        directory="${recovery_guard_created_directories[$index]}"
+        if [[ -n "$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+            remaining_directories=("$directory" "${remaining_directories[@]}")
+            continue
+        fi
+        if [[ ! -d "$directory" || -L "$directory" || \
+            "$(stat -c %i -- "$directory")" != \
+            "${recovery_guard_directory_inodes[$directory]-}" ]] || \
+            ! rmdir -- "$directory"; then
+            status=1
+            remaining_directories=("$directory" "${remaining_directories[@]}")
+            continue
+        fi
+        unset 'recovery_guard_directory_inodes[$directory]'
+    done
+    recovery_guard_created_directories=("${remaining_directories[@]}")
+    return "$status"
+}
+write_retained_recovery_guard_manifest() {
+    local path
+    local unit
+    local enabled_state
+    local canonical_path
+    local manifest_tsv="$state_root/.service-retained-guards.tsv.tmp"
+    local manifest_json="$state_root/service-retained-guards.json"
+    : >"$manifest_tsv" || return 1
+    validate_recovery_unit_guards || return 1
+    for path in "${recovery_guard_files[@]}"; do
+        [[ -n "${recovery_guard_paths_retained[$path]+present}" ]] || {
+            echo "offline install left an unclassified recovery guard: $path" >&2
+            return 1
+        }
+        unit="${recovery_guard_paths_retained[$path]}"
+        enabled_state="${recovery_guard_retained_states[$path]-}"
+        [[ "$unit" =~ ^[A-Za-z0-9@_.:-]+\.(service|socket|timer|target)$ && \
+            "$enabled_state" =~ ^(static|indirect|generated|transient)$ ]] || {
+            echo "offline install retained guard classification is unsafe: $path" >&2
+            return 1
+        }
+        [[ "$path" == "$target"/etc/systemd/system/*/90-hoardarr-offline-recovery.conf ]] || {
+            echo "offline install retained guard path is outside the fixed boundary: $path" >&2
+            return 1
+        }
+        canonical_path="${path#"$target"}"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$unit" "$canonical_path" "${recovery_guard_file_inodes[$path]}" \
+            "$(sha256sum -- "$path" | awk '{print $1}')" "$enabled_state" \
+            "${recovery_guard_condition_paths[$path]-}" \
+            >>"$manifest_tsv" || return 1
+    done
+    python3 - "$state_root/service-policy-readback.json" "$manifest_tsv" \
+        "$manifest_json" <<'PY'
+import json, pathlib, re, sys
+policy_path=pathlib.Path(sys.argv[1])
+source_path=pathlib.Path(sys.argv[2])
+output_path=pathlib.Path(sys.argv[3])
+policy=json.loads(policy_path.read_text(encoding="utf-8"))
+expected={
+    row["unit"]:row["enabled_state"]
+    for row in policy["units"]
+    if row["start_boundary"] == "condition-drop-in"
+}
+guards=[]
+seen=set()
+for raw in source_path.read_text(encoding="utf-8").splitlines():
+    fields=raw.split("\t")
+    if len(fields) != 6:
+        raise SystemExit("retained service guard receipt has invalid fields")
+    unit,path,inode,digest,state,condition_path=fields
+    if unit in seen or not re.fullmatch(r"[A-Za-z0-9@_.:-]+\.(service|socket|timer|target)",unit):
+        raise SystemExit("retained service guard receipt has invalid unit identity")
+    if not re.fullmatch(r"/etc/systemd/system/[^/]+/90-hoardarr-offline-recovery\.conf",path):
+        raise SystemExit("retained service guard receipt has invalid canonical path")
+    if not inode.isdigit() or int(inode) <= 0 or not re.fullmatch(r"[0-9a-f]{64}",digest):
+        raise SystemExit("retained service guard receipt has invalid file identity")
+    if state not in {"static","indirect","generated","transient"}:
+        raise SystemExit("retained service guard receipt has invalid unit state")
+    if condition_path != f"/etc/systemd/system/.hoardarr-service-start-authorized/{unit}":
+        raise SystemExit("retained service guard receipt has unsafe condition identity")
+    if expected.get(unit) != state:
+        raise SystemExit("retained service guard receipt disagrees with policy readback")
+    seen.add(unit)
+    guards.append({
+        "unit":unit,
+        "canonical_path":path,
+        "inode":int(inode),
+        "sha256":digest,
+        "reason":"unit-file-state-requires-persistent-start-boundary",
+        "enabled_state":state,
+        "condition_path":condition_path,
+    })
+if seen != set(expected):
+    raise SystemExit("retained service guard receipt does not exactly cover guarded units")
+document={
+    "schema_version":1,
+    "supported_activation_action":"remove-exact-verified-guard-only",
+    "removal_requirement":"later-authorized-selection-must-verify-unit-path-inode-and-sha256-before-removal",
+    "guards":guards,
+}
+output_path.write_text(json.dumps(document,indent=2,sort_keys=True)+"\n",encoding="utf-8")
+PY
+    rm -f -- "$manifest_tsv" || return 1
+    sync -f "$manifest_json" 2>/dev/null || return 1
+}
 prepare_temporary_unit_mask() {
     local destination="$1"
     local unit="$2"
@@ -785,19 +1056,12 @@ prepare_temporary_unit_mask() {
         echo "offline install refuses to replace a pre-existing unit override: $unit" >&2
         return 1
     fi
-    ln -s -- /dev/null "$destination"
-    new_inode="$(stat -c %i -- "$destination")" || {
-        if [[ -L "$destination" && "$(readlink -- "$destination")" == /dev/null ]]; then
-            rm -f -- "$destination" || {
-                echo "offline install cannot remove an untracked temporary unit mask: $unit" >&2
-                return 1
-            }
-        fi
-        echo "offline install cannot record temporary unit mask identity: $unit" >&2
-        return 1
-    }
-    temporary_mask_inodes["$destination"]="$new_inode"
-    temporary_masks+=("$destination")
+    # A newly absent denied unit remains absent while packages run.  Creating a
+    # mask here makes deb-systemd-helper/systemctl preset fail for valid Noble
+    # packages (notably pcp/pmcd).  Start denial is instead provided by the
+    # policy-rc.d guard and SYSTEMD_OFFLINE, and finalization disables every
+    # fixed validated unit before either guard is removed.
+    policy_guarded_absent_units["$unit"]="$destination"
 }
 cleanup_temporary_masks() {
     local mask
@@ -825,6 +1089,19 @@ cleanup_temporary_masks() {
 }
 cleanup_service_guards() {
     local cleanup_status=0
+    if [[ "$package_transaction_started" == true && ( \
+        "$denied_units_finalized" != true || \
+        "$service_readback_complete" != true ) ]]; then
+        retain_recovery_unit_guards || cleanup_status=1
+        return 1
+    fi
+    if [[ "$recovery_guards_cleanup_complete" != true ]]; then
+        if remove_recovery_unit_guards; then
+            recovery_guards_cleanup_complete=true
+        else
+            cleanup_status=1
+        fi
+    fi
     if [[ "$temporary_masks_cleanup_complete" != true ]]; then
         if cleanup_temporary_masks; then
             temporary_masks_cleanup_complete=true
@@ -840,9 +1117,11 @@ cleanup_service_guards() {
         fi
         (( cleanup_status != 0 )) || policy_cleanup_complete=true
     fi
-    if [[ "$temporary_masks_cleanup_complete" == true && \
+    if [[ "$recovery_guards_cleanup_complete" == true && \
+        "$temporary_masks_cleanup_complete" == true && \
         "$policy_cleanup_complete" == true ]]; then
         validate_preserved_unit_objects || cleanup_status=1
+        validate_recovery_unit_guards || cleanup_status=1
         (( cleanup_status != 0 )) || service_guard_cleanup_complete=true
     fi
     return "$cleanup_status"
@@ -880,6 +1159,23 @@ disable_unmasked_units() {
     local canonical_state
     local canonical_state_status
     local canonical_handled=false
+    local canonical_active_state
+    local canonical_active_status
+    local destination
+    local enabled_state
+    local enabled_status
+    local active_state
+    local active_status
+    local disable_status
+    local start_boundary
+    local readback_tmp="$state_root/.service-policy-readback.tsv.tmp"
+    : >"$readback_tmp" || return 1
+    validate_preserved_unit_objects || return 1
+    [[ ! -e "$recovery_guard_authorization_root" && \
+        ! -L "$recovery_guard_authorization_root" ]] || {
+        echo "offline install recovery authorization root unexpectedly exists" >&2
+        return 1
+    }
     for unit in "${denied_units[@]}"; do
         if [[ -n "${preserved_unit_masks[$unit]+present}" ]]; then
             preserved_mask="${preserved_unit_masks[$unit]}"
@@ -889,13 +1185,34 @@ disable_unmasked_units() {
                 echo "pre-existing unit mask changed during offline install: $unit" >&2
                 return 1
             fi
+            enabled_status=0
+            enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root="$target" \
+                is-enabled "$unit" 2>&1)" || enabled_status=$?
+            enabled_state="$(printf '%s\n' "$enabled_state" | head -n 1)"
+            [[ "$enabled_state" == masked && "$enabled_status" -eq 1 ]] || {
+                echo "pre-existing unit mask readback is not masked: $unit" >&2
+                return 1
+            }
+            active_status=0
+            active_state="$(SYSTEMD_OFFLINE=1 chroot "$target" systemctl \
+                is-active "$unit" 2>&1)" || active_status=$?
+            active_state="$(printf '%s\n' "$active_state" | head -n 1)"
+            [[ "$active_state" == inactive && "$active_status" -eq 3 ]] || {
+                echo "pre-existing masked unit is not inactive: $unit=$active_state" >&2
+                return 1
+            }
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$unit" "$enabled_state" "$enabled_status" "$active_state" "$active_status" \
+                pre-existing-mask \
+                >>"$readback_tmp" || return 1
             continue
         fi
         if [[ -n "${preserved_package_aliases[$unit]+present}" ]]; then
             alias_path="${preserved_package_aliases[$unit]}"
             canonical_unit="${preserved_package_alias_canonical_units[$unit]}"
             validate_preserved_unit_objects || return 1
-            chroot "$target" systemctl disable "$canonical_unit" >/dev/null 2>&1 || {
+            SYSTEMD_OFFLINE=1 systemctl --root="$target" disable "$canonical_unit" \
+                >/dev/null 2>&1 || {
                 echo "offline install could not disable canonical unit: $canonical_unit" >&2
                 return 1
             }
@@ -906,21 +1223,93 @@ disable_unmasked_units() {
                 return 1
             fi
             canonical_state_status=0
-            canonical_state="$(chroot "$target" systemctl is-enabled "$canonical_unit" 2>&1)" || \
+            canonical_state="$(SYSTEMD_OFFLINE=1 systemctl --root="$target" \
+                is-enabled "$canonical_unit" 2>&1)" || \
                 canonical_state_status=$?
             canonical_state="$(printf '%s\n' "$canonical_state" | head -n 1)"
             [[ "$canonical_state" == disabled && "$canonical_state_status" -eq 1 ]] || {
                 echo "offline install canonical unit is not disabled: $canonical_unit" >&2
                 return 1
             }
+            canonical_active_status=0
+            canonical_active_state="$(SYSTEMD_OFFLINE=1 chroot "$target" systemctl \
+                is-active "$canonical_unit" 2>&1)" || canonical_active_status=$?
+            canonical_active_state="$(printf '%s\n' "$canonical_active_state" | head -n 1)"
+            [[ "$canonical_active_state" == inactive && \
+                "$canonical_active_status" -eq 3 ]] || {
+                echo "offline install canonical unit is not inactive: $canonical_unit" >&2
+                return 1
+            }
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$unit" "$canonical_state" "$canonical_state_status" \
+                "$canonical_active_state" "$canonical_active_status" \
+                disabled-canonical \
+                >>"$readback_tmp" || return 1
+            unset 'preserved_package_aliases[$unit]' \
+                'preserved_package_alias_inodes[$unit]' \
+                'preserved_package_alias_targets[$unit]' \
+                'preserved_package_alias_canonical_units[$unit]'
             canonical_handled=true
             continue
         fi
         if [[ "$canonical_handled" == true && "$unit" == open-iscsi.service ]]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$unit" "$canonical_state" "$canonical_state_status" \
+                "$canonical_active_state" "$canonical_active_status" \
+                disabled-canonical \
+                >>"$readback_tmp" || return 1
             continue
         fi
-        chroot "$target" systemctl disable "$unit" >/dev/null 2>&1 || true
+        disable_status=0
+        SYSTEMD_OFFLINE=1 systemctl --root="$target" disable "$unit" \
+            >/dev/null 2>&1 || disable_status=$?
+        enabled_status=0
+        enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root="$target" \
+            is-enabled "$unit" 2>&1)" || enabled_status=$?
+        enabled_state="$(printf '%s\n' "$enabled_state" | head -n 1)"
+        case "$enabled_state" in
+            disabled|static|indirect|not-found|generated|transient) ;;
+            *)
+                echo "offline install denied unit remains enabled: $unit=$enabled_state" >&2
+                return 1
+                ;;
+        esac
+        if (( disable_status != 0 )) && [[ "$enabled_state" == disabled ]]; then
+            echo "offline install could not disable denied unit: $unit" >&2
+            return 1
+        fi
+        start_boundary=disabled-unit
+        if [[ "$enabled_state" =~ ^(static|indirect|generated|transient)$ ]]; then
+            destination="${recovery_guard_paths_by_unit[$unit]-}"
+            [[ -n "$destination" ]] || return 1
+            recovery_guard_paths_retained["$destination"]="$unit"
+            recovery_guard_retained_states["$destination"]="$enabled_state"
+            start_boundary=condition-drop-in
+        fi
+        destination="${policy_guarded_absent_units[$unit]-}"
+        if [[ -n "$destination" && ( -e "$destination" || -L "$destination" ) ]]; then
+            echo "offline install denied unit override appeared during installation: $unit" >&2
+            return 1
+        fi
+        active_status=0
+        active_state="$(SYSTEMD_OFFLINE=1 chroot "$target" systemctl \
+            is-active "$unit" 2>&1)" || active_status=$?
+        active_state="$(printf '%s\n' "$active_state" | head -n 1)"
+        [[ "$active_state" == inactive && "$active_status" -eq 3 ]] || {
+            echo "offline install denied unit is not inactive: $unit=$active_state" >&2
+            return 1
+        }
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$unit" "$enabled_state" "$enabled_status" "$active_state" "$active_status" \
+            "$start_boundary" \
+            >>"$readback_tmp" || return 1
     done
+    validate_preserved_unit_objects || return 1
+    [[ "$(wc -l <"$readback_tmp")" -eq "${#denied_units[@]}" ]] || return 1
+    mv -f -- "$readback_tmp" "$state_root/service-policy-readback.tsv" || return 1
+    sync -f "$state_root/service-policy-readback.tsv" 2>/dev/null || return 1
+    denied_units_finalized=true
+    service_readback_complete=true
 }
 trap 'exit_cleanup $?' EXIT
 trap 'signal_exit 129' HUP
@@ -933,6 +1322,7 @@ for unit in "${denied_units[@]}"; do
     }
     destination="$mask_root/$unit"
     prepare_temporary_unit_mask "$destination" "$unit"
+    prepare_recovery_unit_guard "$unit"
 done
 
 # Autoassembly/import is denied independently of service-start policy. These
@@ -981,15 +1371,30 @@ export DEBIAN_FRONTEND=noninteractive
 export LVM_SYSTEM_DIR=/opt/hoardarr-install/lvm-guard
 export NEEDRESTART_MODE=l
 export UCF_FORCE_CONFFOLD=1
+export SYSTEMD_OFFLINE=1
 prepare_runtime_mounts
+package_transaction_started=true
 chroot "$target" apt-get "${apt_options[@]}" update
 simulation="$(chroot "$target" apt-get "${apt_options[@]}" --simulate --no-install-recommends install "${exact_roots[@]}")"
 if grep -Eq '^(Remv|Purg) |DOWNGRADED' <<<"$simulation"; then
     echo "offline package transaction would remove or downgrade a package" >&2
     exit 1
 fi
+package_install_log="$state_root/package-install.log"
+install_exact_packages() {
 chroot "$target" apt-get "${apt_options[@]}" \
     --yes --no-install-recommends install "${exact_roots[@]}"
+}
+set +e
+install_exact_packages 2>&1 | tee "$package_install_log"
+package_install_status="${PIPESTATUS[0]}"
+set -e
+sync -f "$package_install_log"
+if grep -Fq 'Failed to preset unit' "$package_install_log"; then
+    echo "offline package transaction reported a unit preset failure" >&2
+    exit 1
+fi
+(( package_install_status == 0 )) || exit "$package_install_status"
 
 python3 - "$target" "$retained_repo/evidence/package-manifest.json" "$state_root/package-readback.json" <<'PY'
 import json, pathlib, subprocess, sys
@@ -1025,26 +1430,33 @@ audit="$(chroot "$target" dpkg --audit)"
 }
 chroot "$target" apt-get "${apt_options[@]}" --simulate check
 
-cleanup_service_guards
 disable_unmasked_units
 
-python3 - "$target" "$retained_repo/evidence/compatibility-matrix.json" "$state_root/service-policy-readback.json" <<'PY'
+python3 - "$target" "$retained_repo/evidence/compatibility-matrix.json" \
+    "$state_root/service-policy-readback.tsv" "$state_root/service-policy-readback.json" <<'PY'
 import json, pathlib, subprocess, sys
 target=pathlib.Path(sys.argv[1])
 matrix=json.load(open(sys.argv[2], encoding="utf-8"))
-states=[]
-for unit in matrix["denied_units"]:
-    result=subprocess.run(["systemctl",f"--root={target}","is-enabled",unit],text=True,capture_output=True)
-    state=(result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else "not-found"
-    if state not in {"disabled","masked","static","indirect","not-found","generated","transient","alias"}:
-        raise SystemExit(f"optional unit remains enabled: {unit}={state}")
-    if unit in {"iscsi.service", "open-iscsi.service"} and state == "alias":
-        raise SystemExit(f"canonical iSCSI unit alias remains after final disable: {unit}")
-    states.append({"unit":unit,"enabled_state":state})
-path=pathlib.Path(sys.argv[3]); path.write_text(json.dumps({"schema_version":1,"units":states},indent=2,sort_keys=True)+"\n",encoding="utf-8")
+rows=[]
+for raw in pathlib.Path(sys.argv[3]).read_text(encoding="utf-8").splitlines():
+    unit,enabled,enabled_status,active,active_status,start_boundary=raw.split("\t")
+    row={"unit":unit,"enabled_state":enabled,"enabled_status":int(enabled_status),"active_state":active,"active_status":int(active_status),"start_boundary":start_boundary}
+    if enabled not in {"disabled","masked","static","indirect","not-found","generated","transient"}:
+        raise SystemExit(f"offline service readback has unsafe enablement: {unit}={enabled}")
+    if active != "inactive" or row["active_status"] != 3:
+        raise SystemExit(f"offline service readback has unsafe activity: {unit}={active}")
+    if start_boundary not in {"pre-existing-mask","disabled-canonical","disabled-unit","condition-drop-in"}:
+        raise SystemExit(f"offline service readback has unknown start boundary: {unit}")
+    rows.append(row)
+if [row["unit"] for row in rows] != matrix["denied_units"]:
+    raise SystemExit("offline service readback does not exactly cover the denied-unit policy")
+path=pathlib.Path(sys.argv[4]); path.write_text(json.dumps({"schema_version":1,"systemd_offline":True,"policy_rc_d_exit":101,"units":rows},indent=2,sort_keys=True)+"\n",encoding="utf-8")
 PY
+cleanup_service_guards
+write_retained_recovery_guard_manifest
 
 sha256sum "$state_root/package-readback.json" "$state_root/service-policy-readback.json" \
+    "$state_root/service-retained-guards.json" \
     >"$state_root/SHA256SUMS"
 cleanup_runtime_mounts
 cleanup_guard 0

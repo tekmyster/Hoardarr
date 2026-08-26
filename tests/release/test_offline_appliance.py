@@ -57,6 +57,10 @@ class OfflineApplianceTests(unittest.TestCase):
             '-o "Acquire::http::Proxy=false"',
             '-o "Acquire::https::Proxy=false"',
             "policy-rc.d",
+            "export SYSTEMD_OFFLINE=1",
+            "package_transaction_started=true",
+            "service_readback_complete=true",
+            "Failed to preset unit",
             "AUTO -all",
             'global_filter = [ "r|.*|" ]',
             'devnode ".*"',
@@ -65,6 +69,7 @@ class OfflineApplianceTests(unittest.TestCase):
             'chroot "$target" apt-get "${apt_options[@]}" --simulate check',
             "package-readback.json",
             "service-policy-readback.json",
+            "service-retained-guards.json",
         )
         for value in required:
             if value not in payload:
@@ -112,6 +117,7 @@ class OfflineApplianceTests(unittest.TestCase):
             "prepare_runtime_mounts",
             "cleanup_service_guards",
             "disable_unmasked_units",
+            "export SYSTEMD_OFFLINE=1",
             "cleanup_runtime_mounts",
             "cleanup_guard 0",
             "trap - EXIT HUP INT TERM",
@@ -145,8 +151,8 @@ class OfflineApplianceTests(unittest.TestCase):
         if not (
             prepare
             < first_chroot
-            < service_cleanup
             < disable
+            < service_cleanup
             < runtime_cleanup
             < success
         ):
@@ -380,6 +386,9 @@ class OfflineApplianceTests(unittest.TestCase):
                 "temporary_masks_cleanup_complete=false",
                 "policy_cleanup_complete=false",
                 "service_guard_cleanup_complete=false",
+                "package_transaction_started=false",
+                "denied_units_finalized=false",
+                "service_readback_complete=false",
                 "created_runtime_mounts=()",
                 "declare -A runtime_mount_ids=()",
                 "declare -A runtime_mount_records=()",
@@ -390,12 +399,29 @@ class OfflineApplianceTests(unittest.TestCase):
                 "declare -A preserved_package_alias_targets=()",
                 "declare -A preserved_package_alias_canonical_units=()",
                 "declare -A policy_guarded_canonical_units=()",
+                "declare -A policy_guarded_absent_units=()",
+                "recovery_guard_files=()",
+                "recovery_guard_created_directories=()",
+                "declare -A recovery_guard_file_inodes=()",
+                "declare -A recovery_guard_contents=()",
+                "declare -A recovery_guard_condition_paths=()",
+                "declare -A recovery_guard_directory_inodes=()",
+                "declare -A recovery_guard_paths_by_unit=()",
+                "declare -A recovery_guard_path_owners=()",
+                "declare -A recovery_guard_paths_retained=()",
+                "declare -A recovery_guard_retained_states=()",
+                "recovery_guards_cleanup_complete=false",
+                "recovery_guard_authorization_root=",
                 shell_function("entry_is_root_owned"),
                 shell_function("exact_iscsi_alias_parents_are_safe"),
                 shell_function("unit_declares_exact_alias"),
                 shell_function("is_exact_package_backed_iscsi_alias"),
                 shell_function("record_package_backed_iscsi_alias"),
                 shell_function("validate_preserved_unit_objects"),
+                shell_function("prepare_recovery_unit_guard"),
+                shell_function("validate_recovery_unit_guards"),
+                shell_function("retain_recovery_unit_guards"),
+                shell_function("remove_recovery_unit_guards"),
                 shell_function("prepare_temporary_unit_mask"),
                 shell_function("cleanup_temporary_masks"),
                 shell_function("disable_unmasked_units"),
@@ -409,6 +435,19 @@ class OfflineApplianceTests(unittest.TestCase):
                 "  preserved_package_alias_targets=()",
                 "  preserved_package_alias_canonical_units=()",
                 "  policy_guarded_canonical_units=()",
+                "  policy_guarded_absent_units=()",
+                "  recovery_guard_files=()",
+                "  recovery_guard_created_directories=()",
+                "  recovery_guard_file_inodes=()",
+                "  recovery_guard_contents=()",
+                "  recovery_guard_condition_paths=()",
+                "  recovery_guard_directory_inodes=()",
+                "  recovery_guard_paths_by_unit=()",
+                "  recovery_guard_path_owners=()",
+                "  recovery_guard_paths_retained=()",
+                "  recovery_guard_retained_states=()",
+                "  recovery_guards_cleanup_complete=false",
+                "  denied_units_finalized=false",
                 "}",
                 'root="$1"',
                 'if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -u -- "$root")"; fi',
@@ -416,13 +455,13 @@ class OfflineApplianceTests(unittest.TestCase):
                 'target="$root/no-package-root"',
                 'mask_root="$target/etc/systemd/system"',
                 "",
-                "# Newly created exact iscsi.service masks are temporary.",
+                "# Newly absent units remain absent so package preset bookkeeping works.",
                 'absent="$root/absent/iscsi.service"',
                 'mkdir -p -- "$(dirname -- "$absent")"',
                 "reset_tracking",
                 'prepare_temporary_unit_mask "$absent" iscsi.service',
-                '[[ -L "$absent" && "$(readlink -- "$absent")" == /dev/null ]]',
-                '[[ "${#temporary_masks[@]}" -eq 1 && "${temporary_masks[0]}" == "$absent" ]]',
+                '[[ ! -e "$absent" && ! -L "$absent" ]]',
+                '[[ "${policy_guarded_absent_units[iscsi.service]}" == "$absent" ]]',
                 "cleanup_temporary_masks",
                 '[[ ! -e "$absent" && ! -L "$absent" ]]',
                 'later="$root/later-failure/iscsi.service"',
@@ -495,7 +534,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 'if prepare_temporary_unit_mask "$relative" iscsi.service; then exit 95; fi',
                 '[[ "$(readlink -- "$relative")" == ../../dev/null ]]',
                 "",
-                "# Mixed ownership cleanup preserves existing and removes only new.",
+                "# Mixed ownership cleanup preserves existing and leaves absent units absent.",
                 'mixed_safe="$root/mixed/iscsi.service"',
                 'mixed_new="$root/mixed/iscsid.service"',
                 'mkdir -p -- "$(dirname -- "$mixed_safe")"',
@@ -504,13 +543,14 @@ class OfflineApplianceTests(unittest.TestCase):
                 "reset_tracking",
                 'prepare_temporary_unit_mask "$mixed_safe" iscsi.service',
                 'prepare_temporary_unit_mask "$mixed_new" iscsid.service',
-                '[[ "${#temporary_masks[@]}" -eq 1 && "${temporary_masks[0]}" == "$mixed_new" ]]',
+                '[[ "${#temporary_masks[@]}" -eq 0 ]]',
+                '[[ "${policy_guarded_absent_units[iscsid.service]}" == "$mixed_new" ]]',
                 "cleanup_temporary_masks",
                 '[[ -L "$mixed_safe" && "$(readlink -- "$mixed_safe")" == /dev/null ]]',
                 '[[ "$(stat -c %i -- "$mixed_safe")" == "$mixed_inode" ]]',
                 '[[ ! -e "$mixed_new" && ! -L "$mixed_new" ]]',
                 "",
-                "# Final disable skips the accepted mask and mutates only the new unit.",
+                "# Final disable preserves the accepted mask and validates the absent unit.",
                 'lifecycle_safe="$root/lifecycle/iscsi.service"',
                 'lifecycle_new="$root/lifecycle/iscsid.service"',
                 'mkdir -p -- "$(dirname -- "$lifecycle_safe")"',
@@ -520,15 +560,44 @@ class OfflineApplianceTests(unittest.TestCase):
                 "reset_tracking",
                 'prepare_temporary_unit_mask "$lifecycle_safe" iscsi.service',
                 'prepare_temporary_unit_mask "$lifecycle_new" iscsid.service',
-                "cleanup_temporary_masks",
                 "denied_units=(iscsi.service iscsid.service)",
                 'target="$root/target"',
-                'chroot() { printf \'%s\\n\' "$*" >>"$disable_log"; }',
+                'state_root="$root/state"',
+                'mkdir -p -- "$state_root"',
+                "active_mode=inactive",
+                "systemctl() {",
+                '  printf \'%s\\n\' "$*" >>"$disable_log"',
+                '  if [[ "$*" == *" is-enabled "* ]]; then',
+                "    if [[ \"${*: -1}\" == iscsi.service ]]; then printf '%s\\n' masked; else printf '%s\\n' not-found; fi",
+                "    return 1",
+                "  fi",
+                "  return 0",
+                "}",
+                "chroot() {",
+                "  if [[ \"$active_mode\" == active ]]; then printf '%s\\n' active; return 0; fi",
+                "  if [[ \"$active_mode\" == ambiguous ]]; then printf '%s\\n' unknown; return 4; fi",
+                "  printf '%s\\n' inactive; return 3",
+                "}",
                 "disable_unmasked_units",
                 '[[ -L "$lifecycle_safe" && "$(readlink -- "$lifecycle_safe")" == /dev/null ]]',
                 '[[ "$(stat -c %i -- "$lifecycle_safe")" == "$lifecycle_inode" ]]',
                 '[[ ! -e "$lifecycle_new" && ! -L "$lifecycle_new" ]]',
-                '[[ "$(cat "$disable_log")" == "$target systemctl disable iscsid.service" ]]',
+                'grep -Fq -- "--root=$target disable iscsid.service" "$disable_log"',
+                '[[ "$denied_units_finalized" == true ]]',
+                "",
+                "# Active and ambiguous target observations both fail closed.",
+                'active_mask="$root/active/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$active_mask")"',
+                'ln -s -- /dev/null "$active_mask"',
+                "reset_tracking",
+                'prepare_temporary_unit_mask "$active_mask" iscsi.service',
+                "denied_units=(iscsi.service)",
+                "active_mode=active",
+                "if disable_unmasked_units >/dev/null 2>&1; then exit 96; fi",
+                '[[ -L "$active_mask" && "$(readlink -- "$active_mask")" == /dev/null ]]',
+                "active_mode=ambiguous",
+                "if disable_unmasked_units >/dev/null 2>&1; then exit 97; fi",
+                '[[ -L "$active_mask" && "$(readlink -- "$active_mask")" == /dev/null ]]',
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -578,6 +647,9 @@ class OfflineApplianceTests(unittest.TestCase):
                 "temporary_masks_cleanup_complete=false",
                 "policy_cleanup_complete=false",
                 "service_guard_cleanup_complete=false",
+                "package_transaction_started=false",
+                "denied_units_finalized=false",
+                "service_readback_complete=false",
                 "created_runtime_mounts=()",
                 "declare -A runtime_mount_ids=()",
                 "declare -A runtime_mount_records=()",
@@ -588,6 +660,19 @@ class OfflineApplianceTests(unittest.TestCase):
                 "declare -A preserved_package_alias_targets=()",
                 "declare -A preserved_package_alias_canonical_units=()",
                 "declare -A policy_guarded_canonical_units=()",
+                "declare -A policy_guarded_absent_units=()",
+                "recovery_guard_files=()",
+                "recovery_guard_created_directories=()",
+                "declare -A recovery_guard_file_inodes=()",
+                "declare -A recovery_guard_contents=()",
+                "declare -A recovery_guard_condition_paths=()",
+                "declare -A recovery_guard_directory_inodes=()",
+                "declare -A recovery_guard_paths_by_unit=()",
+                "declare -A recovery_guard_path_owners=()",
+                "declare -A recovery_guard_paths_retained=()",
+                "declare -A recovery_guard_retained_states=()",
+                "recovery_guards_cleanup_complete=false",
+                "recovery_guard_authorization_root=",
                 shell_function("install_service_start_guard"),
                 shell_function("entry_is_root_owned"),
                 shell_function("exact_iscsi_alias_parents_are_safe"),
@@ -595,11 +680,17 @@ class OfflineApplianceTests(unittest.TestCase):
                 shell_function("is_exact_package_backed_iscsi_alias"),
                 shell_function("record_package_backed_iscsi_alias"),
                 shell_function("validate_preserved_unit_objects"),
+                shell_function("prepare_recovery_unit_guard"),
+                shell_function("validate_recovery_unit_guards"),
+                shell_function("retain_recovery_unit_guards"),
+                shell_function("remove_recovery_unit_guards"),
                 shell_function("prepare_temporary_unit_mask"),
                 shell_function("cleanup_temporary_masks"),
                 shell_function("cleanup_runtime_mounts"),
                 shell_function("cleanup_service_guards"),
                 shell_function("cleanup_guard"),
+                shell_function("exit_cleanup"),
+                shell_function("signal_exit"),
                 shell_function("disable_unmasked_units"),
                 r"""
 root="$1"
@@ -653,6 +744,9 @@ reset_tracking() {
     temporary_masks_cleanup_complete=false
     policy_cleanup_complete=false
     service_guard_cleanup_complete=false
+    package_transaction_started=false
+    denied_units_finalized=false
+    service_readback_complete=false
     created_runtime_mounts=()
     runtime_mount_ids=()
     runtime_mount_records=()
@@ -663,6 +757,18 @@ reset_tracking() {
     preserved_package_alias_targets=()
     preserved_package_alias_canonical_units=()
     policy_guarded_canonical_units=()
+    policy_guarded_absent_units=()
+    recovery_guard_files=()
+    recovery_guard_created_directories=()
+    recovery_guard_file_inodes=()
+    recovery_guard_contents=()
+    recovery_guard_condition_paths=()
+    recovery_guard_directory_inodes=()
+    recovery_guard_paths_by_unit=()
+    recovery_guard_path_owners=()
+    recovery_guard_paths_retained=()
+    recovery_guard_retained_states=()
+    recovery_guards_cleanup_complete=false
 }
 refresh_md5() {
     local canonical="$target/usr/lib/systemd/system/open-iscsi.service"
@@ -674,6 +780,7 @@ refresh_md5() {
 make_fixture() {
     target="$root/$1"
     mask_root="$target/etc/systemd/system"
+    recovery_guard_authorization_root="$mask_root/.hoardarr-service-start-authorized"
     mkdir -p -- \
         "$mask_root" \
         "$target/usr/lib/systemd/system" \
@@ -695,6 +802,8 @@ make_fixture() {
     ln -s -- /usr/lib/systemd/system/open-iscsi.service "$mask_root/iscsi.service"
     policy="$target/usr/sbin/policy-rc.d"
     policy_backup="$target/opt/hoardarr-install/policy-rc.d.original"
+    state_root="$target/opt/hoardarr-install/state"
+    mkdir -p -- "$state_root"
     policy_state=absent
     package_metadata_mode=ok
     non_root_path=
@@ -768,20 +877,21 @@ prepare_temporary_unit_mask "$alias" iscsi.service
 prepare_temporary_unit_mask "$canonical_override" open-iscsi.service
 cleanup_temporary_masks
 disable_log="$target/disable.log"
-chroot() {
-    [[ "$1" == "$target" && "$2" == systemctl ]]
-    if [[ "$3" == disable && "$4" == open-iscsi.service ]]; then
+systemctl() {
+    [[ "$1" == "--root=$target" ]]
+    if [[ "$2" == disable && "$3" == open-iscsi.service ]]; then
         printf '%s\n' disable-open-iscsi >>"$disable_log"
         rm -f -- "$alias" "$wants"
         return 0
     fi
-    if [[ "$3" == is-enabled && "$4" == open-iscsi.service ]]; then
+    if [[ "$2" == is-enabled && "$3" == open-iscsi.service ]]; then
         printf '%s\n' disabled
         return 1
     fi
-    printf 'unexpected chroot argv: %s\n' "$*" >&2
+    printf 'unexpected systemctl argv: %s\n' "$*" >&2
     return 97
 }
+chroot() { printf '%s\n' inactive; return 3; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_unmasked_units
 [[ ! -e "$alias" && ! -L "$alias" ]]
@@ -795,10 +905,11 @@ wants="$mask_root/sysinit.target.wants/open-iscsi.service"
 mkdir -p -- "$(dirname -- "$wants")"
 ln -s -- /usr/lib/systemd/system/open-iscsi.service "$wants"
 prepare_temporary_unit_mask "$alias" iscsi.service
-chroot() {
-    [[ "$3" == disable && "$4" == open-iscsi.service ]]
+systemctl() {
+    [[ "$2" == disable && "$3" == open-iscsi.service ]]
     return 1
 }
+chroot() { printf '%s\n' inactive; return 3; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_failure_status=0
 disable_unmasked_units >/dev/null 2>&1 || disable_failure_status=$?
@@ -812,11 +923,12 @@ wants="$mask_root/sysinit.target.wants/open-iscsi.service"
 mkdir -p -- "$(dirname -- "$wants")"
 ln -s -- /usr/lib/systemd/system/open-iscsi.service "$wants"
 prepare_temporary_unit_mask "$alias" iscsi.service
-chroot() {
-    if [[ "$3" == disable ]]; then return 0; fi
+systemctl() {
+    if [[ "$2" == disable ]]; then return 0; fi
     printf '%s\n' disabled
     return 1
 }
+chroot() { printf '%s\n' inactive; return 3; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_incomplete_status=0
 disable_unmasked_units >/dev/null 2>&1 || disable_incomplete_status=$?
@@ -945,34 +1057,8 @@ prepare_temporary_unit_mask "$canonical_override" open-iscsi.service \
 [[ ! -e "$canonical_override" && ! -L "$canonical_override" ]]
 [[ "$(readlink -- "$alias")" == /usr/lib/systemd/system/drifted.service ]]
 
-# Temporary-mask identity drift fails closed while cleanup continues for peers.
-make_fixture mask-drift
-first="$mask_root/first.service"
-second="$mask_root/second.service"
-prepare_temporary_unit_mask "$first" first.service
-prepare_temporary_unit_mask "$second" second.service
-mv -- "$first" "$target/original-first-mask"
-ln -s -- /dev/null "$first"
-replacement_inode="$(stat -c %i -- "$first")"
-cleanup_status=0
-cleanup_temporary_masks >/dev/null 2>&1 || cleanup_status=$?
-[[ "$cleanup_status" -ne 0 ]]
-[[ -L "$first" && "$(stat -c %i -- "$first")" == "$replacement_inode" ]]
-[[ ! -e "$second" && ! -L "$second" ]]
-
-# Identity acquisition fails before the path is published; the exact mask is
-# removed and cleanup never indexes an unset associative-array entry.
-make_fixture stat-failure
-stat_failure="$mask_root/stat-failure.service"
-fail_inode_path="$stat_failure"
-stat_failure_status=0
-prepare_temporary_unit_mask "$stat_failure" stat-failure.service >/dev/null 2>&1 || \
-    stat_failure_status=$?
-[[ "$stat_failure_status" -ne 0 ]]
-[[ ! -e "$stat_failure" && ! -L "$stat_failure" ]]
-[[ "${#temporary_masks[@]}" -eq 0 ]]
-cleanup_temporary_masks
-
+# A pre-existing exact mask whose inode cannot be recorded is rejected intact.
+make_fixture safe-stat-failure
 safe_stat_failure="$mask_root/safe-stat-failure.service"
 ln -s -- /dev/null "$safe_stat_failure"
 safe_stat_failure_inode="$(stat -c %i -- "$safe_stat_failure")"
@@ -988,6 +1074,73 @@ fail_inode_path=
 
 # Cleanup failure is aggregated; an existing payload failure remains exact,
 # while an otherwise successful invocation becomes failure.
+make_fixture incomplete-transaction
+install_service_start_guard
+prepare_temporary_unit_mask "$mask_root/iscsi.service" iscsi.service
+prepare_recovery_unit_guard iscsi.service
+mkdir -p -- "$mask_root/sysinit.target.wants"
+ln -s -- /usr/lib/systemd/system/open-iscsi.service \
+    "$mask_root/sysinit.target.wants/open-iscsi.service"
+package_transaction_started=true
+incomplete_status=0
+cleanup_guard 73 >/dev/null 2>&1 || incomplete_status=$?
+[[ "$incomplete_status" -eq 73 ]]
+guard_status=0
+"$policy" pmcd.service start || guard_status=$?
+[[ -x "$policy" && "$guard_status" -eq 101 ]]
+grep -Fq 'finalization=false readback=false' "$state_root/service-guard-recovery.txt"
+recovery_path="${recovery_guard_paths_by_unit[iscsi.service]}"
+[[ -f "$recovery_path" && ! -L "$recovery_path" ]]
+grep -Fxq 'ConditionPathExists=/etc/systemd/system/.hoardarr-service-start-authorized/open-iscsi.service' "$recovery_path"
+[[ -L "$mask_root/sysinit.target.wants/open-iscsi.service" ]]
+
+set +e
+cleanup_guard 0 >/dev/null 2>&1
+set_plus_e_status=$?
+set -e
+[[ "$set_plus_e_status" -ne 0 && -x "$policy" ]]
+
+denied_units_finalized=true
+cleanup_guard 0 >/dev/null 2>&1 || readback_incomplete_status=$?
+[[ "${readback_incomplete_status:-0}" -ne 0 && -x "$policy" ]]
+denied_units_finalized=false
+systemctl() {
+    if [[ "$2" == disable && "$3" == open-iscsi.service ]]; then
+        rm -f -- "$mask_root/iscsi.service" \
+            "$mask_root/sysinit.target.wants/open-iscsi.service"
+        return 0
+    fi
+    if [[ "$2" == is-enabled && "$3" == open-iscsi.service ]]; then
+        printf '%s\n' disabled
+        return 1
+    fi
+    return 97
+}
+chroot() { printf '%s\n' inactive; return 3; }
+denied_units=(iscsi.service open-iscsi.service)
+disable_unmasked_units
+cleanup_guard 0
+[[ ! -e "$policy" && ! -L "$policy" ]]
+
+for signal_case in 'HUP 129' 'INT 130' 'TERM 143'; do
+    read -r signal_name signal_status <<<"$signal_case"
+    make_fixture "signal-$signal_name"
+    install_service_start_guard
+    prepare_temporary_unit_mask "$mask_root/iscsi.service" iscsi.service
+    prepare_recovery_unit_guard iscsi.service
+    package_transaction_started=true
+    observed_status=0
+    (
+        trap 'exit_cleanup $?' EXIT
+        trap 'signal_exit 129' HUP
+        trap 'signal_exit 130' INT
+        trap 'signal_exit 143' TERM
+        kill -s "$signal_name" "$BASHPID"
+    ) || observed_status=$?
+    [[ "$observed_status" -eq "$signal_status" && -x "$policy" ]]
+    grep -Fq 'finalization=false readback=false' "$state_root/service-guard-recovery.txt"
+done
+
 make_fixture cleanup-original-status
 reset_tracking
 rm -f -- "$policy"
@@ -1018,6 +1171,357 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("command not found", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux mounts")
+    def test_real_noble_pcp_postinst_presets_with_production_service_guard(
+        self,
+    ) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+
+        def shell_function(name: str) -> str:
+            if name == "write_retained_recovery_guard_manifest":
+                start = payload.index(f"{name}() {{\n")
+                end = payload.index("\nprepare_temporary_unit_mask() {", start)
+                return payload[start : end + 1]
+            match = re.search(
+                rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n",
+                payload,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"missing production function {name}")
+            assert match is not None
+            return match.group(0)
+
+        required = (
+            "apt-get",
+            "bash",
+            "deb-systemd-helper",
+            "dpkg-deb",
+            "sudo",
+            "systemd-analyze",
+            "systemctl",
+            "unshare",
+        )
+        missing = [command for command in required if shutil.which(command) is None]
+        self.assertEqual(missing, [], f"missing Noble service-guard tools: {missing}")
+        sudo = subprocess.run(
+            ["sudo", "-n", "true"], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(sudo.returncode, 0, sudo.stderr)
+
+        expected_version = "6.2.0-1.1build4"
+        expected_deb_sha256 = (
+            "5941a5aabb5e873883b1f4ac8e5e577a3617a8c9b7cb1918a3baea6e1d1b89a9"
+        )
+        expected_postinst_sha256 = (
+            "a964a5c5a17ad154eec1068fe984c37fa9cc1642d85fe5dc393f6022afe6440c"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            download = subprocess.run(
+                ["apt-get", "download", f"pcp={expected_version}"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=240,
+            )
+            self.assertEqual(download.returncode, 0, download.stdout + download.stderr)
+            debs = list(root.glob("pcp_*.deb"))
+            self.assertEqual(len(debs), 1, [path.name for path in debs])
+            self.assertEqual(
+                hashlib.sha256(debs[0].read_bytes()).hexdigest(), expected_deb_sha256
+            )
+            control = root / "control"
+            data = root / "data"
+            subprocess.run(["dpkg-deb", "-e", str(debs[0]), str(control)], check=True)
+            subprocess.run(["dpkg-deb", "-x", str(debs[0]), str(data)], check=True)
+            postinst = control / "postinst"
+            self.assertEqual(
+                hashlib.sha256(postinst.read_bytes()).hexdigest(),
+                expected_postinst_sha256,
+            )
+            policy = json.loads(
+                (ROOT / "packaging" / "offline" / "package-policy.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            denied_units = policy["denied_units"]
+            denied_path = root / "denied-units.txt"
+            denied_path.write_text(
+                "".join(f"{unit}\n" for unit in denied_units), encoding="utf-8"
+            )
+
+            harness = root / "pcp-service-guard.sh"
+            harness.write_text(
+                "\n".join(
+                    (
+                        "set -euo pipefail",
+                        shell_function("install_service_start_guard"),
+                        shell_function("validate_preserved_unit_objects"),
+                        shell_function("prepare_recovery_unit_guard"),
+                        shell_function("validate_recovery_unit_guards"),
+                        shell_function("retain_recovery_unit_guards"),
+                        shell_function("remove_recovery_unit_guards"),
+                        shell_function("write_retained_recovery_guard_manifest"),
+                        shell_function("prepare_temporary_unit_mask"),
+                        shell_function("cleanup_temporary_masks"),
+                        shell_function("cleanup_service_guards"),
+                        shell_function("disable_unmasked_units"),
+                        r"""
+postinst="$1"
+data="$2"
+work="$3"
+denied_file="$4"
+mount --make-rprivate /
+mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install}
+cp -a "$(command -v chroot)" "$work/usr-sbin/chroot"
+cp -a "$data/usr/lib/systemd/system/." "$work/vendor-units/" 2>/dev/null || {
+    mkdir -p "$work/vendor-units"
+    cp -a "$data/usr/lib/systemd/system/." "$work/vendor-units/"
+}
+while IFS= read -r unit; do
+    [[ "$unit" =~ ^[A-Za-z0-9@_.:-]+\.(service|socket|timer|target)$ ]]
+    unit_path="$work/vendor-units/$unit"
+    [[ -e "$unit_path" ]] && continue
+    case "$unit" in
+        *.service) body=$'[Service]\nType=oneshot\nExecStart=/bin/true' ;;
+        *.socket) body=$'[Socket]\nListenStream=/run/hoardarr-test-'"${unit//[^A-Za-z0-9]/-}" ;;
+        *.timer) body=$'[Timer]\nOnBootSec=1h' ;;
+        *.target) body= ;;
+    esac
+    printf '[Unit]\nDescription=Hoardarr denied-unit preset regression\n%s\n[Install]\nWantedBy=multi-user.target\n' \
+        "$body" >"$unit_path"
+done <"$denied_file"
+# Guarantee one supported static-style unit so intentional retained-guard
+# behavior is exercised independently of the host package set.
+printf '%s\n' \
+    '[Unit]' \
+    'Description=Hoardarr static denied-unit regression' \
+    '[Service]' \
+    'Type=oneshot' \
+    'ExecStart=/bin/true' \
+    >"$work/vendor-units/watchdog.service"
+mount --bind "$work/vendor-units" /usr/lib/systemd/system
+mount --bind "$work/etc-systemd" /etc/systemd/system
+mount --bind "$work/systemd-state" /var/lib/systemd
+mount --bind "$work/run-systemd" /run/systemd
+mount --bind "$work/usr-sbin" /usr/sbin
+for command in dpkg-maintscript-helper touch chmod chown groupadd useradd; do
+    cat >"$work/wrappers/$command" <<'EOF'
+#!/bin/sh
+case "$(basename "$0"):$1" in
+    dpkg-maintscript-helper:supports) exit 0 ;;
+esac
+exit 0
+EOF
+    chmod 0755 "$work/wrappers/$command"
+done
+cat >"$work/wrappers/getent" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$work/wrappers/getent"
+export PATH="$work/wrappers:/usr/sbin:/usr/bin:/bin"
+export DPKG_MAINTSCRIPT_PACKAGE=pcp
+export DPKG_MAINTSCRIPT_NAME=postinst
+export SYSTEMD_OFFLINE=1
+pcp_units=(pcp-reboot-init.service pmcd.service pmlogger.service pmie.service pmproxy.service)
+mapfile -t all_denied_units <"$denied_file"
+
+# Reproduce the accepted F7A defect using the exact package script.
+for unit in "${pcp_units[@]}"; do ln -s /dev/null "/etc/systemd/system/$unit"; done
+old_status=0
+"$postinst" configure >"$work/old.log" 2>&1 || old_status=$?
+(( old_status != 0 ))
+grep -Fq 'Failed to preset unit' "$work/old.log"
+find "$work/etc-systemd" -mindepth 1 -maxdepth 1 -delete
+find "$work/systemd-state" -mindepth 1 -delete
+
+# Exercise the production classification and exact start guard.
+target="/"
+mask_root=/etc/systemd/system
+install_root="$work/install"
+state_root="$work/state"
+policy=/usr/sbin/policy-rc.d
+policy_backup="$install_root/policy-rc.d.original"
+policy_state=absent
+temporary_masks=()
+declare -A temporary_mask_inodes=()
+temporary_masks_cleanup_complete=false
+policy_cleanup_complete=false
+service_guard_cleanup_complete=false
+declare -A preserved_unit_masks=()
+declare -A preserved_unit_mask_inodes=()
+declare -A preserved_package_aliases=()
+declare -A preserved_package_alias_inodes=()
+declare -A preserved_package_alias_targets=()
+declare -A preserved_package_alias_canonical_units=()
+declare -A policy_guarded_canonical_units=()
+declare -A policy_guarded_absent_units=()
+recovery_guard_files=()
+recovery_guard_created_directories=()
+declare -A recovery_guard_file_inodes=()
+declare -A recovery_guard_contents=()
+declare -A recovery_guard_condition_paths=()
+declare -A recovery_guard_directory_inodes=()
+declare -A recovery_guard_paths_by_unit=()
+declare -A recovery_guard_path_owners=()
+declare -A recovery_guard_paths_retained=()
+declare -A recovery_guard_retained_states=()
+recovery_guards_cleanup_complete=false
+recovery_guard_authorization_root=/etc/systemd/system/.hoardarr-service-start-authorized
+denied_units=("${all_denied_units[@]}")
+denied_units_finalized=false
+service_readback_complete=false
+package_transaction_started=false
+install_service_start_guard
+# A pre-existing authorization namespace is never trusted during guard setup.
+mkdir -- "$recovery_guard_authorization_root"
+if prepare_recovery_unit_guard corosync.service >/dev/null 2>&1; then exit 95; fi
+rmdir -- "$recovery_guard_authorization_root"
+for unit in "${denied_units[@]}"; do
+    prepare_temporary_unit_mask "$mask_root/$unit" "$unit"
+    [[ ! -e "$mask_root/$unit" && ! -L "$mask_root/$unit" ]]
+    prepare_recovery_unit_guard "$unit"
+done
+# Per-unit conditions cannot authorize a guarded peer.  Remove the test marker
+# before the package transaction so the production absent-root invariant holds.
+mkdir -- "$recovery_guard_authorization_root"
+: >"$recovery_guard_authorization_root/watchdog.service"
+systemd-analyze condition \
+    "ConditionPathExists=${recovery_guard_condition_paths[watchdog.service]}" \
+    >/dev/null 2>&1
+systemd-analyze condition \
+    "ConditionPathExists=${recovery_guard_condition_paths[pmcd.service]}" \
+    >/dev/null 2>&1 && exit 98
+rm -f -- "$recovery_guard_authorization_root/watchdog.service"
+rmdir -- "$recovery_guard_authorization_root"
+start_status=0
+"$policy" pmcd.service start || start_status=$?
+[[ "$start_status" -eq 101 ]]
+
+"$postinst" configure >"$work/corrected.log" 2>&1
+! grep -Fq 'Failed to preset unit' "$work/corrected.log"
+for unit in "${denied_units[@]}"; do
+    SYSTEMD_OFFLINE=1 systemctl preset "$unit"
+done >"$work/all-denied-presets.log" 2>&1
+! grep -Fq 'Failed to preset unit' "$work/all-denied-presets.log"
+[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
+preset_enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled pmcd.service)"
+[[ "$preset_enabled_state" == enabled ]]
+pcp_active_status=0
+pcp_active_state="$(SYSTEMD_OFFLINE=1 chroot / systemctl is-active pmcd.service 2>&1)" || \
+    pcp_active_status=$?
+[[ "$pcp_active_state" == inactive && "$pcp_active_status" -eq 3 ]]
+package_transaction_started=true
+interrupted_status=0
+cleanup_service_guards >/dev/null 2>&1 || interrupted_status=$?
+[[ "$interrupted_status" -ne 0 ]]
+validate_recovery_unit_guards
+grep -Fq 'finalization=false readback=false' "$state_root/service-guard-recovery.txt"
+for path in "${recovery_guard_files[@]}"; do
+    systemd-analyze condition "ConditionPathExists=${recovery_guard_condition_paths[$path]}" \
+        >/dev/null 2>&1 && exit 96
+done
+disable_unmasked_units
+[[ "$denied_units_finalized" == true ]]
+[[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq "${#denied_units[@]}" ]]
+python3 - "$state_root/service-policy-readback.tsv" \
+    "$state_root/service-policy-readback.json" <<'PY'
+import json, pathlib, sys
+rows=[]
+for raw in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    unit,enabled,enabled_status,active,active_status,boundary=raw.split("\t")
+    rows.append({
+        "unit":unit,
+        "enabled_state":enabled,
+        "enabled_status":int(enabled_status),
+        "active_state":active,
+        "active_status":int(active_status),
+        "start_boundary":boundary,
+    })
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps({"schema_version":1,"units":rows})+"\n", encoding="utf-8"
+)
+PY
+cleanup_service_guards
+[[ "$service_guard_cleanup_complete" == true ]]
+write_retained_recovery_guard_manifest
+retained_count=0
+while IFS=$'\t' read -r unit enabled enabled_status active active_status boundary; do
+    path="${recovery_guard_paths_by_unit[$unit]}"
+    if [[ "$boundary" == condition-drop-in ]]; then
+        [[ -n "${recovery_guard_paths_retained[$path]+present}" && -f "$path" ]]
+        systemd-analyze condition "ConditionPathExists=${recovery_guard_condition_paths[$path]}" \
+            >/dev/null 2>&1 && exit 97
+        retained_count=$((retained_count + 1))
+    else
+        [[ ! -e "$path" && ! -L "$path" ]]
+    fi
+done <"$state_root/service-policy-readback.tsv"
+(( retained_count > 0 ))
+python3 - "$state_root/service-retained-guards.json" <<'PY'
+import json, pathlib, sys
+document=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert document["schema_version"] == 1
+assert document["supported_activation_action"] == "remove-exact-verified-guard-only"
+assert document["removal_requirement"] == "later-authorized-selection-must-verify-unit-path-inode-and-sha256-before-removal"
+assert document["guards"]
+for guard in document["guards"]:
+    assert guard["reason"] == "unit-file-state-requires-persistent-start-boundary"
+    assert guard["enabled_state"] in {"static","indirect","generated","transient"}
+    assert guard["canonical_path"].startswith("/etc/systemd/system/")
+    assert guard["condition_path"] == f"/etc/systemd/system/.hoardarr-service-start-authorized/{guard['unit']}"
+    assert guard["inode"] > 0 and len(guard["sha256"]) == 64
+PY
+sha256sum "$state_root/service-policy-readback.json" \
+    "$state_root/service-retained-guards.json" >"$state_root/SHA256SUMS"
+(cd "$state_root" && sha256sum --check --strict SHA256SUMS)
+for unit in "${denied_units[@]}"; do
+    state_status=0
+    state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled "$unit" 2>&1)" || state_status=$?
+    [[ "$state" != enabled ]]
+done
+printf '%s\n' \
+    real_pcp_old_preset_failure=reproduced \
+    real_pcp_corrected_preset_errors=0 \
+    policy_rc_d_start_status=101 \
+    host_manager_contacts=0 \
+    final_denied_units="${#denied_units[@]}"
+""",
+                    )
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "unshare",
+                    "--mount",
+                    "--fork",
+                    "bash",
+                    str(harness),
+                    str(postinst),
+                    str(data),
+                    str(root / "namespace"),
+                    str(denied_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=240,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("real_pcp_old_preset_failure=reproduced", result.stdout)
+        self.assertIn("real_pcp_corrected_preset_errors=0", result.stdout)
+        self.assertIn("policy_rc_d_start_status=101", result.stdout)
+        self.assertIn("host_manager_contacts=0", result.stdout)
+        self.assertIn(f"final_denied_units={len(denied_units)}", result.stdout)
 
     def test_debian_control_metadata_is_parsed_by_field_name(self) -> None:
         control = """Package: snapraid
@@ -1493,6 +1997,11 @@ Description: Backup program for disk arrays
             ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("policy-rc.d", installer)
+        self.assertIn(
+            'condition_path="/etc/systemd/system/.hoardarr-service-start-authorized/$guarded_unit"',
+            installer,
+        )
+        self.assertNotIn('ln -s -- /dev/null "$destination"', installer)
         self.assertIn("AUTO -all", installer)
         self.assertIn('global_filter = [ "r|.*|" ]', installer)
         self.assertIn('devnode ".*"', installer)
@@ -1500,6 +2009,11 @@ Description: Backup program for disk arrays
         self._assert_actual_install_contract(installer)
         self.assertIn("package-readback.json", installer)
         self.assertIn("service-policy-readback.json", installer)
+        self.assertIn("service-retained-guards.json", installer)
+        self.assertIn(
+            "later-authorized-selection-must-verify-unit-path-inode-and-sha256",
+            installer,
+        )
         self.assertIn("sha256sum --check --strict SHA256SUMS", installer)
         self.assertNotIn("curl ", installer)
         self.assertNotIn("wget ", installer)
@@ -1610,6 +2124,9 @@ Description: Backup program for disk arrays
                 '"${exact_roots[@]}"', '"${exact_roots[0]}"', 1
             ),
             "service guard loss": payload.replace("policy-rc.d", "policy-start.d"),
+            "direct systemctl offline guard loss": payload.replace(
+                "export SYSTEMD_OFFLINE=1", "export SYSTEMD_OFFLINE=0"
+            ),
             "md storage guard loss": payload.replace("AUTO -all", "AUTO +all"),
             "LVM storage guard loss": payload.replace(
                 'global_filter = [ "r|.*|" ]', 'global_filter = [ "a|.*|" ]'
