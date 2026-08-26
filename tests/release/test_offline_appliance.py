@@ -722,6 +722,238 @@ Description: Backup program for disk arrays
         self.assertIn("pcp", selected)
         self.assertNotIn("dstat", selected)
 
+    def test_systemd_compatibility_family_is_explicit_and_not_a_product_root(
+        self,
+    ) -> None:
+        plan = offline_repo.build_plan()
+        expected = {
+            "systemd",
+            "systemd-sysv",
+            "systemd-timesyncd",
+            "systemd-resolved",
+            "udev",
+            "libudev1",
+            "libsystemd0",
+            "libsystemd-shared",
+            "libpam-systemd",
+            "libnss-systemd",
+            "systemd-dev",
+        }
+        self.assertEqual(len(plan.roots), 109)
+        self.assertEqual(len(plan.compatibility_families), 1)
+        family = plan.compatibility_families[0]
+        self.assertEqual(family["id"], "systemd-noble")
+        self.assertEqual(set(family["members"]), expected)
+        self.assertEqual(family["version_policy"], "single-candidate-version")
+        self.assertEqual(
+            set(plan.roots),
+            {
+                item["package"]
+                for item in plan.matrix["candidates"]
+                if item["package"]
+            },
+        )
+        self.assertTrue(expected - set(plan.roots))
+
+    def test_compatibility_family_schema_rejects_unsafe_and_duplicate_values(
+        self,
+    ) -> None:
+        valid = [
+            {
+                "id": "systemd-noble",
+                "members": ["systemd", "systemd-sysv"],
+                "version_policy": "single-candidate-version",
+            }
+        ]
+        self.assertEqual(
+            offline_repo._compatibility_families(valid)[0]["id"], "systemd-noble"
+        )
+        invalid_values = (
+            [{**valid[0], "members": ["systemd", "../unsafe"]}],
+            [valid[0], {**valid[0], "members": ["udev"]}],
+            [valid[0], {**valid[0], "id": "udev-noble"}],
+            [{**valid[0], "version_policy": "runner-installed"}],
+            [{**valid[0], "extra": True}],
+            [{**valid[0], "members": []}],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(
+                offline_repo.OfflineRepositoryError
+            ):
+                offline_repo._compatibility_families(value)
+
+    def test_download_closure_pins_roots_and_complete_family_at_one_version(
+        self,
+    ) -> None:
+        plan = offline_repo.PackagePlan(
+            roots=("root-package",),
+            compatibility_families=(
+                {
+                    "id": "systemd-noble",
+                    "members": ("systemd", "systemd-sysv"),
+                    "version_policy": "single-candidate-version",
+                },
+            ),
+            matrix={},
+            policy={},
+        )
+        candidates = {
+            "root-package": "1.0",
+            "systemd": "255.4-1ubuntu8.17",
+            "systemd-sysv": "255.4-1ubuntu8.17",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+
+            def run(command: list[str], **_: object) -> mock.Mock:
+                archives_arg = next(
+                    item for item in command if item.startswith("Dir::Cache::archives=")
+                )
+                archives = pathlib.Path(archives_arg.split("=", 1)[1])
+                for package in candidates:
+                    (archives / f"{package}.deb").write_bytes(package.encode())
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            def fields(path: pathlib.Path) -> dict[str, str]:
+                package = path.stem
+                return {
+                    "Package": package,
+                    "Version": candidates[package],
+                    "Architecture": "amd64",
+                }
+
+            with (
+                mock.patch.object(
+                    offline_repo, "_candidate", side_effect=lambda name: candidates[name]
+                ),
+                mock.patch.object(offline_repo, "_run", side_effect=run) as apt_run,
+                mock.patch.object(offline_repo, "_deb_fields", side_effect=fields),
+            ):
+                roots, families, debs = offline_repo._download_closure(plan, root)
+
+        argv = apt_run.call_args.args[0]
+        self.assertEqual(roots, {"root-package": "1.0"})
+        self.assertEqual(families["systemd-noble"], {
+            "systemd": "255.4-1ubuntu8.17",
+            "systemd-sysv": "255.4-1ubuntu8.17",
+        })
+        self.assertEqual(len(debs), 3)
+        self.assertEqual(argv[-4:], [
+            "install",
+            "root-package=1.0",
+            "systemd=255.4-1ubuntu8.17",
+            "systemd-sysv=255.4-1ubuntu8.17",
+        ])
+
+    def test_download_closure_rejects_family_version_mismatch_and_omission(
+        self,
+    ) -> None:
+        plan = offline_repo.PackagePlan(
+            roots=("root-package",),
+            compatibility_families=(
+                {
+                    "id": "systemd-noble",
+                    "members": ("systemd", "systemd-sysv"),
+                    "version_policy": "single-candidate-version",
+                },
+            ),
+            matrix={},
+            policy={},
+        )
+        with mock.patch.object(
+            offline_repo,
+            "_candidate",
+            side_effect=lambda name: {
+                "root-package": "1.0",
+                "systemd": "8.17",
+                "systemd-sysv": "8.12",
+            }[name],
+        ), tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
+            offline_repo.OfflineRepositoryError, "candidate versions differ"
+        ):
+            offline_repo._download_closure(plan, pathlib.Path(temporary))
+
+        candidates = {
+            "root-package": "1.0",
+            "systemd": "8.17",
+            "systemd-sysv": "8.17",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+
+            def run(command: list[str], **_: object) -> mock.Mock:
+                archives = pathlib.Path(
+                    next(
+                        item
+                        for item in command
+                        if item.startswith("Dir::Cache::archives=")
+                    ).split("=", 1)[1]
+                )
+                for package in ("root-package", "systemd"):
+                    (archives / f"{package}.deb").write_bytes(package.encode())
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with (
+                mock.patch.object(
+                    offline_repo, "_candidate", side_effect=lambda name: candidates[name]
+                ),
+                mock.patch.object(offline_repo, "_run", side_effect=run),
+                mock.patch.object(
+                    offline_repo,
+                    "_deb_fields",
+                    side_effect=lambda path: {
+                        "Package": path.stem,
+                        "Version": candidates[path.stem],
+                        "Architecture": "amd64",
+                    },
+                ),
+                self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError,
+                    "omitted required exact inputs: systemd-sysv",
+                ),
+            ):
+                offline_repo._download_closure(plan, root)
+
+    def test_download_closure_rejects_duplicate_binary_identity(self) -> None:
+        plan = offline_repo.PackagePlan(
+            roots=("systemd",),
+            compatibility_families=(),
+            matrix={},
+            policy={},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+
+            def run(command: list[str], **_: object) -> mock.Mock:
+                archives = pathlib.Path(
+                    next(
+                        item
+                        for item in command
+                        if item.startswith("Dir::Cache::archives=")
+                    ).split("=", 1)[1]
+                )
+                (archives / "one.deb").write_bytes(b"one")
+                (archives / "two.deb").write_bytes(b"two")
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with (
+                mock.patch.object(offline_repo, "_candidate", return_value="8.17"),
+                mock.patch.object(offline_repo, "_run", side_effect=run),
+                mock.patch.object(
+                    offline_repo,
+                    "_deb_fields",
+                    return_value={
+                        "Package": "systemd",
+                        "Version": "8.17",
+                        "Architecture": "amd64",
+                    },
+                ),
+                self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "duplicate binary identity"
+                ),
+            ):
+                offline_repo._download_closure(plan, root)
+
     def test_owner_workbook_aliases_and_superseded_container_rows_are_explicit(
         self,
     ) -> None:
@@ -1036,6 +1268,7 @@ Description: Backup program for disk arrays
             "dists/noble/main/binary-amd64/Packages.gz",
             "evidence/SBOM.cdx.json",
             "evidence/compatibility-matrix.json",
+            "evidence/compatibility-families.json",
             "evidence/package-manifest.json",
             "evidence/provenance.json",
             "evidence/root-package-versions.txt",
@@ -1048,8 +1281,136 @@ Description: Backup program for disk arrays
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(relative, encoding="utf-8")
+            (root / "evidence" / "package-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "packages": [
+                            {
+                                "name": "udev",
+                                "version": "8.17",
+                                "architecture": "amd64",
+                            },
+                            {
+                                "name": "systemd",
+                                "version": "8.17",
+                                "architecture": "amd64",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            nonalphabetical_plan = offline_repo.PackagePlan(
+                roots=(),
+                compatibility_families=(
+                    {
+                        "id": "systemd-noble",
+                        "members": ("udev", "systemd"),
+                        "version_policy": "single-candidate-version",
+                    },
+                ),
+                matrix={},
+                policy={},
+            )
+            generated_family_evidence = offline_repo._resolved_family_evidence(
+                nonalphabetical_plan,
+                {"systemd-noble": {"udev": "8.17", "systemd": "8.17"}},
+                [
+                    {"name": "udev", "version": "8.17", "architecture": "amd64"},
+                    {
+                        "name": "systemd",
+                        "version": "8.17",
+                        "architecture": "amd64",
+                    },
+                ],
+            )
+            (root / "evidence" / "compatibility-families.json").write_text(
+                json.dumps(generated_family_evidence),
+                encoding="utf-8",
+            )
+            (root / "evidence" / "compatibility-matrix.json").write_text(
+                json.dumps(
+                    {
+                        "compatibility_families": [
+                            {
+                                "id": "systemd-noble",
+                                "members": ["udev", "systemd"],
+                                "version_policy": "single-candidate-version",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "dists/noble/main/binary-amd64/Packages").write_text(
+                "Package: udev\nVersion: 8.17\nArchitecture: amd64\n\n"
+                "Package: systemd\nVersion: 8.17\nArchitecture: amd64\n\n",
+                encoding="utf-8",
+            )
             offline_repo._write_tree_manifest(root)
             with mock.patch.object(offline_repo.shutil, "which", return_value=None):
+                offline_repo.verify_repository(root)
+                family_path = root / "evidence" / "compatibility-families.json"
+                family_document = json.loads(family_path.read_text(encoding="utf-8"))
+                family_document["schema_version"] = 2
+                family_path.write_text(json.dumps(family_document), encoding="utf-8")
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "evidence schema"
+                ):
+                    offline_repo.verify_repository(root)
+                family_document["schema_version"] = 1
+                family_path.write_text(json.dumps(family_document), encoding="utf-8")
+                offline_repo._write_tree_manifest(root)
+                offline_repo.verify_repository(root)
+                family_document["families"][0]["members"][0] = "udev=8.17"
+                family_path.write_text(json.dumps(family_document), encoding="utf-8")
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError,
+                    "incomplete or incoherent",
+                ):
+                    offline_repo.verify_repository(root)
+                family_document["families"][0]["members"][0] = {
+                    "name": "udev",
+                    "version": "8.17",
+                }
+                family_path.write_text(json.dumps(family_document), encoding="utf-8")
+                offline_repo._write_tree_manifest(root)
+                offline_repo.verify_repository(root)
+                package_manifest_path = root / "evidence" / "package-manifest.json"
+                package_document = json.loads(
+                    package_manifest_path.read_text(encoding="utf-8")
+                )
+                package_document["packages"] = package_document["packages"][1:]
+                package_manifest_path.write_text(
+                    json.dumps(package_document), encoding="utf-8"
+                )
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "incomplete or incoherent"
+                ):
+                    offline_repo.verify_repository(root)
+                package_document["packages"].insert(
+                    0,
+                    {"name": "udev", "version": "8.17", "architecture": "amd64"},
+                )
+                package_manifest_path.write_text(
+                    json.dumps(package_document), encoding="utf-8"
+                )
+                packages_path = root / "dists/noble/main/binary-amd64/Packages"
+                packages_document = packages_path.read_text(encoding="utf-8")
+                packages_path.write_text(
+                    packages_document.split("\n\n", 1)[1], encoding="utf-8"
+                )
+                offline_repo._write_tree_manifest(root)
+                with self.assertRaisesRegex(
+                    offline_repo.OfflineRepositoryError, "incomplete or incoherent"
+                ):
+                    offline_repo.verify_repository(root)
+                packages_path.write_text(packages_document, encoding="utf-8")
+                offline_repo._write_tree_manifest(root)
                 offline_repo.verify_repository(root)
                 (root / "evidence" / "package-manifest.json").write_text(
                     "tampered", encoding="utf-8"

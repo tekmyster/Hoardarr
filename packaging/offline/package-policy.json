@@ -13,6 +13,25 @@
     "advanced-fcoe.txt",
     "advanced-ha.txt"
   ],
+  "compatibility_families": [
+    {
+      "id": "systemd-noble",
+      "members": [
+        "systemd",
+        "systemd-sysv",
+        "systemd-timesyncd",
+        "systemd-resolved",
+        "udev",
+        "libudev1",
+        "libsystemd0",
+        "libsystemd-shared",
+        "libpam-systemd",
+        "libnss-systemd",
+        "systemd-dev"
+      ],
+      "version_policy": "single-candidate-version"
+    }
+  ],
   "included_feature_disabled": [
     "bcache-tools",
     "corosync",
