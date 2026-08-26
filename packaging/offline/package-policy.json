@@ -165,6 +165,7 @@
   "official_evidence": {
     "apt": "https://ubuntu.com/server/docs/how-to/software/package-management/",
     "b3sum": "https://packages.ubuntu.com/noble/b3sum",
+    "linux-image-generic": "https://packages.ubuntu.com/noble/linux-image-generic",
     "open-vm-tools": "https://packages.ubuntu.com/noble/open-vm-tools",
     "pcp": "https://packages.ubuntu.com/noble/pcp",
     "qemu-guest-agent": "https://packages.ubuntu.com/noble/qemu-guest-agent",

@@ -34,7 +34,7 @@ logrotate
 lsscsi
 lldpd
 lldpad
-linux-modules-extra-generic
+linux-image-generic
 lvm2
 mdadm
 mergerfs
