@@ -445,7 +445,7 @@ if grep -Eq '^(Remv|Purg) |DOWNGRADED' <<<"$simulation"; then
     exit 1
 fi
 chroot "$target" apt-get "${apt_options[@]}" \
-    --yes --no-download --no-install-recommends install "${exact_roots[@]}"
+    --yes --no-install-recommends install "${exact_roots[@]}"
 
 python3 - "$target" "$retained_repo/evidence/package-manifest.json" "$state_root/package-readback.json" <<'PY'
 import json, pathlib, subprocess, sys

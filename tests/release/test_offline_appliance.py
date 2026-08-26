@@ -23,6 +23,67 @@ SPEC.loader.exec_module(offline_repo)
 
 
 class OfflineApplianceTests(unittest.TestCase):
+    @staticmethod
+    def _actual_install_fragment(payload: str) -> str:
+        match = re.search(
+            r'^chroot "\$target" apt-get "\$\{apt_options\[@\]\}" \\\n'
+            r'    --yes [^\n]+ install "\$\{exact_roots\[@\]\}"$',
+            payload,
+            flags=re.MULTILINE,
+        )
+        if match is None:
+            raise AssertionError("missing unique production actual-install command")
+        if payload.count(match.group(0)) != 1:
+            raise AssertionError("production actual-install command is ambiguous")
+        return match.group(0)
+
+    @classmethod
+    def _assert_actual_install_contract(cls, payload: str) -> None:
+        fragment = cls._actual_install_fragment(payload)
+        expected_fragment = (
+            'chroot "$target" apt-get "${apt_options[@]}" \\\n'
+            '    --yes --no-install-recommends install "${exact_roots[@]}"'
+        )
+        if fragment != expected_fragment:
+            raise AssertionError("production actual-install argv changed")
+        required = (
+            "sha256sum --check --strict SHA256SUMS",
+            'cp -a -- "$source_repo" "$retained_repo"',
+            "deb [signed-by=/usr/share/keyrings/hoardarr-offline-archive-keyring.gpg] file:/opt/hoardarr/offline-repository noble main",
+            "*.hoardarr-online-disabled",
+            '-o "Dir::Etc::sourcelist=/etc/apt/sources.list.d/hoardarr-offline.list"',
+            '-o "Dir::Etc::sourceparts=-"',
+            '-o "Acquire::Retries=0"',
+            '-o "Acquire::http::Proxy=false"',
+            '-o "Acquire::https::Proxy=false"',
+            "policy-rc.d",
+            "AUTO -all",
+            'global_filter = [ "r|.*|" ]',
+            'devnode ".*"',
+            'mapfile -t exact_roots <"$retained_repo/evidence/root-package-versions.txt"',
+            'simulation="$(chroot "$target" apt-get "${apt_options[@]}" --simulate --no-install-recommends install "${exact_roots[@]}")"',
+            'chroot "$target" apt-get "${apt_options[@]}" --simulate check',
+            "package-readback.json",
+            "service-policy-readback.json",
+        )
+        for value in required:
+            if value not in payload:
+                raise AssertionError(f"missing offline install safeguard: {value}")
+        lowered = payload.lower()
+        for forbidden in (
+            "trusted=yes",
+            "allow-unauthenticated",
+            "allowinsecurerepositories=true",
+        ):
+            if forbidden in lowered:
+                raise AssertionError(f"signature safeguard weakened: {forbidden}")
+        if "http://" in payload or "https://" in payload:
+            raise AssertionError("network source introduced into offline payload")
+        if "--no-download" in fragment:
+            raise AssertionError(
+                "actual install cannot acquire from the file repository"
+            )
+
     def test_offline_service_masks_are_classified_and_cleaned_executably(self) -> None:
         payload = (
             ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
@@ -1154,7 +1215,7 @@ Description: Backup program for disk arrays
         self.assertIn('global_filter = [ "r|.*|" ]', installer)
         self.assertIn('devnode ".*"', installer)
         self.assertIn("--simulate --no-install-recommends", installer)
-        self.assertIn("--no-download --no-install-recommends", installer)
+        self._assert_actual_install_contract(installer)
         self.assertIn("package-readback.json", installer)
         self.assertIn("service-policy-readback.json", installer)
         self.assertIn("sha256sum --check --strict SHA256SUMS", installer)
@@ -1166,6 +1227,159 @@ Description: Backup program for disk arrays
         self.assertIn("HOARDARR_OFFLINE_EVIDENCE_BEGIN", verifier)
         self.assertIn("list-unit-files", verifier)
         self.assertIn("127.0.0.1:7877/health/ready", verifier)
+
+    def test_actual_install_argv_executes_exact_production_fragment(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        fragment = self._actual_install_fragment(payload)
+        if sys.platform == "win32":
+            candidates = (
+                pathlib.Path(r"C:\Program Files\Git\bin\bash.exe"),
+                pathlib.Path(r"C:\msys64\usr\bin\bash.exe"),
+            )
+            bash = next((str(path) for path in candidates if path.is_file()), None)
+        else:
+            bash = shutil.which("bash")
+        self.assertIsNotNone(
+            bash, "Bash is required for actual-install argv regression"
+        )
+        assert bash is not None
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            fragment_path = root / "production-fragment.sh"
+            log_path = root / "argv.bin"
+            fragment_path.write_text(fragment + "\n", encoding="utf-8")
+            script = "\n".join(
+                (
+                    "set -euo pipefail",
+                    'target="/target"',
+                    "apt_options=(",
+                    '  -o "Dir::Etc::sourcelist=/etc/apt/sources.list.d/hoardarr-offline.list"',
+                    '  -o "Dir::Etc::sourceparts=-"',
+                    '  -o "Acquire::Languages=none"',
+                    '  -o "Acquire::Retries=0"',
+                    '  -o "Acquire::http::Proxy=false"',
+                    '  -o "Acquire::https::Proxy=false"',
+                    ")",
+                    'exact_roots=("alpha=1" "beta=2")',
+                    'log="$1"',
+                    'chroot() { printf \'%s\\0\' "$@" >"$log"; }',
+                    f'source "{fragment_path.as_posix()}"',
+                )
+            )
+            result = subprocess.run(
+                [bash, "-c", script, "bash", log_path.as_posix()],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = log_path.read_bytes().split(b"\0")[:-1]
+            self.assertEqual(
+                [value.decode() for value in argv],
+                [
+                    "/target",
+                    "apt-get",
+                    "-o",
+                    "Dir::Etc::sourcelist=/etc/apt/sources.list.d/hoardarr-offline.list",
+                    "-o",
+                    "Dir::Etc::sourceparts=-",
+                    "-o",
+                    "Acquire::Languages=none",
+                    "-o",
+                    "Acquire::Retries=0",
+                    "-o",
+                    "Acquire::http::Proxy=false",
+                    "-o",
+                    "Acquire::https::Proxy=false",
+                    "--yes",
+                    "--no-install-recommends",
+                    "install",
+                    "alpha=1",
+                    "beta=2",
+                ],
+            )
+
+    def test_actual_install_contract_rejects_safeguard_regressions(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        self._assert_actual_install_contract(payload)
+        mutations = {
+            "network source": payload.replace(
+                "file:/opt/hoardarr/offline-repository",
+                "https://example.invalid/repository",
+            ),
+            "missing signed-by": payload.replace("signed-by=", "keyring="),
+            "signature weakening": payload.replace(
+                "noble main", "noble main trusted=yes", 1
+            ),
+            "missing retry guard": payload.replace(
+                "Acquire::Retries=0", "Acquire::Retries=1"
+            ),
+            "missing HTTP proxy guard": payload.replace(
+                "Acquire::http::Proxy=false", "Acquire::http::Proxy=direct"
+            ),
+            "missing HTTPS proxy guard": payload.replace(
+                "Acquire::https::Proxy=false", "Acquire::https::Proxy=direct"
+            ),
+            "root loss": payload.replace(
+                '"${exact_roots[@]}"', '"${exact_roots[0]}"', 1
+            ),
+            "service guard loss": payload.replace("policy-rc.d", "policy-start.d"),
+            "md storage guard loss": payload.replace("AUTO -all", "AUTO +all"),
+            "LVM storage guard loss": payload.replace(
+                'global_filter = [ "r|.*|" ]', 'global_filter = [ "a|.*|" ]'
+            ),
+            "multipath storage guard loss": payload.replace(
+                'devnode ".*"', 'devnode "^$"'
+            ),
+            "no-download reintroduced": payload.replace(
+                "--yes --no-install-recommends install",
+                "--yes --no-download --no-install-recommends install",
+            ),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                self._assert_actual_install_contract(mutation)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux APT")
+    def test_signed_local_file_repository_actual_install(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        fragment = self._actual_install_fragment(payload)
+        required = ("apt-get", "dpkg-deb", "dpkg-query", "gpg", "gzip", "sudo")
+        missing = [command for command in required if shutil.which(command) is None]
+        self.assertEqual(missing, [], f"missing Linux integration tools: {missing}")
+        sudo = subprocess.run(
+            ["sudo", "-n", "true"], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(sudo.returncode, 0, sudo.stderr)
+        with tempfile.TemporaryDirectory() as temporary:
+            fragment_path = pathlib.Path(temporary) / "production-fragment.sh"
+            fragment_path.write_text(fragment + "\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "bash",
+                    str(
+                        ROOT / "tests" / "appliance" / "test-local-file-apt-install.sh"
+                    ),
+                    str(fragment_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=180,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"(?m)^old_no_download_status=[1-9][0-9]*$")
+        self.assertIn("archive_cache_was_empty=true", result.stdout)
+        self.assertIn("network_sources=0", result.stdout)
+        self.assertIn("package_readback=installed\t1.0\tall", result.stdout)
 
     def test_appliance_builder_embeds_verified_repository_and_emits_complete_tree_manifest(
         self,
