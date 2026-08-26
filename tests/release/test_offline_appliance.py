@@ -393,6 +393,85 @@ sync -f "$systemd_causal_receipt"
 [[ "$(systemd_mount_id)" == "$systemd_underlay_mount_id" ]]
 """.strip()
 
+PCP_LOCAL_SYSTEMD_MARKER_ORACLE = r"""
+local_systemd_marker_cleanup_count=0
+validate_and_remove_local_systemd_marker() {
+    local receipt marker private_marker mounted_root private_root
+    local expected_receipt expected_receipt_size receipt_hash_before receipt_hash_after
+    local mount_id mounted_identity private_identity marker_metadata marker_metadata_now
+    local marker_mode marker_uid marker_gid marker_size marker_links marker_device
+    local marker_inode root_device extra entry_file
+    local -a entries=()
+    [[ "$#" -eq 1 ]] || return 160
+    receipt="$1"
+    mounted_root=/run/systemd
+    private_root="$work/run-systemd"
+    marker="$mounted_root/systemd-units-load"
+    private_marker="$private_root/systemd-units-load"
+    entry_file="$work/local-systemd-marker.entries"
+    [[ "$receipt" == "$work/manager-root-after.tsv" && \
+        "${receipt%/*}" == "$work" && -f "$receipt" && ! -L "$receipt" ]] || return 161
+    [[ "$condition_status" -eq 1 ]] || return 162
+    expected_receipt=$'HMROOT|1|after|status=1\nENTRY\tsystemd-units-load\tregular\t444\t0\t0\n'
+    expected_receipt_size="${#expected_receipt}"
+    [[ "$(/usr/bin/stat -c %s -- "$receipt")" == "$expected_receipt_size" && \
+        "$(/usr/bin/cat -- "$receipt")"$'\n' == "$expected_receipt" ]] || return 163
+    receipt_hash_before="$(/usr/bin/sha256sum -- "$receipt")" || return 164
+    receipt_hash_before="${receipt_hash_before%% *}"
+    [[ "$receipt_hash_before" =~ ^[0-9a-f]{64}$ ]] || return 164
+    /usr/bin/sync -f "$receipt" || return 164
+    [[ "$private_root" == "$work/run-systemd" && -d "$private_root" && \
+        ! -L "$private_root" && -d "$mounted_root" && ! -L "$mounted_root" ]] || return 165
+    [[ "$(/usr/bin/readlink -e -- "$private_root")" == "$private_root" && \
+        "$(/usr/bin/readlink -e -- "$mounted_root")" == "$mounted_root" ]] || return 165
+    mount_id="$(systemd_mount_id)" || return 166
+    [[ "$mount_id" =~ ^[1-9][0-9]*$ && "$mount_id" == "$systemd_underlay_mount_id" ]] || return 166
+    mounted_identity="$(/usr/bin/stat -c '%d:%i' -- "$mounted_root")" || return 167
+    private_identity="$(/usr/bin/stat -c '%d:%i' -- "$private_root")" || return 167
+    [[ "$mounted_identity" == "$private_identity" ]] || return 167
+    [[ ! -e "$entry_file" && ! -L "$entry_file" ]] || return 168
+    /usr/bin/find "$mounted_root" -xdev -mindepth 1 -maxdepth 1 -print0 \
+        >"$entry_file" || return 168
+    mapfile -d '' -t entries <"$entry_file" || return 168
+    /usr/bin/rm -- "$entry_file" || return 168
+    [[ "${#entries[@]}" -eq 1 && "${entries[0]}" == "$marker" ]] || return 169
+    [[ -z "$(/usr/bin/find "$mounted_root" -xdev -mindepth 2 -print -quit)" ]] || return 170
+    [[ -z "$(/usr/bin/find "$mounted_root" -xdev -type s -print -quit)" ]] || return 171
+    [[ "$marker" == /run/systemd/systemd-units-load && \
+        "$private_marker" == "$work/run-systemd/systemd-units-load" && \
+        -f "$marker" && ! -L "$marker" && -f "$private_marker" && \
+        ! -L "$private_marker" ]] || return 172
+    [[ "$(/usr/bin/stat -c '%d:%i' -- "$marker")" == \
+        "$(/usr/bin/stat -c '%d:%i' -- "$private_marker")" ]] || return 172
+    marker_metadata="$(/usr/bin/stat -c '%a %u %g %s %h %d %i' -- "$marker")" || return 173
+    read -r marker_mode marker_uid marker_gid marker_size marker_links marker_device \
+        marker_inode extra <<<"$marker_metadata"
+    root_device="$(/usr/bin/stat -c %d -- "$mounted_root")" || return 173
+    [[ -z "${extra:-}" && "$marker_mode" == 444 && "$marker_uid" == 0 && \
+        "$marker_gid" == 0 && "$marker_size" == 0 && "$marker_links" == 1 && \
+        "$marker_device" == "$root_device" && "$marker_inode" =~ ^[1-9][0-9]*$ ]] || return 173
+    /usr/bin/cmp -s -- "$marker" /dev/null || return 174
+    [[ "$local_systemd_marker_cleanup_count" -eq 0 ]] || return 175
+    [[ "$(systemd_mount_id)" == "$systemd_underlay_mount_id" && \
+        "$(/usr/bin/stat -c '%d:%i' -- "$mounted_root")" == "$private_identity" ]] || return 176
+    marker_metadata_now="$(/usr/bin/stat -c '%a %u %g %s %h %d %i' -- "$marker")" || return 176
+    [[ "$marker_metadata_now" == "$marker_metadata" ]] || return 176
+    [[ "$(/usr/bin/sha256sum -- "$receipt")" == "$receipt_hash_before  $receipt" ]] || return 177
+    /usr/bin/rm -- "$marker" || return 178
+    local_systemd_marker_cleanup_count=$((local_systemd_marker_cleanup_count + 1))
+    /usr/bin/sync -f "$private_root" || return 179
+    [[ "$local_systemd_marker_cleanup_count" -eq 1 && \
+        ! -e "$marker" && ! -L "$marker" && \
+        ! -e "$private_marker" && ! -L "$private_marker" && \
+        -z "$(/usr/bin/find "$mounted_root" -xdev -mindepth 1 -print -quit)" ]] || return 180
+    receipt_hash_after="$(/usr/bin/sha256sum -- "$receipt")" || return 181
+    receipt_hash_after="${receipt_hash_after%% *}"
+    [[ "$receipt_hash_after" == "$receipt_hash_before" && \
+        "$(/usr/bin/stat -c %s -- "$receipt")" == "$expected_receipt_size" && \
+        "$(/usr/bin/cat -- "$receipt")"$'\n' == "$expected_receipt" ]] || return 181
+}
+""".strip()
+
 
 def _pcp_phase_ten_with_causal_proof() -> str:
     prefix = "trace_begin 10-host-manager-isolation host-manager-isolation\n"
@@ -400,7 +479,13 @@ def _pcp_phase_ten_with_causal_proof() -> str:
         raise AssertionError("real PCP phase-10 entry is missing or ambiguous")
     return PCP_OFFLINE_NONACTIVATION_PROOF.replace(
         prefix,
-        prefix + PCP_SYSTEMD_SOURCE_RECEIPT + "\n" + PCP_SYSTEMD_CAUSAL_PROOF + "\n",
+        prefix
+        + PCP_SYSTEMD_SOURCE_RECEIPT
+        + "\n"
+        + PCP_SYSTEMD_CAUSAL_PROOF
+        + "\n"
+        + PCP_LOCAL_SYSTEMD_MARKER_ORACLE
+        + "\n",
         1,
     )
 
@@ -442,6 +527,8 @@ systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition" \
     >/dev/null 2>&1 && exit 100
 condition_status=$?
 manager_root_snapshot after "$condition_status" "$work/manager-root-after.tsv"
+validate_and_remove_local_systemd_marker "$work/manager-root-after.tsv"
+[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]
 [[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
 trace_pass
 """.strip()
@@ -465,6 +552,8 @@ def _assert_pcp_offline_nonactivation_contract(harness: str) -> None:
         'systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition"',
         "condition_status=$?",
         'manager_root_snapshot after "$condition_status" "$work/manager-root-after.tsv"',
+        'validate_and_remove_local_systemd_marker "$work/manager-root-after.tsv"',
+        '[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]',
     )
     for fragment in required:
         if fragment not in harness:
@@ -484,7 +573,10 @@ def _assert_pcp_offline_nonactivation_contract(harness: str) -> None:
         "    >/dev/null 2>&1 && exit 100\n"
         "condition_status=$?\n"
         'manager_root_snapshot after "$condition_status" '
-        '"$work/manager-root-after.tsv"\n' + manager_root_check
+        '"$work/manager-root-after.tsv"\n'
+        "validate_and_remove_local_systemd_marker "
+        '"$work/manager-root-after.tsv"\n'
+        '[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]\n' + manager_root_check
     )
     if snapshot_sequence not in harness:
         raise AssertionError(
@@ -2447,7 +2539,7 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
             finally:
                 outside.unlink()
 
-    def test_systemd_causal_control_preserves_real_phase_ten_oracle(self) -> None:
+    def test_systemd_causal_control_preserves_real_phase_ten_sequence(self) -> None:
         phase = _pcp_phase_ten_with_causal_proof()
         real_sequence = (
             'manager_root_snapshot before - "$work/manager-root-before.tsv"\n'
@@ -2456,6 +2548,9 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
             "condition_status=$?\n"
             'manager_root_snapshot after "$condition_status" '
             '"$work/manager-root-after.tsv"\n'
+            "validate_and_remove_local_systemd_marker "
+            '"$work/manager-root-after.tsv"\n'
+            '[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]\n'
             '[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]'
         )
         self.assertEqual(phase.count(real_sequence), 1)
@@ -2472,12 +2567,397 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
         self.assertNotIn("curl", PCP_SYSTEMD_CAUSAL_PROOF)
         self.assertNotIn("wget", PCP_SYSTEMD_CAUSAL_PROOF)
         self.assertNotIn("strace", PCP_SYSTEMD_CAUSAL_PROOF)
-        self.assertNotIn("rm -f -- /run/systemd/systemd-units-load", phase)
+        self.assertEqual(
+            PCP_LOCAL_SYSTEMD_MARKER_ORACLE.count('/usr/bin/rm -- "$marker"'), 1
+        )
+        self.assertNotIn("rm -f", PCP_LOCAL_SYSTEMD_MARKER_ORACLE)
+        self.assertNotIn("rm -r", PCP_LOCAL_SYSTEMD_MARKER_ORACLE)
+        self.assertIsNone(
+            re.search(
+                r"(?m)^\s*/usr/bin/rm[^\n]*[\*\?\[]",
+                PCP_LOCAL_SYSTEMD_MARKER_ORACLE,
+            )
+        )
+        self.assertNotIn("systemctl", PCP_LOCAL_SYSTEMD_MARKER_ORACLE)
+        self.assertNotIn("systemd-analyze", PCP_LOCAL_SYSTEMD_MARKER_ORACLE)
         self.assertIn(
             'rm -f -- "$expected_entry"',
             PCP_SYSTEMD_CAUSAL_PROOF,
         )
         _assert_pcp_offline_nonactivation_contract(phase)
+        with self.assertRaises(AssertionError):
+            _assert_pcp_offline_nonactivation_contract(
+                phase.replace(
+                    'manager_root_snapshot after "$condition_status" '
+                    '"$work/manager-root-after.tsv"\n'
+                    "validate_and_remove_local_systemd_marker",
+                    "validate_and_remove_local_systemd_marker "
+                    '"$work/manager-root-after.tsv"\n'
+                    'manager_root_snapshot after "$condition_status"',
+                    1,
+                )
+            )
+        with self.assertRaises(AssertionError):
+            _assert_pcp_offline_nonactivation_contract(
+                phase.replace(
+                    "validate_and_remove_local_systemd_marker "
+                    '"$work/manager-root-after.tsv"\n'
+                    '[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]\n'
+                    '[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]',
+                    '[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]\n'
+                    "validate_and_remove_local_systemd_marker "
+                    '"$work/manager-root-after.tsv"\n'
+                    '[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]',
+                    1,
+                )
+            )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux mounts")
+    def test_local_systemd_marker_oracle_is_exact_and_fail_closed(self) -> None:
+        required = ("bash", "mount", "sudo", "umount", "unshare")
+        missing = [command for command in required if shutil.which(command) is None]
+        self.assertEqual(missing, [], f"missing marker-oracle tools: {missing}")
+        sudo = subprocess.run(
+            ["sudo", "-n", "true"], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(sudo.returncode, 0, sudo.stderr)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = root / "local-systemd-marker-oracle.sh"
+            script.write_text(
+                "set -Eeuo pipefail\n"
+                'fixture_root="$1"\n'
+                "mounted=false\n"
+                "nested_marker_mount=false\n"
+                "private_marker_mount=false\n"
+                "sync_wrapper_mount=false\n"
+                'wrong_device_source="/dev/shm/hoardarr-f16-marker-$$"\n'
+                "cleanup_case() {\n"
+                '    if [[ "$sync_wrapper_mount" == true ]]; then\n'
+                "        /usr/bin/umount -- /usr/bin/sync || return 201\n"
+                "        sync_wrapper_mount=false\n"
+                "    fi\n"
+                '    if [[ "$nested_marker_mount" == true ]]; then\n'
+                "        /usr/bin/umount -- /run/systemd/systemd-units-load || return 202\n"
+                "        nested_marker_mount=false\n"
+                "    fi\n"
+                '    if [[ "$private_marker_mount" == true ]]; then\n'
+                '        /usr/bin/umount -- "$work/run-systemd/systemd-units-load" || return 202\n'
+                "        private_marker_mount=false\n"
+                "    fi\n"
+                '    if [[ "$mounted" == true ]]; then\n'
+                "        /usr/bin/umount -- /run/systemd || return 203\n"
+                "        mounted=false\n"
+                "    fi\n"
+                "}\n"
+                "cleanup_all() {\n"
+                '    local status="$?"\n'
+                "    trap - EXIT\n"
+                "    cleanup_case || status=$?\n"
+                '    /usr/bin/rm -f -- "$wrong_device_source" || status=204\n'
+                '    exit "$status"\n'
+                "}\n"
+                "trap cleanup_all EXIT\n"
+                "systemd_mount_id() {\n"
+                "    /usr/bin/awk '$5 == \"/run/systemd\" { id=$1 } END { print id }' "
+                "/proc/self/mountinfo\n"
+                "}\n"
+                "start_case() {\n"
+                "    cleanup_case\n"
+                '    work="$fixture_root/$1"\n'
+                '    /usr/bin/mkdir -p -- "$work/run-systemd"\n'
+                '    /usr/bin/mount --bind "$work/run-systemd" /run/systemd\n'
+                "    mounted=true\n"
+                "    /usr/bin/mount --make-private /run/systemd\n"
+                '    systemd_underlay_mount_id="$(systemd_mount_id)"\n'
+                '    [[ "$systemd_underlay_mount_id" =~ ^[1-9][0-9]*$ ]]\n'
+                "    condition_status=1\n"
+                "    local_systemd_marker_cleanup_count=0\n"
+                "}\n"
+                "write_receipt() {\n"
+                "    printf 'HMROOT|1|after|status=1\\nENTRY\\tsystemd-units-load\\tregular\\t444\\t0\\t0\\n' >\"$work/manager-root-after.tsv\"\n"
+                "}\n"
+                "write_marker() {\n"
+                '    : >"$work/run-systemd/systemd-units-load"\n'
+                '    /usr/bin/chown 0:0 -- "$work/run-systemd/systemd-units-load"\n'
+                '    /usr/bin/chmod 0444 -- "$work/run-systemd/systemd-units-load"\n'
+                "}\n"
+                "expect_rejected() {\n"
+                '    local label="$1" expected_status="$2" '
+                'before="$local_systemd_marker_cleanup_count" actual_status=0\n'
+                "    if validate_and_remove_local_systemd_marker "
+                '"$work/manager-root-after.tsv"; then\n'
+                "        printf 'unexpected oracle acceptance: %s\\n' \"$label\" >&2\n"
+                "        exit 205\n"
+                "    else\n"
+                "        actual_status=$?\n"
+                "    fi\n"
+                '    [[ "$actual_status" -eq "$expected_status" ]] || {\n'
+                "        printf 'unexpected oracle rejection: %s expected=%s actual=%s\\n' "
+                '"$label" "$expected_status" "$actual_status" >&2\n'
+                "        exit 206\n"
+                "    }\n"
+                '    [[ "$local_systemd_marker_cleanup_count" -eq "$before" ]] || '
+                '[[ "$label" == residual && "$local_systemd_marker_cleanup_count" -eq 1 ]]\n'
+                "}\n"
+                + PCP_LOCAL_SYSTEMD_MARKER_ORACLE
+                + "\n"
+                + r"""
+negative_count=0
+start_case valid
+write_receipt
+write_marker
+receipt_hash="$(/usr/bin/sha256sum -- "$work/manager-root-after.tsv")"
+validate_and_remove_local_systemd_marker "$work/manager-root-after.tsv"
+[[ "$local_systemd_marker_cleanup_count" -eq 1 ]]
+[[ -z "$(/usr/bin/find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
+[[ "$(/usr/bin/sha256sum -- "$work/manager-root-after.tsv")" == "$receipt_hash" ]]
+
+start_case missing
+write_receipt
+expect_rejected missing 169
+negative_count=$((negative_count + 1))
+
+start_case wrong-name
+write_receipt
+: >"$work/run-systemd/not-systemd-units-load"
+expect_rejected wrong-name 169
+negative_count=$((negative_count + 1))
+
+start_case extra
+write_receipt
+write_marker
+: >"$work/run-systemd/extra"
+expect_rejected extra 169
+negative_count=$((negative_count + 1))
+
+start_case deeper
+write_receipt
+/usr/bin/mkdir -- "$work/run-systemd/systemd-units-load"
+: >"$work/run-systemd/systemd-units-load/deeper"
+expect_rejected deeper 170
+negative_count=$((negative_count + 1))
+
+start_case directory
+write_receipt
+/usr/bin/mkdir -- "$work/run-systemd/systemd-units-load"
+expect_rejected directory 172
+negative_count=$((negative_count + 1))
+
+start_case symlink
+write_receipt
+/usr/bin/ln -s -- /dev/null "$work/run-systemd/systemd-units-load"
+expect_rejected symlink 172
+negative_count=$((negative_count + 1))
+
+start_case socket
+write_receipt
+/usr/bin/python3 - "$work/run-systemd/systemd-units-load" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.close()
+PY
+expect_rejected socket 171
+negative_count=$((negative_count + 1))
+
+start_case fifo
+write_receipt
+/usr/bin/mkfifo -- "$work/run-systemd/systemd-units-load"
+expect_rejected fifo 172
+negative_count=$((negative_count + 1))
+
+start_case nonzero
+write_receipt
+printf x >"$work/run-systemd/systemd-units-load"
+/usr/bin/chmod 0444 -- "$work/run-systemd/systemd-units-load"
+expect_rejected nonzero 173
+negative_count=$((negative_count + 1))
+
+start_case wrong-mode
+write_receipt
+write_marker
+/usr/bin/chmod 0644 -- "$work/run-systemd/systemd-units-load"
+expect_rejected wrong-mode 173
+negative_count=$((negative_count + 1))
+
+start_case wrong-owner
+write_receipt
+write_marker
+/usr/bin/chown 1:0 -- "$work/run-systemd/systemd-units-load"
+expect_rejected wrong-owner 173
+negative_count=$((negative_count + 1))
+
+start_case wrong-group
+write_receipt
+write_marker
+/usr/bin/chown 0:1 -- "$work/run-systemd/systemd-units-load"
+expect_rejected wrong-group 173
+negative_count=$((negative_count + 1))
+
+start_case wrong-links
+write_receipt
+write_marker
+/usr/bin/ln -- "$work/run-systemd/systemd-units-load" "$work/marker-peer"
+expect_rejected wrong-links 173
+negative_count=$((negative_count + 1))
+
+start_case wrong-device
+write_receipt
+write_marker
+: >"$wrong_device_source"
+/usr/bin/chown 0:0 -- "$wrong_device_source"
+/usr/bin/chmod 0444 -- "$wrong_device_source"
+[[ "$(/usr/bin/stat -c %d -- "$wrong_device_source")" != \
+    "$(/usr/bin/stat -c %d -- "$work/run-systemd")" ]]
+/usr/bin/mount --bind "$wrong_device_source" /run/systemd/systemd-units-load
+nested_marker_mount=true
+/usr/bin/mount --bind "$wrong_device_source" "$work/run-systemd/systemd-units-load"
+private_marker_mount=true
+expect_rejected wrong-device 173
+negative_count=$((negative_count + 1))
+
+start_case manager-endpoint
+write_receipt
+write_marker
+/usr/bin/python3 - "$work/run-systemd/private" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.close()
+PY
+expect_rejected manager-endpoint 169
+negative_count=$((negative_count + 1))
+
+start_case binding-mismatch
+write_receipt
+write_marker
+/usr/bin/umount -- /run/systemd
+mounted=false
+/usr/bin/mkdir -p -- "$fixture_root/binding-mismatch-mounted"
+/usr/bin/mount --bind "$fixture_root/binding-mismatch-mounted" /run/systemd
+mounted=true
+/usr/bin/mount --make-private /run/systemd
+systemd_underlay_mount_id="$(systemd_mount_id)"
+: >/run/systemd/systemd-units-load
+/usr/bin/chown 0:0 -- /run/systemd/systemd-units-load
+/usr/bin/chmod 0444 -- /run/systemd/systemd-units-load
+expect_rejected binding-mismatch 167
+negative_count=$((negative_count + 1))
+
+start_case cleanup-failure
+write_receipt
+write_marker
+cleanup_source="$fixture_root/cleanup-source"
+: >"$cleanup_source"
+/usr/bin/chown 0:0 -- "$cleanup_source"
+/usr/bin/chmod 0444 -- "$cleanup_source"
+[[ "$(/usr/bin/stat -c %d -- "$cleanup_source")" == \
+    "$(/usr/bin/stat -c %d -- "$work/run-systemd")" ]]
+/usr/bin/mount --bind "$cleanup_source" /run/systemd/systemd-units-load
+nested_marker_mount=true
+/usr/bin/mount --bind "$cleanup_source" "$work/run-systemd/systemd-units-load"
+private_marker_mount=true
+expect_rejected cleanup-failure 178
+[[ "$local_systemd_marker_cleanup_count" -eq 0 ]]
+negative_count=$((negative_count + 1))
+
+start_case receipt-drift
+write_receipt
+write_marker
+/usr/bin/sed -i 's/regular\t444/regular\t644/' "$work/manager-root-after.tsv"
+expect_rejected receipt-drift 163
+negative_count=$((negative_count + 1))
+
+start_case residual
+write_receipt
+write_marker
+/usr/bin/cp -- /usr/bin/sync "$fixture_root/real-sync"
+cat >"$fixture_root/sync-wrapper" <<EOF
+#!/bin/sh
+count_file='$fixture_root/sync-count'
+count=0
+if [ -f "\$count_file" ]; then count=\$(cat -- "\$count_file"); fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"\$count_file"
+if [ "\$count" -eq 2 ]; then : >/run/systemd/residual; fi
+exec '$fixture_root/real-sync' "\$@"
+EOF
+/usr/bin/chmod 0755 -- "$fixture_root/sync-wrapper"
+/usr/bin/mount --bind "$fixture_root/sync-wrapper" /usr/bin/sync
+sync_wrapper_mount=true
+expect_rejected residual 180
+[[ "$local_systemd_marker_cleanup_count" -eq 1 && -f /run/systemd/residual ]]
+negative_count=$((negative_count + 1))
+
+start_case one-removal
+write_receipt
+write_marker
+validate_and_remove_local_systemd_marker "$work/manager-root-after.tsv"
+write_marker
+expect_rejected second-removal 175
+[[ "$local_systemd_marker_cleanup_count" -eq 1 && \
+    -f "$work/run-systemd/systemd-units-load" ]]
+negative_count=$((negative_count + 1))
+
+[[ "$negative_count" -eq 20 ]]
+printf 'local_systemd_marker_oracle_valid=1 negatives=%s cleanup_count=1\n' \
+    "$negative_count"
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            syntax = subprocess.run(
+                [shutil.which("bash") or "bash", "-n", str(script)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stdout + syntax.stderr)
+            result: subprocess.CompletedProcess[str] | None = None
+            ownership: subprocess.CompletedProcess[str] | None = None
+            try:
+                result = subprocess.run(
+                    [
+                        "sudo",
+                        "-n",
+                        "unshare",
+                        "--mount",
+                        "--fork",
+                        shutil.which("bash") or "bash",
+                        str(script),
+                        str(root),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=120,
+                )
+            finally:
+                ownership = subprocess.run(
+                    [
+                        "sudo",
+                        "-n",
+                        "chown",
+                        "-R",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--",
+                        str(root),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=30,
+                )
+            assert ownership is not None
+            self.assertEqual(ownership.returncode, 0, ownership.stderr)
+            assert result is not None
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                result.stdout,
+                "local_systemd_marker_oracle_valid=1 negatives=20 cleanup_count=1\n",
+            )
 
     @unittest.skipUnless(
         sys.platform.startswith("linux") and shutil.which("bash"),
