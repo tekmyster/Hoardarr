@@ -1795,9 +1795,23 @@ for path in "$negative_target" "$wrong_name" "$wrong_directory" \
     /usr/bin/chmod 0600 -- "$path"
 done
 symlink_target="$negative_dir/.hoardarr-recovery.SYM001"
+hardlink_source="$HOARDARR_TEST_RECOVERY_ROOT/.hoardarr-hardlink-negative-source"
 hardlink_target="$negative_dir/.hoardarr-recovery.LNK001"
 ln -s -- "$outside_target" "$symlink_target"
-ln -- "$outside_target" "$hardlink_target"
+: >"$hardlink_source"
+/usr/bin/chmod 0600 -- "$hardlink_source"
+ln -- "$hardlink_source" "$hardlink_target"
+[[ "$hardlink_source" == "$HOARDARR_TEST_RECOVERY_ROOT/"* ]]
+[[ "${hardlink_source%/*}" == "$HOARDARR_TEST_RECOVERY_ROOT" ]]
+[[ "$hardlink_source" != *.d/* ]]
+[[ "$hardlink_source" != */../* ]]
+[[ -f "$hardlink_source" && ! -L "$hardlink_source" ]]
+[[ "$(/usr/bin/stat -c %d -- "$hardlink_source")" == \
+    "$(/usr/bin/stat -c %d -- "$hardlink_target")" ]]
+[[ "$(/usr/bin/stat -c %i -- "$hardlink_source")" == \
+    "$(/usr/bin/stat -c %i -- "$hardlink_target")" ]]
+[[ "$(/usr/bin/stat -c %h -- "$hardlink_source")" == 2 ]]
+[[ "$(/usr/bin/stat -c %h -- "$hardlink_target")" == 2 ]]
 "$work/wrappers/chmod" 0600 -- "$negative_target"
 "$work/wrappers/chmod" 0644 "$negative_target"
 "$work/wrappers/chmod" 0644 -- "$negative_target" extra
@@ -1809,12 +1823,15 @@ ln -- "$outside_target" "$hardlink_target"
 "$work/wrappers/chmod" 0644 -- "$hardlink_target"
 "$work/wrappers/chmod" 0644 -- "$unrelated_target"
 for path in "$negative_target" "$wrong_name" "$wrong_directory" \
-    "$outside_target" "$unrelated_target" "$hardlink_target"; do
+    "$outside_target" "$unrelated_target" "$hardlink_source" "$hardlink_target"; do
     [[ "$(/usr/bin/stat -c %a -- "$path")" == 600 ]]
 done
 [[ ! -s "$HOARDARR_TEST_CHMOD_RECEIPT" ]]
-rm -f -- "$symlink_target" "$hardlink_target" "$negative_target" "$wrong_name" \
-    "$wrong_directory" "$outside_target" "$unrelated_target"
+rm -f -- "$symlink_target" "$hardlink_target" "$hardlink_source" \
+    "$negative_target" "$wrong_name" "$wrong_directory" "$outside_target" \
+    "$unrelated_target"
+[[ ! -e "$hardlink_target" && ! -L "$hardlink_target" ]]
+[[ ! -e "$hardlink_source" && ! -L "$hardlink_source" ]]
 rmdir -- "$negative_dir" "$wrong_dir"
 trace_pass
 
