@@ -32,6 +32,49 @@ def load_builder():
 builder = load_builder()
 
 
+class FrontendLicenseEvidenceTests(unittest.TestCase):
+    def test_platform_optional_package_absent_from_install_is_not_in_sbom(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            frontend = root / "frontend"
+            installed = frontend / "node_modules" / "installed-package"
+            installed.mkdir(parents=True)
+            (installed / "LICENSE").write_text("MIT\n", encoding="utf-8")
+            (frontend / "package-lock.json").write_text(
+                json.dumps(
+                    {
+                        "packages": {
+                            "": {"name": "frontend", "version": "0.0.0"},
+                            "node_modules/installed-package": {
+                                "version": "1.2.3",
+                                "license": "MIT",
+                            },
+                            "node_modules/platform-optional": {
+                                "version": "4.5.6",
+                                "license": "MIT",
+                                "optional": True,
+                                "os": ["aix"],
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            staging = root / "staging"
+
+            builder._collect_frontend_licenses(frontend, staging)
+
+            evidence = json.loads(
+                (staging / "evidence" / "npm-licenses.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [item["name"] for item in evidence["packages"]],
+                ["installed-package"],
+            )
+
+
 class VersionConsistencyTests(unittest.TestCase):
     def test_release_package_and_ui_versions_match(self):
         project_version = str(

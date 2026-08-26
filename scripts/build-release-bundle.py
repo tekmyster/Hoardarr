@@ -519,6 +519,11 @@ def _collect_frontend_licenses(frontend: Path, staging: Path) -> None:
             raise BuildError(f"package-lock entry lacks a version: {package_path}")
         name = package_path.removeprefix("node_modules/")
         unresolved_source = frontend / package_path
+        if not unresolved_source.exists() and metadata.get("optional") is True:
+            # npm lockfiles retain platform-specific optional packages that npm ci
+            # correctly omits on the current target. They are not part of the
+            # installed frontend payload or its SBOM/license corpus.
+            continue
         source = unresolved_source.resolve()
         if (
             node_modules not in source.parents
