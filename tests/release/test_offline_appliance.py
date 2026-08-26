@@ -1378,6 +1378,7 @@ Description: Backup program for disk arrays
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertRegex(result.stdout, r"(?m)^old_no_download_status=[1-9][0-9]*$")
         self.assertIn("archive_cache_was_empty=true", result.stdout)
+        self.assertIn("actual_install_file_acquisition=true", result.stdout)
         self.assertIn("network_sources=0", result.stdout)
         self.assertIn("package_readback=installed\t1.0\tall", result.stdout)
 

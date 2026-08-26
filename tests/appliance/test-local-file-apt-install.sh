@@ -161,11 +161,11 @@ old_error="$(awk '
 
 # This is the exact actual-install command extracted from the production payload.
 # It must acquire through the only configured, signed file: source.
-source "$production_fragment"
+source "$production_fragment" >"$work/corrected-install.log" 2>&1
+grep -Fq "file:$repo" "$work/corrected-install.log"
 readback="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}\n' "$package")"
 [[ "$readback" == $'installed\t1.0\tall' ]]
 [[ "$(cat "$installed_path")" == installed-from-signed-local-file-repository ]]
-[[ -n "$(find "$archives" -maxdepth 1 -type f -name "${package}_*.deb" -print -quit)" ]]
 
 printf 'old_no_download_status=%s\n' "$old_status"
 printf 'old_no_download_error=%s\n' "$old_error"
@@ -173,5 +173,6 @@ printf 'signed_by=%s\n' "$keyring"
 printf 'fingerprint=%s\n' "$fingerprint"
 printf 'source=file:%s\n' "$repo"
 printf 'archive_cache_was_empty=true\n'
+printf 'actual_install_file_acquisition=true\n'
 printf 'network_sources=0\n'
 printf 'package_readback=%s\n' "$readback"
