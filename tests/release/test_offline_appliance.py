@@ -1065,8 +1065,34 @@ Description: Backup program for disk arrays
             " || format('hoardarr-offline-{0}', matrix.pass)",
             workflow,
         )
-        self.assertIn("if: github.event_name == 'workflow_dispatch'", workflow)
-        self.assertIn("name: hoardarr-offline-install-inputs\n          path: dist", workflow)
+        retention = workflow.split(
+            "- name: Retain offline install inputs for no-network validation", 1
+        )[1].split("\n\n  offline-install:", 1)[0]
+        self.assertNotIn("if:", retention)
+        self.assertIn("name: hoardarr-offline-install-inputs", retention)
+        self.assertIn("compression-level: 0", retention)
+        self.assertIn("retention-days: 3", retention)
+        self.assertEqual(
+            [
+                line.strip()
+                for line in retention.splitlines()
+                if line.strip().startswith("dist/")
+            ],
+            ["dist/hoardarr-release.tar.gz", "dist/offline-repository"],
+        )
+        offline_install = workflow.split("\n  offline-install:\n", 1)[1]
+        self.assertTrue(
+            offline_install.startswith(
+                "    if: github.event_name == 'workflow_dispatch'\n"
+            )
+        )
+        self.assertEqual(workflow.count("\n  offline-install:\n"), 1)
+        self.assertEqual(
+            offline_install.count(
+                "inputs.offline_validation_mode == 'diagnostic-pass-1'"
+            ),
+            3,
+        )
         self.assertIn('$RUNNER_TEMP/ci-signing-key', workflow)
         self.assertIn('$RUNNER_TEMP/ubuntu-vulnerability-status.json', workflow)
         self.assertIn("-nic none", harness)
