@@ -2,11 +2,12 @@
 
 ## Result
 
-**BASELINE ARTIFACT VERIFIED; TWO-PASS OFFLINE INSTALL NOT VERIFIED.**
+**PRE-CHANGE TWO-PASS BASELINE: FAIL.**  
+**SUPERSEDING OWNER-10 GATE: FAIL.**
 
 The pre-LINSTOR baseline now builds a complete signed/indexed Ubuntu 24.04 amd64 ISO-local APT repository, exact dependency closure, release bundle, evidence corpus, and bootable 4.15 GiB appliance ISO. The repository and release manifests were independently read back from the downloaded CI artifact. No live system, owner data, credential, pool, network, physical disk, or protected disk was mutated, and nothing was deployed.
 
-The authoritative manual run built both CI-only no-network ISOs, but the harness was not executed because `tests/appliance/run-offline-iso-pass.sh` lacks an executable Git mode. Both jobs failed before QEMU installation or protected-media testing with exit `126` / `Permission denied`.
+WO-APP-006-C1 corrected only the harness Git mode, preserving blob content, and the automatic artifact build passed. In the single corrected manual run, both fresh `-nic none` jobs executed but reached the exact 45-minute installer bound without the reboot checkpoint. Both installer serial logs are zero bytes, so the retained evidence proves a reproducible bounded timeout and an observability defect but does not distinguish a slow TCG guest from a hung installer. No retry, timeout extension, NIC addition or harness change was made.
 
 This evidence predates the owner-selected **LINSTOR + DRBD 9 + DRBD Reactor + installed-but-disabled LINSTOR Gateway** three-host clustered-storage requirement added to the normative contract while run `32918144601` was already in flight. It contains no claimed LINSTOR/DRBD/Reactor/Gateway package, kernel-module, Secure Boot/module-signing, or offline Proxmox-plugin sidecar closure and therefore **cannot close the superseding OWNER-10 contract**.
 
@@ -20,6 +21,7 @@ Scoped implementation commits:
 - `ae3a567111536733e219da70857c5e31f2ac773b` — omit only absent platform-optional npm packages from installed-payload evidence
 - `f2e3790f69e29e25172eab6394883f806c520542` — safe cleanup of read-only extracted ISO directories
 - `d6fe6d040713744c5dba8cea999863fcdd5602a3` — restore retained offline input artifact under exact `dist/` paths
+- `413243666d0b8cbf5277c38250b511bd0a37131a` — mode-only harness correction from `100644` to `100755`; blob unchanged
 
 ## Evidence
 
@@ -45,6 +47,27 @@ python -m ruff check scripts/build-offline-apt-repository.py scripts/build-relea
 ```
 
 Result: **47 passed, 1 platform-specific skip; Ruff passed**. The suite grew from the original 45 tests by two deterministic regression cases. Local `bash -n` was unavailable because this Windows host has no installed WSL distribution; Linux CI executed the appliance shell build successfully.
+
+### WO-APP-006-C1 mode and two-pass evidence
+
+- Initial index mode: `100644`; blob: `99d9fb7d4197c9700aa8296bbaed6e86144b56bd`; first line: `#!/usr/bin/env bash`.
+- Authorized change: `git update-index --chmod=+x -- tests/appliance/run-offline-iso-pass.sh`.
+- Staged summary: `mode change 100644 => 100755`; numstat: `0 0`.
+- Committed tree at `413243666d0b8cbf5277c38250b511bd0a37131a`: `100755 blob 99d9fb7d4197c9700aa8296bbaed6e86144b56bd`.
+- Automatic push run `32919298829`: **PASS**; completed before manual dispatch.
+- Corrected manual run `32919845325`: shared build **PASS**; overall **FAIL**.
+- Pass-2 job `98032589470`: installer execution `2026-08-26T01:49:58Z`–`02:34:58Z`; **FAIL** at exact 45-minute bound.
+- Pass-1 job `98032589485`: installer execution `2026-08-26T01:50:27Z`–`02:35:27Z`; **FAIL** at exact 45-minute bound.
+- Both failures: `offline installer did not reach its bounded reboot checkpoint`; QEMU terminated by the existing timeout.
+- Pass-1 artifact: ID `9590596589`; digest `sha256:a72b5a364a60de5e9f29b33c70a428d633a53e038cdd611b912e64a9061743fc`.
+- Pass-2 artifact: ID `9590585533`; digest `sha256:f3db0e1963ab685dac302fc8200d86067cb7650f1bb01703ddd1cfc97b235225`.
+- Supervisor readback path: `.codex-temp/c1-32919845325/{pass-1,pass-2}`.
+- Both `installer-serial.log` files: zero bytes.
+- Partial pass-1 QCOW2: healthy/clean, 32-GiB virtual, `4,018,077,696` bytes actual; independent Windows `qemu-img 11.1.0 check` found no errors.
+- Partial pass-2 QCOW2: healthy/clean, 32-GiB virtual, `3,977,445,376` bytes actual; independent Windows `qemu-img 11.1.0 check` found no errors.
+- All four protected raw-disk hashes match their respective before manifests.
+- Both validation ISO tree manifests are byte-identical; manifest-file SHA-256: `1aff87b8734184c0341177cce4eb02a2b429010eb6225274b8596eaabe2223fc`; their ISO byte identities differ as expected across independent rebuilds.
+- The empty serial logs prevent any claim that the installer was progressing, stalled, or waiting for input.
 
 ### Resolver/build progression
 
@@ -104,15 +127,17 @@ Manual run `32918144601` artifacts:
 
 ## Defects
 
-1. `tests/appliance/run-offline-iso-pass.sh` is not executable in the Git checkout. Both no-NIC jobs failed with exit `126` before QEMU; no installation, package readback, service readback, protected-disk hash comparison, WebUI readiness, or first-boot measurement was executed.
-2. The pre-LINSTOR ISO/repository is not a valid closure of the now-superseding clustered-storage contract. LINSTOR, DRBD 9, DRBD Reactor, installed-but-disabled LINSTOR Gateway, required kernel/module/Secure-Boot handling and the offline Proxmox-plugin sidecar disposition remain unevidenced.
-3. The CI repository uses an explicit ephemeral test signing identity. A production repository signing key remains an external release input and was not invented or embedded.
+1. The executable-mode defect is resolved, but both corrected no-NIC installations reproducibly failed at the exact 45-minute installer bound before the reboot checkpoint.
+2. Installer observability is insufficient: both serial logs are empty, so current evidence cannot identify whether TCG execution was merely slow, the guest hung, or the installer waited on an unseen state.
+3. The pre-LINSTOR ISO/repository is not a valid closure of the now-superseding clustered-storage contract. LINSTOR, DRBD 9, DRBD Reactor, installed-but-disabled LINSTOR Gateway, required kernel/module/Secure-Boot handling and the offline Proxmox-plugin sidecar disposition remain unevidenced.
+4. The CI repository uses an explicit ephemeral test signing identity. A production repository signing key remains an external release input and was not invented or embedded.
 
 ## Blockers
 
-- Supervisor explicitly froze package changes and reruns after the LINSTOR/DRBD/Reactor requirement arrived, requiring this baseline to stop for QA.
-- Full WO-APP-006/OWNER-10 acceptance remains blocked until a successor incorporates the new clustered-storage closure and the executable harness correction, then executes two clean no-NIC installations and the remaining offline provider/upgrade/rollback gates.
+- The pre-change two-pass baseline is **FAIL** because neither clean install reached the reboot/first-boot evidence gates.
+- Another retry is blocked pending a separately reviewed diagnostic correction that yields a real installer serial/progress checkpoint and distinguishes TCG slowness from a hang without weakening `-nic none` or protected-disk checks.
+- The superseding OWNER-10 gate is independently **FAIL** because LINSTOR + DRBD 9 + DRBD Reactor + installed-but-disabled LINSTOR Gateway, kernel/Secure-Boot handling and the offline Proxmox-plugin sidecar have not been reconciled or tested.
 
 ## Next action
 
-Supervisor accepts this pre-change baseline and issues the narrow successor authorization to reconcile LINSTOR + DRBD 9 + DRBD Reactor + installed-but-disabled LINSTOR Gateway (including kernel, Secure Boot/module signing and the offline Proxmox-plugin sidecar disposition), restore the harness executable Git mode, and run the superseding two-pass no-network validation exactly once.
+Issue one narrow diagnostic successor that preserves `-nic none`, fresh disks and the current 45-minute bound while capturing a real installer console/progress checkpoint (for example an independently retained VGA/monitor or correctly configured serial console) and diagnoses TCG timing before authorizing any retry; clustered-package work remains a separate later gate.
