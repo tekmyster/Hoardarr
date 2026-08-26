@@ -794,7 +794,10 @@ prepare_recovery_unit_guard() {
     fi
     directory="$mask_root/$guarded_unit.d"
     path="$directory/90-hoardarr-offline-recovery.conf"
-    condition_path="/etc/systemd/system/.hoardarr-service-start-authorized/$guarded_unit"
+    # /dev/null cannot contain descendants.  This condition is deliberately
+    # non-authorizing: later product selection must remove this exact verified
+    # guard and cannot bypass it by creating a marker file.
+    condition_path="/dev/null/hoardarr-offline-service-guard/$guarded_unit"
     guard_content="$(printf '[Unit]\nConditionPathExists=%s\n' "$condition_path")"$'\n'
     recovery_guard_paths_by_unit["$unit"]="$path"
     if [[ -n "${recovery_guard_path_owners[$path]+present}" ]]; then
@@ -859,6 +862,11 @@ prepare_recovery_unit_guard() {
 }
 validate_recovery_unit_guards() {
     local path
+    [[ ! -e "$recovery_guard_authorization_root" && \
+        ! -L "$recovery_guard_authorization_root" ]] || {
+        echo "offline install recovery authorization root unexpectedly exists" >&2
+        return 1
+    }
     for path in "${recovery_guard_files[@]}"; do
         [[ -n "${recovery_guard_file_inodes[$path]-}" && -f "$path" && ! -L "$path" && \
             "$(stat -c %i -- "$path")" == "${recovery_guard_file_inodes[$path]}" && \
@@ -987,7 +995,7 @@ for raw in source_path.read_text(encoding="utf-8").splitlines():
         raise SystemExit("retained service guard receipt has invalid file identity")
     if state not in {"static","indirect","generated","transient"}:
         raise SystemExit("retained service guard receipt has invalid unit state")
-    if condition_path != f"/etc/systemd/system/.hoardarr-service-start-authorized/{unit}":
+    if condition_path != f"/dev/null/hoardarr-offline-service-guard/{unit}":
         raise SystemExit("retained service guard receipt has unsafe condition identity")
     if expected.get(unit) != state:
         raise SystemExit("retained service guard receipt disagrees with policy readback")

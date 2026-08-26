@@ -1091,7 +1091,7 @@ guard_status=0
 grep -Fq 'finalization=false readback=false' "$state_root/service-guard-recovery.txt"
 recovery_path="${recovery_guard_paths_by_unit[iscsi.service]}"
 [[ -f "$recovery_path" && ! -L "$recovery_path" ]]
-grep -Fxq 'ConditionPathExists=/etc/systemd/system/.hoardarr-service-start-authorized/open-iscsi.service' "$recovery_path"
+grep -Fxq 'ConditionPathExists=/dev/null/hoardarr-offline-service-guard/open-iscsi.service' "$recovery_path"
 [[ -L "$mask_root/sysinit.target.wants/open-iscsi.service" ]]
 
 set +e
@@ -1304,6 +1304,10 @@ printf '%s\n' \
     'Type=oneshot' \
     'ExecStart=/bin/true' \
     >"$work/vendor-units/watchdog.service"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=Hoardarr static peer denied-unit regression' \
+    >"$work/vendor-units/zfs.target"
 mount --bind "$work/vendor-units" /usr/lib/systemd/system
 mount --bind "$work/etc-systemd" /etc/systemd/system
 mount --bind "$work/systemd-state" /var/lib/systemd
@@ -1387,18 +1391,6 @@ for unit in "${denied_units[@]}"; do
     [[ ! -e "$mask_root/$unit" && ! -L "$mask_root/$unit" ]]
     prepare_recovery_unit_guard "$unit"
 done
-# Per-unit conditions cannot authorize a guarded peer.  Remove the test marker
-# before the package transaction so the production absent-root invariant holds.
-mkdir -- "$recovery_guard_authorization_root"
-: >"$recovery_guard_authorization_root/watchdog.service"
-systemd-analyze condition \
-    "ConditionPathExists=${recovery_guard_condition_paths[watchdog.service]}" \
-    >/dev/null 2>&1
-systemd-analyze condition \
-    "ConditionPathExists=${recovery_guard_condition_paths[pmcd.service]}" \
-    >/dev/null 2>&1 && exit 98
-rm -f -- "$recovery_guard_authorization_root/watchdog.service"
-rmdir -- "$recovery_guard_authorization_root"
 start_status=0
 "$policy" pmcd.service start || start_status=$?
 [[ "$start_status" -eq 101 ]]
@@ -1417,6 +1409,20 @@ pcp_active_state="$(SYSTEMD_OFFLINE=1 chroot / systemctl is-active pmcd.service 
     pcp_active_status=$?
 [[ "$pcp_active_state" == inactive && "$pcp_active_status" -eq 3 ]]
 package_transaction_started=true
+interrupted_status=0
+# The old marker namespace cannot authorize the structurally false condition,
+# and its appearance makes interrupted recovery evidence fail closed.
+mkdir -- "$recovery_guard_authorization_root"
+: >"$recovery_guard_authorization_root/watchdog.service"
+rm -f -- "$state_root/service-guard-recovery.txt"
+cleanup_service_guards >/dev/null 2>&1 || interrupted_status=$?
+[[ "$interrupted_status" -ne 0 ]]
+[[ ! -e "$state_root/service-guard-recovery.txt" ]]
+systemd-analyze condition \
+    "ConditionPathExists=${recovery_guard_condition_paths[watchdog.service]}" \
+    >/dev/null 2>&1 && exit 98
+rm -f -- "$recovery_guard_authorization_root/watchdog.service"
+rmdir -- "$recovery_guard_authorization_root"
 interrupted_status=0
 cleanup_service_guards >/dev/null 2>&1 || interrupted_status=$?
 [[ "$interrupted_status" -ne 0 ]]
@@ -1474,12 +1480,33 @@ for guard in document["guards"]:
     assert guard["reason"] == "unit-file-state-requires-persistent-start-boundary"
     assert guard["enabled_state"] in {"static","indirect","generated","transient"}
     assert guard["canonical_path"].startswith("/etc/systemd/system/")
-    assert guard["condition_path"] == f"/etc/systemd/system/.hoardarr-service-start-authorized/{guard['unit']}"
+    assert guard["condition_path"] == f"/dev/null/hoardarr-offline-service-guard/{guard['unit']}"
     assert guard["inode"] > 0 and len(guard["sha256"]) == 64
 PY
 sha256sum "$state_root/service-policy-readback.json" \
     "$state_root/service-retained-guards.json" >"$state_root/SHA256SUMS"
 (cd "$state_root" && sha256sum --check --strict SHA256SUMS)
+# Removing one exact verified guard in this disposable fixture cannot release
+# its retained static peer.  Product activation remains out of scope.
+watchdog_guard="${recovery_guard_paths_by_unit[watchdog.service]}"
+peer_guard="${recovery_guard_paths_by_unit[zfs.target]}"
+[[ -f "$watchdog_guard" && -f "$peer_guard" ]]
+watchdog_inode="$(stat -c %i -- "$watchdog_guard")"
+watchdog_hash="$(sha256sum -- "$watchdog_guard" | awk '{print $1}')"
+python3 - "$state_root/service-retained-guards.json" "$watchdog_inode" \
+    "$watchdog_hash" <<'PY'
+import json, pathlib, sys
+document=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+matches=[guard for guard in document["guards"] if guard["unit"] == "watchdog.service"]
+assert len(matches) == 1
+assert matches[0]["inode"] == int(sys.argv[2])
+assert matches[0]["sha256"] == sys.argv[3]
+PY
+rm -f -- "$watchdog_guard"
+[[ ! -e "$watchdog_guard" && -f "$peer_guard" ]]
+systemd-analyze condition \
+    "ConditionPathExists=${recovery_guard_condition_paths[zfs.target]}" \
+    >/dev/null 2>&1 && exit 99
 for unit in "${denied_units[@]}"; do
     state_status=0
     state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled "$unit" 2>&1)" || state_status=$?
@@ -1497,25 +1524,50 @@ printf '%s\n' \
                 encoding="utf-8",
                 newline="\n",
             )
-            result = subprocess.run(
-                [
-                    "sudo",
-                    "-n",
-                    "unshare",
-                    "--mount",
-                    "--fork",
-                    "bash",
-                    str(harness),
-                    str(postinst),
-                    str(data),
-                    str(root / "namespace"),
-                    str(denied_path),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=240,
-            )
+            namespace_path = (root / "namespace").resolve()
+            self.assertEqual(namespace_path.parent, root.resolve())
+            try:
+                result = subprocess.run(
+                    [
+                        "sudo",
+                        "-n",
+                        "unshare",
+                        "--mount",
+                        "--fork",
+                        "bash",
+                        str(harness),
+                        str(postinst),
+                        str(data),
+                        str(namespace_path),
+                        str(denied_path),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=240,
+                )
+            finally:
+                if namespace_path.exists():
+                    ownership = subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "chown",
+                            "-R",
+                            f"{os.getuid()}:{os.getgid()}",
+                            "--",
+                            str(namespace_path),
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=30,
+                    )
+                    self.assertEqual(
+                        ownership.returncode,
+                        0,
+                        ownership.stdout + ownership.stderr,
+                    )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("real_pcp_old_preset_failure=reproduced", result.stdout)
         self.assertIn("real_pcp_corrected_preset_errors=0", result.stdout)
@@ -1998,7 +2050,7 @@ Description: Backup program for disk arrays
         ).read_text(encoding="utf-8")
         self.assertIn("policy-rc.d", installer)
         self.assertIn(
-            'condition_path="/etc/systemd/system/.hoardarr-service-start-authorized/$guarded_unit"',
+            'condition_path="/dev/null/hoardarr-offline-service-guard/$guarded_unit"',
             installer,
         )
         self.assertNotIn('ln -s -- /dev/null "$destination"', installer)
