@@ -1260,6 +1260,7 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                     (
                         "set -euo pipefail",
                         shell_function("install_service_start_guard"),
+                        shell_function("entry_is_root_owned"),
                         shell_function("validate_preserved_unit_objects"),
                         shell_function("prepare_recovery_unit_guard"),
                         shell_function("validate_recovery_unit_guards"),
