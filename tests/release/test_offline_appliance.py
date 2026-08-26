@@ -84,6 +84,233 @@ class OfflineApplianceTests(unittest.TestCase):
                 "actual install cannot acquire from the file repository"
             )
 
+    @staticmethod
+    def _assert_runtime_mount_contract(payload: str) -> None:
+        required = (
+            "exec {parent_namespace_fd}< /proc/self/ns/mnt",
+            "unshare --mount --propagation private",
+            "--hoardarr-private-mount-namespace",
+            "unset HOARDARR_OFFLINE_PRIVATE_MOUNT_NAMESPACE HOARDARR_OFFLINE_PARENT_MOUNT_NAMESPACE",
+            'current_mount_namespace="$(readlink -- /proc/self/ns/mnt)"',
+            'open("/proc/self/mountinfo", encoding="utf-8")',
+            "runtime_mount_paths=(proc sys dev dev/pts run)",
+            "runtime_mount_sources=(/proc /sys /dev /dev/pts /run)",
+            'mount --bind -- "$source" "$destination"',
+            'runtime_mount_ids["$destination"]="$mount_id"',
+            'mount --make-private -- "$destination"',
+            'umount -- "$destination"',
+            "cleanup_runtime_mounts || cleanup_status=1",
+            "trap 'exit_cleanup $?' EXIT",
+            "trap 'signal_exit 143' TERM",
+            "prepare_runtime_mounts",
+            "cleanup_service_guards",
+            "disable_unmasked_units",
+            "cleanup_runtime_mounts",
+            "cleanup_guard 0",
+            "trap - EXIT HUP INT TERM",
+        )
+        for value in required:
+            if value not in payload:
+                raise AssertionError(f"missing runtime mount safeguard: {value}")
+        for forbidden in ("mount --rbind", "umount -l", "umount --lazy"):
+            if forbidden in payload:
+                raise AssertionError(f"unsafe runtime mount operation: {forbidden}")
+        prepare = payload.rindex("\nprepare_runtime_mounts\n")
+        first_chroot = payload.index('chroot "$target" apt-get', prepare)
+        service_cleanup = payload.rindex("\ncleanup_service_guards\n")
+        disable = payload.rindex("\ndisable_unmasked_units\n")
+        runtime_cleanup = payload.rindex("\ncleanup_runtime_mounts\n")
+        success = payload.rindex(
+            'echo "Hoardarr offline package payload installed and verified."'
+        )
+        if not (
+            prepare
+            < first_chroot
+            < service_cleanup
+            < disable
+            < runtime_cleanup
+            < success
+        ):
+            raise AssertionError("runtime mount lifecycle ordering changed")
+
+    def test_target_runtime_mount_contract_rejects_mutations(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        self._assert_runtime_mount_contract(payload)
+        mutations = {
+            "caller sentinel trusted": payload.replace(
+                "unset HOARDARR_OFFLINE_PRIVATE_MOUNT_NAMESPACE HOARDARR_OFFLINE_PARENT_MOUNT_NAMESPACE",
+                ":",
+            ),
+            "no private namespace": payload.replace(
+                "unshare --mount --propagation private",
+                "unshare --mount --propagation unchanged",
+            ),
+            "mountinfo removed": payload.replace(
+                'open("/proc/self/mountinfo", encoding="utf-8")',
+                'open("/etc/mtab", encoding="utf-8")',
+            ),
+            "runtime path missing": payload.replace(
+                "runtime_mount_paths=(proc sys dev dev/pts run)",
+                "runtime_mount_paths=(proc sys dev run)",
+            ),
+            "ID not recorded": payload.replace(
+                'runtime_mount_ids["$destination"]="$mount_id"',
+                ":",
+                1,
+            ),
+            "propagation not isolated": payload.replace(
+                'mount --make-private -- "$destination"',
+                ":",
+            ),
+            "lazy cleanup": payload.replace(
+                'umount -- "$destination"',
+                'umount --lazy -- "$destination"',
+                1,
+            ),
+            "EXIT cleanup missing": payload.replace(
+                "trap 'exit_cleanup $?' EXIT",
+                ":",
+            ),
+            "TERM cleanup missing": payload.replace(
+                "trap 'signal_exit 143' TERM",
+                ":",
+            ),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                self._assert_runtime_mount_contract(mutation)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux mounts")
+    def test_target_runtime_mount_lifecycle_and_package_postinst(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        self._assert_runtime_mount_contract(payload)
+
+        def shell_function(name: str) -> str:
+            match = re.search(
+                rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n",
+                payload,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"missing production function {name}")
+            assert match is not None
+            return match.group(0)
+
+        required = (
+            "bash",
+            "dpkg",
+            "dpkg-deb",
+            "mount",
+            "sudo",
+            "umount",
+            "unshare",
+        )
+        missing = [command for command in required if shutil.which(command) is None]
+        self.assertEqual(missing, [], f"missing runtime integration tools: {missing}")
+        sudo = subprocess.run(
+            ["sudo", "-n", "true"], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(sudo.returncode, 0, sudo.stderr)
+        names = (
+            "mountinfo_exact_record",
+            "runtime_path_is_safe",
+            "runtime_record_field",
+            "rollback_unrecorded_runtime_mount",
+            "prepare_runtime_mounts",
+            "cleanup_runtime_mounts",
+            "cleanup_guard",
+            "exit_cleanup",
+            "signal_exit",
+        )
+        fragment = "\n".join(
+            (
+                "runtime_mount_paths=(proc sys dev dev/pts run)",
+                "runtime_mount_sources=(/proc /sys /dev /dev/pts /run)",
+                "created_runtime_mounts=()",
+                "declare -A runtime_mount_ids=()",
+                "declare -A runtime_mount_records=()",
+                *(shell_function(name) for name in names),
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = pathlib.Path(temporary)
+            wrapper_root = temporary_root / "bin"
+            wrapper_root.mkdir()
+            launcher_marker = temporary_root / "unshare-invoked"
+            real_unshare = pathlib.Path(shutil.which("unshare") or "")
+            unshare_wrapper = wrapper_root / "unshare"
+            unshare_wrapper.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' invoked >'{launcher_marker}'\n"
+                f"exec '{real_unshare}' \"$@\"\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            unshare_wrapper.chmod(0o755)
+            launcher_target = temporary_root / "launcher-target"
+            launcher_repository = temporary_root / "launcher-repository"
+            launcher_target.mkdir()
+            launcher_repository.mkdir()
+            launcher_payload = temporary_root / "install-offline-payload.sh"
+            shutil.copyfile(
+                ROOT / "packaging" / "appliance" / "install-offline-payload.sh",
+                launcher_payload,
+            )
+            launcher_payload.chmod(0o755)
+            launcher = subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "env",
+                    f"PATH={wrapper_root}:{os.environ.get('PATH', '')}",
+                    "HOARDARR_OFFLINE_PRIVATE_MOUNT_NAMESPACE=1",
+                    "HOARDARR_OFFLINE_PARENT_MOUNT_NAMESPACE=mnt:[1]",
+                    str(launcher_payload),
+                    str(launcher_target),
+                    str(launcher_repository),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertNotEqual(launcher.returncode, 0)
+            self.assertTrue(
+                launcher_marker.is_file(),
+                "preseeded variables bypassed the production unshare launcher",
+            )
+            self.assertIn(
+                "offline payload target must be the real /target directory",
+                launcher.stderr,
+            )
+            fragment_path = pathlib.Path(temporary) / "production-runtime-functions.sh"
+            fragment_path.write_text(fragment, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "bash",
+                    str(
+                        ROOT
+                        / "tests"
+                        / "appliance"
+                        / "test-target-chroot-runtime-mounts.sh"
+                    ),
+                    str(fragment_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=240,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("private_namespace_containment=true", result.stdout)
+        self.assertIn("postinst_runtime_probe=passed", result.stdout)
+        self.assertIn("partial_and_signal_cleanup=passed", result.stdout)
+
     def test_offline_service_masks_are_classified_and_cleaned_executably(self) -> None:
         payload = (
             ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
@@ -115,6 +342,12 @@ class OfflineApplianceTests(unittest.TestCase):
                 "set -euo pipefail",
                 "temporary_masks=()",
                 "declare -A temporary_mask_inodes=()",
+                "temporary_masks_cleanup_complete=false",
+                "policy_cleanup_complete=false",
+                "service_guard_cleanup_complete=false",
+                "created_runtime_mounts=()",
+                "declare -A runtime_mount_ids=()",
+                "declare -A runtime_mount_records=()",
                 "declare -A preserved_unit_masks=()",
                 "declare -A preserved_unit_mask_inodes=()",
                 "declare -A preserved_package_aliases=()",
@@ -307,6 +540,12 @@ class OfflineApplianceTests(unittest.TestCase):
                 "set -euo pipefail",
                 "temporary_masks=()",
                 "declare -A temporary_mask_inodes=()",
+                "temporary_masks_cleanup_complete=false",
+                "policy_cleanup_complete=false",
+                "service_guard_cleanup_complete=false",
+                "created_runtime_mounts=()",
+                "declare -A runtime_mount_ids=()",
+                "declare -A runtime_mount_records=()",
                 "declare -A preserved_unit_masks=()",
                 "declare -A preserved_unit_mask_inodes=()",
                 "declare -A preserved_package_aliases=()",
@@ -323,6 +562,8 @@ class OfflineApplianceTests(unittest.TestCase):
                 shell_function("validate_preserved_unit_objects"),
                 shell_function("prepare_temporary_unit_mask"),
                 shell_function("cleanup_temporary_masks"),
+                shell_function("cleanup_runtime_mounts"),
+                shell_function("cleanup_service_guards"),
                 shell_function("cleanup_guard"),
                 shell_function("disable_unmasked_units"),
                 r"""
@@ -374,6 +615,12 @@ dpkg-query() {
 reset_tracking() {
     temporary_masks=()
     temporary_mask_inodes=()
+    temporary_masks_cleanup_complete=false
+    policy_cleanup_complete=false
+    service_guard_cleanup_complete=false
+    created_runtime_mounts=()
+    runtime_mount_ids=()
+    runtime_mount_records=()
     preserved_unit_masks=()
     preserved_unit_mask_inodes=()
     preserved_package_aliases=()

@@ -6,9 +6,78 @@ usage() {
     exit 2
 }
 
+internal_namespace_mode=false
+parent_namespace_fd=
+if [[ $# -eq 4 && "$1" == --hoardarr-private-mount-namespace ]]; then
+    internal_namespace_mode=true
+    parent_namespace_fd="$2"
+    shift 2
+fi
 [[ $# -eq 2 ]] || usage
 target="$(realpath -- "$1")"
 source_repo="$(realpath -- "$2")"
+script_path="$(realpath -- "$0")"
+[[ -f "$script_path" && ! -L "$script_path" ]] || {
+    echo "offline payload must be a real regular file" >&2
+    exit 1
+}
+for namespace_command in unshare mount umount readlink python3; do
+    command -v "$namespace_command" >/dev/null || {
+        echo "offline payload requires $namespace_command" >&2
+        exit 1
+    }
+done
+unset HOARDARR_OFFLINE_PRIVATE_MOUNT_NAMESPACE HOARDARR_OFFLINE_PARENT_MOUNT_NAMESPACE
+if [[ "$internal_namespace_mode" != true ]]; then
+    exec {parent_namespace_fd}< /proc/self/ns/mnt || {
+        echo "offline payload cannot retain its parent mount namespace" >&2
+        exit 1
+    }
+    exec unshare --mount --propagation private -- \
+        "$script_path" --hoardarr-private-mount-namespace \
+        "$parent_namespace_fd" "$target" "$source_repo"
+fi
+[[ "$parent_namespace_fd" =~ ^[1-9][0-9]*$ && \
+    -e "/proc/self/fd/$parent_namespace_fd" ]] || {
+    echo "offline payload parent mount namespace descriptor is invalid" >&2
+    exit 1
+}
+parent_mount_namespace="$(readlink -- "/proc/self/fd/$parent_namespace_fd")" || {
+    echo "offline payload cannot identify its parent mount namespace" >&2
+    exit 1
+}
+current_mount_namespace="$(readlink -- /proc/self/ns/mnt)" || {
+    echo "offline payload cannot identify its private mount namespace" >&2
+    exit 1
+}
+[[ "$parent_mount_namespace" =~ ^mnt:\[[0-9]+\]$ && \
+    "$current_mount_namespace" =~ ^mnt:\[[0-9]+\]$ && \
+    "$current_mount_namespace" != "$parent_mount_namespace" ]] || {
+    echo "offline payload mount namespace isolation is not proven" >&2
+    exit 1
+}
+python3 - <<'PY'
+import re
+
+
+def decode(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+roots = []
+with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+    for line in stream:
+        fields = line.rstrip("\n").split(" ")
+        separator = fields.index("-")
+        if decode(fields[4]) == "/":
+            roots.append(fields[6:separator])
+if len(roots) != 1 or any(
+    value.startswith(("shared:", "master:", "propagate_from:"))
+    for value in roots[0]
+):
+    raise SystemExit("offline payload root mount propagation is not private")
+PY
+exec {parent_namespace_fd}<&-
 [[ "$target" == /target && -d "$target" && ! -L "$target" ]] || {
     echo "offline payload target must be the real /target directory" >&2
     exit 1
@@ -39,6 +108,8 @@ find "$source_repo" -type l -print -quit | grep -q . && {
 install_root="$target/opt/hoardarr-install"
 retained_repo="$target/opt/hoardarr/offline-repository"
 state_root="$target/var/lib/hoardarr-install"
+runtime_mount_record="$state_root/runtime-mounts.tsv"
+runtime_cleanup_record="$state_root/runtime-mount-cleanup.tsv"
 install -d -m 0755 "$install_root" "$target/opt/hoardarr" "$state_root"
 [[ ! -e "$retained_repo" ]] || {
     echo "retained offline repository destination already exists" >&2
@@ -72,6 +143,247 @@ APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Unattended-Upgrade "0";
 Acquire::Retries "0";
 EOF
+
+# Runtime mounts are created only inside the private mount namespace above.
+# /proc/self/mountinfo is the kernel interface used for both preflight and
+# identity-aware cleanup; human-formatted mount output is never parsed.
+runtime_mount_paths=(proc sys dev dev/pts run)
+runtime_mount_sources=(/proc /sys /dev /dev/pts /run)
+created_runtime_mounts=()
+declare -A runtime_mount_ids=()
+declare -A runtime_mount_records=()
+mountinfo_exact_record() {
+    local path="$1"
+    python3 - "$path" <<'PY'
+import re
+import sys
+
+expected = sys.argv[1]
+
+
+def decode(value: str) -> str:
+    return re.sub(
+        r"\\([0-7]{3})",
+        lambda match: chr(int(match.group(1), 8)),
+        value,
+    )
+
+
+matches = []
+with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+    for raw_line in stream:
+        fields = raw_line.rstrip("\n").split(" ")
+        separator = fields.index("-")
+        mountpoint = decode(fields[4])
+        if mountpoint != expected:
+            continue
+        matches.append(
+            (
+                fields[0],
+                fields[1],
+                fields[2],
+                decode(fields[3]),
+                mountpoint,
+                fields[5],
+                ",".join(fields[6:separator]),
+                fields[separator + 1],
+                decode(fields[separator + 2]),
+                fields[separator + 3],
+            )
+        )
+if len(matches) > 1:
+    raise SystemExit("multiple exact mountinfo records")
+if matches:
+    print("\x1f".join(matches[0]))
+PY
+}
+runtime_path_is_safe() {
+    local destination="$1"
+    local expected="$2"
+    local resolved
+    [[ "$destination" == "$expected" && -d "$destination" && ! -L "$destination" ]] || {
+        echo "offline runtime mount path is not a real directory: $expected" >&2
+        return 1
+    }
+    resolved="$(realpath -e -- "$destination")" || return 1
+    [[ "$resolved" == "$expected" && "$resolved" == "$target"/* ]] || {
+        echo "offline runtime mount path escapes the target: $expected" >&2
+        return 1
+    }
+}
+runtime_record_field() {
+    local record="$1"
+    local field="$2"
+    local values=()
+    IFS=$'\x1f' read -r -a values <<<"$record"
+    [[ "${#values[@]}" -eq 10 && "$field" -ge 0 && "$field" -lt 10 ]] || return 1
+    printf '%s\n' "${values[$field]}"
+}
+rollback_unrecorded_runtime_mount() {
+    local destination="$1"
+    local last_index=$(( ${#created_runtime_mounts[@]} - 1 ))
+    [[ "$last_index" -ge 0 && "${created_runtime_mounts[$last_index]}" == "$destination" ]] || {
+        echo "offline runtime mount rollback tracking is inconsistent: $destination" >&2
+        return 1
+    }
+    runtime_path_is_safe "$destination" "$destination" || return 1
+    umount -- "$destination" || {
+        echo "offline unrecorded runtime mount rollback failed: $destination" >&2
+        return 1
+    }
+    [[ -z "$(mountinfo_exact_record "$destination")" ]] || {
+        echo "offline unrecorded runtime mount remains after rollback: $destination" >&2
+        return 1
+    }
+    unset 'created_runtime_mounts[$last_index]'
+    created_runtime_mounts=("${created_runtime_mounts[@]}")
+}
+prepare_runtime_mounts() {
+    local index relative source destination source_record target_record
+    local source_root source_type source_name target_root target_type target_source
+    local target_optional mount_id
+    local source_records=()
+    (( ${#runtime_mount_paths[@]} == ${#runtime_mount_sources[@]} )) || {
+        echo "offline runtime mount plan is inconsistent" >&2
+        return 1
+    }
+    (( ${#created_runtime_mounts[@]} == 0 )) || {
+        echo "offline runtime mounts are already tracked" >&2
+        return 1
+    }
+    : >"$runtime_mount_record"
+    printf 'mount_id\tparent_id\tmajor_minor\troot\ttarget\tmount_options\toptional_fields\tfilesystem\tsource\tsuper_options\n' \
+        >"$runtime_mount_record"
+    printf 'mount_id\ttarget\tresult\n' >"$runtime_cleanup_record"
+    for index in "${!runtime_mount_paths[@]}"; do
+        relative="${runtime_mount_paths[$index]}"
+        source="${runtime_mount_sources[$index]}"
+        destination="$target/$relative"
+        runtime_path_is_safe "$destination" "$target/$relative" || return 1
+        [[ -d "$source" && ! -L "$source" ]] || {
+            echo "offline runtime source is unavailable: $source" >&2
+            return 1
+        }
+        [[ -z "$(mountinfo_exact_record "$destination")" ]] || {
+            echo "offline runtime path is already mounted: $destination" >&2
+            return 1
+        }
+        source_record="$(mountinfo_exact_record "$source")" || return 1
+        [[ -n "$source_record" ]] || {
+            echo "offline runtime source is not an exact mountpoint: $source" >&2
+            return 1
+        }
+        source_records[$index]="$source_record"
+    done
+    for index in "${!runtime_mount_paths[@]}"; do
+        relative="${runtime_mount_paths[$index]}"
+        source="${runtime_mount_sources[$index]}"
+        destination="$target/$relative"
+        runtime_path_is_safe "$destination" "$target/$relative" || return 1
+        [[ -z "$(mountinfo_exact_record "$destination")" ]] || {
+            echo "offline runtime path changed before mount: $destination" >&2
+            return 1
+        }
+        mount --bind -- "$source" "$destination"
+        created_runtime_mounts+=("$destination")
+        target_record="$(mountinfo_exact_record "$destination")" || {
+            rollback_unrecorded_runtime_mount "$destination" || true
+            return 1
+        }
+        [[ -n "$target_record" ]] || {
+            echo "offline runtime mount is missing after creation: $destination" >&2
+            rollback_unrecorded_runtime_mount "$destination" || true
+            return 1
+        }
+        mount_id="$(runtime_record_field "$target_record" 0)" || {
+            rollback_unrecorded_runtime_mount "$destination" || true
+            return 1
+        }
+        [[ "$mount_id" =~ ^[1-9][0-9]*$ ]] || {
+            rollback_unrecorded_runtime_mount "$destination" || true
+            return 1
+        }
+        runtime_mount_ids["$destination"]="$mount_id"
+        runtime_mount_records["$destination"]="$target_record"
+        mount --make-private -- "$destination"
+        target_record="$(mountinfo_exact_record "$destination")" || return 1
+        [[ -n "$target_record" && \
+            "$(runtime_record_field "$target_record" 0)" == "$mount_id" ]] || {
+            echo "offline runtime mount identity changed during propagation isolation: $destination" >&2
+            return 1
+        }
+        source_record="${source_records[$index]}"
+        source_root="$(runtime_record_field "$source_record" 3)" || return 1
+        source_type="$(runtime_record_field "$source_record" 7)" || return 1
+        source_name="$(runtime_record_field "$source_record" 8)" || return 1
+        target_root="$(runtime_record_field "$target_record" 3)" || return 1
+        target_optional="$(runtime_record_field "$target_record" 6)" || return 1
+        target_type="$(runtime_record_field "$target_record" 7)" || return 1
+        target_source="$(runtime_record_field "$target_record" 8)" || return 1
+        [[ "$target_root" == "$source_root" && "$target_type" == "$source_type" && \
+            "$target_source" == "$source_name" && \
+            "$target_optional" != *shared:* && "$target_optional" != *master:* && \
+            "$target_optional" != *propagate_from:* ]] || {
+            echo "offline runtime mount identity or propagation is unsafe: $destination" >&2
+            return 1
+        }
+        runtime_mount_records["$destination"]="$target_record"
+        printf '%s\n' "${target_record//$'\x1f'/$'\t'}" >>"$runtime_mount_record"
+    done
+    (( ${#created_runtime_mounts[@]} == ${#runtime_mount_paths[@]} )) || return 1
+    sync -f "$runtime_mount_record"
+}
+cleanup_runtime_mounts() {
+    local index destination expected_id current_record current_id
+    local status=0
+    local remaining=()
+    (( ${#created_runtime_mounts[@]} > 0 )) || return 0
+    [[ -f "$runtime_cleanup_record" && ! -L "$runtime_cleanup_record" ]] || {
+        echo "offline runtime cleanup receipt is unavailable" >&2
+        return 1
+    }
+    for (( index=${#created_runtime_mounts[@]}-1; index>=0; index-- )); do
+        destination="${created_runtime_mounts[$index]}"
+        expected_id="${runtime_mount_ids[$destination]-}"
+        current_record="$(mountinfo_exact_record "$destination")" || {
+            status=1
+            remaining=("$destination" "${remaining[@]}")
+            continue
+        }
+        if [[ -z "$current_record" ]]; then
+            echo "tracked offline runtime mount disappeared: $destination" >&2
+            status=1
+            unset 'runtime_mount_ids[$destination]' 'runtime_mount_records[$destination]'
+            continue
+        fi
+        current_id="$(runtime_record_field "$current_record" 0)" || current_id=
+        if [[ -z "$expected_id" || "$current_id" != "$expected_id" ]] || \
+            ! runtime_path_is_safe "$destination" "$destination"; then
+            echo "offline runtime mount identity changed before cleanup: $destination" >&2
+            status=1
+            remaining=("$destination" "${remaining[@]}")
+            continue
+        fi
+        if ! umount -- "$destination"; then
+            echo "offline runtime mount cleanup failed: $destination" >&2
+            status=1
+            remaining=("$destination" "${remaining[@]}")
+            continue
+        fi
+        if [[ -n "$(mountinfo_exact_record "$destination")" ]]; then
+            echo "offline runtime mount remains after cleanup: $destination" >&2
+            status=1
+            remaining=("$destination" "${remaining[@]}")
+            continue
+        fi
+        printf '%s\t%s\tunmounted\n' "$expected_id" "$destination" \
+            >>"$runtime_cleanup_record" || status=1
+        unset 'runtime_mount_ids[$destination]' 'runtime_mount_records[$destination]'
+    done
+    created_runtime_mounts=("${remaining[@]}")
+    sync -f "$runtime_cleanup_record" 2>/dev/null || status=1
+    return "$status"
+}
 
 policy="$target/usr/sbin/policy-rc.d"
 policy_backup="$install_root/policy-rc.d.original"
@@ -109,6 +421,9 @@ mask_root="$target/etc/systemd/system"
 install -d -m 0755 "$mask_root"
 temporary_masks=()
 declare -A temporary_mask_inodes=()
+temporary_masks_cleanup_complete=false
+policy_cleanup_complete=false
+service_guard_cleanup_complete=false
 declare -A preserved_unit_masks=()
 declare -A preserved_unit_mask_inodes=()
 declare -A preserved_package_aliases=()
@@ -302,28 +617,56 @@ prepare_temporary_unit_mask() {
 cleanup_temporary_masks() {
     local mask
     local status=0
+    local remaining=()
     for mask in "${temporary_masks[@]}"; do
         if [[ -z "${temporary_mask_inodes[$mask]-}" || ! -L "$mask" || \
             "$(readlink -- "$mask")" != /dev/null || \
             "$(stat -c %i -- "$mask")" != "${temporary_mask_inodes[$mask]-}" ]]; then
             echo "temporary unit mask changed during offline install: $mask" >&2
             status=1
+            remaining+=("$mask")
             continue
         fi
-        rm -f -- "$mask" || status=1
+        if rm -f -- "$mask"; then
+            unset 'temporary_mask_inodes[$mask]'
+        else
+            status=1
+            remaining+=("$mask")
+        fi
     done
+    temporary_masks=("${remaining[@]}")
     validate_preserved_unit_objects || status=1
     return "$status"
+}
+cleanup_service_guards() {
+    local cleanup_status=0
+    if [[ "$temporary_masks_cleanup_complete" != true ]]; then
+        if cleanup_temporary_masks; then
+            temporary_masks_cleanup_complete=true
+        else
+            cleanup_status=1
+        fi
+    fi
+    if [[ "$policy_cleanup_complete" != true ]]; then
+        if [[ "$policy_state" == regular ]]; then
+            cp -a -- "$policy_backup" "$policy" || cleanup_status=1
+        else
+            rm -f -- "$policy" || cleanup_status=1
+        fi
+        (( cleanup_status != 0 )) || policy_cleanup_complete=true
+    fi
+    if [[ "$temporary_masks_cleanup_complete" == true && \
+        "$policy_cleanup_complete" == true ]]; then
+        validate_preserved_unit_objects || cleanup_status=1
+        (( cleanup_status != 0 )) || service_guard_cleanup_complete=true
+    fi
+    return "$cleanup_status"
 }
 cleanup_guard() {
     local original_status="${1:-0}"
     local cleanup_status=0
-    cleanup_temporary_masks || cleanup_status=1
-    if [[ "$policy_state" == regular ]]; then
-        cp -a -- "$policy_backup" "$policy" || cleanup_status=1
-    else
-        rm -f -- "$policy" || cleanup_status=1
-    fi
+    cleanup_runtime_mounts || cleanup_status=1
+    cleanup_service_guards || cleanup_status=1
     if (( cleanup_status != 0 )); then
         echo "offline install cleanup integrity check failed" >&2
     fi
@@ -331,6 +674,18 @@ cleanup_guard() {
         return "$original_status"
     fi
     return "$cleanup_status"
+}
+exit_cleanup() {
+    local original_status="$1"
+    trap - EXIT HUP INT TERM
+    set +e
+    cleanup_guard "$original_status"
+    exit $?
+}
+signal_exit() {
+    local signal_status="$1"
+    trap - HUP INT TERM
+    exit "$signal_status"
 }
 disable_unmasked_units() {
     local unit
@@ -382,7 +737,10 @@ disable_unmasked_units() {
         chroot "$target" systemctl disable "$unit" >/dev/null 2>&1 || true
     done
 }
-trap 'original_status=$?; trap - EXIT; cleanup_guard "$original_status"; exit $?' EXIT
+trap 'exit_cleanup $?' EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
 for unit in "${denied_units[@]}"; do
     [[ "$unit" =~ ^[A-Za-z0-9@_.:-]+\.(service|socket|timer|target)$ ]] || {
         echo "unsafe unit in offline service policy" >&2
@@ -438,6 +796,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LVM_SYSTEM_DIR=/opt/hoardarr-install/lvm-guard
 export NEEDRESTART_MODE=l
 export UCF_FORCE_CONFFOLD=1
+prepare_runtime_mounts
 chroot "$target" apt-get "${apt_options[@]}" update
 simulation="$(chroot "$target" apt-get "${apt_options[@]}" --simulate --no-install-recommends install "${exact_roots[@]}")"
 if grep -Eq '^(Remv|Purg) |DOWNGRADED' <<<"$simulation"; then
@@ -481,8 +840,7 @@ audit="$(chroot "$target" dpkg --audit)"
 }
 chroot "$target" apt-get "${apt_options[@]}" --simulate check
 
-trap - EXIT
-cleanup_guard 0
+cleanup_service_guards
 disable_unmasked_units
 
 python3 - "$target" "$retained_repo/evidence/compatibility-matrix.json" "$state_root/service-policy-readback.json" <<'PY'
@@ -503,4 +861,7 @@ PY
 
 sha256sum "$state_root/package-readback.json" "$state_root/service-policy-readback.json" \
     >"$state_root/SHA256SUMS"
+cleanup_runtime_mounts
+cleanup_guard 0
+trap - EXIT HUP INT TERM
 echo "Hoardarr offline package payload installed and verified."
