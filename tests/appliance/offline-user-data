@@ -1,11 +1,8 @@
 #cloud-config
+# CI-only seed. It targets one exact disposable virtual OS disk and powers off
+# after emitting offline first-boot evidence to the serial console.
 autoinstall:
   version: 1
-  # Installation-disk selection is always interactive. Hoardarr never guesses
-  # that the largest disk is the operating-system target.
-  interactive-sections:
-    - identity
-    - storage
   refresh-installer:
     update: false
   apt:
@@ -15,26 +12,37 @@ autoinstall:
   locale: en_US.UTF-8
   keyboard:
     layout: us
-  # Identity is deliberately interactive. The installer must obtain a real
-  # administrator login before it can finish; a locked placeholder account
-  # would leave a newly installed appliance with no way to run `hoardarr setup`.
+  network:
+    version: 2
+    ethernets: {}
+  identity:
+    hostname: hoardarr-offline-ci
+    realname: Hoardarr Offline CI
+    username: hoardarr-ci
+    password: "$6$hoardarrci$18tBMG6UTExjP3SkslC33.zKeOxdBWxcTAwvjLtpLEO4x3W4eYtacjk6h6UDCTk/ORc9nfnXcisMPdjXF7pOc/"
   ssh:
     install-server: true
     allow-pw: false
   storage:
     layout:
       name: direct
+      match:
+        serial: HOARDARR-OS-DISK
   late-commands:
-    - curtin in-target --target=/target -- mkdir -p /opt/hoardarr-install
+    - curtin in-target --target=/target -- mkdir -p /opt/hoardarr-install /usr/local/lib/hoardarr
     - cp /cdrom/hoardarr/install-offline-payload.sh /target/opt/hoardarr-install/install-offline-payload.sh
     - chmod 0755 /target/opt/hoardarr-install/install-offline-payload.sh
     - /cdrom/hoardarr/install-offline-payload.sh /target /cdrom/hoardarr/offline-repository
-    - curtin in-target --target=/target -- mkdir -p /usr/local/lib/hoardarr
     - cp /cdrom/hoardarr/verify-offline-appliance.sh /target/usr/local/lib/hoardarr/verify-offline-appliance.sh
     - chmod 0755 /target/usr/local/lib/hoardarr/verify-offline-appliance.sh
     - cp /cdrom/hoardarr/hoardarr-release.tar.gz /target/opt/hoardarr-install/release.tar.gz
     - curtin in-target --target=/target -- tar -xzf /opt/hoardarr-install/release.tar.gz -C /opt/hoardarr-install
     - curtin in-target --target=/target -- sh -c 'release="$(find /opt/hoardarr-install -mindepth 1 -maxdepth 1 -type d -name "hoardarr-*" -print -quit)"; test -n "$release"; exec bash "$release/scripts/install.sh" apply --yes --preserve-existing-login-account --defer-service-start'
+    - curtin in-target --target=/target -- sh -c 'sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"console=tty0 console=ttyS0,115200n8\"/" /etc/default/grub; update-grub'
+    - curtin in-target --target=/target -- systemctl enable serial-getty@ttyS0.service
   user-data:
     runcmd:
-      - [sh, -c, 'mkdir -p /etc/motd.d && printf "%s\n" "Run sudo hoardarr setup to create the Hoardarr owner account." "The Linux account selected during installation is only for appliance administration." >/etc/motd.d/hoardarr']
+      - [sh, -c, 'printf "%s\n" "HoardarrCiOwner!" | /usr/local/bin/hoardarr setup --console --username ci-owner --password-stdin --site-url http://127.0.0.1:7877']
+      - [/usr/local/lib/hoardarr/verify-offline-appliance.sh, --require-api, --emit-serial]
+      - [sh, -c, 'printf "%s\n" HOARDARR_OFFLINE_READY >/dev/ttyS0']
+      - [shutdown, -h, now]

@@ -2,25 +2,33 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 BASE_ISO BASE_ISO_SHA256 RELEASE_BUNDLE OUTPUT_ISO [USER_DATA]" >&2
+    echo "usage: $0 BASE_ISO BASE_ISO_SHA256 RELEASE_BUNDLE OUTPUT_ISO [USER_DATA] [OFFLINE_REPOSITORY]" >&2
     exit 2
 }
 
-[[ $# -ge 4 && $# -le 5 ]] || usage
+[[ $# -ge 4 && $# -le 6 ]] || usage
 base_iso="$(realpath -- "$1")"
 expected_sha="$2"
 bundle="$(realpath -- "$3")"
 output="$(realpath -m -- "$4")"
 user_data="$(realpath -- "${5:-packaging/appliance/user-data}")"
+offline_repo="$(realpath -- "${6:-dist/offline-repository}")"
+offline_installer="$(realpath -- packaging/appliance/install-offline-payload.sh)"
+offline_verifier="$(realpath -- packaging/appliance/verify-offline-appliance.sh)"
 [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || usage
 [[ -f "$base_iso" && ! -L "$base_iso" ]] || { echo "base ISO must be a regular file" >&2; exit 1; }
 [[ -f "$bundle" && ! -L "$bundle" ]] || { echo "release bundle must be a regular file" >&2; exit 1; }
 [[ -f "$user_data" && ! -L "$user_data" ]] || { echo "user-data must be a regular file" >&2; exit 1; }
+[[ -d "$offline_repo" && ! -L "$offline_repo" ]] || { echo "offline repository must be a real directory" >&2; exit 1; }
+[[ -f "$offline_installer" && ! -L "$offline_installer" ]] || { echo "offline installer must be a regular file" >&2; exit 1; }
+[[ -f "$offline_verifier" && ! -L "$offline_verifier" ]] || { echo "offline verifier must be a regular file" >&2; exit 1; }
+find "$offline_repo" -type l -print -quit | grep -q . && { echo "offline repository contains a symbolic link" >&2; exit 1; }
 [[ "$(sha256sum -- "$base_iso" | awk '{print $1}')" == "$expected_sha" ]] || {
     echo "base ISO digest mismatch" >&2
     exit 1
 }
 command -v xorriso >/dev/null || { echo "xorriso is required" >&2; exit 1; }
+python3 scripts/build-offline-apt-repository.py verify "$offline_repo"
 
 work="$(mktemp -d -t hoardarr-appliance.XXXXXXXX)"
 cleanup() { rm -rf -- "$work"; }
@@ -28,6 +36,8 @@ trap cleanup EXIT
 install -m 0644 "$user_data" "$work/user-data"
 install -m 0644 packaging/appliance/meta-data "$work/meta-data"
 install -m 0644 "$bundle" "$work/hoardarr-release.tar.gz"
+install -m 0755 "$offline_installer" "$work/install-offline-payload.sh"
+install -m 0755 "$offline_verifier" "$work/verify-offline-appliance.sh"
 grub_maps=()
 checksum_map=()
 
@@ -75,6 +85,12 @@ if xorriso -osirrox on -indev "$base_iso" -extract /md5sum.txt "$checksum_file" 
     update_checksum "$work/user-data" nocloud/user-data
     update_checksum "$work/meta-data" nocloud/meta-data
     update_checksum "$work/hoardarr-release.tar.gz" hoardarr/hoardarr-release.tar.gz
+    update_checksum "$work/install-offline-payload.sh" hoardarr/install-offline-payload.sh
+    update_checksum "$work/verify-offline-appliance.sh" hoardarr/verify-offline-appliance.sh
+    while IFS= read -r -d '' repository_file; do
+        relative="${repository_file#"$offline_repo"/}"
+        update_checksum "$repository_file" "hoardarr/offline-repository/$relative"
+    done < <(find "$offline_repo" -type f -print0 | sort -z)
     checksum_map=( -map "$checksum_file" /md5sum.txt )
 else
     echo "Ubuntu md5sum.txt was not found" >&2
@@ -89,9 +105,21 @@ xorriso \
     -map "$work/user-data" /nocloud/user-data \
     -map "$work/meta-data" /nocloud/meta-data \
     -map "$work/hoardarr-release.tar.gz" /hoardarr/hoardarr-release.tar.gz \
+    -map "$work/install-offline-payload.sh" /hoardarr/install-offline-payload.sh \
+    -map "$work/verify-offline-appliance.sh" /hoardarr/verify-offline-appliance.sh \
+    -map "$offline_repo" /hoardarr/offline-repository \
     "${grub_maps[@]}" \
     "${checksum_map[@]}" \
     -boot_image any replay \
     -commit
 
 sha256sum -- "$output" >"${output}.sha256"
+
+# Produce a complete, independently reviewable tree manifest for the final ISO.
+tree="$work/iso-tree"
+mkdir -p "$tree"
+xorriso -osirrox on -indev "$output" -extract / "$tree" >/dev/null 2>&1
+(
+    cd "$tree"
+    find . -type f -print0 | sort -z | xargs -0 sha256sum
+) >"${output}.tree-sha256"

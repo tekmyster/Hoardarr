@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "target": {
+    "architecture": "amd64",
+    "os": "ubuntu",
+    "release": "24.04",
+    "suite": "noble"
+  },
+  "profiles": [
+    "appliance-core.txt",
+    "storage-services.txt",
+    "tiered-storage.txt",
+    "advanced-fcoe.txt",
+    "advanced-ha.txt"
+  ],
+  "included_feature_disabled": [
+    "bcache-tools",
+    "corosync",
+    "crmsh",
+    "ctdb",
+    "fcoe-utils",
+    "fence-agents-base",
+    "lldpad",
+    "lvm2",
+    "mdadm",
+    "multipath-tools",
+    "nfs-common",
+    "nfs-kernel-server",
+    "nftables",
+    "open-iscsi",
+    "open-vm-tools",
+    "pacemaker",
+    "qemu-guest-agent",
+    "rauc",
+    "resource-agents-base",
+    "resource-agents-extra",
+    "samba",
+    "samba-common-bin",
+    "samba-vfs-modules",
+    "smartmontools",
+    "snmpd",
+    "sysstat",
+    "targetcli-fb",
+    "thin-provisioning-tools",
+    "watchdog",
+    "winbind",
+    "zfsutils-linux",
+    "zfs-zed"
+  ],
+  "allowed_enabled_units": [
+    "hoardarr-account-executor.service",
+    "hoardarr-api.service",
+    "hoardarr-migrate.service",
+    "hoardarr-storage-executor.service",
+    "hoardarr-storage-status.service",
+    "hoardarr-worker.service",
+    "ssh.service",
+    "systemd-journald.service",
+    "systemd-logind.service",
+    "systemd-networkd.service",
+    "systemd-resolved.service",
+    "systemd-timesyncd.service"
+  ],
+  "denied_units": [
+    "corosync.service",
+    "ctdb.service",
+    "fcoe.service",
+    "fcoe-utils.service",
+    "fcoemon.socket",
+    "iscsid.service",
+    "iscsid.socket",
+    "iscsi.service",
+    "ledmon.service",
+    "lldpad.service",
+    "lldpd.service",
+    "lvm2-lvmpolld.service",
+    "lvm2-lvmpolld.socket",
+    "lvm2-monitor.service",
+    "mdmonitor.service",
+    "mdmonitor-oneshot.service",
+    "mdmonitor-oneshot.timer",
+    "multipathd.service",
+    "multipathd.socket",
+    "nfs-server.service",
+    "nmbd.service",
+    "open-iscsi.service",
+    "open-vm-tools.service",
+    "pacemaker.service",
+    "qemu-guest-agent.service",
+    "rauc.service",
+    "rpcbind.service",
+    "rpcbind.socket",
+    "rtslib-fb-targetctl.service",
+    "samba-ad-dc.service",
+    "samba.service",
+    "smartmontools.service",
+    "smbd.service",
+    "snmpd.service",
+    "sysstat-collect.timer",
+    "sysstat-summary.timer",
+    "target.service",
+    "watchdog.service",
+    "winbind.service",
+    "zfs-import-cache.service",
+    "zfs-import-scan.service",
+    "zfs-mount.service",
+    "zfs-share.service",
+    "zfs-zed.service",
+    "zfs.target"
+  ],
+  "command_aliases": {
+    "b3sum (BLAKE3)": "b3sum",
+    "dd": "coreutils",
+    "shred": "coreutils",
+    "udev": "udev",
+    "wipefs": "util-linux"
+  },
+  "manual_sidecars": [
+    "areca-cli",
+    "broadcom-hbacmd",
+    "broadcom-sas3ircu",
+    "broadcom-storcli",
+    "broadcom-storcli2",
+    "dell-perccli",
+    "dell-perccli2",
+    "dell-racadm",
+    "fortyfive-drives-tools",
+    "hpe-ssacli",
+    "hpe-storcli",
+    "hpe-storcli2",
+    "marvell-qaucli",
+    "microchip-arcconf",
+    "supermicro-sum"
+  ],
+  "not_supported": [
+    {
+      "candidate": "containerd.io",
+      "reason": "The accepted Ubuntu systemd appliance does not run Hoardarr through Docker; bundling another privileged runtime adds no supported appliance capability."
+    },
+    {
+      "candidate": "docker-ce",
+      "reason": "The owner workbook reflects an older container deployment. The accepted production appliance is a native wheel/systemd installation."
+    },
+    {
+      "candidate": "docker-ce-cli",
+      "reason": "No supported Hoardarr appliance workflow shells out to Docker."
+    },
+    {
+      "candidate": "docker-compose-plugin",
+      "reason": "Compose is not the canonical deployment or extension model for the production appliance."
+    },
+    {
+      "candidate": "nwipe",
+      "reason": "Hoardarr uses capability-specific, plan-bound erase operations; a separate interactive bulk-wipe surface is intentionally excluded."
+    }
+  ],
+  "official_evidence": {
+    "apt": "https://ubuntu.com/server/docs/how-to/software/package-management/",
+    "b3sum": "https://packages.ubuntu.com/noble/b3sum",
+    "open-vm-tools": "https://packages.ubuntu.com/noble/open-vm-tools",
+    "qemu-guest-agent": "https://packages.ubuntu.com/noble/qemu-guest-agent",
+    "redfishtool": "https://packages.ubuntu.com/noble/redfishtool",
+    "snapraid": "https://packages.ubuntu.com/noble/snapraid"
+  },
+  "owner_workbook": {
+    "path": "Linux Packages needed.xlsx",
+    "sha256": "438991f1a7def5de709beea6337780baf50e2fd5e50f3a9229ef858d8186ed4c",
+    "sheet": "Sheet1",
+    "used_range": "A1:E59"
+  }
+}

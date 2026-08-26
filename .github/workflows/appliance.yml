@@ -11,6 +11,7 @@ on:
       - backend/uv.lock
       - packaging/**
       - scripts/build-appliance.sh
+      - scripts/build-offline-apt-repository.py
       - scripts/build-release-bundle.py
       - tests/appliance/**
       - tests/release/**
@@ -41,7 +42,58 @@ jobs:
           node-version: 24.18.0
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: sudo apt-get update && sudo apt-get install -y xorriso python3.12 python3.12-venv qemu-system-x86
+      - run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg xorriso python3.12 python3.12-venv qemu-system-x86
+      - name: Create isolated CI repository signing identity
+        run: |
+          cat >ci-signing-key <<'EOF'
+          Key-Type: RSA
+          Key-Length: 3072
+          Name-Real: Hoardarr offline repository CI validation
+          Name-Email: ci-offline-repository@invalid.hoardarr.local
+          Expire-Date: 1d
+          %no-protection
+          %commit
+          EOF
+          gpg --batch --generate-key ci-signing-key
+          gpg --batch --with-colons --list-secret-keys ci-offline-repository@invalid.hoardarr.local |
+            awk -F: '$1 == "fpr" { print $10; exit }' >ci-signing-fingerprint
+          test "$(wc -l <ci-signing-fingerprint)" -eq 1
+      - name: Capture executed Ubuntu vulnerability status
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          command = ["pro", "security-status", "--format", "json"]
+          result = subprocess.run(command, text=True, capture_output=True, check=False)
+          try:
+              payload = json.loads(result.stdout)
+          except json.JSONDecodeError:
+              payload = {"stdout": result.stdout}
+          Path("ubuntu-vulnerability-status.json").write_text(
+              json.dumps(
+                  {
+                      "command": command,
+                      "exit_code": result.returncode,
+                      "result": payload,
+                      "stderr": result.stderr,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          if result.returncode != 0:
+              raise SystemExit("Ubuntu vulnerability-status command failed")
+          PY
+      - name: Build and verify complete signed offline APT repository
+        run: |
+          python3 scripts/build-offline-apt-repository.py build \
+            --output dist/offline-repository \
+            --signing-key "$(cat ci-signing-fingerprint)" \
+            --vulnerability-report ubuntu-vulnerability-status.json
+          python3 scripts/build-offline-apt-repository.py verify dist/offline-repository
       - run: python3 scripts/build-release-bundle.py build --output-dir dist/releases
       - name: Create deterministic release archive
         run: |
@@ -62,7 +114,7 @@ jobs:
               --connect-timeout 30 --retry 5 --retry-delay 5 --retry-all-errors \
               --output ubuntu.iso "$BASE_ISO_URL"
           fi
-      - run: scripts/build-appliance.sh ubuntu.iso "$BASE_ISO_SHA256" dist/hoardarr-release.tar.gz hoardarr.iso
+      - run: scripts/build-appliance.sh ubuntu.iso "$BASE_ISO_SHA256" dist/hoardarr-release.tar.gz hoardarr.iso packaging/appliance/user-data dist/offline-repository
       - name: Boot the appliance to a visible interactive installer checkpoint
         run: |
           qemu-system-x86_64 -machine accel=tcg -m 2048 -smp 2 \
@@ -119,5 +171,66 @@ jobs:
           path: |
             hoardarr.iso
             hoardarr.iso.sha256
+            hoardarr.iso.tree-sha256
+            dist/offline-repository/evidence/**
+            dist/offline-repository/SHA256SUMS
             qemu-serial.log
             qemu-installer.ppm
+      - name: Retain offline install inputs for no-network validation
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoardarr-offline-install-inputs
+          compression-level: 0
+          retention-days: 3
+          path: |
+            dist/hoardarr-release.tar.gz
+            dist/offline-repository
+
+  offline-install:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [pass-1, pass-2]
+    runs-on: ubuntu-24.04
+    env:
+      BASE_ISO_URL: ${{ inputs.base_iso_url }}
+      BASE_ISO_SHA256: ${{ inputs.base_iso_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y xorriso qemu-system-x86 qemu-utils
+      - uses: actions/download-artifact@v4
+        with:
+          name: hoardarr-offline-install-inputs
+          path: .
+      - name: Download and verify the pinned Ubuntu base ISO
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 30 --retry 5 --retry-delay 5 --retry-all-errors \
+            --output ubuntu.iso "$BASE_ISO_URL"
+          echo "$BASE_ISO_SHA256  ubuntu.iso" | sha256sum --check --strict
+      - name: Build the CI-only no-network validation ISO
+        run: |
+          scripts/build-appliance.sh \
+            ubuntu.iso "$BASE_ISO_SHA256" \
+            dist/hoardarr-release.tar.gz \
+            hoardarr-offline-test.iso \
+            tests/appliance/offline-user-data \
+            dist/offline-repository
+      - name: Execute clean install and first boot with no virtual NIC
+        run: |
+          tests/appliance/run-offline-iso-pass.sh \
+            hoardarr-offline-test.iso \
+            "offline-evidence/${{ matrix.pass }}" \
+            "${{ matrix.pass }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hoardarr-offline-${{ matrix.pass }}
+          retention-days: 14
+          path: |
+            offline-evidence/${{ matrix.pass }}/**
+            hoardarr-offline-test.iso.sha256
+            hoardarr-offline-test.iso.tree-sha256

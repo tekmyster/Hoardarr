@@ -274,6 +274,8 @@ validate_release_layout() {
         die "mandatory package is missing from appliance-core.txt: samba"
     grep -Fxq "lldpd" "${BUNDLE_ROOT}/packages/appliance-core.txt" || \
         die "mandatory package is missing from appliance-core.txt: lldpd"
+    grep -Fxq "snapraid" "${BUNDLE_ROOT}/packages/appliance-core.txt" || \
+        die "mandatory package is missing from appliance-core.txt: snapraid"
     compgen -G "${BUNDLE_ROOT}/wheels/*.whl" >/dev/null || die "bundle wheelhouse is empty"
     compgen -G "${BUNDLE_ROOT}/hardware/*.json" >/dev/null || die "bundle hardware manifests are empty"
 }
@@ -754,7 +756,9 @@ apply_release() {
     install_config_units_docs
     systemctl daemon-reload
     if [[ "${DEFER_SERVICE_START}" == "true" ]]; then
-        systemctl enable lldpd.service
+        # Offline appliance installation leaves discovery/monitoring daemons
+        # inactive until the owner configures the corresponding feature.
+        systemctl disable lldpd.service >/dev/null 2>&1 || true
     else
         systemctl enable --now lldpd.service
         stop_runtime_services
