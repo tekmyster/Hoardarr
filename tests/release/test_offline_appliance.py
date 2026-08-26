@@ -53,19 +53,44 @@ class OfflineApplianceTests(unittest.TestCase):
             (
                 "set -euo pipefail",
                 "temporary_masks=()",
+                "declare -A temporary_mask_inodes=()",
                 "declare -A preserved_unit_masks=()",
+                "declare -A preserved_unit_mask_inodes=()",
+                "declare -A preserved_package_aliases=()",
+                "declare -A preserved_package_alias_inodes=()",
+                "declare -A preserved_package_alias_targets=()",
+                "declare -A preserved_package_alias_canonical_units=()",
+                "declare -A policy_guarded_canonical_units=()",
+                shell_function("entry_is_root_owned"),
+                shell_function("exact_iscsi_alias_parents_are_safe"),
+                shell_function("unit_declares_exact_alias"),
+                shell_function("is_exact_package_backed_iscsi_alias"),
+                shell_function("record_package_backed_iscsi_alias"),
+                shell_function("validate_preserved_unit_objects"),
                 shell_function("prepare_temporary_unit_mask"),
                 shell_function("cleanup_temporary_masks"),
                 shell_function("disable_unmasked_units"),
+                "reset_tracking() {",
+                "  temporary_masks=()",
+                "  temporary_mask_inodes=()",
+                "  preserved_unit_masks=()",
+                "  preserved_unit_mask_inodes=()",
+                "  preserved_package_aliases=()",
+                "  preserved_package_alias_inodes=()",
+                "  preserved_package_alias_targets=()",
+                "  preserved_package_alias_canonical_units=()",
+                "  policy_guarded_canonical_units=()",
+                "}",
                 'root="$1"',
                 'if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -u -- "$root")"; fi',
                 'mkdir -p -- "$root"',
+                'target="$root/no-package-root"',
+                'mask_root="$target/etc/systemd/system"',
                 "",
                 "# Newly created exact iscsi.service masks are temporary.",
                 'absent="$root/absent/iscsi.service"',
                 'mkdir -p -- "$(dirname -- "$absent")"',
-                "temporary_masks=()",
-                "preserved_unit_masks=()",
+                "reset_tracking",
                 'prepare_temporary_unit_mask "$absent" iscsi.service',
                 '[[ -L "$absent" && "$(readlink -- "$absent")" == /dev/null ]]',
                 '[[ "${#temporary_masks[@]}" -eq 1 && "${temporary_masks[0]}" == "$absent" ]]',
@@ -75,8 +100,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 'mkdir -p -- "$(dirname -- "$later")"',
                 "later_status=0",
                 "(",
-                "  temporary_masks=()",
-                "  preserved_unit_masks=()",
+                "  reset_tracking",
                 "  trap cleanup_temporary_masks EXIT",
                 '  prepare_temporary_unit_mask "$later" iscsi.service',
                 "  exit 79",
@@ -88,8 +112,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 'mkdir -p -- "$(dirname -- "$safe")"',
                 'ln -s -- /dev/null "$safe"',
                 'safe_inode="$(stat -c %i -- "$safe")"',
-                "temporary_masks=()",
-                "preserved_unit_masks=()",
+                "reset_tracking",
                 'prepare_temporary_unit_mask "$safe" iscsi.service',
                 '[[ "${#temporary_masks[@]}" -eq 0 ]]',
                 '[[ "${preserved_unit_masks[iscsi.service]}" == "$safe" ]]',
@@ -102,8 +125,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 'safe_failure_inode="$(stat -c %i -- "$safe_failure")"',
                 "safe_status=0",
                 "(",
-                "  temporary_masks=()",
-                "  preserved_unit_masks=()",
+                "  reset_tracking",
                 "  trap cleanup_temporary_masks EXIT",
                 '  prepare_temporary_unit_mask "$safe_failure" iscsi.service',
                 "  exit 81",
@@ -150,8 +172,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 'mkdir -p -- "$(dirname -- "$mixed_safe")"',
                 'ln -s -- /dev/null "$mixed_safe"',
                 'mixed_inode="$(stat -c %i -- "$mixed_safe")"',
-                "temporary_masks=()",
-                "preserved_unit_masks=()",
+                "reset_tracking",
                 'prepare_temporary_unit_mask "$mixed_safe" iscsi.service',
                 'prepare_temporary_unit_mask "$mixed_new" iscsid.service',
                 '[[ "${#temporary_masks[@]}" -eq 1 && "${temporary_masks[0]}" == "$mixed_new" ]]',
@@ -167,8 +188,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 'ln -s -- /dev/null "$lifecycle_safe"',
                 'lifecycle_inode="$(stat -c %i -- "$lifecycle_safe")"',
                 'disable_log="$root/disable.log"',
-                "temporary_masks=()",
-                "preserved_unit_masks=()",
+                "reset_tracking",
                 'prepare_temporary_unit_mask "$lifecycle_safe" iscsi.service',
                 'prepare_temporary_unit_mask "$lifecycle_new" iscsid.service',
                 "cleanup_temporary_masks",
@@ -183,14 +203,478 @@ class OfflineApplianceTests(unittest.TestCase):
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
+            script_path = pathlib.Path(temporary) / "mask-regression.sh"
+            script_path.write_text(script, encoding="utf-8", newline="\n")
             result = subprocess.run(
-                [bash, "-c", script, "mask-regression", temporary],
+                [bash, str(script_path), temporary],
                 capture_output=True,
                 check=False,
                 env={**os.environ, "MSYS": "winsymlinks:sys"},
                 text=True,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("command not found", result.stderr)
+
+    def test_package_backed_iscsi_alias_lifecycle_is_fail_closed(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+
+        def shell_function(name: str) -> str:
+            match = re.search(
+                rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n",
+                payload,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"missing production function {name}")
+            assert match is not None
+            return match.group(0)
+
+        if sys.platform == "win32":
+            candidates = (
+                pathlib.Path(r"C:\Program Files\Git\bin\bash.exe"),
+                pathlib.Path(r"C:\msys64\usr\bin\bash.exe"),
+            )
+            bash = next((str(path) for path in candidates if path.is_file()), None)
+        else:
+            bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "Bash is required for executable alias regression")
+        assert bash is not None
+
+        script = "\n".join(
+            (
+                "set -euo pipefail",
+                "temporary_masks=()",
+                "declare -A temporary_mask_inodes=()",
+                "declare -A preserved_unit_masks=()",
+                "declare -A preserved_unit_mask_inodes=()",
+                "declare -A preserved_package_aliases=()",
+                "declare -A preserved_package_alias_inodes=()",
+                "declare -A preserved_package_alias_targets=()",
+                "declare -A preserved_package_alias_canonical_units=()",
+                "declare -A policy_guarded_canonical_units=()",
+                shell_function("install_service_start_guard"),
+                shell_function("entry_is_root_owned"),
+                shell_function("exact_iscsi_alias_parents_are_safe"),
+                shell_function("unit_declares_exact_alias"),
+                shell_function("is_exact_package_backed_iscsi_alias"),
+                shell_function("record_package_backed_iscsi_alias"),
+                shell_function("validate_preserved_unit_objects"),
+                shell_function("prepare_temporary_unit_mask"),
+                shell_function("cleanup_temporary_masks"),
+                shell_function("cleanup_guard"),
+                shell_function("disable_unmasked_units"),
+                r'''
+root="$1"
+if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -u -- "$root")"; fi
+mkdir -p -- "$root"
+real_stat="$(command -v stat)"
+non_root_path=
+fail_inode_path=
+package_metadata_mode=ok
+stat() {
+    local format="${2:-}"
+    local path="${*: -1}"
+    if [[ "${1:-}" == -c && "$format" == %u:%g ]]; then
+        if [[ -n "$non_root_path" && "$path" == "$non_root_path" ]]; then
+            printf '%s\n' 1000:1000
+        else
+            printf '%s\n' 0:0
+        fi
+        return 0
+    fi
+    if [[ "${1:-}" == -c && "$format" == %i && -n "$fail_inode_path" && \
+        "$path" == "$fail_inode_path" ]]; then
+        return 1
+    fi
+    "$real_stat" "$@"
+}
+dpkg-query() {
+    if [[ " $* " == *" -W "* ]]; then
+        case "$package_metadata_mode" in
+            ok|wrong-owner) printf 'installed\topen-iscsi\n' ;;
+            wrong-package) printf 'installed\tother-package\n' ;;
+            malformed) printf 'not-a-valid-status\n' ;;
+            missing) return 1 ;;
+        esac
+        return 0
+    fi
+    if [[ " $* " == *" -S "* ]]; then
+        case "$package_metadata_mode" in
+            ok|wrong-package) printf 'open-iscsi: /usr/lib/systemd/system/open-iscsi.service\n' ;;
+            wrong-owner) printf 'other-package: /usr/lib/systemd/system/open-iscsi.service\n' ;;
+            malformed) printf 'ambiguous\nopen-iscsi: /usr/lib/systemd/system/open-iscsi.service\n' ;;
+            missing) return 1 ;;
+        esac
+        return 0
+    fi
+    return 1
+}
+reset_tracking() {
+    temporary_masks=()
+    temporary_mask_inodes=()
+    preserved_unit_masks=()
+    preserved_unit_mask_inodes=()
+    preserved_package_aliases=()
+    preserved_package_alias_inodes=()
+    preserved_package_alias_targets=()
+    preserved_package_alias_canonical_units=()
+    policy_guarded_canonical_units=()
+}
+refresh_md5() {
+    local canonical="$target/usr/lib/systemd/system/open-iscsi.service"
+    local digest
+    digest="$(md5sum -- "$canonical" | awk '{print $1}')"
+    printf '%s  %s\n' "$digest" usr/lib/systemd/system/open-iscsi.service \
+        >"$target/var/lib/dpkg/info/open-iscsi.md5sums"
+}
+make_fixture() {
+    target="$root/$1"
+    mask_root="$target/etc/systemd/system"
+    mkdir -p -- \
+        "$mask_root" \
+        "$target/usr/lib/systemd/system" \
+        "$target/var/lib/dpkg/info" \
+        "$target/usr/sbin" \
+        "$target/opt/hoardarr-install"
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=Open-iSCSI' \
+        '[Install]' \
+        'WantedBy=sysinit.target' \
+        'Alias=iscsi.service' \
+        >"$target/usr/lib/systemd/system/open-iscsi.service"
+    printf '%s\n' 'Package: open-iscsi' 'Status: install ok installed' \
+        >"$target/var/lib/dpkg/status"
+    printf '%s\n' /usr/lib/systemd/system/open-iscsi.service \
+        >"$target/var/lib/dpkg/info/open-iscsi.list"
+    refresh_md5
+    ln -s -- /usr/lib/systemd/system/open-iscsi.service "$mask_root/iscsi.service"
+    policy="$target/usr/sbin/policy-rc.d"
+    policy_backup="$target/opt/hoardarr-install/policy-rc.d.original"
+    policy_state=absent
+    package_metadata_mode=ok
+    non_root_path=
+    fail_inode_path=
+    reset_tracking
+}
+expect_alias_rejected_unchanged() {
+    local unit="${1:-iscsi.service}"
+    local alias="$mask_root/iscsi.service"
+    local inode target_before status=0
+    inode="$(stat -c %i -- "$alias")"
+    target_before="$(readlink -- "$alias")"
+    prepare_temporary_unit_mask "$alias" "$unit" >/dev/null 2>&1 || status=$?
+    [[ "$status" -ne 0 ]]
+    [[ -L "$alias" && "$(readlink -- "$alias")" == "$target_before" ]]
+    [[ "$(stat -c %i -- "$alias")" == "$inode" ]]
+}
+
+# Exact retained tuple: no replacement, exact inode survives the entire
+# pre-finalization lifecycle, and policy-rc.d denies the retained postinst start.
+make_fixture exact
+alias="$mask_root/iscsi.service"
+canonical_override="$mask_root/open-iscsi.service"
+wants="$mask_root/sysinit.target.wants/open-iscsi.service"
+alias_inode="$(stat -c %i -- "$alias")"
+install_service_start_guard
+prepare_temporary_unit_mask "$alias" iscsi.service
+prepare_temporary_unit_mask "$canonical_override" open-iscsi.service
+[[ "${preserved_package_aliases[iscsi.service]}" == "$alias" ]]
+[[ "${policy_guarded_canonical_units[open-iscsi.service]}" == "$canonical_override" ]]
+[[ ! -e "$canonical_override" && ! -L "$canonical_override" ]]
+
+# Retained open-iscsi.postinst semantics: unmask, enable, then invoke start.
+rm -f -- "$canonical_override"
+mkdir -p -- "$(dirname -- "$wants")"
+ln -s -- /usr/lib/systemd/system/open-iscsi.service "$wants"
+postinst_start_status=0
+invoke_start() {
+    local status=0
+    "$policy" open-iscsi.service start || status=$?
+    if (( status == 0 )); then
+        mkdir -p -- "$target/run"
+        : >"$target/run/open-iscsi.started"
+    fi
+    return "$status"
+}
+invoke_start || postinst_start_status=$?
+[[ "$postinst_start_status" -eq 101 ]]
+[[ ! -e "$target/run/open-iscsi.started" ]]
+[[ -L "$alias" && "$(readlink -- "$alias")" == /usr/lib/systemd/system/open-iscsi.service ]]
+[[ "$(stat -c %i -- "$alias")" == "$alias_inode" ]]
+cleanup_temporary_masks
+[[ "$(stat -c %i -- "$alias")" == "$alias_inode" ]]
+
+# A later payload failure preserves the original status and alias identity.
+failure_status=0
+cleanup_guard 79 || failure_status=$?
+[[ "$failure_status" -eq 79 ]]
+[[ -L "$alias" && "$(stat -c %i -- "$alias")" == "$alias_inode" ]]
+
+# A clean success finalization acts only on the canonical unit, removes the
+# vendor alias and wants link, and requires a disabled canonical readback.
+make_fixture final
+alias="$mask_root/iscsi.service"
+canonical_override="$mask_root/open-iscsi.service"
+wants="$mask_root/sysinit.target.wants/open-iscsi.service"
+mkdir -p -- "$(dirname -- "$wants")"
+ln -s -- /usr/lib/systemd/system/open-iscsi.service "$wants"
+install_service_start_guard
+prepare_temporary_unit_mask "$alias" iscsi.service
+prepare_temporary_unit_mask "$canonical_override" open-iscsi.service
+cleanup_temporary_masks
+disable_log="$target/disable.log"
+chroot() {
+    [[ "$1" == "$target" && "$2" == systemctl ]]
+    if [[ "$3" == disable && "$4" == open-iscsi.service ]]; then
+        printf '%s\n' disable-open-iscsi >>"$disable_log"
+        rm -f -- "$alias" "$wants"
+        return 0
+    fi
+    if [[ "$3" == is-enabled && "$4" == open-iscsi.service ]]; then
+        printf '%s\n' disabled
+        return 1
+    fi
+    printf 'unexpected chroot argv: %s\n' "$*" >&2
+    return 97
+}
+denied_units=(iscsi.service open-iscsi.service)
+disable_unmasked_units
+[[ ! -e "$alias" && ! -L "$alias" ]]
+[[ ! -e "$wants" && ! -L "$wants" ]]
+[[ "$(cat "$disable_log")" == disable-open-iscsi ]]
+
+# Canonical disable failure is not ignored and does not remove either link.
+make_fixture disable-failure
+alias="$mask_root/iscsi.service"
+wants="$mask_root/sysinit.target.wants/open-iscsi.service"
+mkdir -p -- "$(dirname -- "$wants")"
+ln -s -- /usr/lib/systemd/system/open-iscsi.service "$wants"
+prepare_temporary_unit_mask "$alias" iscsi.service
+chroot() {
+    [[ "$3" == disable && "$4" == open-iscsi.service ]]
+    return 1
+}
+denied_units=(iscsi.service open-iscsi.service)
+disable_failure_status=0
+disable_unmasked_units >/dev/null 2>&1 || disable_failure_status=$?
+[[ "$disable_failure_status" -ne 0 ]]
+[[ -L "$alias" && -L "$wants" ]]
+
+# A nominal disable that leaves either generated link is rejected.
+make_fixture disable-incomplete
+alias="$mask_root/iscsi.service"
+wants="$mask_root/sysinit.target.wants/open-iscsi.service"
+mkdir -p -- "$(dirname -- "$wants")"
+ln -s -- /usr/lib/systemd/system/open-iscsi.service "$wants"
+prepare_temporary_unit_mask "$alias" iscsi.service
+chroot() {
+    if [[ "$3" == disable ]]; then return 0; fi
+    printf '%s\n' disabled
+    return 1
+}
+denied_units=(iscsi.service open-iscsi.service)
+disable_incomplete_status=0
+disable_unmasked_units >/dev/null 2>&1 || disable_incomplete_status=$?
+[[ "$disable_incomplete_status" -ne 0 ]]
+[[ -L "$alias" && -L "$wants" ]]
+
+# Exact tuple negative cases all reject without changing the alias object.
+make_fixture wrong-unit
+expect_alias_rejected_unchanged other.service
+
+make_fixture relative-target
+rm -f -- "$mask_root/iscsi.service"
+ln -s -- ../../usr/lib/systemd/system/open-iscsi.service "$mask_root/iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture alternate-target
+rm -f -- "$mask_root/iscsi.service"
+ln -s -- /usr/lib/systemd/system/alternate.service "$mask_root/iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture missing-canonical
+rm -f -- "$target/usr/lib/systemd/system/open-iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture canonical-symlink
+rm -f -- "$target/usr/lib/systemd/system/open-iscsi.service"
+ln -s -- /dev/null "$target/usr/lib/systemd/system/open-iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture canonical-directory
+rm -f -- "$target/usr/lib/systemd/system/open-iscsi.service"
+mkdir -- "$target/usr/lib/systemd/system/open-iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture non-root-alias
+non_root_path="$mask_root/iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture non-root-canonical
+non_root_path="$target/usr/lib/systemd/system/open-iscsi.service"
+expect_alias_rejected_unchanged
+
+make_fixture wrong-owner
+package_metadata_mode=wrong-owner
+expect_alias_rejected_unchanged
+
+make_fixture wrong-package
+package_metadata_mode=wrong-package
+expect_alias_rejected_unchanged
+
+make_fixture missing-package
+package_metadata_mode=missing
+expect_alias_rejected_unchanged
+
+make_fixture malformed-package
+package_metadata_mode=malformed
+expect_alias_rejected_unchanged
+
+make_fixture missing-alias-metadata
+sed -i '/^Alias=/d' "$target/usr/lib/systemd/system/open-iscsi.service"
+refresh_md5
+expect_alias_rejected_unchanged
+
+make_fixture wrong-alias-metadata
+sed -i 's/^Alias=.*/Alias=other.service/' "$target/usr/lib/systemd/system/open-iscsi.service"
+refresh_md5
+expect_alias_rejected_unchanged
+
+make_fixture extra-alias-metadata
+sed -i 's/^Alias=.*/Alias=iscsi.service other.service/' \
+    "$target/usr/lib/systemd/system/open-iscsi.service"
+refresh_md5
+expect_alias_rejected_unchanged
+
+make_fixture status-symlink
+mv -- "$target/var/lib/dpkg/status" "$target/status-retained"
+ln -s -- "$target/status-retained" "$target/var/lib/dpkg/status"
+expect_alias_rejected_unchanged
+
+make_fixture package-list-symlink
+mv -- "$target/var/lib/dpkg/info/open-iscsi.list" "$target/list-retained"
+ln -s -- "$target/list-retained" "$target/var/lib/dpkg/info/open-iscsi.list"
+expect_alias_rejected_unchanged
+
+make_fixture missing-md5
+rm -f -- "$target/var/lib/dpkg/info/open-iscsi.md5sums"
+expect_alias_rejected_unchanged
+
+make_fixture malformed-md5
+printf '%s\n' malformed >"$target/var/lib/dpkg/info/open-iscsi.md5sums"
+expect_alias_rejected_unchanged
+
+make_fixture parent-symlink
+external="$root/parent-symlink-systemd"
+mv -- "$target/etc/systemd" "$external"
+ln -s -- "$external" "$target/etc/systemd"
+expect_alias_rejected_unchanged
+
+# Recorded alias drift is detected before finalization and never overwritten.
+make_fixture alias-drift
+alias="$mask_root/iscsi.service"
+prepare_temporary_unit_mask "$alias" iscsi.service
+original_inode="$(stat -c %i -- "$alias")"
+mv -- "$alias" "$target/original-alias-retained"
+ln -s -- /usr/lib/systemd/system/drifted.service "$alias"
+drift_inode="$(stat -c %i -- "$alias")"
+drift_status=0
+cleanup_temporary_masks >/dev/null 2>&1 || drift_status=$?
+[[ "$drift_status" -ne 0 ]]
+[[ "$(readlink -- "$alias")" == /usr/lib/systemd/system/drifted.service ]]
+[[ "$(stat -c %i -- "$alias")" == "$drift_inode" ]]
+[[ "$(stat -c %i -- "$target/original-alias-retained")" == "$original_inode" ]]
+
+# Drift between alias classification and canonical policy-guard registration
+# is rejected before the canonical path is accepted.
+make_fixture canonical-registration-drift
+alias="$mask_root/iscsi.service"
+canonical_override="$mask_root/open-iscsi.service"
+prepare_temporary_unit_mask "$alias" iscsi.service
+mv -- "$alias" "$target/original-alias-retained"
+ln -s -- /usr/lib/systemd/system/drifted.service "$alias"
+canonical_registration_status=0
+prepare_temporary_unit_mask "$canonical_override" open-iscsi.service \
+    >/dev/null 2>&1 || canonical_registration_status=$?
+[[ "$canonical_registration_status" -ne 0 ]]
+[[ ! -e "$canonical_override" && ! -L "$canonical_override" ]]
+[[ "$(readlink -- "$alias")" == /usr/lib/systemd/system/drifted.service ]]
+
+# Temporary-mask identity drift fails closed while cleanup continues for peers.
+make_fixture mask-drift
+first="$mask_root/first.service"
+second="$mask_root/second.service"
+prepare_temporary_unit_mask "$first" first.service
+prepare_temporary_unit_mask "$second" second.service
+mv -- "$first" "$target/original-first-mask"
+ln -s -- /dev/null "$first"
+replacement_inode="$(stat -c %i -- "$first")"
+cleanup_status=0
+cleanup_temporary_masks >/dev/null 2>&1 || cleanup_status=$?
+[[ "$cleanup_status" -ne 0 ]]
+[[ -L "$first" && "$(stat -c %i -- "$first")" == "$replacement_inode" ]]
+[[ ! -e "$second" && ! -L "$second" ]]
+
+# Identity acquisition fails before the path is published; the exact mask is
+# removed and cleanup never indexes an unset associative-array entry.
+make_fixture stat-failure
+stat_failure="$mask_root/stat-failure.service"
+fail_inode_path="$stat_failure"
+stat_failure_status=0
+prepare_temporary_unit_mask "$stat_failure" stat-failure.service >/dev/null 2>&1 || \
+    stat_failure_status=$?
+[[ "$stat_failure_status" -ne 0 ]]
+[[ ! -e "$stat_failure" && ! -L "$stat_failure" ]]
+[[ "${#temporary_masks[@]}" -eq 0 ]]
+cleanup_temporary_masks
+
+safe_stat_failure="$mask_root/safe-stat-failure.service"
+ln -s -- /dev/null "$safe_stat_failure"
+safe_stat_failure_inode="$(stat -c %i -- "$safe_stat_failure")"
+fail_inode_path="$safe_stat_failure"
+safe_stat_failure_status=0
+prepare_temporary_unit_mask "$safe_stat_failure" safe-stat-failure.service \
+    >/dev/null 2>&1 || safe_stat_failure_status=$?
+fail_inode_path=
+[[ "$safe_stat_failure_status" -ne 0 ]]
+[[ -L "$safe_stat_failure" && "$(readlink -- "$safe_stat_failure")" == /dev/null ]]
+[[ "$(stat -c %i -- "$safe_stat_failure")" == "$safe_stat_failure_inode" ]]
+[[ "${#preserved_unit_masks[@]}" -eq 0 ]]
+
+# Cleanup failure is aggregated; an existing payload failure remains exact,
+# while an otherwise successful invocation becomes failure.
+make_fixture cleanup-original-status
+reset_tracking
+rm -f -- "$policy"
+mkdir -- "$policy"
+original_status=0
+cleanup_guard 73 >/dev/null 2>&1 || original_status=$?
+[[ "$original_status" -eq 73 ]]
+
+make_fixture cleanup-success-status
+reset_tracking
+rm -f -- "$policy"
+mkdir -- "$policy"
+success_status=0
+cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
+[[ "$success_status" -ne 0 ]]
+''',
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script_path = pathlib.Path(temporary) / "alias-regression.sh"
+            script_path.write_text(script, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [bash, str(script_path), temporary],
+                capture_output=True,
+                check=False,
+                env={**os.environ, "MSYS": "winsymlinks:sys"},
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("command not found", result.stderr)
 
     def test_debian_control_metadata_is_parsed_by_field_name(self) -> None:
         control = """Package: snapraid
