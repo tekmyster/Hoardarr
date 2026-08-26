@@ -22,6 +22,169 @@ sys.modules[SPEC.name] = offline_repo
 SPEC.loader.exec_module(offline_repo)
 
 
+PCP_TRACE_PHASES = (
+    ("01-fixture-creation", "fixture-creation"),
+    ("02-package-download", "package-download"),
+    ("03-package-hash", "package-hash"),
+    ("04-package-extract", "package-extract"),
+    ("05-mount-namespace", "mount-namespace"),
+    ("06-old-failure", "old-failure"),
+    ("07-guard-preparation", "guard-preparation"),
+    ("08-pcp-configure", "pcp-configure"),
+    ("09-all-denied-presets", "all-denied-presets"),
+    ("10-host-manager-isolation", "host-manager-isolation"),
+    ("11-interrupted-retention", "interrupted-retention"),
+    ("12-final-disable-readback", "final-disable-readback"),
+    ("13-retained-manifest", "retained-manifest"),
+    ("14-peer-isolation", "peer-isolation"),
+    ("15-fixture-cleanup", "fixture-cleanup"),
+)
+PCP_TRACE_MAX_BYTES = 8192
+PCP_TRACE_MAX_LINE_BYTES = 240
+PCP_TRACE_RECORD = re.compile(
+    r"^HPCP\|1\|(BEGIN|PASS|EXIT)\|([0-9]{2}-[a-z0-9-]+)\|"
+    r"status=(-|[0-9]{1,3})\|line=(-|[0-9]{1,6})\|"
+    r"function=(-|[A-Za-z_][A-Za-z0-9_]*)\|label=([a-z0-9-]+)$"
+)
+
+
+def _pcp_trace_shell_prelude() -> str:
+    return r"""
+trace_file="$5"
+current_phase=01-fixture-creation
+current_label=fixture-creation
+trace_terminal=false
+trace_write() {
+    local record="$1"
+    (( ${#record} <= 240 ))
+    printf '%s\n' "$record" >>"$trace_file"
+}
+trace_begin() {
+    current_phase="$1"
+    current_label="$2"
+    trace_write "HPCP|1|BEGIN|$current_phase|status=-|line=-|function=-|label=$current_label"
+}
+trace_pass() {
+    trace_write "HPCP|1|PASS|$current_phase|status=-|line=-|function=-|label=$current_label"
+}
+trace_failure() {
+    local status="$1"
+    local line="$2"
+    local function="${FUNCNAME[1]:-main}"
+    trap - ERR EXIT
+    if [[ "$trace_terminal" != true ]]; then
+        trace_terminal=true
+        trace_write "HPCP|1|EXIT|$current_phase|status=$status|line=$line|function=$function|label=$current_label" || :
+    fi
+    exit "$status"
+}
+trace_exit() {
+    local status="$1"
+    local line="$2"
+    trap - ERR EXIT
+    if [[ "$trace_terminal" != true ]]; then
+        trace_terminal=true
+        trace_write "HPCP|1|EXIT|$current_phase|status=$status|line=$line|function=main|label=$current_label" || :
+    fi
+    exit "$status"
+}
+trap 'trace_failure "$?" "$LINENO"' ERR
+trap 'trace_exit "$?" "$LINENO"' EXIT
+""".strip()
+
+
+def _append_pcp_trace_phase(
+    trace_path: pathlib.Path, phase_index: int, kind: str
+) -> None:
+    phase, label = PCP_TRACE_PHASES[phase_index]
+    if kind not in {"BEGIN", "PASS"}:
+        raise AssertionError("invalid PCP trace phase marker")
+    with trace_path.open("a", encoding="ascii", newline="\n") as trace:
+        trace.write(f"HPCP|1|{kind}|{phase}|status=-|line=-|function=-|label={label}\n")
+
+
+def _validate_pcp_trace(
+    trace_path: pathlib.Path,
+    fixture_root: pathlib.Path,
+    namespace_path: pathlib.Path,
+) -> tuple[str, int]:
+    root = fixture_root.resolve(strict=True)
+    namespace = namespace_path.resolve(strict=False)
+    trace = trace_path.resolve(strict=False)
+    if trace.parent != root or trace == namespace or namespace in trace.parents:
+        raise AssertionError("PCP trace is outside the exact fixture root")
+    if trace_path.is_symlink() or not trace_path.is_file():
+        raise AssertionError("PCP trace is missing or is not a regular file")
+    raw = trace_path.read_bytes()
+    if not raw or len(raw) > PCP_TRACE_MAX_BYTES:
+        raise AssertionError("PCP trace size is missing or unbounded")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise AssertionError("PCP trace is not bounded ASCII") from exc
+    if not text.endswith("\n"):
+        raise AssertionError("PCP trace is not newline terminated")
+    lines = text.splitlines()
+    if any(len(line.encode("ascii")) > PCP_TRACE_MAX_LINE_BYTES for line in lines):
+        raise AssertionError("PCP trace contains an unbounded line")
+
+    expected = list(PCP_TRACE_PHASES)
+    expected_index = 0
+    open_phase: tuple[str, str] | None = None
+    terminal_status: int | None = None
+    for index, line in enumerate(lines):
+        match = PCP_TRACE_RECORD.fullmatch(line)
+        if match is None:
+            raise AssertionError(f"PCP trace record {index + 1} is malformed")
+        kind, phase, status_text, line_text, function, label = match.groups()
+        if kind == "BEGIN":
+            if terminal_status is not None or open_phase is not None:
+                raise AssertionError("PCP trace phase is duplicate or out of order")
+            if (
+                expected_index >= len(expected)
+                or (phase, label) != expected[expected_index]
+            ):
+                raise AssertionError(
+                    "PCP trace phase is unknown, missing, or out of order"
+                )
+            if (status_text, line_text, function) != ("-", "-", "-"):
+                raise AssertionError("PCP BEGIN record contains unexpected fields")
+            open_phase = (phase, label)
+        elif kind == "PASS":
+            if terminal_status is not None or open_phase != (phase, label):
+                raise AssertionError("PCP trace PASS is duplicate or out of order")
+            if (status_text, line_text, function) != ("-", "-", "-"):
+                raise AssertionError("PCP PASS record contains unexpected fields")
+            open_phase = None
+            expected_index += 1
+        else:
+            if terminal_status is not None:
+                raise AssertionError(
+                    "PCP trace terminal receipt is duplicate or misplaced"
+                )
+            status = int(status_text) if status_text != "-" else -1
+            source_line = int(line_text) if line_text != "-" else -1
+            if not 0 <= status <= 255 or source_line <= 0 or function == "-":
+                raise AssertionError(
+                    "PCP trace terminal status or source identity is invalid"
+                )
+            if status == 0:
+                if (
+                    open_phase is not None
+                    or expected_index != len(expected)
+                    or (phase, label) != expected[-1]
+                ):
+                    raise AssertionError(
+                        "PCP trace reports success before every phase passed"
+                    )
+            elif open_phase != (phase, label):
+                raise AssertionError("PCP trace failure is not tied to the open phase")
+            terminal_status = status
+    if terminal_status is None:
+        raise AssertionError(f"PCP trace has no terminal receipt:\n{text}")
+    return text, terminal_status
+
+
 class OfflineApplianceTests(unittest.TestCase):
     @staticmethod
     def _actual_install_fragment(payload: str) -> str:
@@ -1172,6 +1335,124 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("command not found", result.stderr)
 
+    def test_pcp_trace_contract_rejects_untrusted_or_incomplete_evidence(
+        self,
+    ) -> None:
+        def phase_record(kind: str, index: int) -> str:
+            phase, label = PCP_TRACE_PHASES[index]
+            return f"HPCP|1|{kind}|{phase}|status=-|line=-|function=-|label={label}"
+
+        valid_lines = [
+            record
+            for index in range(len(PCP_TRACE_PHASES))
+            for record in (phase_record("BEGIN", index), phase_record("PASS", index))
+        ]
+        final_phase, final_label = PCP_TRACE_PHASES[-1]
+        valid_lines.append(
+            f"HPCP|1|EXIT|{final_phase}|status=0|line=321|function=main|"
+            f"label={final_label}"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            namespace = root / "namespace"
+            namespace.mkdir()
+
+            def rejected(name: str, lines: list[str], *, outside: bool = False) -> None:
+                if outside:
+                    with tempfile.TemporaryDirectory() as other:
+                        trace = pathlib.Path(other) / f"{name}.trace"
+                        trace.write_text("\n".join(lines) + "\n", encoding="ascii")
+                        with self.assertRaises(AssertionError):
+                            _validate_pcp_trace(trace, root, namespace)
+                    return
+                trace = root / f"{name}.trace"
+                trace.write_text("\n".join(lines) + "\n", encoding="ascii")
+                with self.assertRaises(AssertionError):
+                    _validate_pcp_trace(trace, root, namespace)
+
+            success_trace = root / "success.trace"
+            success_trace.write_text("\n".join(valid_lines) + "\n", encoding="ascii")
+            _, status = _validate_pcp_trace(success_trace, root, namespace)
+            self.assertEqual(status, 0)
+
+            missing = valid_lines[:4] + valid_lines[6:]
+            duplicate = valid_lines[:1] + [valid_lines[0]] + valid_lines[1:]
+            out_of_order = valid_lines.copy()
+            out_of_order[2:6] = valid_lines[4:6] + valid_lines[2:4]
+            unknown = valid_lines.copy()
+            unknown[0] = unknown[0].replace("01-fixture-creation", "01-unknown-phase")
+            multiple_terminal = valid_lines + [valid_lines[-1]]
+            malformed_status = valid_lines.copy()
+            malformed_status[-1] = malformed_status[-1].replace(
+                "status=0", "status=999"
+            )
+            malformed_line = valid_lines.copy()
+            malformed_line[-1] = malformed_line[-1].replace("line=321", "line=0")
+            unbounded = valid_lines.copy()
+            unbounded[0] += "x" * PCP_TRACE_MAX_LINE_BYTES
+            environment_like = valid_lines.copy()
+            environment_like[0] += "|PASSWORD=do-not-record"
+
+            cases = {
+                "missing": missing,
+                "duplicate": duplicate,
+                "out-of-order": out_of_order,
+                "unknown": unknown,
+                "multiple-terminal": multiple_terminal,
+                "malformed-status": malformed_status,
+                "malformed-line": malformed_line,
+                "unbounded": unbounded,
+                "environment-like": environment_like,
+            }
+            for name, lines in cases.items():
+                with self.subTest(name=name):
+                    rejected(name, lines)
+            rejected("outside-root", valid_lines, outside=True)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and shutil.which("bash"),
+        "requires Linux Bash",
+    )
+    def test_pcp_trace_trap_preserves_original_exit_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            namespace = root / "namespace"
+            namespace.mkdir()
+            trace = root / "exit-preservation.trace"
+            for index in range(4):
+                _append_pcp_trace_phase(trace, index, "BEGIN")
+                _append_pcp_trace_phase(trace, index, "PASS")
+            script = root / "trace-exit.sh"
+            script.write_text(
+                "set -Eeuo pipefail\n"
+                + _pcp_trace_shell_prelude()
+                + "\ntrace_begin 05-mount-namespace mount-namespace\nexit 73\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [
+                    shutil.which("bash") or "bash",
+                    str(script),
+                    "unused-1",
+                    "unused-2",
+                    "unused-3",
+                    "unused-4",
+                    str(trace),
+                ],
+                capture_output=True,
+                check=False,
+                env={**os.environ, "MSYS": "winsymlinks:sys"},
+                text=True,
+            )
+            try:
+                trace_text, trace_status = _validate_pcp_trace(trace, root, namespace)
+            except AssertionError as exc:
+                self.fail(result.stdout + result.stderr + str(exc))
+            self.assertEqual(result.returncode, 73, trace_text)
+            self.assertEqual(trace_status, result.returncode, trace_text)
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux mounts")
     def test_real_noble_pcp_postinst_presets_with_production_service_guard(
         self,
@@ -1220,6 +1501,14 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
+            trace_path = root / "pcp-harness.trace"
+            namespace_path = (root / "namespace").resolve()
+            self.assertEqual(namespace_path.parent, root.resolve())
+            self.assertEqual(trace_path.resolve(strict=False).parent, root.resolve())
+            self.assertNotEqual(trace_path.resolve(strict=False), namespace_path)
+            _append_pcp_trace_phase(trace_path, 0, "BEGIN")
+            _append_pcp_trace_phase(trace_path, 0, "PASS")
+            _append_pcp_trace_phase(trace_path, 1, "BEGIN")
             download = subprocess.run(
                 ["apt-get", "download", f"pcp={expected_version}"],
                 cwd=root,
@@ -1229,11 +1518,15 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                 timeout=240,
             )
             self.assertEqual(download.returncode, 0, download.stdout + download.stderr)
+            _append_pcp_trace_phase(trace_path, 1, "PASS")
             debs = list(root.glob("pcp_*.deb"))
             self.assertEqual(len(debs), 1, [path.name for path in debs])
+            _append_pcp_trace_phase(trace_path, 2, "BEGIN")
             self.assertEqual(
                 hashlib.sha256(debs[0].read_bytes()).hexdigest(), expected_deb_sha256
             )
+            _append_pcp_trace_phase(trace_path, 2, "PASS")
+            _append_pcp_trace_phase(trace_path, 3, "BEGIN")
             control = root / "control"
             data = root / "data"
             subprocess.run(["dpkg-deb", "-e", str(debs[0]), str(control)], check=True)
@@ -1243,6 +1536,7 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                 hashlib.sha256(postinst.read_bytes()).hexdigest(),
                 expected_postinst_sha256,
             )
+            _append_pcp_trace_phase(trace_path, 3, "PASS")
             policy = json.loads(
                 (ROOT / "packaging" / "offline" / "package-policy.json").read_text(
                     encoding="utf-8"
@@ -1258,7 +1552,8 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
             harness.write_text(
                 "\n".join(
                     (
-                        "set -euo pipefail",
+                        "set -Eeuo pipefail",
+                        _pcp_trace_shell_prelude(),
                         shell_function("install_service_start_guard"),
                         shell_function("entry_is_root_owned"),
                         shell_function("validate_preserved_unit_objects"),
@@ -1276,6 +1571,7 @@ postinst="$1"
 data="$2"
 work="$3"
 denied_file="$4"
+trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
 mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install}
 cp -a "$(command -v chroot)" "$work/usr-sbin/chroot"
@@ -1335,8 +1631,10 @@ export DPKG_MAINTSCRIPT_NAME=postinst
 export SYSTEMD_OFFLINE=1
 pcp_units=(pcp-reboot-init.service pmcd.service pmlogger.service pmie.service pmproxy.service)
 mapfile -t all_denied_units <"$denied_file"
+trace_pass
 
 # Reproduce the accepted F7A defect using the exact package script.
+trace_begin 06-old-failure old-failure
 for unit in "${pcp_units[@]}"; do ln -s /dev/null "/etc/systemd/system/$unit"; done
 old_status=0
 "$postinst" configure >"$work/old.log" 2>&1 || old_status=$?
@@ -1344,8 +1642,10 @@ old_status=0
 grep -Fq 'Failed to preset unit' "$work/old.log"
 find "$work/etc-systemd" -mindepth 1 -maxdepth 1 -delete
 find "$work/systemd-state" -mindepth 1 -delete
+trace_pass
 
 # Exercise the production classification and exact start guard.
+trace_begin 07-guard-preparation guard-preparation
 target="/"
 mask_root=/etc/systemd/system
 install_root="$work/install"
@@ -1395,13 +1695,19 @@ done
 start_status=0
 "$policy" pmcd.service start || start_status=$?
 [[ "$start_status" -eq 101 ]]
+trace_pass
 
+trace_begin 08-pcp-configure pcp-configure
 "$postinst" configure >"$work/corrected.log" 2>&1
 ! grep -Fq 'Failed to preset unit' "$work/corrected.log"
+trace_pass
+trace_begin 09-all-denied-presets all-denied-presets
 for unit in "${denied_units[@]}"; do
     SYSTEMD_OFFLINE=1 systemctl preset "$unit"
 done >"$work/all-denied-presets.log" 2>&1
 ! grep -Fq 'Failed to preset unit' "$work/all-denied-presets.log"
+trace_pass
+trace_begin 10-host-manager-isolation host-manager-isolation
 [[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
 preset_enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled pmcd.service)"
 [[ "$preset_enabled_state" == enabled ]]
@@ -1409,6 +1715,8 @@ pcp_active_status=0
 pcp_active_state="$(SYSTEMD_OFFLINE=1 chroot / systemctl is-active pmcd.service 2>&1)" || \
     pcp_active_status=$?
 [[ "$pcp_active_state" == inactive && "$pcp_active_status" -eq 3 ]]
+trace_pass
+trace_begin 11-interrupted-retention interrupted-retention
 package_transaction_started=true
 interrupted_status=0
 # The old marker namespace cannot authorize the structurally false condition,
@@ -1433,6 +1741,8 @@ for path in "${recovery_guard_files[@]}"; do
     systemd-analyze condition "ConditionPathExists=${recovery_guard_condition_paths[$path]}" \
         >/dev/null 2>&1 && exit 96
 done
+trace_pass
+trace_begin 12-final-disable-readback final-disable-readback
 disable_unmasked_units
 [[ "$denied_units_finalized" == true ]]
 [[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq "${#denied_units[@]}" ]]
@@ -1456,6 +1766,8 @@ pathlib.Path(sys.argv[2]).write_text(
 PY
 cleanup_service_guards
 [[ "$service_guard_cleanup_complete" == true ]]
+trace_pass
+trace_begin 13-retained-manifest retained-manifest
 write_retained_recovery_guard_manifest
 retained_count=0
 while IFS=$'\t' read -r unit enabled enabled_status active active_status boundary; do
@@ -1487,8 +1799,10 @@ PY
 sha256sum "$state_root/service-policy-readback.json" \
     "$state_root/service-retained-guards.json" >"$state_root/SHA256SUMS"
 (cd "$state_root" && sha256sum --check --strict SHA256SUMS)
+trace_pass
 # Removing one exact verified guard in this disposable fixture cannot release
 # its retained static peer.  Product activation remains out of scope.
+trace_begin 14-peer-isolation peer-isolation
 watchdog_guard="${recovery_guard_paths_by_unit[watchdog.service]}"
 peer_guard="${recovery_guard_paths_by_unit[zfs.target]}"
 [[ -f "$watchdog_guard" && -f "$peer_guard" ]]
@@ -1513,63 +1827,93 @@ for unit in "${denied_units[@]}"; do
     state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled "$unit" 2>&1)" || state_status=$?
     [[ "$state" != enabled ]]
 done
+trace_pass
+trace_begin 15-fixture-cleanup fixture-cleanup
 printf '%s\n' \
     real_pcp_old_preset_failure=reproduced \
     real_pcp_corrected_preset_errors=0 \
     policy_rc_d_start_status=101 \
     host_manager_contacts=0 \
     final_denied_units="${#denied_units[@]}"
+trace_pass
+trace_terminal=true
+trace_write "HPCP|1|EXIT|$current_phase|status=0|line=$LINENO|function=main|label=$current_label"
+trap - ERR EXIT
+exit 0
 """,
                     )
                 ),
                 encoding="utf-8",
                 newline="\n",
             )
-            namespace_path = (root / "namespace").resolve()
-            self.assertEqual(namespace_path.parent, root.resolve())
+            result: subprocess.CompletedProcess[str] | None = None
+            run_error: OSError | subprocess.TimeoutExpired | None = None
+            ownership: subprocess.CompletedProcess[str] | None = None
+            ownership_error: OSError | subprocess.TimeoutExpired | None = None
             try:
-                result = subprocess.run(
-                    [
-                        "sudo",
-                        "-n",
-                        "unshare",
-                        "--mount",
-                        "--fork",
-                        "bash",
-                        str(harness),
-                        str(postinst),
-                        str(data),
-                        str(namespace_path),
-                        str(denied_path),
-                    ],
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                    timeout=240,
-                )
-            finally:
-                if namespace_path.exists():
-                    ownership = subprocess.run(
+                try:
+                    result = subprocess.run(
                         [
                             "sudo",
                             "-n",
-                            "chown",
-                            "-R",
-                            f"{os.getuid()}:{os.getgid()}",
-                            "--",
+                            "unshare",
+                            "--mount",
+                            "--fork",
+                            "bash",
+                            str(harness),
+                            str(postinst),
+                            str(data),
                             str(namespace_path),
+                            str(denied_path),
+                            str(trace_path),
                         ],
                         text=True,
                         capture_output=True,
                         check=False,
-                        timeout=30,
+                        timeout=240,
                     )
-                    self.assertEqual(
-                        ownership.returncode,
-                        0,
-                        ownership.stdout + ownership.stderr,
-                    )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    run_error = exc
+            finally:
+                if namespace_path.exists():
+                    try:
+                        ownership = subprocess.run(
+                            [
+                                "sudo",
+                                "-n",
+                                "chown",
+                                "-R",
+                                f"{os.getuid()}:{os.getgid()}",
+                                "--",
+                                str(namespace_path),
+                            ],
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                            timeout=30,
+                        )
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        ownership_error = exc
+            trace_text, trace_status = _validate_pcp_trace(
+                trace_path, root, namespace_path
+            )
+            if ownership_error is not None:
+                self.fail(
+                    f"namespace ownership cleanup failed: {ownership_error}\n{trace_text}"
+                )
+            if ownership is not None:
+                self.assertEqual(
+                    ownership.returncode,
+                    0,
+                    ownership.stdout + ownership.stderr + trace_text,
+                )
+            if run_error is not None:
+                self.fail(f"PCP harness execution failed: {run_error}\n{trace_text}")
+            assert result is not None
+            self.assertEqual(trace_status, result.returncode, trace_text)
+        self.assertEqual(
+            result.returncode, 0, result.stdout + result.stderr + trace_text
+        )
         self.assertIn("real_pcp_old_preset_failure=reproduced", result.stdout)
         self.assertIn("real_pcp_corrected_preset_errors=0", result.stdout)
         self.assertIn("policy_rc_d_start_status=101", result.stdout)
