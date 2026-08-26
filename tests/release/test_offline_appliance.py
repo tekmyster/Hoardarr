@@ -216,17 +216,32 @@ read -r systemd_executable_mode systemd_executable_uid systemd_executable_gid \
     "$systemd_executable_links" =~ ^[1-9][0-9]*$ && \
     "$systemd_version_sha256" =~ ^[0-9a-f]{{64}}$ && \
     "$systemd_executable_sha256" =~ ^[0-9a-f]{{64}}$ ]]
-printf '%s\n' \
-    'HSOURCE|1' \
-    "PACKAGE\tsystemd\t$systemd_package_version\t$systemd_package_arch" \
-    "VERSION\t$systemd_version_first\t$systemd_version_sha256" \
-    "EXECUTABLE\t/usr/bin/systemd-analyze\t$systemd_executable_sha256\t$systemd_executable_mode\t0\t0\t$systemd_executable_size\t$systemd_executable_links\tsystemd" \
-    'UPSTREAM\t{PCP_SYSTEMD_UPSTREAM_REPOSITORY}\t{PCP_SYSTEMD_UPSTREAM_TAG}\t{PCP_SYSTEMD_UPSTREAM_REVISION}' \
-    'SOURCE\t{PCP_SYSTEMD_ANALYZE_SOURCE_PATH}\t{PCP_SYSTEMD_ANALYZE_SOURCE_FUNCTION}\t{PCP_SYSTEMD_ANALYZE_SOURCE_SHA256}' \
-    'SOURCE\t{PCP_SYSTEMD_MANAGER_SOURCE_PATH}\t{PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION}\t{PCP_SYSTEMD_MANAGER_SOURCE_SHA256}' \
-    'CHAIN\tverb_condition>verify_conditions>manager_startup>manager_ready>touch_file' \
-    'MARKER\t{PCP_SYSTEMD_MARKER_PATH}\tregular\t0444\tzero-length\tmanager-ready' \
-    >"$systemd_source_partial"
+{{
+    printf '%s\n' 'HSOURCE|1'
+    printf 'PACKAGE\t%s\t%s\t%s\n' \
+        systemd "$systemd_package_version" "$systemd_package_arch"
+    printf 'VERSION\t%s\t%s\n' \
+        "$systemd_version_first" "$systemd_version_sha256"
+    printf 'EXECUTABLE\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        /usr/bin/systemd-analyze "$systemd_executable_sha256" \
+        "$systemd_executable_mode" 0 0 "$systemd_executable_size" \
+        "$systemd_executable_links" systemd
+    printf 'UPSTREAM\t%s\t%s\t%s\n' \
+        '{PCP_SYSTEMD_UPSTREAM_REPOSITORY}' '{PCP_SYSTEMD_UPSTREAM_TAG}' \
+        '{PCP_SYSTEMD_UPSTREAM_REVISION}'
+    printf 'SOURCE\t%s\t%s\t%s\n' \
+        '{PCP_SYSTEMD_ANALYZE_SOURCE_PATH}' \
+        '{PCP_SYSTEMD_ANALYZE_SOURCE_FUNCTION}' \
+        '{PCP_SYSTEMD_ANALYZE_SOURCE_SHA256}'
+    printf 'SOURCE\t%s\t%s\t%s\n' \
+        '{PCP_SYSTEMD_MANAGER_SOURCE_PATH}' \
+        '{PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION}' \
+        '{PCP_SYSTEMD_MANAGER_SOURCE_SHA256}'
+    printf 'CHAIN\t%s\n' \
+        'verb_condition>verify_conditions>manager_startup>manager_ready>touch_file'
+    printf 'MARKER\t%s\t%s\t%s\t%s\t%s\n' \
+        '{PCP_SYSTEMD_MARKER_PATH}' regular 0444 zero-length manager-ready
+}} >"$systemd_source_partial"
 (( $(/usr/bin/stat -c %s -- "$systemd_source_partial") <= {PCP_SYSTEMD_SOURCE_RECEIPT_MAX_BYTES} ))
 /usr/bin/mv -- "$systemd_source_partial" "$systemd_source_receipt"
 /usr/bin/sync -f "$systemd_source_receipt"
@@ -361,12 +376,17 @@ systemd_causal_cleanup_root \
 [[ -z "$(find "$systemd_causal_parent" -mindepth 1 -print -quit)" ]]
 rmdir -- "$systemd_causal_parent"
 [[ ! -e "$systemd_causal_parent" && ! -L "$systemd_causal_parent" ]]
-printf '%s\n' \
-    'HCAUSE|1' \
-    'CONTROL\tnegative\tcommand=none\tstatus=-\tbefore=0\tafter=0\tmanager_endpoints_before=0\tmanager_endpoints_after=0\tcleanup=removed' \
-    'CONTROL\tpositive\tcommand=systemd-analyze-condition\tstatus=1\tbefore=0\tafter=1\tmanager_endpoints_before=0\tmanager_endpoints_after=0\tcleanup=removed' \
-    "MARKER\tsystemd-units-load\tregular\t$systemd_marker_mode\t$systemd_marker_uid\t$systemd_marker_gid\t$systemd_marker_size\t$systemd_marker_links\tsame-filesystem" \
-    >"$systemd_causal_partial"
+{{
+    printf '%s\n' 'HCAUSE|1'
+    printf 'CONTROL\t%s\tcommand=%s\tstatus=%s\tbefore=%s\tafter=%s\tmanager_endpoints_before=%s\tmanager_endpoints_after=%s\tcleanup=%s\n' \
+        negative none - 0 0 0 0 removed
+    printf 'CONTROL\t%s\tcommand=%s\tstatus=%s\tbefore=%s\tafter=%s\tmanager_endpoints_before=%s\tmanager_endpoints_after=%s\tcleanup=%s\n' \
+        positive systemd-analyze-condition 1 0 1 0 0 removed
+    printf 'MARKER\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        systemd-units-load regular "$systemd_marker_mode" "$systemd_marker_uid" \
+        "$systemd_marker_gid" "$systemd_marker_size" "$systemd_marker_links" \
+        same-filesystem
+}} >"$systemd_causal_partial"
 (( $(stat -c %s -- "$systemd_causal_partial") <= {PCP_SYSTEMD_CAUSAL_RECEIPT_MAX_BYTES} ))
 mv -- "$systemd_causal_partial" "$systemd_causal_receipt"
 sync -f "$systemd_causal_receipt"
@@ -827,6 +847,24 @@ def _validate_systemd_causal_receipt(
     if text != expected:
         raise AssertionError("systemd causal receipt is malformed or incomplete")
     return text
+
+
+def _extract_systemd_receipt_writer(shell: str, partial_variable: str) -> str:
+    end_marker = f'}} >"${partial_variable}"'
+    end = shell.find(end_marker)
+    if end < 0 or shell.find(end_marker, end + 1) >= 0:
+        raise AssertionError(
+            f"receipt writer for {partial_variable} is missing or ambiguous"
+        )
+    start = shell.rfind("{\n", 0, end)
+    if start < 0:
+        raise AssertionError(
+            f"receipt writer for {partial_variable} has no group start"
+        )
+    writer = shell[start : end + len(end_marker)]
+    if writer.count("printf ") < 2 or "%b" in writer or "echo -e" in writer:
+        raise AssertionError(f"receipt writer for {partial_variable} is not field-safe")
+    return writer
 
 
 class OfflineApplianceTests(unittest.TestCase):
@@ -2162,6 +2200,91 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                     '[[ "$post_configure_start_status" -eq 101 ]]', "", 1
                 )
             )
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and shutil.which("bash"),
+        "requires Linux Bash",
+    )
+    def test_systemd_receipt_production_writers_emit_real_tab_bytes(self) -> None:
+        source_writer = _extract_systemd_receipt_writer(
+            PCP_SYSTEMD_SOURCE_RECEIPT, "systemd_source_partial"
+        )
+        causal_writer = _extract_systemd_receipt_writer(
+            PCP_SYSTEMD_CAUSAL_PROOF, "systemd_causal_partial"
+        )
+        self.assertNotIn("printf '%s\\n' \\", source_writer)
+        self.assertNotIn("printf '%s\\n' \\", causal_writer)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = root / "emit-systemd-receipts.sh"
+            script.write_text(
+                "set -Eeuo pipefail\n"
+                'work="$1"\n'
+                'systemd_source_receipt="$work/systemd-source.tsv"\n'
+                'systemd_source_partial="${systemd_source_receipt}.partial"\n'
+                'systemd_package_version="255.4-1ubuntu8.17"\n'
+                'systemd_package_arch="amd64"\n'
+                'systemd_version_first="systemd 255 (255.4-1ubuntu8.17)"\n'
+                f'systemd_version_sha256="{"b" * 64}"\n'
+                f'systemd_executable_sha256="{"a" * 64}"\n'
+                'systemd_executable_mode="755"\n'
+                'systemd_executable_size="123456"\n'
+                'systemd_executable_links="1"\n'
+                + source_writer
+                + "\n"
+                + '/usr/bin/mv -- "$systemd_source_partial" '
+                '"$systemd_source_receipt"\n'
+                + 'systemd_causal_receipt="$work/systemd-causal.tsv"\n'
+                'systemd_causal_partial="${systemd_causal_receipt}.partial"\n'
+                'systemd_marker_mode="444"\n'
+                'systemd_marker_uid="0"\n'
+                'systemd_marker_gid="0"\n'
+                'systemd_marker_size="0"\n'
+                'systemd_marker_links="1"\n'
+                + causal_writer
+                + "\n"
+                + '/usr/bin/mv -- "$systemd_causal_partial" '
+                '"$systemd_causal_receipt"\n',
+                encoding="ascii",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [shutil.which("bash") or "bash", str(script), str(root)],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            source = root / "systemd-source.tsv"
+            causal = root / "systemd-causal.tsv"
+            for receipt, expected_lines in ((source, 9), (causal, 4)):
+                raw = receipt.read_bytes()
+                with self.subTest(receipt=receipt.name):
+                    self.assertTrue(raw.isascii())
+                    self.assertTrue(raw.endswith(b"\n"))
+                    self.assertNotIn(b"\r", raw)
+                    self.assertEqual(len(raw.splitlines()), expected_lines)
+                    self.assertIn(b"\t", raw)
+                    self.assertNotIn(b"\\t", b"\n".join(raw.splitlines()[1:]))
+                    self.assertTrue(all(b"\t" in row for row in raw.splitlines()[1:]))
+
+            source_text, version, executable_hash = _validate_systemd_source_receipt(
+                source, root
+            )
+            self.assertEqual(version, "255.4-1ubuntu8.17")
+            self.assertEqual(executable_hash, "a" * 64)
+            self.assertEqual(source_text.encode("ascii"), source.read_bytes())
+            causal_text = _validate_systemd_causal_receipt(causal, root)
+            self.assertEqual(causal_text.encode("ascii"), causal.read_bytes())
+
+            source.write_bytes(source.read_bytes().replace(b"\t", b"\\t"))
+            causal.write_bytes(causal.read_bytes().replace(b"\t", b"\\t"))
+            with self.assertRaises(AssertionError):
+                _validate_systemd_source_receipt(source, root)
+            with self.assertRaises(AssertionError):
+                _validate_systemd_causal_receipt(causal, root)
 
     def test_systemd_source_and_causal_receipts_are_bounded_and_fail_closed(
         self,
