@@ -47,6 +47,79 @@ PCP_TRACE_RECORD = re.compile(
     r"function=(-|[A-Za-z_][A-Za-z0-9_]*)\|label=([a-z0-9-]+)$"
 )
 
+PCP_OFFLINE_NONACTIVATION_PROOF = r"""
+trace_begin 10-host-manager-isolation host-manager-isolation
+[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
+preset_enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled pmcd.service)"
+[[ "$preset_enabled_state" == enabled ]]
+post_configure_start_status=0
+"$policy" pmcd.service start || post_configure_start_status=$?
+[[ "$post_configure_start_status" -eq 101 ]]
+validate_recovery_unit_guards
+pmcd_guard="${recovery_guard_paths_by_unit[pmcd.service]}"
+expected_pmcd_guard="$mask_root/pmcd.service.d/90-hoardarr-offline-recovery.conf"
+[[ "$pmcd_guard" == "$expected_pmcd_guard" ]]
+[[ "${recovery_guard_path_owners[$pmcd_guard]-}" == pmcd.service ]]
+[[ "${recovery_guard_file_inodes[$pmcd_guard]-}" =~ ^[1-9][0-9]*$ ]]
+[[ -f "$pmcd_guard" && ! -L "$pmcd_guard" ]]
+entry_is_root_owned "$pmcd_guard"
+[[ "$(stat -c %a -- "$pmcd_guard")" == 644 ]]
+[[ "$(stat -c %i -- "$pmcd_guard")" == "${recovery_guard_file_inodes[$pmcd_guard]}" ]]
+pmcd_guard_count=0
+for guard in "${recovery_guard_files[@]}"; do
+    [[ "$guard" != "$pmcd_guard" ]] || pmcd_guard_count=$((pmcd_guard_count + 1))
+done
+[[ "$pmcd_guard_count" -eq 1 ]]
+expected_pmcd_condition=/dev/null/hoardarr-offline-service-guard/pmcd.service
+[[ "${recovery_guard_condition_paths[$pmcd_guard]-}" == "$expected_pmcd_condition" ]]
+expected_pmcd_content="$(printf '[Unit]\nConditionPathExists=%s\n' "$expected_pmcd_condition")"$'\n'
+[[ "${recovery_guard_contents[$pmcd_guard]-}" == "$expected_pmcd_content" ]]
+[[ "$(cat -- "$pmcd_guard")"$'\n' == "$expected_pmcd_content" ]]
+[[ ! -e "$expected_pmcd_condition" && ! -L "$expected_pmcd_condition" ]]
+[[ ! -e "$recovery_guard_authorization_root" && ! -L "$recovery_guard_authorization_root" ]]
+[[ "$expected_pmcd_condition" != "$recovery_guard_authorization_root" && \
+    "$expected_pmcd_condition" != "$recovery_guard_authorization_root/"* ]]
+systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition" \
+    >/dev/null 2>&1 && exit 100
+[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
+trace_pass
+""".strip()
+
+
+def _assert_pcp_offline_nonactivation_contract(harness: str) -> None:
+    required = (
+        '[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]',
+        "SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled pmcd.service",
+        '"$policy" pmcd.service start || post_configure_start_status=$?',
+        '[[ "$post_configure_start_status" -eq 101 ]]',
+        "validate_recovery_unit_guards",
+        'expected_pmcd_guard="$mask_root/pmcd.service.d/90-hoardarr-offline-recovery.conf"',
+        '[[ "${recovery_guard_path_owners[$pmcd_guard]-}" == pmcd.service ]]',
+        'entry_is_root_owned "$pmcd_guard"',
+        '[[ "$(stat -c %a -- "$pmcd_guard")" == 644 ]]',
+        "expected_pmcd_condition=/dev/null/hoardarr-offline-service-guard/pmcd.service",
+        '[[ ! -e "$expected_pmcd_condition" && ! -L "$expected_pmcd_condition" ]]',
+        '[[ ! -e "$recovery_guard_authorization_root" && ! -L "$recovery_guard_authorization_root" ]]',
+        'systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition"',
+    )
+    for fragment in required:
+        if fragment not in harness:
+            raise AssertionError(
+                f"generated PCP harness lacks offline proof: {fragment}"
+            )
+    manager_root_check = (
+        '[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]'
+    )
+    if harness.count(manager_root_check) != 2:
+        raise AssertionError(
+            "generated PCP harness must bracket offline proof with manager-root checks"
+        )
+    if re.search(r"systemctl\s+is-active\s+pmcd\.service", harness):
+        raise AssertionError("generated PCP harness queries manager-dependent activity")
+    for obsolete in ("pcp_active_state", "pcp_active_status"):
+        if obsolete in harness:
+            raise AssertionError(f"generated PCP harness retains obsolete {obsolete}")
+
 
 def _pcp_trace_shell_prelude() -> str:
     return r"""
@@ -1410,6 +1483,21 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                     rejected(name, lines)
             rejected("outside-root", valid_lines, outside=True)
 
+    def test_pcp_generated_nonactivation_proof_is_structural_and_managerless(
+        self,
+    ) -> None:
+        _assert_pcp_offline_nonactivation_contract(PCP_OFFLINE_NONACTIVATION_PROOF)
+        with self.assertRaises(AssertionError):
+            _assert_pcp_offline_nonactivation_contract(
+                PCP_OFFLINE_NONACTIVATION_PROOF + "\nsystemctl is-active pmcd.service\n"
+            )
+        with self.assertRaises(AssertionError):
+            _assert_pcp_offline_nonactivation_contract(
+                PCP_OFFLINE_NONACTIVATION_PROOF.replace(
+                    '[[ "$post_configure_start_status" -eq 101 ]]', "", 1
+                )
+            )
+
     @unittest.skipUnless(
         sys.platform.startswith("linux") and shutil.which("bash"),
         "requires Linux Bash",
@@ -1707,15 +1795,9 @@ for unit in "${denied_units[@]}"; do
 done >"$work/all-denied-presets.log" 2>&1
 ! grep -Fq 'Failed to preset unit' "$work/all-denied-presets.log"
 trace_pass
-trace_begin 10-host-manager-isolation host-manager-isolation
-[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
-preset_enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled pmcd.service)"
-[[ "$preset_enabled_state" == enabled ]]
-pcp_active_status=0
-pcp_active_state="$(SYSTEMD_OFFLINE=1 chroot / systemctl is-active pmcd.service 2>&1)" || \
-    pcp_active_status=$?
-[[ "$pcp_active_state" == inactive && "$pcp_active_status" -eq 3 ]]
-trace_pass
+""",
+                        PCP_OFFLINE_NONACTIVATION_PROOF,
+                        r"""
 trace_begin 11-interrupted-retention interrupted-retention
 package_transaction_started=true
 interrupted_status=0
@@ -1845,6 +1927,9 @@ exit 0
                 ),
                 encoding="utf-8",
                 newline="\n",
+            )
+            _assert_pcp_offline_nonactivation_contract(
+                harness.read_text(encoding="utf-8")
             )
             result: subprocess.CompletedProcess[str] | None = None
             run_error: OSError | subprocess.TimeoutExpired | None = None
