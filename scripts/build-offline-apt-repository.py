@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
 import gzip
 import hashlib
 import json
@@ -365,11 +366,9 @@ def _deb_fields(path: Path) -> dict[str, str]:
         "Pre-Depends",
         "Homepage",
     )
-    output = _run(["dpkg-deb", "-f", str(path), *fields]).stdout.splitlines()
-    values = {
-        field: (output[index] if index < len(output) else "")
-        for index, field in enumerate(fields)
-    }
+    control = _run(["dpkg-deb", "-f", str(path)]).stdout
+    message = email.parser.Parser().parsestr(control)
+    values = {field: (message.get(field) or "").strip() for field in fields}
     if not values["Package"] or not values["Version"] or not values["Architecture"]:
         raise OfflineRepositoryError(
             f"Debian package metadata is incomplete: {path.name}"

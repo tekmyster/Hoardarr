@@ -19,6 +19,26 @@ SPEC.loader.exec_module(offline_repo)
 
 
 class OfflineApplianceTests(unittest.TestCase):
+    def test_debian_control_metadata_is_parsed_by_field_name(self) -> None:
+        control = """Package: snapraid
+Version: 12.3-1
+Architecture: amd64
+Source: snapraid
+Depends: libc6 (>= 2.34), libgcc-s1 (>= 3.0)
+Homepage: https://www.snapraid.it/
+Description: Backup program for disk arrays
+"""
+        completed = mock.Mock(stdout=control)
+        with mock.patch.object(offline_repo, "_run", return_value=completed) as run:
+            fields = offline_repo._deb_fields(pathlib.Path("snapraid.deb"))
+
+        run.assert_called_once_with(["dpkg-deb", "-f", "snapraid.deb"])
+        self.assertEqual(fields["Package"], "snapraid")
+        self.assertEqual(fields["Version"], "12.3-1")
+        self.assertEqual(fields["Architecture"], "amd64")
+        self.assertEqual(fields["Source"], "snapraid")
+        self.assertEqual(fields["Depends"], "libc6 (>= 2.34), libgcc-s1 (>= 3.0)")
+
     def test_reconciled_plan_covers_profiles_providers_and_all_dispositions(
         self,
     ) -> None:
