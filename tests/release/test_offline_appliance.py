@@ -1698,7 +1698,7 @@ mount --bind "$work/etc-systemd" /etc/systemd/system
 mount --bind "$work/systemd-state" /var/lib/systemd
 mount --bind "$work/run-systemd" /run/systemd
 mount --bind "$work/usr-sbin" /usr/sbin
-for command in dpkg-maintscript-helper touch chmod chown groupadd useradd; do
+for command in dpkg-maintscript-helper touch chown groupadd useradd; do
     cat >"$work/wrappers/$command" <<'EOF'
 #!/bin/sh
 case "$(basename "$0"):$1" in
@@ -1708,17 +1708,114 @@ exit 0
 EOF
     chmod 0755 "$work/wrappers/$command"
 done
+cat >"$work/wrappers/chmod" <<'EOF'
+#!/bin/sh
+# Package-maintainer chmod calls remain isolated.  Delegate only the exact
+# recovery-guard temporary-file operation performed by the extracted
+# production helper, inside this fixture's private systemd bind mount.
+if [ "$#" -ne 3 ] || [ "$1" != 0644 ] || [ "$2" != -- ]; then
+    exit 0
+fi
+candidate=$3
+case "$candidate" in
+    "$HOARDARR_TEST_RECOVERY_ROOT"/*) ;;
+    *) exit 0 ;;
+esac
+case "$candidate" in
+    *//*|*/../*|*/./*) exit 0 ;;
+esac
+parent=${candidate%/*}
+name=${candidate##*/}
+case "$name" in
+    .hoardarr-recovery.??????) ;;
+    *) exit 0 ;;
+esac
+suffix=${name#.hoardarr-recovery.}
+case "$suffix" in
+    *[!A-Za-z0-9]*) exit 0 ;;
+esac
+parent_name=${parent##*/}
+case "$parent_name" in
+    *.d) unit=${parent_name%.d} ;;
+    *) exit 0 ;;
+esac
+case "$unit" in
+    ''|*[!A-Za-z0-9@_.:-]*) exit 0 ;;
+esac
+unit_count=0
+while IFS= read -r denied_unit; do
+    if [ "$denied_unit" = "$unit" ]; then
+        unit_count=$((unit_count + 1))
+    fi
+done <"$HOARDARR_TEST_DENIED_UNITS"
+[ "$unit_count" -eq 1 ] || exit 0
+[ -f "$candidate" ] && [ ! -L "$candidate" ] || exit 0
+[ "$(/usr/bin/stat -c %h -- "$candidate" 2>/dev/null)" = 1 ] || exit 0
+canonical_root=$(/usr/bin/readlink -e -- "$HOARDARR_TEST_RECOVERY_ROOT") || exit 0
+canonical_parent=$(/usr/bin/readlink -e -- "$parent") || exit 0
+canonical_target=$(/usr/bin/readlink -e -- "$candidate") || exit 0
+[ "$canonical_parent" = "$canonical_root/$unit.d" ] || exit 0
+[ "$canonical_target" = "$canonical_parent/$name" ] || exit 0
+/usr/bin/chmod 0644 -- "$candidate" || exit $?
+[ "$(/usr/bin/stat -c %a -- "$candidate" 2>/dev/null)" = 644 ] || exit 1
+printf '%s\t%s\t0644\n' "$unit" "$name" >>"$HOARDARR_TEST_CHMOD_RECEIPT" || exit 1
+exit 0
+EOF
+chmod 0755 "$work/wrappers/chmod"
 cat >"$work/wrappers/getent" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
 chmod 0755 "$work/wrappers/getent"
+export HOARDARR_TEST_RECOVERY_ROOT=/etc/systemd/system
+export HOARDARR_TEST_DENIED_UNITS="$denied_file"
+export HOARDARR_TEST_CHMOD_RECEIPT="$work/chmod-delegated.tsv"
+: >"$HOARDARR_TEST_CHMOD_RECEIPT"
 export PATH="$work/wrappers:/usr/sbin:/usr/bin:/bin"
 export DPKG_MAINTSCRIPT_PACKAGE=pcp
 export DPKG_MAINTSCRIPT_NAME=postinst
 export SYSTEMD_OFFLINE=1
 pcp_units=(pcp-reboot-init.service pmcd.service pmlogger.service pmie.service pmproxy.service)
 mapfile -t all_denied_units <"$denied_file"
+
+# Prove malformed and unrelated requests remain isolated no-ops.  These
+# fixtures are wholly inside the disposable private mount namespace.
+negative_unit=${all_denied_units[0]}
+negative_dir="$HOARDARR_TEST_RECOVERY_ROOT/$negative_unit.d"
+wrong_dir="$HOARDARR_TEST_RECOVERY_ROOT/not-denied.service.d"
+mkdir -- "$negative_dir" "$wrong_dir"
+negative_target="$negative_dir/.hoardarr-recovery.NEG001"
+wrong_name="$negative_dir/not-a-recovery-temporary"
+wrong_directory="$wrong_dir/.hoardarr-recovery.DIR001"
+outside_target="$work/.hoardarr-recovery.OUT001"
+unrelated_target="$work/package-mode-target"
+for path in "$negative_target" "$wrong_name" "$wrong_directory" \
+    "$outside_target" "$unrelated_target"; do
+    : >"$path"
+    /usr/bin/chmod 0600 -- "$path"
+done
+symlink_target="$negative_dir/.hoardarr-recovery.SYM001"
+hardlink_target="$negative_dir/.hoardarr-recovery.LNK001"
+ln -s -- "$outside_target" "$symlink_target"
+ln -- "$outside_target" "$hardlink_target"
+"$work/wrappers/chmod" 0600 -- "$negative_target"
+"$work/wrappers/chmod" 0644 "$negative_target"
+"$work/wrappers/chmod" 0644 -- "$negative_target" extra
+"$work/wrappers/chmod" 0644 -- "$negative_dir/../$negative_unit.d/.hoardarr-recovery.NEG001"
+"$work/wrappers/chmod" 0644 -- "$outside_target"
+"$work/wrappers/chmod" 0644 -- "$wrong_name"
+"$work/wrappers/chmod" 0644 -- "$wrong_directory"
+"$work/wrappers/chmod" 0644 -- "$symlink_target"
+"$work/wrappers/chmod" 0644 -- "$hardlink_target"
+"$work/wrappers/chmod" 0644 -- "$unrelated_target"
+for path in "$negative_target" "$wrong_name" "$wrong_directory" \
+    "$outside_target" "$unrelated_target" "$hardlink_target"; do
+    [[ "$(/usr/bin/stat -c %a -- "$path")" == 600 ]]
+done
+[[ ! -s "$HOARDARR_TEST_CHMOD_RECEIPT" ]]
+rm -f -- "$symlink_target" "$hardlink_target" "$negative_target" "$wrong_name" \
+    "$wrong_directory" "$outside_target" "$unrelated_target"
+rmdir -- "$negative_dir" "$wrong_dir"
 trace_pass
 
 # Reproduce the accepted F7A defect using the exact package script.
@@ -1780,6 +1877,19 @@ for unit in "${denied_units[@]}"; do
     [[ ! -e "$mask_root/$unit" && ! -L "$mask_root/$unit" ]]
     prepare_recovery_unit_guard "$unit"
 done
+[[ "$(wc -l <"$HOARDARR_TEST_CHMOD_RECEIPT")" -eq "${#denied_units[@]}" ]]
+declare -A delegated_chmod_units=()
+while IFS=$'\t' read -r unit temporary_name delegated_mode extra; do
+    [[ -z "$extra" && "$delegated_mode" == 0644 ]]
+    [[ "$temporary_name" == .hoardarr-recovery.?????? ]]
+    [[ "$temporary_name" != *[!A-Za-z0-9.\-]* ]]
+    [[ -z "${delegated_chmod_units[$unit]+present}" ]]
+    delegated_chmod_units[$unit]=$temporary_name
+done <"$HOARDARR_TEST_CHMOD_RECEIPT"
+for unit in "${denied_units[@]}"; do
+    [[ -n "${delegated_chmod_units[$unit]+present}" ]]
+done
+chmod_receipt_hash="$(sha256sum -- "$HOARDARR_TEST_CHMOD_RECEIPT" | awk '{print $1}')"
 start_status=0
 "$policy" pmcd.service start || start_status=$?
 [[ "$start_status" -eq 101 ]]
@@ -1788,12 +1898,16 @@ trace_pass
 trace_begin 08-pcp-configure pcp-configure
 "$postinst" configure >"$work/corrected.log" 2>&1
 ! grep -Fq 'Failed to preset unit' "$work/corrected.log"
+[[ "$(sha256sum -- "$HOARDARR_TEST_CHMOD_RECEIPT" | awk '{print $1}')" == \
+    "$chmod_receipt_hash" ]]
 trace_pass
 trace_begin 09-all-denied-presets all-denied-presets
 for unit in "${denied_units[@]}"; do
     SYSTEMD_OFFLINE=1 systemctl preset "$unit"
 done >"$work/all-denied-presets.log" 2>&1
 ! grep -Fq 'Failed to preset unit' "$work/all-denied-presets.log"
+[[ "$(sha256sum -- "$HOARDARR_TEST_CHMOD_RECEIPT" | awk '{print $1}')" == \
+    "$chmod_receipt_hash" ]]
 trace_pass
 """,
                         PCP_OFFLINE_NONACTIVATION_PROOF,
