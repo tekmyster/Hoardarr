@@ -96,8 +96,15 @@ class OfflineApplianceTests(unittest.TestCase):
             "runtime_mount_paths=(proc sys dev dev/pts run)",
             "runtime_mount_sources=(/proc /sys /dev /dev/pts /run)",
             'mount --bind -- "$source" "$destination"',
+            'if mount --bind -- "$source" "$destination"; then',
             'runtime_mount_ids["$destination"]="$mount_id"',
             'mount --make-private -- "$destination"',
+            'if mount --make-private -- "$destination"; then',
+            'prepare_runtime_mounts_failure "$bind_status"',
+            'prepare_runtime_mounts_failure "$propagation_status"',
+            'rollback_just_attempted_runtime_mount "$destination"',
+            "if ! printf 'mount_id\\tparent_id\\tmajor_minor",
+            'if ! sync -f "$runtime_mount_record"',
             'umount -- "$destination"',
             "cleanup_runtime_mounts || cleanup_status=1",
             "trap 'exit_cleanup $?' EXIT",
@@ -112,6 +119,18 @@ class OfflineApplianceTests(unittest.TestCase):
         for value in required:
             if value not in payload:
                 raise AssertionError(f"missing runtime mount safeguard: {value}")
+        exact_counts = {
+            'if mount --bind -- "$source" "$destination"; then': 1,
+            'if mount --make-private -- "$destination"; then': 1,
+            'prepare_runtime_mounts_failure "$bind_status"': 2,
+            'prepare_runtime_mounts_failure "$propagation_status"': 1,
+            'rollback_just_attempted_runtime_mount "$destination"': 4,
+        }
+        for value, expected in exact_counts.items():
+            if payload.count(value) != expected:
+                raise AssertionError(
+                    f"runtime mutation handling count changed: {value}"
+                )
         for forbidden in ("mount --rbind", "umount -l", "umount --lazy"):
             if forbidden in payload:
                 raise AssertionError(f"unsafe runtime mount operation: {forbidden}")
@@ -161,8 +180,21 @@ class OfflineApplianceTests(unittest.TestCase):
                 1,
             ),
             "propagation not isolated": payload.replace(
-                'mount --make-private -- "$destination"',
+                'if mount --make-private -- "$destination"; then',
                 ":",
+            ),
+            "bind status not checked": payload.replace(
+                'if mount --bind -- "$source" "$destination"; then',
+                'mount --bind -- "$source" "$destination"\n        if true; then',
+            ),
+            "bind failure cleanup missing": payload.replace(
+                'prepare_runtime_mounts_failure "$bind_status"',
+                "return 1",
+                1,
+            ),
+            "ambiguous bind rollback missing": payload.replace(
+                'rollback_just_attempted_runtime_mount "$destination"',
+                "false",
             ),
             "lazy cleanup": payload.replace(
                 'umount -- "$destination"',
@@ -218,7 +250,10 @@ class OfflineApplianceTests(unittest.TestCase):
             "mountinfo_exact_record",
             "runtime_path_is_safe",
             "runtime_record_field",
-            "rollback_unrecorded_runtime_mount",
+            "prepare_runtime_mounts_failure",
+            "runtime_mount_matches_source",
+            "runtime_mount_path_is_absent",
+            "rollback_just_attempted_runtime_mount",
             "prepare_runtime_mounts",
             "cleanup_runtime_mounts",
             "cleanup_guard",

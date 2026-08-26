@@ -219,29 +219,75 @@ runtime_record_field() {
     [[ "${#values[@]}" -eq 10 && "$field" -ge 0 && "$field" -lt 10 ]] || return 1
     printf '%s\n' "${values[$field]}"
 }
-rollback_unrecorded_runtime_mount() {
+prepare_runtime_mounts_failure() {
+    local failure_status="${1:-1}"
+    [[ "$failure_status" =~ ^[1-9][0-9]*$ && "$failure_status" -le 255 ]] || \
+        failure_status=1
+    if ! cleanup_runtime_mounts; then
+        echo "offline runtime mount preparation cleanup failed" >&2
+    fi
+    return "$failure_status"
+}
+runtime_mount_matches_source() {
+    local target_record="$1"
+    local source_record="$2"
+    local expected_destination="$3"
+    local mount_id source_root source_type source_name
+    local target_root target_path target_type target_source
+    mount_id="$(runtime_record_field "$target_record" 0)" || return 2
+    source_root="$(runtime_record_field "$source_record" 3)" || return 2
+    source_type="$(runtime_record_field "$source_record" 7)" || return 2
+    source_name="$(runtime_record_field "$source_record" 8)" || return 2
+    target_root="$(runtime_record_field "$target_record" 3)" || return 2
+    target_path="$(runtime_record_field "$target_record" 4)" || return 2
+    target_type="$(runtime_record_field "$target_record" 7)" || return 2
+    target_source="$(runtime_record_field "$target_record" 8)" || return 2
+    [[ "$mount_id" =~ ^[1-9][0-9]*$ && \
+        "$target_path" == "$expected_destination" && \
+        "$target_root" == "$source_root" && \
+        "$target_type" == "$source_type" && \
+        "$target_source" == "$source_name" ]]
+}
+runtime_mount_path_is_absent() {
     local destination="$1"
-    local last_index=$(( ${#created_runtime_mounts[@]} - 1 ))
-    [[ "$last_index" -ge 0 && "${created_runtime_mounts[$last_index]}" == "$destination" ]] || {
-        echo "offline runtime mount rollback tracking is inconsistent: $destination" >&2
-        return 1
-    }
+    python3 - "$destination" <<'PY'
+import re
+import sys
+
+expected = sys.argv[1]
+
+
+def decode(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+    matches = [
+        line
+        for line in stream
+        if decode(line.rstrip("\n").split(" ")[4]) == expected
+    ]
+raise SystemExit(0 if not matches else 1)
+PY
+}
+rollback_just_attempted_runtime_mount() {
+    local destination="$1"
+    local unmount_status=0
     runtime_path_is_safe "$destination" "$destination" || return 1
-    umount -- "$destination" || {
-        echo "offline unrecorded runtime mount rollback failed: $destination" >&2
-        return 1
-    }
-    [[ -z "$(mountinfo_exact_record "$destination")" ]] || {
-        echo "offline unrecorded runtime mount remains after rollback: $destination" >&2
-        return 1
-    }
-    unset 'created_runtime_mounts[$last_index]'
-    created_runtime_mounts=("${created_runtime_mounts[@]}")
+    if umount -- "$destination"; then
+        unmount_status=0
+    else
+        unmount_status=$?
+    fi
+    if runtime_mount_path_is_absent "$destination"; then
+        return 0
+    fi
+    echo "offline just-attempted runtime mount rollback failed (umount status $unmount_status): $destination" >&2
+    return 1
 }
 prepare_runtime_mounts() {
-    local index relative source destination source_record target_record
-    local source_root source_type source_name target_root target_type target_source
-    local target_optional mount_id
+    local index relative source destination source_record target_record existing_record
+    local target_optional target_path mount_id current_id bind_status propagation_status match_status
     local source_records=()
     (( ${#runtime_mount_paths[@]} == ${#runtime_mount_sources[@]} )) || {
         echo "offline runtime mount plan is inconsistent" >&2
@@ -251,20 +297,36 @@ prepare_runtime_mounts() {
         echo "offline runtime mounts are already tracked" >&2
         return 1
     }
-    : >"$runtime_mount_record"
-    printf 'mount_id\tparent_id\tmajor_minor\troot\ttarget\tmount_options\toptional_fields\tfilesystem\tsource\tsuper_options\n' \
-        >"$runtime_mount_record"
-    printf 'mount_id\ttarget\tresult\n' >"$runtime_cleanup_record"
+    if ! printf 'mount_id\tparent_id\tmajor_minor\troot\ttarget\tmount_options\toptional_fields\tfilesystem\tsource\tsuper_options\n' \
+        >"$runtime_mount_record"; then
+        echo "offline runtime mount receipt cannot be initialized" >&2
+        return 1
+    fi
+    if ! printf 'mount_id\ttarget\tresult\n' >"$runtime_cleanup_record"; then
+        echo "offline runtime cleanup receipt cannot be initialized" >&2
+        return 1
+    fi
+    if ! sync -f "$runtime_mount_record" || ! sync -f "$runtime_cleanup_record"; then
+        echo "offline runtime mount receipt initialization is not durable" >&2
+        return 1
+    fi
     for index in "${!runtime_mount_paths[@]}"; do
         relative="${runtime_mount_paths[$index]}"
         source="${runtime_mount_sources[$index]}"
         destination="$target/$relative"
-        runtime_path_is_safe "$destination" "$target/$relative" || return 1
+        if ! runtime_path_is_safe "$destination" "$target/$relative"; then
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
         [[ -d "$source" && ! -L "$source" ]] || {
             echo "offline runtime source is unavailable: $source" >&2
             return 1
         }
-        [[ -z "$(mountinfo_exact_record "$destination")" ]] || {
+        if ! existing_record="$(mountinfo_exact_record "$destination")"; then
+            echo "offline runtime path state cannot be read: $destination" >&2
+            return 1
+        fi
+        [[ -z "$existing_record" ]] || {
             echo "offline runtime path is already mounted: $destination" >&2
             return 1
         }
@@ -279,59 +341,176 @@ prepare_runtime_mounts() {
         relative="${runtime_mount_paths[$index]}"
         source="${runtime_mount_sources[$index]}"
         destination="$target/$relative"
-        runtime_path_is_safe "$destination" "$target/$relative" || return 1
-        [[ -z "$(mountinfo_exact_record "$destination")" ]] || {
+        if ! runtime_path_is_safe "$destination" "$target/$relative"; then
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
+        if ! existing_record="$(mountinfo_exact_record "$destination")"; then
+            echo "offline runtime path state cannot be re-read: $destination" >&2
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
+        [[ -z "$existing_record" ]] || {
             echo "offline runtime path changed before mount: $destination" >&2
-            return 1
+            prepare_runtime_mounts_failure 1
+            return $?
         }
-        mount --bind -- "$source" "$destination"
+        bind_status=0
+        if mount --bind -- "$source" "$destination"; then
+            bind_status=0
+        else
+            bind_status=$?
+        fi
+        if ! target_record="$(mountinfo_exact_record "$destination")"; then
+            echo "offline runtime mount state read failed after bind; rechecking once: $destination" >&2
+            if ! target_record="$(mountinfo_exact_record "$destination")"; then
+                echo "offline runtime mount state cannot be classified after bind: $destination" >&2
+                if ! rollback_just_attempted_runtime_mount "$destination"; then
+                    echo "offline runtime mount remains after ambiguous bind state: $destination" >&2
+                fi
+                prepare_runtime_mounts_failure "${bind_status:-1}"
+                return $?
+            fi
+        fi
+        if [[ -z "$target_record" ]]; then
+            if (( bind_status == 0 )); then
+                echo "offline runtime mount is missing after successful bind: $destination" >&2
+                bind_status=1
+            else
+                echo "offline runtime bind failed without creating a mount: $destination" >&2
+            fi
+            prepare_runtime_mounts_failure "$bind_status"
+            return $?
+        fi
+        if ! mount_id="$(runtime_record_field "$target_record" 0)"; then
+            echo "offline runtime bind mount ID parse failed; rechecking once: $destination" >&2
+            mount_id="$(runtime_record_field "$target_record" 0)" || {
+                echo "offline runtime bind mount ID is ambiguous: $destination" >&2
+                if ! rollback_just_attempted_runtime_mount "$destination"; then
+                    echo "offline runtime mount remains after ambiguous ID state: $destination" >&2
+                fi
+                prepare_runtime_mounts_failure 1
+                return $?
+            }
+        fi
+        if ! target_path="$(runtime_record_field "$target_record" 4)"; then
+            echo "offline runtime bind path parse failed; rechecking once: $destination" >&2
+            target_path="$(runtime_record_field "$target_record" 4)" || {
+                echo "offline runtime bind path is ambiguous: $destination" >&2
+                if ! rollback_just_attempted_runtime_mount "$destination"; then
+                    echo "offline runtime mount remains after ambiguous path state: $destination" >&2
+                fi
+                prepare_runtime_mounts_failure 1
+                return $?
+            }
+        fi
+        [[ "$mount_id" =~ ^[1-9][0-9]*$ && "$target_path" == "$destination" ]] || {
+            echo "offline runtime bind mount ID or path is unsafe: $destination" >&2
+            if ! rollback_just_attempted_runtime_mount "$destination"; then
+                echo "offline runtime mount remains after unsafe ID/path state: $destination" >&2
+            fi
+            prepare_runtime_mounts_failure 1
+            return $?
+        }
         created_runtime_mounts+=("$destination")
-        target_record="$(mountinfo_exact_record "$destination")" || {
-            rollback_unrecorded_runtime_mount "$destination" || true
-            return 1
-        }
-        [[ -n "$target_record" ]] || {
-            echo "offline runtime mount is missing after creation: $destination" >&2
-            rollback_unrecorded_runtime_mount "$destination" || true
-            return 1
-        }
-        mount_id="$(runtime_record_field "$target_record" 0)" || {
-            rollback_unrecorded_runtime_mount "$destination" || true
-            return 1
-        }
-        [[ "$mount_id" =~ ^[1-9][0-9]*$ ]] || {
-            rollback_unrecorded_runtime_mount "$destination" || true
-            return 1
-        }
         runtime_mount_ids["$destination"]="$mount_id"
         runtime_mount_records["$destination"]="$target_record"
-        mount --make-private -- "$destination"
-        target_record="$(mountinfo_exact_record "$destination")" || return 1
-        [[ -n "$target_record" && \
-            "$(runtime_record_field "$target_record" 0)" == "$mount_id" ]] || {
+        match_status=0
+        if runtime_mount_matches_source "$target_record" "${source_records[$index]}" "$destination"; then
+            match_status=0
+        else
+            match_status=$?
+        fi
+        if (( match_status == 2 )); then
+            echo "offline runtime bind identity parse failed; rechecking once: $destination" >&2
+            if runtime_mount_matches_source "$target_record" "${source_records[$index]}" "$destination"; then
+                match_status=0
+            else
+                match_status=$?
+            fi
+        fi
+        if (( match_status != 0 )); then
+            echo "offline runtime bind produced an unexpected mount identity: $destination" >&2
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
+        if (( bind_status != 0 )); then
+            echo "offline runtime bind reported failure after creating a mount: $destination" >&2
+            prepare_runtime_mounts_failure "$bind_status"
+            return $?
+        fi
+        propagation_status=0
+        if mount --make-private -- "$destination"; then
+            propagation_status=0
+        else
+            propagation_status=$?
+        fi
+        if ! target_record="$(mountinfo_exact_record "$destination")"; then
+            echo "offline runtime mount state read failed after propagation change; rechecking once: $destination" >&2
+            if ! target_record="$(mountinfo_exact_record "$destination")"; then
+                echo "offline runtime mount state cannot be classified after propagation change: $destination" >&2
+                prepare_runtime_mounts_failure "${propagation_status:-1}"
+                return $?
+            fi
+        fi
+        current_id="$(runtime_record_field "$target_record" 0)" || current_id=
+        match_status=0
+        if runtime_mount_matches_source "$target_record" "${source_records[$index]}" "$destination"; then
+            match_status=0
+        else
+            match_status=$?
+        fi
+        if (( match_status == 2 )); then
+            echo "offline runtime propagation identity parse failed; rechecking once: $destination" >&2
+            if runtime_mount_matches_source "$target_record" "${source_records[$index]}" "$destination"; then
+                match_status=0
+            else
+                match_status=$?
+            fi
+        fi
+        if [[ -z "$target_record" || "$current_id" != "$mount_id" ]] || \
+            (( match_status != 0 )); then
             echo "offline runtime mount identity changed during propagation isolation: $destination" >&2
-            return 1
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
+        target_optional="$(runtime_record_field "$target_record" 6)" || {
+            prepare_runtime_mounts_failure 1
+            return $?
         }
-        source_record="${source_records[$index]}"
-        source_root="$(runtime_record_field "$source_record" 3)" || return 1
-        source_type="$(runtime_record_field "$source_record" 7)" || return 1
-        source_name="$(runtime_record_field "$source_record" 8)" || return 1
-        target_root="$(runtime_record_field "$target_record" 3)" || return 1
-        target_optional="$(runtime_record_field "$target_record" 6)" || return 1
-        target_type="$(runtime_record_field "$target_record" 7)" || return 1
-        target_source="$(runtime_record_field "$target_record" 8)" || return 1
-        [[ "$target_root" == "$source_root" && "$target_type" == "$source_type" && \
-            "$target_source" == "$source_name" && \
-            "$target_optional" != *shared:* && "$target_optional" != *master:* && \
+        if [[ "$target_optional" == *shared:* || "$target_optional" == *master:* || \
+            "$target_optional" == *propagate_from:* ]]; then
+            echo "offline runtime mount propagation remains unsafe: $destination" >&2
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
+        if (( propagation_status != 0 )); then
+            echo "offline runtime propagation change reported failure: $destination" >&2
+            prepare_runtime_mounts_failure "$propagation_status"
+            return $?
+        fi
+        [[ "$target_optional" != *shared:* && "$target_optional" != *master:* && \
             "$target_optional" != *propagate_from:* ]] || {
             echo "offline runtime mount identity or propagation is unsafe: $destination" >&2
-            return 1
+            prepare_runtime_mounts_failure 1
+            return $?
         }
         runtime_mount_records["$destination"]="$target_record"
-        printf '%s\n' "${target_record//$'\x1f'/$'\t'}" >>"$runtime_mount_record"
+        if ! printf '%s\n' "${target_record//$'\x1f'/$'\t'}" >>"$runtime_mount_record"; then
+            echo "offline runtime mount receipt write failed: $destination" >&2
+            prepare_runtime_mounts_failure 1
+            return $?
+        fi
     done
-    (( ${#created_runtime_mounts[@]} == ${#runtime_mount_paths[@]} )) || return 1
-    sync -f "$runtime_mount_record"
+    if (( ${#created_runtime_mounts[@]} != ${#runtime_mount_paths[@]} )); then
+        prepare_runtime_mounts_failure 1
+        return $?
+    fi
+    if ! sync -f "$runtime_mount_record"; then
+        echo "offline runtime mount receipt is not durable" >&2
+        prepare_runtime_mounts_failure 1
+        return $?
+    fi
 }
 cleanup_runtime_mounts() {
     local index destination expected_id current_record current_id
@@ -370,7 +549,13 @@ cleanup_runtime_mounts() {
             remaining=("$destination" "${remaining[@]}")
             continue
         fi
-        if [[ -n "$(mountinfo_exact_record "$destination")" ]]; then
+        if ! current_record="$(mountinfo_exact_record "$destination")"; then
+            echo "offline runtime mount state cannot be read after cleanup: $destination" >&2
+            status=1
+            remaining=("$destination" "${remaining[@]}")
+            continue
+        fi
+        if [[ -n "$current_record" ]]; then
             echo "offline runtime mount remains after cleanup: $destination" >&2
             status=1
             remaining=("$destination" "${remaining[@]}")
