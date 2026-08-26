@@ -105,18 +105,69 @@ PY
 mask_root="$target/etc/systemd/system"
 install -d -m 0755 "$mask_root"
 temporary_masks=()
+declare -A preserved_unit_masks=()
+prepare_temporary_unit_mask() {
+    local destination="$1"
+    local unit="$2"
+    local link_target
+    if [[ -L "$destination" ]]; then
+        link_target="$(readlink -- "$destination")" || {
+            echo "offline install cannot inspect a pre-existing unit override: $unit" >&2
+            return 1
+        }
+        if [[ "$link_target" == /dev/null ]]; then
+            preserved_unit_masks["$unit"]="$destination"
+            return 0
+        fi
+        echo "offline install refuses to replace a pre-existing unit override: $unit" >&2
+        return 1
+    fi
+    if [[ -e "$destination" ]]; then
+        echo "offline install refuses to replace a pre-existing unit override: $unit" >&2
+        return 1
+    fi
+    ln -s -- /dev/null "$destination"
+    temporary_masks+=("$destination")
+}
+cleanup_temporary_masks() {
+    local mask
+    for mask in "${temporary_masks[@]}"; do
+        if [[ -L "$mask" && "$(readlink -- "$mask")" == /dev/null ]]; then
+            rm -f -- "$mask"
+        fi
+    done
+}
+cleanup_guard() {
+    cleanup_temporary_masks
+    if [[ "$policy_state" == regular ]]; then
+        cp -a -- "$policy_backup" "$policy"
+    else
+        rm -f -- "$policy"
+    fi
+}
+disable_unmasked_units() {
+    local unit
+    local preserved_mask
+    for unit in "${denied_units[@]}"; do
+        if [[ -n "${preserved_unit_masks[$unit]+present}" ]]; then
+            preserved_mask="${preserved_unit_masks[$unit]}"
+            if [[ ! -L "$preserved_mask" || "$(readlink -- "$preserved_mask")" != /dev/null ]]; then
+                echo "pre-existing unit mask changed during offline install: $unit" >&2
+                return 1
+            fi
+            continue
+        fi
+        chroot "$target" systemctl disable "$unit" >/dev/null 2>&1 || true
+    done
+}
+trap cleanup_guard EXIT
 for unit in "${denied_units[@]}"; do
     [[ "$unit" =~ ^[A-Za-z0-9@_.:-]+\.(service|socket|timer|target)$ ]] || {
         echo "unsafe unit in offline service policy" >&2
         exit 1
     }
     destination="$mask_root/$unit"
-    if [[ -e "$destination" || -L "$destination" ]]; then
-        echo "offline install refuses to replace a pre-existing unit override: $unit" >&2
-        exit 1
-    fi
-    ln -s /dev/null "$destination"
-    temporary_masks+=("$destination")
+    prepare_temporary_unit_mask "$destination" "$unit"
 done
 
 # Autoassembly/import is denied independently of service-start policy. These
@@ -147,19 +198,6 @@ activation {
     auto_activation_volume_list = [ ]
 }
 EOF
-
-cleanup_guard() {
-    local mask
-    for mask in "${temporary_masks[@]}"; do
-        [[ -L "$mask" && "$(readlink -- "$mask")" == /dev/null ]] && rm -f -- "$mask"
-    done
-    if [[ "$policy_state" == regular ]]; then
-        cp -a -- "$policy_backup" "$policy"
-    else
-        rm -f -- "$policy"
-    fi
-}
-trap cleanup_guard EXIT
 
 mapfile -t exact_roots <"$retained_repo/evidence/root-package-versions.txt"
 (( ${#exact_roots[@]} > 0 )) || {
@@ -223,9 +261,7 @@ chroot "$target" apt-get "${apt_options[@]}" --simulate check
 
 cleanup_guard
 trap - EXIT
-for unit in "${denied_units[@]}"; do
-    chroot "$target" systemctl disable "$unit" >/dev/null 2>&1 || true
-done
+disable_unmasked_units
 
 python3 - "$target" "$retained_repo/evidence/compatibility-matrix.json" "$state_root/service-policy-readback.json" <<'PY'
 import json, pathlib, subprocess, sys

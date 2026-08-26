@@ -3,7 +3,10 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +24,175 @@ SPEC.loader.exec_module(offline_repo)
 
 
 class OfflineApplianceTests(unittest.TestCase):
+    def test_offline_service_masks_are_classified_and_cleaned_executably(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+
+        def shell_function(name: str) -> str:
+            match = re.search(
+                rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n",
+                payload,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"missing production function {name}")
+            assert match is not None
+            return match.group(0)
+
+        if sys.platform == "win32":
+            candidates = (
+                pathlib.Path(r"C:\Program Files\Git\bin\bash.exe"),
+                pathlib.Path(r"C:\msys64\usr\bin\bash.exe"),
+            )
+            bash = next((str(path) for path in candidates if path.is_file()), None)
+        else:
+            bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "Bash is required for executable mask regression")
+        assert bash is not None
+
+        script = "\n".join(
+            (
+                "set -euo pipefail",
+                "temporary_masks=()",
+                "declare -A preserved_unit_masks=()",
+                shell_function("prepare_temporary_unit_mask"),
+                shell_function("cleanup_temporary_masks"),
+                shell_function("disable_unmasked_units"),
+                'root="$1"',
+                'if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -u -- "$root")"; fi',
+                'mkdir -p -- "$root"',
+                "",
+                "# Newly created exact iscsi.service masks are temporary.",
+                'absent="$root/absent/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$absent")"',
+                "temporary_masks=()",
+                "preserved_unit_masks=()",
+                'prepare_temporary_unit_mask "$absent" iscsi.service',
+                '[[ -L "$absent" && "$(readlink -- "$absent")" == /dev/null ]]',
+                '[[ "${#temporary_masks[@]}" -eq 1 && "${temporary_masks[0]}" == "$absent" ]]',
+                "cleanup_temporary_masks",
+                '[[ ! -e "$absent" && ! -L "$absent" ]]',
+                'later="$root/later-failure/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$later")"',
+                "later_status=0",
+                "(",
+                "  temporary_masks=()",
+                "  preserved_unit_masks=()",
+                "  trap cleanup_temporary_masks EXIT",
+                '  prepare_temporary_unit_mask "$later" iscsi.service',
+                "  exit 79",
+                ") || later_status=$?",
+                '[[ "$later_status" -eq 79 && ! -e "$later" && ! -L "$later" ]]',
+                "",
+                "# A pre-existing exact absolute mask is never tracked or recreated.",
+                'safe="$root/safe/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$safe")"',
+                'ln -s -- /dev/null "$safe"',
+                'safe_inode="$(stat -c %i -- "$safe")"',
+                "temporary_masks=()",
+                "preserved_unit_masks=()",
+                'prepare_temporary_unit_mask "$safe" iscsi.service',
+                '[[ "${#temporary_masks[@]}" -eq 0 ]]',
+                '[[ "${preserved_unit_masks[iscsi.service]}" == "$safe" ]]',
+                "cleanup_temporary_masks",
+                '[[ -L "$safe" && "$(readlink -- "$safe")" == /dev/null ]]',
+                '[[ "$(stat -c %i -- "$safe")" == "$safe_inode" ]]',
+                'safe_failure="$root/safe-failure/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$safe_failure")"',
+                'ln -s -- /dev/null "$safe_failure"',
+                'safe_failure_inode="$(stat -c %i -- "$safe_failure")"',
+                "safe_status=0",
+                "(",
+                "  temporary_masks=()",
+                "  preserved_unit_masks=()",
+                "  trap cleanup_temporary_masks EXIT",
+                '  prepare_temporary_unit_mask "$safe_failure" iscsi.service',
+                "  exit 81",
+                ") || safe_status=$?",
+                '[[ "$safe_status" -eq 81 ]]',
+                '[[ -L "$safe_failure" && "$(readlink -- "$safe_failure")" == /dev/null ]]',
+                '[[ "$(stat -c %i -- "$safe_failure")" == "$safe_failure_inode" ]]',
+                "",
+                "# Every other pre-existing object is rejected without modification.",
+                'regular="$root/reject-regular/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$regular")"',
+                'printf preserved >"$regular"',
+                'regular_sha="$(sha256sum "$regular")"',
+                'if prepare_temporary_unit_mask "$regular" iscsi.service; then exit 91; fi',
+                '[[ "$(sha256sum "$regular")" == "$regular_sha" ]]',
+                'directory="$root/reject-directory/iscsi.service"',
+                'mkdir -p -- "$directory"',
+                'printf marker >"$directory/preserved"',
+                'if prepare_temporary_unit_mask "$directory" iscsi.service; then exit 92; fi',
+                '[[ "$(cat "$directory/preserved")" == marker ]]',
+                'target="$root/ordinary-target"',
+                'printf target >"$target"',
+                'ordinary="$root/reject-symlink/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$ordinary")"',
+                'ln -s -- "$target" "$ordinary"',
+                'ordinary_inode="$(stat -c %i -- "$ordinary")"',
+                'if prepare_temporary_unit_mask "$ordinary" iscsi.service; then exit 93; fi',
+                '[[ "$(readlink -- "$ordinary")" == "$target" ]]',
+                '[[ "$(stat -c %i -- "$ordinary")" == "$ordinary_inode" ]]',
+                'dangling="$root/reject-dangling/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$dangling")"',
+                'ln -s -- /does/not/exist "$dangling"',
+                'if prepare_temporary_unit_mask "$dangling" iscsi.service; then exit 94; fi',
+                '[[ "$(readlink -- "$dangling")" == /does/not/exist ]]',
+                'relative="$root/reject-relative/iscsi.service"',
+                'mkdir -p -- "$(dirname -- "$relative")"',
+                'ln -s -- ../../dev/null "$relative"',
+                'if prepare_temporary_unit_mask "$relative" iscsi.service; then exit 95; fi',
+                '[[ "$(readlink -- "$relative")" == ../../dev/null ]]',
+                "",
+                "# Mixed ownership cleanup preserves existing and removes only new.",
+                'mixed_safe="$root/mixed/iscsi.service"',
+                'mixed_new="$root/mixed/iscsid.service"',
+                'mkdir -p -- "$(dirname -- "$mixed_safe")"',
+                'ln -s -- /dev/null "$mixed_safe"',
+                'mixed_inode="$(stat -c %i -- "$mixed_safe")"',
+                "temporary_masks=()",
+                "preserved_unit_masks=()",
+                'prepare_temporary_unit_mask "$mixed_safe" iscsi.service',
+                'prepare_temporary_unit_mask "$mixed_new" iscsid.service',
+                '[[ "${#temporary_masks[@]}" -eq 1 && "${temporary_masks[0]}" == "$mixed_new" ]]',
+                "cleanup_temporary_masks",
+                '[[ -L "$mixed_safe" && "$(readlink -- "$mixed_safe")" == /dev/null ]]',
+                '[[ "$(stat -c %i -- "$mixed_safe")" == "$mixed_inode" ]]',
+                '[[ ! -e "$mixed_new" && ! -L "$mixed_new" ]]',
+                "",
+                "# Final disable skips the accepted mask and mutates only the new unit.",
+                'lifecycle_safe="$root/lifecycle/iscsi.service"',
+                'lifecycle_new="$root/lifecycle/iscsid.service"',
+                'mkdir -p -- "$(dirname -- "$lifecycle_safe")"',
+                'ln -s -- /dev/null "$lifecycle_safe"',
+                'lifecycle_inode="$(stat -c %i -- "$lifecycle_safe")"',
+                'disable_log="$root/disable.log"',
+                "temporary_masks=()",
+                "preserved_unit_masks=()",
+                'prepare_temporary_unit_mask "$lifecycle_safe" iscsi.service',
+                'prepare_temporary_unit_mask "$lifecycle_new" iscsid.service',
+                "cleanup_temporary_masks",
+                "denied_units=(iscsi.service iscsid.service)",
+                'target="$root/target"',
+                "chroot() { printf '%s\\n' \"$*\" >>\"$disable_log\"; }",
+                "disable_unmasked_units",
+                '[[ -L "$lifecycle_safe" && "$(readlink -- "$lifecycle_safe")" == /dev/null ]]',
+                '[[ "$(stat -c %i -- "$lifecycle_safe")" == "$lifecycle_inode" ]]',
+                '[[ ! -e "$lifecycle_new" && ! -L "$lifecycle_new" ]]',
+                '[[ "$(cat "$disable_log")" == "$target systemctl disable iscsid.service" ]]',
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [bash, "-c", script, "mask-regression", temporary],
+                capture_output=True,
+                check=False,
+                env={**os.environ, "MSYS": "winsymlinks:sys"},
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_debian_control_metadata_is_parsed_by_field_name(self) -> None:
         control = """Package: snapraid
 Version: 12.3-1
