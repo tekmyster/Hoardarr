@@ -63,6 +63,25 @@ PCP_MANAGER_ROOT_HEADER = re.compile(
     r"^HMROOT\|1\|(before|after)\|status=(-|[0-9]{1,3})$"
 )
 PCP_MANAGER_ROOT_COMPONENT = re.compile(r"^[A-Za-z0-9_.@:+,-]+$")
+PCP_SYSTEMD_SOURCE_RECEIPT_MAX_BYTES = 8192
+PCP_SYSTEMD_CAUSAL_RECEIPT_MAX_BYTES = 4096
+PCP_SYSTEMD_UPSTREAM_REPOSITORY = "https://github.com/systemd/systemd-stable"
+PCP_SYSTEMD_UPSTREAM_TAG = "v255.4"
+PCP_SYSTEMD_UPSTREAM_REVISION = "387a14a7b67b8b76adaed4175e14bb7e39b2f738"
+PCP_SYSTEMD_ANALYZE_SOURCE_PATH = "src/analyze/analyze-condition.c"
+PCP_SYSTEMD_ANALYZE_SOURCE_FUNCTION = "verify_conditions:68-114"
+PCP_SYSTEMD_ANALYZE_SOURCE_SHA256 = (
+    "3f89216b21faa202099f290615cdd8ed4ee5f98a2f0094242d447670248a9b89"
+)
+PCP_SYSTEMD_MANAGER_SOURCE_PATH = "src/core/manager.c"
+PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION = "manager_ready:1891-1910"
+PCP_SYSTEMD_MANAGER_SOURCE_SHA256 = (
+    "58af3c261e43b6de343be931a46c049152eb57c856f24f81dd53bdd9abafa72e"
+)
+PCP_SYSTEMD_MARKER_PATH = "/run/systemd/systemd-units-load"
+PCP_SYSTEMD_FALSE_CONDITION = (
+    "ConditionPathExists=/dev/null/hoardarr-offline-service-guard/pmcd.service"
+)
 
 PCP_MANAGER_ROOT_SNAPSHOT_FUNCTION = r"""
 manager_root_snapshot_abort() {
@@ -156,6 +175,215 @@ manager_root_snapshot() {
     /usr/bin/rm -f -- "$raw" "$sorted" "$entries" || return 126
 }
 """.strip()
+
+PCP_SYSTEMD_SOURCE_RECEIPT = rf"""
+systemd_source_receipt="$work/systemd-source.tsv"
+systemd_source_partial="${{systemd_source_receipt}}.partial"
+[[ ! -e "$systemd_source_receipt" && ! -L "$systemd_source_receipt" ]]
+[[ ! -e "$systemd_source_partial" && ! -L "$systemd_source_partial" ]]
+systemd_analyze=/usr/bin/systemd-analyze
+[[ -f "$systemd_analyze" && ! -L "$systemd_analyze" ]]
+[[ "$(/usr/bin/readlink -e -- "$systemd_analyze")" == "$systemd_analyze" ]]
+systemd_package_record="$(/usr/bin/dpkg-query -W \
+    -f='${{binary:Package}}\t${{Version}}\t${{Architecture}}\n' systemd)"
+IFS=$'\t' read -r systemd_package systemd_package_version systemd_package_arch extra \
+    <<<"$systemd_package_record"
+[[ -z "${{extra:-}}" && "$systemd_package" == systemd && \
+    "$systemd_package_arch" == amd64 ]]
+[[ "$systemd_package_version" =~ ^255\.4-[0-9A-Za-z.+:~]+$ ]]
+systemd_owner="$(/usr/bin/dpkg-query -S -- "$systemd_analyze")"
+[[ "$systemd_owner" == "systemd: /usr/bin/systemd-analyze" ]]
+systemd_version_output="$work/systemd-analyze-version.txt"
+[[ ! -e "$systemd_version_output" && ! -L "$systemd_version_output" ]]
+"$systemd_analyze" --version >"$systemd_version_output"
+[[ -f "$systemd_version_output" && ! -L "$systemd_version_output" ]]
+(( $(/usr/bin/stat -c %s -- "$systemd_version_output") > 0 ))
+(( $(/usr/bin/stat -c %s -- "$systemd_version_output") <= 4096 ))
+IFS= read -r systemd_version_first <"$systemd_version_output"
+[[ "$systemd_version_first" == "systemd 255 ($systemd_package_version)" ]]
+[[ "$systemd_version_first" =~ ^systemd\ 255\ \(255\.4-[0-9A-Za-z.+:~]+\)$ ]]
+systemd_version_sha256="$(/usr/bin/sha256sum -- "$systemd_version_output")"
+systemd_version_sha256="${{systemd_version_sha256%% *}}"
+systemd_executable_sha256="$(/usr/bin/sha256sum -- "$systemd_analyze")"
+systemd_executable_sha256="${{systemd_executable_sha256%% *}}"
+systemd_executable_metadata="$(/usr/bin/stat -c '%a %u %g %s %h' -- "$systemd_analyze")"
+read -r systemd_executable_mode systemd_executable_uid systemd_executable_gid \
+    systemd_executable_size systemd_executable_links extra \
+    <<<"$systemd_executable_metadata"
+[[ -z "${{extra:-}}" && "$systemd_executable_mode" =~ ^[0-7]{{3,4}}$ && \
+    "$systemd_executable_uid" == 0 && "$systemd_executable_gid" == 0 && \
+    "$systemd_executable_size" =~ ^[1-9][0-9]*$ && \
+    "$systemd_executable_links" =~ ^[1-9][0-9]*$ && \
+    "$systemd_version_sha256" =~ ^[0-9a-f]{{64}}$ && \
+    "$systemd_executable_sha256" =~ ^[0-9a-f]{{64}}$ ]]
+printf '%s\n' \
+    'HSOURCE|1' \
+    "PACKAGE\tsystemd\t$systemd_package_version\t$systemd_package_arch" \
+    "VERSION\t$systemd_version_first\t$systemd_version_sha256" \
+    "EXECUTABLE\t/usr/bin/systemd-analyze\t$systemd_executable_sha256\t$systemd_executable_mode\t0\t0\t$systemd_executable_size\t$systemd_executable_links\tsystemd" \
+    'UPSTREAM\t{PCP_SYSTEMD_UPSTREAM_REPOSITORY}\t{PCP_SYSTEMD_UPSTREAM_TAG}\t{PCP_SYSTEMD_UPSTREAM_REVISION}' \
+    'SOURCE\t{PCP_SYSTEMD_ANALYZE_SOURCE_PATH}\t{PCP_SYSTEMD_ANALYZE_SOURCE_FUNCTION}\t{PCP_SYSTEMD_ANALYZE_SOURCE_SHA256}' \
+    'SOURCE\t{PCP_SYSTEMD_MANAGER_SOURCE_PATH}\t{PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION}\t{PCP_SYSTEMD_MANAGER_SOURCE_SHA256}' \
+    'CHAIN\tverb_condition>verify_conditions>manager_startup>manager_ready>touch_file' \
+    'MARKER\t{PCP_SYSTEMD_MARKER_PATH}\tregular\t0444\tzero-length\tmanager-ready' \
+    >"$systemd_source_partial"
+(( $(/usr/bin/stat -c %s -- "$systemd_source_partial") <= {PCP_SYSTEMD_SOURCE_RECEIPT_MAX_BYTES} ))
+/usr/bin/mv -- "$systemd_source_partial" "$systemd_source_receipt"
+/usr/bin/sync -f "$systemd_source_receipt"
+""".strip()
+
+PCP_SYSTEMD_CAUSAL_PROOF = rf"""
+systemd_causal_parent="$work/systemd-causal-controls"
+systemd_positive_root="$systemd_causal_parent/positive"
+systemd_negative_root="$systemd_causal_parent/negative"
+systemd_causal_receipt="$work/systemd-causal.tsv"
+systemd_causal_partial="${{systemd_causal_receipt}}.partial"
+[[ ! -e "$systemd_causal_parent" && ! -L "$systemd_causal_parent" ]]
+[[ ! -e "$systemd_causal_receipt" && ! -L "$systemd_causal_receipt" ]]
+[[ ! -e "$systemd_causal_partial" && ! -L "$systemd_causal_partial" ]]
+mkdir -- "$systemd_causal_parent"
+mkdir -- "$systemd_positive_root" "$systemd_negative_root"
+[[ -d "$systemd_causal_parent" && ! -L "$systemd_causal_parent" ]]
+[[ -d "$systemd_positive_root" && ! -L "$systemd_positive_root" ]]
+[[ -d "$systemd_negative_root" && ! -L "$systemd_negative_root" ]]
+systemd_mount_id() {{
+    /usr/bin/awk '$5 == "/run/systemd" {{ id=$1 }} END {{ print id }}' /proc/self/mountinfo
+}}
+systemd_underlay_mount_id="$(systemd_mount_id)"
+[[ "$systemd_underlay_mount_id" =~ ^[1-9][0-9]*$ ]]
+systemd_causal_mounted=false
+systemd_causal_cleanup_root() {{
+    local control_root="$1"
+    local expected_entry="$2"
+    if [[ "$systemd_causal_mounted" == true ]]; then
+        umount -- /run/systemd || return 131
+        systemd_causal_mounted=false
+        [[ "$(systemd_mount_id)" == "$systemd_underlay_mount_id" ]] || return 132
+    fi
+    if [[ -n "$expected_entry" ]]; then
+        [[ "$expected_entry" == "$control_root/systemd-units-load" ]] || return 133
+        [[ -f "$expected_entry" && ! -L "$expected_entry" ]] || return 133
+        rm -f -- "$expected_entry" || return 133
+    fi
+    [[ -z "$(find "$control_root" -mindepth 1 -print -quit)" ]] || return 134
+    rmdir -- "$control_root" || return 134
+}}
+systemd_causal_abort() {{
+    local status="$1"
+    local control_root="${{2:-}}"
+    local expected_entry="${{3:-}}"
+    if [[ -n "$control_root" && -d "$control_root" && ! -L "$control_root" ]]; then
+        systemd_causal_cleanup_root "$control_root" "$expected_entry" || status=135
+    fi
+    if [[ -d "$systemd_positive_root" && ! -L "$systemd_positive_root" ]]; then
+        [[ -z "$(find "$systemd_positive_root" -mindepth 1 -print -quit)" ]] && \
+            rmdir -- "$systemd_positive_root" || status=135
+    fi
+    if [[ -d "$systemd_negative_root" && ! -L "$systemd_negative_root" ]]; then
+        [[ -z "$(find "$systemd_negative_root" -mindepth 1 -print -quit)" ]] && \
+            rmdir -- "$systemd_negative_root" || status=135
+    fi
+    if [[ -d "$systemd_causal_parent" && ! -L "$systemd_causal_parent" ]]; then
+        [[ -z "$(find "$systemd_causal_parent" -mindepth 1 -print -quit)" ]] && \
+            rmdir -- "$systemd_causal_parent" || status=135
+    fi
+    rm -f -- "$systemd_causal_partial" || status=135
+    return "$status"
+}}
+
+# Negative control: the same fresh private root remains empty when no
+# systemd-analyze command is run.
+[[ -z "$(find "$systemd_negative_root" -mindepth 1 -print -quit)" ]] || \
+    systemd_causal_abort 136
+mount --bind "$systemd_negative_root" /run/systemd || systemd_causal_abort 137
+systemd_causal_mounted=true
+mount --make-private /run/systemd || \
+    systemd_causal_abort 138 "$systemd_negative_root"
+[[ "$(systemd_mount_id)" =~ ^[1-9][0-9]*$ && \
+    "$(systemd_mount_id)" != "$systemd_underlay_mount_id" && \
+    "$(stat -c %d:%i -- /run/systemd)" == "$(stat -c %d:%i -- "$systemd_negative_root")" ]] || \
+    systemd_causal_abort 139 "$systemd_negative_root"
+[[ -z "$(find /run/systemd -mindepth 1 -print -quit)" ]] || \
+    systemd_causal_abort 140 "$systemd_negative_root"
+[[ -z "$(find /run/systemd -xdev -type s -print -quit)" ]] || \
+    systemd_causal_abort 141 "$systemd_negative_root"
+[[ -z "$(find /run/systemd -mindepth 1 -print -quit)" ]] || \
+    systemd_causal_abort 142 "$systemd_negative_root"
+systemd_causal_cleanup_root "$systemd_negative_root" "" || \
+    systemd_causal_abort 143
+
+# Positive control: exactly one false condition invocation in an otherwise
+# identical fresh private root creates only the documented local marker.
+[[ -z "$(find "$systemd_positive_root" -mindepth 1 -print -quit)" ]] || \
+    systemd_causal_abort 144
+mount --bind "$systemd_positive_root" /run/systemd || systemd_causal_abort 145
+systemd_causal_mounted=true
+mount --make-private /run/systemd || \
+    systemd_causal_abort 146 "$systemd_positive_root"
+[[ "$(systemd_mount_id)" =~ ^[1-9][0-9]*$ && \
+    "$(systemd_mount_id)" != "$systemd_underlay_mount_id" && \
+    "$(stat -c %d:%i -- /run/systemd)" == "$(stat -c %d:%i -- "$systemd_positive_root")" ]] || \
+    systemd_causal_abort 147 "$systemd_positive_root"
+[[ -z "$(find /run/systemd -mindepth 1 -print -quit)" ]] || \
+    systemd_causal_abort 148 "$systemd_positive_root"
+[[ -z "$(find /run/systemd -xdev -type s -print -quit)" ]] || \
+    systemd_causal_abort 149 "$systemd_positive_root"
+systemd_positive_status=0
+/usr/bin/systemd-analyze condition \
+    "{PCP_SYSTEMD_FALSE_CONDITION}" >/dev/null 2>&1 || systemd_positive_status=$?
+[[ "$systemd_positive_status" -eq 1 ]] || \
+    systemd_causal_abort 150 "$systemd_positive_root"
+mapfile -d '' systemd_positive_entries \
+    < <(find /run/systemd -xdev -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+[[ "${{#systemd_positive_entries[@]}}" -eq 1 && \
+    "${{systemd_positive_entries[0]}}" == systemd-units-load ]] || \
+    systemd_causal_abort 151 "$systemd_positive_root"
+systemd_marker=/run/systemd/systemd-units-load
+[[ -f "$systemd_marker" && ! -L "$systemd_marker" ]] || \
+    systemd_causal_abort 152 "$systemd_positive_root"
+systemd_marker_metadata="$(stat -c '%a %u %g %s %h %d' -- "$systemd_marker")"
+read -r systemd_marker_mode systemd_marker_uid systemd_marker_gid \
+    systemd_marker_size systemd_marker_links systemd_marker_device extra \
+    <<<"$systemd_marker_metadata"
+systemd_root_device="$(stat -c %d -- /run/systemd)"
+[[ -z "${{extra:-}}" && "$systemd_marker_mode" == 444 && \
+    "$systemd_marker_uid" == 0 && "$systemd_marker_gid" == 0 && \
+    "$systemd_marker_size" == 0 && "$systemd_marker_links" == 1 && \
+    "$systemd_marker_device" == "$systemd_root_device" ]] || \
+    systemd_causal_abort 153 "$systemd_positive_root" "$systemd_positive_root/systemd-units-load"
+cmp -s -- "$systemd_marker" /dev/null || \
+    systemd_causal_abort 154 "$systemd_positive_root" "$systemd_positive_root/systemd-units-load"
+[[ -z "$(find /run/systemd -xdev -type s -print -quit)" ]] || \
+    systemd_causal_abort 155 "$systemd_positive_root" "$systemd_positive_root/systemd-units-load"
+systemd_causal_cleanup_root \
+    "$systemd_positive_root" "$systemd_positive_root/systemd-units-load" || \
+    systemd_causal_abort 156
+[[ -z "$(find "$systemd_causal_parent" -mindepth 1 -print -quit)" ]]
+rmdir -- "$systemd_causal_parent"
+[[ ! -e "$systemd_causal_parent" && ! -L "$systemd_causal_parent" ]]
+printf '%s\n' \
+    'HCAUSE|1' \
+    'CONTROL\tnegative\tcommand=none\tstatus=-\tbefore=0\tafter=0\tmanager_endpoints_before=0\tmanager_endpoints_after=0\tcleanup=removed' \
+    'CONTROL\tpositive\tcommand=systemd-analyze-condition\tstatus=1\tbefore=0\tafter=1\tmanager_endpoints_before=0\tmanager_endpoints_after=0\tcleanup=removed' \
+    "MARKER\tsystemd-units-load\tregular\t$systemd_marker_mode\t$systemd_marker_uid\t$systemd_marker_gid\t$systemd_marker_size\t$systemd_marker_links\tsame-filesystem" \
+    >"$systemd_causal_partial"
+(( $(stat -c %s -- "$systemd_causal_partial") <= {PCP_SYSTEMD_CAUSAL_RECEIPT_MAX_BYTES} ))
+mv -- "$systemd_causal_partial" "$systemd_causal_receipt"
+sync -f "$systemd_causal_receipt"
+[[ "$(systemd_mount_id)" == "$systemd_underlay_mount_id" ]]
+""".strip()
+
+
+def _pcp_phase_ten_with_causal_proof() -> str:
+    prefix = "trace_begin 10-host-manager-isolation host-manager-isolation\n"
+    if PCP_OFFLINE_NONACTIVATION_PROOF.count(prefix) != 1:
+        raise AssertionError("real PCP phase-10 entry is missing or ambiguous")
+    return PCP_OFFLINE_NONACTIVATION_PROOF.replace(
+        prefix,
+        prefix + PCP_SYSTEMD_SOURCE_RECEIPT + "\n" + PCP_SYSTEMD_CAUSAL_PROOF + "\n",
+        1,
+    )
+
 
 PCP_OFFLINE_NONACTIVATION_PROOF = r"""
 trace_begin 10-host-manager-isolation host-manager-isolation
@@ -476,6 +704,129 @@ def _validate_manager_root_receipt(
             raise AssertionError("manager-root receipt ownership is out of range")
         entries.append((relative_path, object_type, mode, uid, gid))
     return text, condition_status, tuple(entries)
+
+
+def _read_bounded_ascii_receipt(
+    receipt_path: pathlib.Path,
+    fixture_root: pathlib.Path,
+    expected_name: str,
+    maximum_bytes: int,
+) -> str:
+    root = fixture_root.resolve(strict=True)
+    expected = root / expected_name
+    if receipt_path != expected or receipt_path.parent != root:
+        raise AssertionError("receipt is outside its exact fixture path")
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise AssertionError("receipt is missing or is not regular")
+    raw = receipt_path.read_bytes()
+    if not raw or len(raw) > maximum_bytes:
+        raise AssertionError("receipt size is missing or unbounded")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise AssertionError("receipt is not bounded ASCII") from exc
+    if not text.endswith("\n") or "\r" in text:
+        raise AssertionError("receipt encoding is not deterministic")
+    if any(ord(character) < 32 and character not in {"\t", "\n"} for character in text):
+        raise AssertionError("receipt contains a control character")
+    if "\x7f" in text:
+        raise AssertionError("receipt contains a control character")
+    return text
+
+
+def _validate_systemd_source_receipt(
+    receipt_path: pathlib.Path,
+    fixture_root: pathlib.Path,
+) -> tuple[str, str, str]:
+    text = _read_bounded_ascii_receipt(
+        receipt_path,
+        fixture_root,
+        "systemd-source.tsv",
+        PCP_SYSTEMD_SOURCE_RECEIPT_MAX_BYTES,
+    )
+    lines = text[:-1].split("\n")
+    if len(lines) != 9 or lines[0] != "HSOURCE|1":
+        raise AssertionError("systemd source receipt schema is incomplete")
+    package = lines[1].split("\t")
+    if len(package) != 4 or package[0:2] != ["PACKAGE", "systemd"]:
+        raise AssertionError("systemd package identity is malformed")
+    package_version, architecture = package[2:]
+    if re.fullmatch(r"255\.4-[0-9A-Za-z.+:~]+", package_version) is None:
+        raise AssertionError("systemd package version is not tied to upstream v255.4")
+    if architecture != "amd64":
+        raise AssertionError("systemd package architecture is unexpected")
+    version = lines[2].split("\t")
+    if len(version) != 3 or version[0] != "VERSION":
+        raise AssertionError("systemd version receipt is malformed")
+    if version[1] != f"systemd 255 ({package_version})":
+        raise AssertionError("systemd executable and package versions diverge")
+    if re.fullmatch(r"[0-9a-f]{64}", version[2]) is None:
+        raise AssertionError("systemd version-output hash is malformed")
+    executable = lines[3].split("\t")
+    if len(executable) != 9 or executable[0:2] != [
+        "EXECUTABLE",
+        "/usr/bin/systemd-analyze",
+    ]:
+        raise AssertionError("systemd executable identity is malformed")
+    executable_hash, mode, uid, gid, size, links, owner = executable[2:]
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", executable_hash) is None
+        or re.fullmatch(r"[0-7]{3,4}", mode) is None
+        or uid != "0"
+        or gid != "0"
+        or not size.isdecimal()
+        or int(size) <= 0
+        or not links.isdecimal()
+        or int(links) <= 0
+        or owner != "systemd"
+    ):
+        raise AssertionError("systemd executable metadata is invalid")
+    expected_lines = (
+        (
+            f"UPSTREAM\t{PCP_SYSTEMD_UPSTREAM_REPOSITORY}\t"
+            f"{PCP_SYSTEMD_UPSTREAM_TAG}\t{PCP_SYSTEMD_UPSTREAM_REVISION}"
+        ),
+        (
+            f"SOURCE\t{PCP_SYSTEMD_ANALYZE_SOURCE_PATH}\t"
+            f"{PCP_SYSTEMD_ANALYZE_SOURCE_FUNCTION}\t"
+            f"{PCP_SYSTEMD_ANALYZE_SOURCE_SHA256}"
+        ),
+        (
+            f"SOURCE\t{PCP_SYSTEMD_MANAGER_SOURCE_PATH}\t"
+            f"{PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION}\t"
+            f"{PCP_SYSTEMD_MANAGER_SOURCE_SHA256}"
+        ),
+        "CHAIN\tverb_condition>verify_conditions>manager_startup>manager_ready>touch_file",
+        f"MARKER\t{PCP_SYSTEMD_MARKER_PATH}\tregular\t0444\tzero-length\tmanager-ready",
+    )
+    if tuple(lines[4:]) != expected_lines:
+        raise AssertionError("systemd immutable upstream source identity diverges")
+    return text, package_version, executable_hash
+
+
+def _validate_systemd_causal_receipt(
+    receipt_path: pathlib.Path,
+    fixture_root: pathlib.Path,
+) -> str:
+    text = _read_bounded_ascii_receipt(
+        receipt_path,
+        fixture_root,
+        "systemd-causal.tsv",
+        PCP_SYSTEMD_CAUSAL_RECEIPT_MAX_BYTES,
+    )
+    expected = (
+        "HCAUSE|1\n"
+        "CONTROL\tnegative\tcommand=none\tstatus=-\tbefore=0\tafter=0\t"
+        "manager_endpoints_before=0\tmanager_endpoints_after=0\tcleanup=removed\n"
+        "CONTROL\tpositive\tcommand=systemd-analyze-condition\tstatus=1\t"
+        "before=0\tafter=1\tmanager_endpoints_before=0\t"
+        "manager_endpoints_after=0\tcleanup=removed\n"
+        "MARKER\tsystemd-units-load\tregular\t444\t0\t0\t0\t1\t"
+        "same-filesystem\n"
+    )
+    if text != expected:
+        raise AssertionError("systemd causal receipt is malformed or incomplete")
+    return text
 
 
 class OfflineApplianceTests(unittest.TestCase):
@@ -1812,6 +2163,199 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                 )
             )
 
+    def test_systemd_source_and_causal_receipts_are_bounded_and_fail_closed(
+        self,
+    ) -> None:
+        package_version = "255.4-1ubuntu8.17"
+        executable_hash = "a" * 64
+        version_hash = "b" * 64
+        source_receipt = (
+            "HSOURCE|1\n"
+            f"PACKAGE\tsystemd\t{package_version}\tamd64\n"
+            f"VERSION\tsystemd 255 ({package_version})\t{version_hash}\n"
+            "EXECUTABLE\t/usr/bin/systemd-analyze\t"
+            f"{executable_hash}\t755\t0\t0\t123456\t1\tsystemd\n"
+            f"UPSTREAM\t{PCP_SYSTEMD_UPSTREAM_REPOSITORY}\t"
+            f"{PCP_SYSTEMD_UPSTREAM_TAG}\t{PCP_SYSTEMD_UPSTREAM_REVISION}\n"
+            f"SOURCE\t{PCP_SYSTEMD_ANALYZE_SOURCE_PATH}\t"
+            f"{PCP_SYSTEMD_ANALYZE_SOURCE_FUNCTION}\t"
+            f"{PCP_SYSTEMD_ANALYZE_SOURCE_SHA256}\n"
+            f"SOURCE\t{PCP_SYSTEMD_MANAGER_SOURCE_PATH}\t"
+            f"{PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION}\t"
+            f"{PCP_SYSTEMD_MANAGER_SOURCE_SHA256}\n"
+            "CHAIN\tverb_condition>verify_conditions>manager_startup>"
+            "manager_ready>touch_file\n"
+            f"MARKER\t{PCP_SYSTEMD_MARKER_PATH}\tregular\t0444\t"
+            "zero-length\tmanager-ready\n"
+        )
+        causal_receipt = (
+            "HCAUSE|1\n"
+            "CONTROL\tnegative\tcommand=none\tstatus=-\tbefore=0\tafter=0\t"
+            "manager_endpoints_before=0\tmanager_endpoints_after=0\t"
+            "cleanup=removed\n"
+            "CONTROL\tpositive\tcommand=systemd-analyze-condition\tstatus=1\t"
+            "before=0\tafter=1\tmanager_endpoints_before=0\t"
+            "manager_endpoints_after=0\tcleanup=removed\n"
+            "MARKER\tsystemd-units-load\tregular\t444\t0\t0\t0\t1\t"
+            "same-filesystem\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            source = root / "systemd-source.tsv"
+            causal = root / "systemd-causal.tsv"
+            source.write_text(source_receipt, encoding="ascii", newline="\n")
+            causal.write_text(causal_receipt, encoding="ascii", newline="\n")
+            source_text, actual_version, actual_hash = _validate_systemd_source_receipt(
+                source, root
+            )
+            self.assertEqual(source_text, source_receipt)
+            self.assertEqual(actual_version, package_version)
+            self.assertEqual(actual_hash, executable_hash)
+            self.assertEqual(
+                _validate_systemd_causal_receipt(causal, root), causal_receipt
+            )
+
+            def source_rejected(name: str, mutated: str | bytes | None) -> None:
+                if source.exists() or source.is_symlink():
+                    source.unlink()
+                if isinstance(mutated, bytes):
+                    source.write_bytes(mutated)
+                elif mutated is not None:
+                    source.write_text(mutated, encoding="ascii", newline="\n")
+                with self.assertRaises(AssertionError, msg=name):
+                    _validate_systemd_source_receipt(source, root)
+
+            source_cases: dict[str, str | bytes | None] = {
+                "missing": None,
+                "wrong-package": source_receipt.replace(
+                    "PACKAGE\tsystemd", "PACKAGE\tlibsystemd0", 1
+                ),
+                "wrong-package-version": source_receipt.replace(
+                    package_version, "256.1-1", 1
+                ),
+                "version-divergence": source_receipt.replace(
+                    f"systemd 255 ({package_version})", "systemd 255 (255.4-other)", 1
+                ),
+                "wrong-executable": source_receipt.replace(
+                    "/usr/bin/systemd-analyze", "/tmp/systemd-analyze", 1
+                ),
+                "wrong-executable-hash": source_receipt.replace(
+                    executable_hash, "z" * 64, 1
+                ),
+                "wrong-revision": source_receipt.replace(
+                    PCP_SYSTEMD_UPSTREAM_REVISION, "0" * 40, 1
+                ),
+                "wrong-source": source_receipt.replace(
+                    PCP_SYSTEMD_MANAGER_SOURCE_PATH, "src/core/not-manager.c", 1
+                ),
+                "wrong-source-function": source_receipt.replace(
+                    PCP_SYSTEMD_MANAGER_SOURCE_FUNCTION, "manager_ready:1-2", 1
+                ),
+                "wrong-source-hash": source_receipt.replace(
+                    PCP_SYSTEMD_MANAGER_SOURCE_SHA256, "0" * 64, 1
+                ),
+                "unknown-field": source_receipt + "ENV\tSECRET=value\n",
+                "control": source_receipt.replace("systemd\t", "systemd\x01", 1),
+                "oversized": b"x" * (PCP_SYSTEMD_SOURCE_RECEIPT_MAX_BYTES + 1),
+            }
+            for name, mutation in source_cases.items():
+                with self.subTest(source=name):
+                    source_rejected(name, mutation)
+
+            source.write_text(source_receipt, encoding="ascii", newline="\n")
+
+            def causal_rejected(name: str, mutated: str | bytes | None) -> None:
+                if causal.exists() or causal.is_symlink():
+                    causal.unlink()
+                if isinstance(mutated, bytes):
+                    causal.write_bytes(mutated)
+                elif mutated is not None:
+                    causal.write_text(mutated, encoding="ascii", newline="\n")
+                with self.assertRaises(AssertionError, msg=name):
+                    _validate_systemd_causal_receipt(causal, root)
+
+            causal_cases: dict[str, str | bytes | None] = {
+                "missing": None,
+                "preexisting-marker": causal_receipt.replace("before=0", "before=1", 1),
+                "symlink": causal_receipt.replace("\tregular\t", "\tsymlink\t", 1),
+                "directory": causal_receipt.replace("\tregular\t", "\tdirectory\t", 1),
+                "nonzero-size": causal_receipt.replace("\t0\t1\t", "\t1\t1\t", 1),
+                "wrong-mode": causal_receipt.replace("\t444\t", "\t644\t", 1),
+                "wrong-owner": causal_receipt.replace(
+                    "\t444\t0\t0\t", "\t444\t1\t0\t", 1
+                ),
+                "wrong-link-count": causal_receipt.replace("\t0\t1\t", "\t0\t2\t", 1),
+                "wrong-filesystem": causal_receipt.replace(
+                    "same-filesystem", "different-filesystem", 1
+                ),
+                "extra-entry": causal_receipt + "ENTRY\tprivate\n",
+                "manager-before": causal_receipt.replace(
+                    "manager_endpoints_before=0", "manager_endpoints_before=1", 1
+                ),
+                "manager-after": causal_receipt.replace(
+                    "manager_endpoints_after=0", "manager_endpoints_after=1", 1
+                ),
+                "wrong-command": causal_receipt.replace(
+                    "command=systemd-analyze-condition", "command=systemctl", 1
+                ),
+                "wrong-status": causal_receipt.replace("status=1", "status=0", 1),
+                "negative-nonempty": causal_receipt.replace(
+                    "command=none\tstatus=-\tbefore=0\tafter=0",
+                    "command=none\tstatus=-\tbefore=0\tafter=1",
+                    1,
+                ),
+                "cleanup-drift": causal_receipt.replace(
+                    "cleanup=removed", "cleanup=present", 1
+                ),
+                "unknown-field": causal_receipt.replace(
+                    "HCAUSE|1", "HCAUSE|1\nENV\tTOKEN=value", 1
+                ),
+                "control": causal_receipt.replace("positive", "pos\x01itive", 1),
+                "oversized": b"x" * (PCP_SYSTEMD_CAUSAL_RECEIPT_MAX_BYTES + 1),
+            }
+            for name, mutation in causal_cases.items():
+                with self.subTest(causal=name):
+                    causal_rejected(name, mutation)
+            outside = root.parent / "systemd-causal.tsv"
+            outside.write_text(causal_receipt, encoding="ascii", newline="\n")
+            try:
+                with self.assertRaises(AssertionError):
+                    _validate_systemd_causal_receipt(outside, root)
+            finally:
+                outside.unlink()
+
+    def test_systemd_causal_control_preserves_real_phase_ten_oracle(self) -> None:
+        phase = _pcp_phase_ten_with_causal_proof()
+        real_sequence = (
+            'manager_root_snapshot before - "$work/manager-root-before.tsv"\n'
+            'systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition" \\\n'
+            "    >/dev/null 2>&1 && exit 100\n"
+            "condition_status=$?\n"
+            'manager_root_snapshot after "$condition_status" '
+            '"$work/manager-root-after.tsv"\n'
+            '[[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]'
+        )
+        self.assertEqual(phase.count(real_sequence), 1)
+        self.assertEqual(
+            phase.count(
+                "/usr/bin/systemd-analyze condition \\\n"
+                f'    "{PCP_SYSTEMD_FALSE_CONDITION}" >/dev/null 2>&1'
+            ),
+            1,
+        )
+        self.assertEqual(phase.count("systemd_causal_cleanup_root"), 4)
+        self.assertNotIn("apt-get", PCP_SYSTEMD_CAUSAL_PROOF)
+        self.assertNotIn("systemctl", PCP_SYSTEMD_CAUSAL_PROOF)
+        self.assertNotIn("curl", PCP_SYSTEMD_CAUSAL_PROOF)
+        self.assertNotIn("wget", PCP_SYSTEMD_CAUSAL_PROOF)
+        self.assertNotIn("strace", PCP_SYSTEMD_CAUSAL_PROOF)
+        self.assertNotIn("rm -f -- /run/systemd/systemd-units-load", phase)
+        self.assertIn(
+            'rm -f -- "$expected_entry"',
+            PCP_SYSTEMD_CAUSAL_PROOF,
+        )
+        _assert_pcp_offline_nonactivation_contract(phase)
+
     @unittest.skipUnless(
         sys.platform.startswith("linux") and shutil.which("bash"),
         "requires Linux Bash",
@@ -1882,6 +2426,7 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
             "bash",
             "deb-systemd-helper",
             "dpkg-deb",
+            "dpkg-query",
             "sudo",
             "systemd-analyze",
             "systemctl",
@@ -2242,7 +2787,7 @@ done >"$work/all-denied-presets.log" 2>&1
     "$chmod_receipt_hash" ]]
 trace_pass
 """,
-                        PCP_OFFLINE_NONACTIVATION_PROOF,
+                        _pcp_phase_ten_with_causal_proof(),
                         r"""
 trace_begin 11-interrupted-retention interrupted-retention
 package_transaction_started=true
@@ -2382,6 +2927,7 @@ exit 0
             ownership: subprocess.CompletedProcess[str] | None = None
             ownership_error: OSError | subprocess.TimeoutExpired | None = None
             manager_receipt_diagnostic = ""
+            systemd_receipt_diagnostic = ""
             try:
                 try:
                     result = subprocess.run(
@@ -2456,9 +3002,19 @@ exit 0
                     namespace_path / "run-systemd",
                     "after",
                 )
+                source_text, package_version, executable_hash = (
+                    _validate_systemd_source_receipt(
+                        namespace_path / "systemd-source.tsv",
+                        namespace_path,
+                    )
+                )
+                causal_text = _validate_systemd_causal_receipt(
+                    namespace_path / "systemd-causal.tsv",
+                    namespace_path,
+                )
             except AssertionError as exc:
                 self.fail(
-                    f"manager-root receipt validation failed: {exc}\n{trace_text}"
+                    f"systemd/manager receipt validation failed: {exc}\n{trace_text}"
                 )
             self.assertIsNone(before_status)
             self.assertIsNotNone(after_status)
@@ -2468,10 +3024,22 @@ exit 0
                 + "VALIDATED MANAGER-ROOT AFTER RECEIPT\n"
                 + after_text
             )
+            systemd_receipt_diagnostic = (
+                "VALIDATED SYSTEMD SOURCE RECEIPT\n"
+                + source_text
+                + "VALIDATED SYSTEMD CAUSAL RECEIPT\n"
+                + causal_text
+            )
+            self.assertTrue(package_version.startswith("255.4-"))
+            self.assertRegex(executable_hash, r"^[0-9a-f]{64}$")
         self.assertEqual(
             result.returncode,
             0,
-            result.stdout + result.stderr + trace_text + manager_receipt_diagnostic,
+            result.stdout
+            + result.stderr
+            + trace_text
+            + manager_receipt_diagnostic
+            + systemd_receipt_diagnostic,
         )
         self.assertIn("real_pcp_old_preset_failure=reproduced", result.stdout)
         self.assertIn("real_pcp_corrected_preset_errors=0", result.stdout)
