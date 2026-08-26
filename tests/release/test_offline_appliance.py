@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -12,7 +12,6 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "build-offline-apt-repository.py"
