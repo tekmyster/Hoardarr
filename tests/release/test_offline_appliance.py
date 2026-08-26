@@ -46,6 +46,116 @@ PCP_TRACE_RECORD = re.compile(
     r"status=(-|[0-9]{1,3})\|line=(-|[0-9]{1,6})\|"
     r"function=(-|[A-Za-z_][A-Za-z0-9_]*)\|label=([a-z0-9-]+)$"
 )
+PCP_MANAGER_ROOT_RECEIPT_MAX_BYTES = 32 * 1024
+PCP_MANAGER_ROOT_RECEIPT_MAX_ENTRIES = 128
+PCP_MANAGER_ROOT_PATH_MAX_BYTES = 192
+PCP_MANAGER_ROOT_TYPES = {
+    "directory",
+    "regular",
+    "symlink",
+    "socket",
+    "fifo",
+    "block",
+    "char",
+    "other",
+}
+PCP_MANAGER_ROOT_HEADER = re.compile(
+    r"^HMROOT\|1\|(before|after)\|status=(-|[0-9]{1,3})$"
+)
+PCP_MANAGER_ROOT_COMPONENT = re.compile(r"^[A-Za-z0-9_.@:+,-]+$")
+
+PCP_MANAGER_ROOT_SNAPSHOT_FUNCTION = r"""
+manager_root_snapshot_abort() {
+    local status="$1"
+    shift
+    /usr/bin/rm -f -- "$@" || return 126
+    return "$status"
+}
+manager_root_snapshot() {
+    local stage="$1"
+    local condition_status="$2"
+    local output="$3"
+    local root="$work/run-systemd"
+    local expected_output
+    local raw="${output}.raw"
+    local sorted="${output}.sorted"
+    local entries="${output}.entries"
+    local partial="${output}.partial"
+    local deep relative previous= object type metadata mode uid gid
+    local count=0
+    local LC_ALL=C
+    case "$stage:$condition_status" in
+        before:-) expected_output="$work/manager-root-before.tsv" ;;
+        after:[1-9]|after:[1-9][0-9]|after:[12][0-9][0-9])
+            (( condition_status <= 255 )) || return 120
+            expected_output="$work/manager-root-after.tsv"
+            ;;
+        *) return 120 ;;
+    esac
+    [[ "$output" == "$expected_output" && "${output%/*}" == "$work" ]] || return 120
+    [[ "$root" == "$work/run-systemd" && -d "$root" && ! -L "$root" ]] || return 120
+    for path in "$output" "$raw" "$sorted" "$entries" "$partial"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || return 120
+    done
+    : >"$raw" || return 121
+    : >"$sorted" || manager_root_snapshot_abort 121 "$raw"
+    : >"$entries" || manager_root_snapshot_abort 121 "$raw" "$sorted"
+    : >"$partial" || manager_root_snapshot_abort 121 "$raw" "$sorted" "$entries"
+    deep="$(/usr/bin/find "$root" -xdev -mindepth 6 -printf x -quit)" || \
+        manager_root_snapshot_abort 122 "$raw" "$sorted" "$entries" "$partial"
+    [[ -z "$deep" ]] || \
+        manager_root_snapshot_abort 122 "$raw" "$sorted" "$entries" "$partial"
+    /usr/bin/find "$root" -xdev -mindepth 1 -maxdepth 5 -printf '%P\0' >"$raw" || \
+        manager_root_snapshot_abort 122 "$raw" "$sorted" "$entries" "$partial"
+    /usr/bin/sort -z -- "$raw" >"$sorted" || \
+        manager_root_snapshot_abort 122 "$raw" "$sorted" "$entries" "$partial"
+    while IFS= read -r -d '' relative; do
+        count=$((count + 1))
+        (( count <= 128 )) || \
+            manager_root_snapshot_abort 123 "$raw" "$sorted" "$entries" "$partial"
+        (( ${#relative} > 0 && ${#relative} <= 192 )) || \
+            manager_root_snapshot_abort 123 "$raw" "$sorted" "$entries" "$partial"
+        [[ "$relative" =~ ^[A-Za-z0-9_.@:+,-]+(/[A-Za-z0-9_.@:+,-]+){0,4}$ ]] || \
+            manager_root_snapshot_abort 123 "$raw" "$sorted" "$entries" "$partial"
+        IFS=/ read -r -a components <<<"$relative"
+        for component in "${components[@]}"; do
+            [[ "$component" != . && "$component" != .. ]] || \
+                manager_root_snapshot_abort 123 "$raw" "$sorted" "$entries" "$partial"
+        done
+        [[ -z "$previous" || "$previous" != "$relative" ]] || \
+            manager_root_snapshot_abort 123 "$raw" "$sorted" "$entries" "$partial"
+        previous="$relative"
+        object="$root/$relative"
+        if [[ -L "$object" ]]; then type=symlink
+        elif [[ -d "$object" ]]; then type=directory
+        elif [[ -f "$object" ]]; then type=regular
+        elif [[ -S "$object" ]]; then type=socket
+        elif [[ -p "$object" ]]; then type=fifo
+        elif [[ -b "$object" ]]; then type=block
+        elif [[ -c "$object" ]]; then type=char
+        else type=other
+        fi
+        metadata="$(/usr/bin/stat -c '%a %u %g' -- "$object")" || \
+            manager_root_snapshot_abort 124 "$raw" "$sorted" "$entries" "$partial"
+        read -r mode uid gid extra <<<"$metadata"
+        [[ -z "${extra:-}" && "$mode" =~ ^[0-7]{3,4}$ && \
+            "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || \
+            manager_root_snapshot_abort 124 "$raw" "$sorted" "$entries" "$partial"
+        printf 'ENTRY\t%s\t%s\t%s\t%s\t%s\n' \
+            "$relative" "$type" "$mode" "$uid" "$gid" >>"$entries" || \
+            manager_root_snapshot_abort 124 "$raw" "$sorted" "$entries" "$partial"
+    done <"$sorted"
+    printf 'HMROOT|1|%s|status=%s\n' "$stage" "$condition_status" >"$partial" || \
+        manager_root_snapshot_abort 125 "$raw" "$sorted" "$entries" "$partial"
+    /usr/bin/cat -- "$entries" >>"$partial" || \
+        manager_root_snapshot_abort 125 "$raw" "$sorted" "$entries" "$partial"
+    (( $(/usr/bin/stat -c %s -- "$partial") <= 32768 )) || \
+        manager_root_snapshot_abort 125 "$raw" "$sorted" "$entries" "$partial"
+    /usr/bin/mv -- "$partial" "$output" || \
+        manager_root_snapshot_abort 125 "$raw" "$sorted" "$entries" "$partial"
+    /usr/bin/rm -f -- "$raw" "$sorted" "$entries" || return 126
+}
+""".strip()
 
 PCP_OFFLINE_NONACTIVATION_PROOF = r"""
 trace_begin 10-host-manager-isolation host-manager-isolation
@@ -79,8 +189,11 @@ expected_pmcd_content="$(printf '[Unit]\nConditionPathExists=%s\n' "$expected_pm
 [[ ! -e "$recovery_guard_authorization_root" && ! -L "$recovery_guard_authorization_root" ]]
 [[ "$expected_pmcd_condition" != "$recovery_guard_authorization_root" && \
     "$expected_pmcd_condition" != "$recovery_guard_authorization_root/"* ]]
+manager_root_snapshot before - "$work/manager-root-before.tsv"
 systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition" \
     >/dev/null 2>&1 && exit 100
+condition_status=$?
+manager_root_snapshot after "$condition_status" "$work/manager-root-after.tsv"
 [[ -z "$(find "$work/run-systemd" -mindepth 1 -print -quit)" ]]
 trace_pass
 """.strip()
@@ -100,7 +213,10 @@ def _assert_pcp_offline_nonactivation_contract(harness: str) -> None:
         "expected_pmcd_condition=/dev/null/hoardarr-offline-service-guard/pmcd.service",
         '[[ ! -e "$expected_pmcd_condition" && ! -L "$expected_pmcd_condition" ]]',
         '[[ ! -e "$recovery_guard_authorization_root" && ! -L "$recovery_guard_authorization_root" ]]',
+        'manager_root_snapshot before - "$work/manager-root-before.tsv"',
         'systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition"',
+        "condition_status=$?",
+        'manager_root_snapshot after "$condition_status" "$work/manager-root-after.tsv"',
     )
     for fragment in required:
         if fragment not in harness:
@@ -113,6 +229,18 @@ def _assert_pcp_offline_nonactivation_contract(harness: str) -> None:
     if harness.count(manager_root_check) != 2:
         raise AssertionError(
             "generated PCP harness must bracket offline proof with manager-root checks"
+        )
+    snapshot_sequence = (
+        'manager_root_snapshot before - "$work/manager-root-before.tsv"\n'
+        'systemd-analyze condition "ConditionPathExists=$expected_pmcd_condition" \\\n'
+        "    >/dev/null 2>&1 && exit 100\n"
+        "condition_status=$?\n"
+        'manager_root_snapshot after "$condition_status" '
+        '"$work/manager-root-after.tsv"\n' + manager_root_check
+    )
+    if snapshot_sequence not in harness:
+        raise AssertionError(
+            "generated PCP harness changes condition or snapshot ordering semantics"
         )
     if re.search(r"systemctl\s+is-active\s+pmcd\.service", harness):
         raise AssertionError("generated PCP harness queries manager-dependent activity")
@@ -256,6 +384,98 @@ def _validate_pcp_trace(
     if terminal_status is None:
         raise AssertionError(f"PCP trace has no terminal receipt:\n{text}")
     return text, terminal_status
+
+
+def _validate_manager_root_receipt(
+    receipt_path: pathlib.Path,
+    fixture_root: pathlib.Path,
+    manager_root: pathlib.Path,
+    expected_stage: str,
+) -> tuple[str, int | None, tuple[tuple[str, str, str, int, int], ...]]:
+    if expected_stage not in {"before", "after"}:
+        raise AssertionError("manager-root receipt stage is unsupported")
+    root = fixture_root.resolve(strict=True)
+    manager = manager_root.resolve(strict=True)
+    expected = root / f"manager-root-{expected_stage}.tsv"
+    if manager != root / "run-systemd" or manager.is_symlink():
+        raise AssertionError("manager-root receipt uses an unexpected private root")
+    if receipt_path != expected or receipt_path.parent != root:
+        raise AssertionError("manager-root receipt is outside its exact fixture path")
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise AssertionError("manager-root receipt is missing or is not regular")
+    raw = receipt_path.read_bytes()
+    if not raw or len(raw) > PCP_MANAGER_ROOT_RECEIPT_MAX_BYTES:
+        raise AssertionError("manager-root receipt size is missing or unbounded")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AssertionError("manager-root receipt is not UTF-8") from exc
+    if not text.isascii() or not text.endswith("\n") or "\r" in text:
+        raise AssertionError("manager-root receipt encoding is not deterministic")
+    if any(ord(character) < 32 and character not in {"\t", "\n"} for character in text):
+        raise AssertionError("manager-root receipt contains a control character")
+    if "\x7f" in text:
+        raise AssertionError("manager-root receipt contains a control character")
+    lines = text[:-1].split("\n")
+    if not lines or not lines[0]:
+        raise AssertionError("manager-root receipt header is missing")
+    header = PCP_MANAGER_ROOT_HEADER.fullmatch(lines[0])
+    if header is None:
+        raise AssertionError("manager-root receipt header is malformed")
+    stage, status_text = header.groups()
+    if stage != expected_stage:
+        raise AssertionError("manager-root receipt stage does not match its file")
+    if stage == "before":
+        if status_text != "-":
+            raise AssertionError("before manager-root receipt has a status")
+        condition_status: int | None = None
+    else:
+        if status_text == "-":
+            raise AssertionError("after manager-root receipt lacks condition status")
+        condition_status = int(status_text)
+        if condition_status <= 0 or condition_status > 255:
+            raise AssertionError("manager-root condition status is out of range")
+    entry_lines = lines[1:]
+    if len(entry_lines) > PCP_MANAGER_ROOT_RECEIPT_MAX_ENTRIES:
+        raise AssertionError("manager-root receipt has too many entries")
+    entries: list[tuple[str, str, str, int, int]] = []
+    previous_path: bytes | None = None
+    for index, line in enumerate(entry_lines, start=1):
+        fields = line.split("\t")
+        if len(fields) != 6 or fields[0] != "ENTRY":
+            raise AssertionError(f"manager-root receipt entry {index} is malformed")
+        relative_path, object_type, mode, uid_text, gid_text = fields[1:]
+        path_bytes = relative_path.encode("ascii")
+        if not path_bytes or len(path_bytes) > PCP_MANAGER_ROOT_PATH_MAX_BYTES:
+            raise AssertionError("manager-root receipt path is missing or unbounded")
+        if relative_path.startswith("/") or "\\" in relative_path:
+            raise AssertionError(
+                "manager-root receipt path is absolute or noncanonical"
+            )
+        components = relative_path.split("/")
+        if len(components) > 5 or any(
+            component in {"", ".", ".."}
+            or PCP_MANAGER_ROOT_COMPONENT.fullmatch(component) is None
+            for component in components
+        ):
+            raise AssertionError("manager-root receipt path is unsafe")
+        if previous_path is not None and path_bytes <= previous_path:
+            raise AssertionError("manager-root receipt paths are duplicate or unsorted")
+        previous_path = path_bytes
+        if object_type not in PCP_MANAGER_ROOT_TYPES:
+            raise AssertionError("manager-root receipt object type is unknown")
+        if re.fullmatch(r"[0-7]{3,4}", mode) is None:
+            raise AssertionError("manager-root receipt mode is malformed")
+        if not uid_text.isascii() or not uid_text.isdecimal():
+            raise AssertionError("manager-root receipt UID is malformed")
+        if not gid_text.isascii() or not gid_text.isdecimal():
+            raise AssertionError("manager-root receipt GID is malformed")
+        uid = int(uid_text)
+        gid = int(gid_text)
+        if uid > 2**32 - 1 or gid > 2**32 - 1:
+            raise AssertionError("manager-root receipt ownership is out of range")
+        entries.append((relative_path, object_type, mode, uid, gid))
+    return text, condition_status, tuple(entries)
 
 
 class OfflineApplianceTests(unittest.TestCase):
@@ -1483,6 +1703,100 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                     rejected(name, lines)
             rejected("outside-root", valid_lines, outside=True)
 
+    def test_manager_root_receipt_parser_is_bounded_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            namespace = pathlib.Path(temporary).resolve() / "namespace"
+            manager = namespace / "run-systemd"
+            manager.mkdir(parents=True)
+            before = namespace / "manager-root-before.tsv"
+            after = namespace / "manager-root-after.tsv"
+            before.write_text(
+                "HMROOT|1|before|status=-\n", encoding="utf-8", newline="\n"
+            )
+            before_text, before_status, before_entries = _validate_manager_root_receipt(
+                before, namespace, manager, "before"
+            )
+            self.assertEqual(before_text, "HMROOT|1|before|status=-\n")
+            self.assertIsNone(before_status)
+            self.assertEqual(before_entries, ())
+            after.write_text(
+                "HMROOT|1|after|status=1\n"
+                "ENTRY\tprivate\tdirectory\t755\t0\t0\n"
+                "ENTRY\tprivate/socket\tsocket\t660\t100\t101\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            _, after_status, after_entries = _validate_manager_root_receipt(
+                after, namespace, manager, "after"
+            )
+            self.assertEqual(after_status, 1)
+            self.assertEqual(len(after_entries), 2)
+
+            before.unlink()
+            after.unlink()
+
+            def rejected(
+                name: str,
+                text: str | bytes | None,
+                *,
+                stage: str = "after",
+                path: pathlib.Path | None = None,
+            ) -> None:
+                receipt = path or namespace / f"manager-root-{stage}.tsv"
+                if receipt.exists() or receipt.is_symlink():
+                    receipt.unlink()
+                if isinstance(text, bytes):
+                    receipt.write_bytes(text)
+                elif text is not None:
+                    receipt.write_text(text, encoding="utf-8", newline="\n")
+                with self.assertRaises(AssertionError, msg=name):
+                    _validate_manager_root_receipt(receipt, namespace, manager, stage)
+                if receipt.exists() or receipt.is_symlink():
+                    receipt.unlink()
+
+            header = "HMROOT|1|after|status=1\n"
+            valid = "ENTRY\tentry\tregular\t600\t0\t0\n"
+            cases: dict[str, str | bytes | None] = {
+                "missing-file": None,
+                "missing-header": valid,
+                "wrong-version": "HMROOT|2|after|status=1\n",
+                "wrong-stage": "HMROOT|1|before|status=-\n",
+                "wrong-status": "HMROOT|1|after|status=-\n",
+                "overlong-path": header + f"ENTRY\t{'a' * 193}\tregular\t600\t0\t0\n",
+                "absolute-path": header + "ENTRY\t/absolute\tregular\t600\t0\t0\n",
+                "traversal-path": header
+                + "ENTRY\tsafe/../escape\tregular\t600\t0\t0\n",
+                "control-path": (header + "ENTRY\tbad\x01path\tregular\t600\t0\t0\n"),
+                "excess-depth": header + "ENTRY\ta/b/c/d/e/f\tregular\t600\t0\t0\n",
+                "unknown-type": header + "ENTRY\tentry\tunknown\t600\t0\t0\n",
+                "invalid-mode": header + "ENTRY\tentry\tregular\t888\t0\t0\n",
+                "invalid-uid": header + "ENTRY\tentry\tregular\t600\troot\t0\n",
+                "invalid-gid": header + "ENTRY\tentry\tregular\t600\t0\t-1\n",
+                "duplicate": header + valid + valid,
+                "out-of-order": header
+                + "ENTRY\tz\tregular\t600\t0\t0\n"
+                + "ENTRY\ta\tregular\t600\t0\t0\n",
+                "excess-entries": header
+                + "".join(
+                    f"ENTRY\tp{index:03d}\tregular\t600\t0\t0\n" for index in range(129)
+                ),
+                "oversized": b"x" * (PCP_MANAGER_ROOT_RECEIPT_MAX_BYTES + 1),
+                "appended-text": header + valid + "TRAILING\n",
+            }
+            for name, text in cases.items():
+                with self.subTest(name=name):
+                    rejected(name, text)
+            rejected(
+                "outside-exact-path",
+                header,
+                path=namespace / "unexpected-receipt.tsv",
+            )
+            rejected(
+                "before-has-status",
+                "HMROOT|1|before|status=1\n",
+                stage="before",
+            )
+
     def test_pcp_generated_nonactivation_proof_is_structural_and_managerless(
         self,
     ) -> None:
@@ -1642,6 +1956,7 @@ cleanup_guard 0 >/dev/null 2>&1 || success_status=$?
                     (
                         "set -Eeuo pipefail",
                         _pcp_trace_shell_prelude(),
+                        PCP_MANAGER_ROOT_SNAPSHOT_FUNCTION,
                         shell_function("install_service_start_guard"),
                         shell_function("entry_is_root_owned"),
                         shell_function("validate_preserved_unit_objects"),
@@ -2066,6 +2381,7 @@ exit 0
             run_error: OSError | subprocess.TimeoutExpired | None = None
             ownership: subprocess.CompletedProcess[str] | None = None
             ownership_error: OSError | subprocess.TimeoutExpired | None = None
+            manager_receipt_diagnostic = ""
             try:
                 try:
                     result = subprocess.run(
@@ -2127,8 +2443,35 @@ exit 0
                 self.fail(f"PCP harness execution failed: {run_error}\n{trace_text}")
             assert result is not None
             self.assertEqual(trace_status, result.returncode, trace_text)
+            try:
+                before_text, before_status, _ = _validate_manager_root_receipt(
+                    namespace_path / "manager-root-before.tsv",
+                    namespace_path,
+                    namespace_path / "run-systemd",
+                    "before",
+                )
+                after_text, after_status, _ = _validate_manager_root_receipt(
+                    namespace_path / "manager-root-after.tsv",
+                    namespace_path,
+                    namespace_path / "run-systemd",
+                    "after",
+                )
+            except AssertionError as exc:
+                self.fail(
+                    f"manager-root receipt validation failed: {exc}\n{trace_text}"
+                )
+            self.assertIsNone(before_status)
+            self.assertIsNotNone(after_status)
+            manager_receipt_diagnostic = (
+                "\nVALIDATED MANAGER-ROOT BEFORE RECEIPT\n"
+                + before_text
+                + "VALIDATED MANAGER-ROOT AFTER RECEIPT\n"
+                + after_text
+            )
         self.assertEqual(
-            result.returncode, 0, result.stdout + result.stderr + trace_text
+            result.returncode,
+            0,
+            result.stdout + result.stderr + trace_text + manager_receipt_diagnostic,
         )
         self.assertIn("real_pcp_old_preset_failure=reproduced", result.stdout)
         self.assertIn("real_pcp_corrected_preset_errors=0", result.stdout)
