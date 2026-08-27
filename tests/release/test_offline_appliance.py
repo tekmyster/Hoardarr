@@ -5614,11 +5614,17 @@ f19_capture_after_failure() {
         "$phase09_outcomes" "$f19_command_trace" "$original_status" \
         "$original_line" "$original_function" "$original_command" \
         >/dev/null 2>"$snapshot_stderr" || snapshot_status=$?
-    chmod 0600 -- "$snapshot_stderr" || snapshot_status=126
+    chmod 0600 -- "$snapshot_stderr" || {
+        (( snapshot_status != 0 )) || snapshot_status=126
+    }
     if (( snapshot_status == 0 )); then
-        [[ ! -s "$snapshot_stderr" ]] || snapshot_status=126
-        rm -f -- "$snapshot_stderr" || snapshot_status=126
-    else
+        if [[ -s "$snapshot_stderr" ]]; then
+            snapshot_status=126
+        else
+            rm -f -- "$snapshot_stderr" || snapshot_status=126
+        fi
+    fi
+    if (( snapshot_status != 0 )); then
         python3 "$f29_outer_runner" f19-after "$snapshot_status" \
             "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
             "$f29_f21_attempt_receipt" "$work" "$f21_capture_error_sha256" \
@@ -5629,11 +5635,17 @@ f19_capture_after_failure() {
     snapshot_stderr="$work/f20-after.stderr"
     python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv" \
         >/dev/null 2>"$snapshot_stderr" || snapshot_status=$?
-    chmod 0600 -- "$snapshot_stderr" || snapshot_status=126
+    chmod 0600 -- "$snapshot_stderr" || {
+        (( snapshot_status != 0 )) || snapshot_status=126
+    }
     if (( snapshot_status == 0 )); then
-        [[ ! -s "$snapshot_stderr" ]] || snapshot_status=126
-        rm -f -- "$snapshot_stderr" || snapshot_status=126
-    else
+        if [[ -s "$snapshot_stderr" ]]; then
+            snapshot_status=126
+        else
+            rm -f -- "$snapshot_stderr" || snapshot_status=126
+        fi
+    fi
+    if (( snapshot_status != 0 )); then
         if [[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]; then
             python3 "$f29_outer_runner" f20-after "$snapshot_status" \
                 "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
@@ -7708,8 +7720,15 @@ Description: Backup program for disk arrays
         function = source[start:end]
 
         def run_case(
-            f19_status: int, f20_status: int
-        ) -> tuple[str, str, list[str], str]:
+            f19_status: int,
+            f20_status: int,
+            *,
+            f19_stderr: str = "",
+            f20_stderr: str = "",
+            chmod_fails: bool = False,
+            rm_fails: bool = False,
+            outer_status: int = 0,
+        ) -> tuple[str, str, list[str], list[str], str]:
             with tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
                 work = root / "work"
@@ -7718,17 +7737,27 @@ Description: Backup program for disk arrays
                 f20 = root / "f20.py"
                 outer = root / "outer.py"
                 f19.write_text(
-                    "import os, pathlib, sys\npathlib.Path(os.environ['ARGS']).write_text('|'.join(sys.argv[1:]))\nsys.exit(int(os.environ['F19']))\n",
+                    "import os, pathlib, sys\n"
+                    "pathlib.Path(os.environ['ARGS']).write_text('|'.join(sys.argv[1:]))\n"
+                    "pathlib.Path(os.environ['SNAPSHOTS']).open('a').write('f19\\n')\n"
+                    "sys.stderr.write(os.environ['F19_STDERR'])\n"
+                    "sys.exit(int(os.environ['F19']))\n",
                     encoding="ascii",
                     newline="\n",
                 )
                 f20.write_text(
-                    "import os, sys\nsys.exit(int(os.environ['F20']))\n",
+                    "import os, pathlib, sys\n"
+                    "pathlib.Path(os.environ['SNAPSHOTS']).open('a').write('f20\\n')\n"
+                    "sys.stderr.write(os.environ['F20_STDERR'])\n"
+                    "sys.exit(int(os.environ['F20']))\n",
                     encoding="ascii",
                     newline="\n",
                 )
                 outer.write_text(
-                    "import os, pathlib\npathlib.Path(os.environ['OUTER']).open('a').write('call\\n')\n",
+                    "import os, pathlib, sys\n"
+                    "pathlib.Path(os.environ['OUTER']).open('a').write(sys.argv[1]+'|'+sys.argv[2]+'\\n')\n"
+                    "if sys.argv[1] == 'f19-after': pathlib.Path(sys.argv[5]).write_text('receipt')\n"
+                    "sys.exit(int(os.environ['OUTER_STATUS']))\n",
                     encoding="ascii",
                     newline="\n",
                 )
@@ -7757,6 +7786,8 @@ Description: Backup program for disk arrays
                             "f29_outer_f20_receipt=$work/outer-f20.json",
                             "f19_capture_status_file=$work/f19.status",
                             "f20_capture_status_file=$work/f20.status",
+                            'chmod() { if [[ ${CHMOD_FAILS:-0} == 1 ]]; then return 1; fi; command chmod "$@"; }',
+                            'rm() { if [[ ${RM_FAILS:-0} == 1 ]]; then return 1; fi; command rm "$@"; }',
                             function,
                             "f19_capture_after_failure 1 99 main phase12-command",
                         )
@@ -7767,6 +7798,7 @@ Description: Backup program for disk arrays
                 )
                 args = root / "args.txt"
                 outer_log = root / "outer.log"
+                snapshots = root / "snapshots.log"
                 completed = subprocess.run(
                     ["bash", str(script)],
                     text=True,
@@ -7776,8 +7808,14 @@ Description: Backup program for disk arrays
                         **os.environ,
                         "F19": str(f19_status),
                         "F20": str(f20_status),
+                        "F19_STDERR": f19_stderr,
+                        "F20_STDERR": f20_stderr,
+                        "CHMOD_FAILS": "1" if chmod_fails else "0",
+                        "RM_FAILS": "1" if rm_fails else "0",
+                        "OUTER_STATUS": str(outer_status),
                         "ARGS": str(args),
                         "OUTER": str(outer_log),
+                        "SNAPSHOTS": str(snapshots),
                     },
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -7787,22 +7825,59 @@ Description: Backup program for disk arrays
                     outer_log.read_text(encoding="ascii").splitlines()
                     if outer_log.exists()
                     else [],
+                    snapshots.read_text(encoding="ascii").splitlines(),
                     args.read_text(encoding="utf-8"),
                 )
 
         with self.subTest(case="both-success"):
-            f19_capture, f20_capture, outer_calls, args = run_case(0, 0)
+            f19_capture, f20_capture, outer_calls, snapshots, args = run_case(0, 0)
             self.assertEqual((f19_capture, f20_capture), ("0\n", "0\n"))
             self.assertEqual(outer_calls, [])
+            self.assertEqual(snapshots, ["f19", "f20"])
             self.assertIn("|1|99|main|phase12-command", f"|{args}")
-        with self.subTest(case="f19-fail"):
-            f19_capture, f20_capture, outer_calls, _ = run_case(41, 0)
+        with self.subTest(case="nonempty-stderr"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
+                0, 0, f19_stderr="unexpected\n"
+            )
+            self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
+            self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="f19-nonzero"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(41, 0)
             self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
-            self.assertEqual(outer_calls, ["call"])
-        with self.subTest(case="both-fail"):
-            f19_capture, f20_capture, outer_calls, _ = run_case(41, 42)
+            self.assertEqual(outer_calls, ["f19-after|41"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="f20-nonzero"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(0, 42)
+            self.assertEqual((f19_capture, f20_capture), ("42\n", "42\n"))
+            self.assertEqual(outer_calls, ["f20-after|42"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="permission-failure-after-zero"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
+                0, 0, chmod_fails=True
+            )
+            self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
+            self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="owned-removal-failure-after-empty-zero"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
+                0, 0, rm_fails=True
+            )
+            self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
+            self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="f19-and-f20-fail-first-status-wins"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(41, 42)
             self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
-            self.assertEqual(outer_calls, ["call", "call"])
+            self.assertEqual(outer_calls, ["f19-after|41"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="outer-failure-preserves-capture-status"):
+            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
+                41, 0, outer_status=9
+            )
+            self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
+            self.assertEqual(outer_calls, ["f19-after|41"])
+            self.assertEqual(snapshots, ["f19", "f20"])
 
     def test_f23_instrumentation_preserves_the_single_systemctl_call(self) -> None:
         payload = (
