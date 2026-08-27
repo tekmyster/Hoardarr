@@ -8,6 +8,7 @@ on:
       - backend/pyproject.toml
       - backend/uv.lock
       - backend/src/hoardarr/operations/**
+      - backend/src/hoardarr/connectivity/**
       - backend/src/hoardarr/storage/**
       - backend/src/hoardarr/api/routes/storage.py
       - backend/src/hoardarr/api/routes/storage_groups.py
@@ -28,6 +29,44 @@ concurrency:
   group: storage-integration-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  managed-zvol-lio-lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+      - run: uv sync --project backend --locked --all-groups
+      - name: Install disposable ZFS, LIO, and initiator tools
+        run: sudo apt-get update && sudo apt-get install -y e2fsprogs jq open-iscsi targetcli-fb zfsutils-linux
+      - name: Exercise real managed-zvol LIO lifecycle
+        run: |
+          sudo touch /.hoardarr-disposable-runner
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID \
+            env HOARDARR_TEST_PYTHON="$PWD/backend/.venv/bin/python" \
+            bash tests/integration/run-managed-zvol-lio-lifecycle.sh
+      - name: Validate bounded managed-zvol lifecycle evidence
+        run: |
+          jq -e '.schema_version == 1 and .classification == "VERIFIED IN ISOLATION" and
+            .topology.loop_count == 6 and .topology.raidz2_vdev_count == 1 and
+            .topology.raidz2_member_count == 6 and .topology.zvol_count == 1 and
+            .executor.production_used and .executor.initial_apply_active and
+            .executor.block_backstore and .executor.lun_zero and .executor.portal_exact and
+            .executor.acl_exact and .executor.chap_equality_booleans and
+            .executor.idempotent_apply and .executor.state_only_recovery and
+            .executor.restart_restored and .executor.remove_absent and
+            .executor.destructive_delete_rejected_before_mutation and
+            .initiator.by_path_identity and .initiator.bounded_io and
+            .initiator.data_hash_equal and .retention.backing_retained and
+            .counters.production_targetcli_calls == 2 and
+            .counters.production_state_writes == 3 and
+            ([.prohibited_actions[]] | add) == 0 and .cleanup_complete' \
+            dist/validation/managed-zvol-lio-lifecycle.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: managed-zvol-lio-lifecycle-evidence
+          path: dist/validation/managed-zvol-lio-lifecycle.json
   storage-group-drain-lifecycle:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
