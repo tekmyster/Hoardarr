@@ -158,6 +158,15 @@ DIAGNOSTIC_CLASSIFICATIONS = {
     "generic_login_rejection",
     "unclassified_bounded",
 }
+RAW_INTEGRITY_STAGES = (
+    "after_logout",
+    "after_idempotent_apply",
+    "after_state_only_reconciliation",
+    "after_saveconfig",
+    "after_target_persistence_restart",
+    "after_persistence_readback",
+    "after_post_restart_idempotent_apply",
+)
 
 
 def validate_guard(
@@ -572,11 +581,13 @@ def validate_receipt(document: object) -> dict[str, Any]:
     prelogin = document.get("prelogin")
     login = document.get("login")
     cleanup = document.get("cleanup")
+    raw_integrity_timeline = document.get("raw_integrity_timeline")
     if (
         not isinstance(parity, dict)
         or not isinstance(prelogin, dict)
         or not isinstance(login, dict)
         or not isinstance(cleanup, dict)
+        or not isinstance(raw_integrity_timeline, dict)
     ):
         raise LifecycleGuardError("receipt sections are invalid")
     tpg_authentication = prelogin.get("tpg_authentication")
@@ -826,6 +837,68 @@ def validate_receipt(document: object) -> dict[str, Any]:
         and login.get("succeeded") is not True
     ):
         raise LifecycleGuardError("successful login classification is inconsistent")
+    if (
+        set(raw_integrity_timeline)
+        != {
+            "schema_version",
+            "checkpoints",
+            "first_mismatch_stage",
+            "final_comparison_attempted",
+        }
+        or raw_integrity_timeline.get("schema_version") != 1
+    ):
+        raise LifecycleGuardError("raw integrity timeline is invalid")
+    checkpoints = raw_integrity_timeline.get("checkpoints")
+    first_mismatch_stage = raw_integrity_timeline.get("first_mismatch_stage")
+    if (
+        not isinstance(checkpoints, list)
+        or len(checkpoints) > len(RAW_INTEGRITY_STAGES)
+        or first_mismatch_stage not in {"NONE", *RAW_INTEGRITY_STAGES}
+        or not isinstance(
+            raw_integrity_timeline.get("final_comparison_attempted"), bool
+        )
+    ):
+        raise LifecycleGuardError("raw integrity timeline is invalid")
+    if [checkpoint.get("stage") for checkpoint in checkpoints] != list(
+        RAW_INTEGRITY_STAGES[: len(checkpoints)]
+    ):
+        raise LifecycleGuardError("raw integrity timeline is invalid")
+    mismatches: list[str] = []
+    for index, checkpoint in enumerate(checkpoints):
+        if (
+            not isinstance(checkpoint, dict)
+            or set(checkpoint) != {"stage", "baseline_equal", "previous_equal"}
+            or checkpoint.get("stage") != RAW_INTEGRITY_STAGES[index]
+            or not isinstance(checkpoint.get("baseline_equal"), bool)
+            or not isinstance(checkpoint.get("previous_equal"), bool)
+        ):
+            raise LifecycleGuardError("raw integrity timeline is invalid")
+        if checkpoint["baseline_equal"] is False:
+            mismatches.append(checkpoint["stage"])
+    expected_first_mismatch = mismatches[0] if mismatches else "NONE"
+    if first_mismatch_stage != expected_first_mismatch:
+        raise LifecycleGuardError("raw integrity timeline is invalid")
+    if not mismatches and any(
+        checkpoint["previous_equal"] is not True for checkpoint in checkpoints
+    ):
+        raise LifecycleGuardError("raw integrity timeline is invalid")
+    if checkpoints and (
+        checkpoints[0]["baseline_equal"] is not True
+        or checkpoints[0]["previous_equal"] is not True
+    ):
+        raise LifecycleGuardError("raw integrity timeline is invalid")
+    if mismatches:
+        mismatch_index = RAW_INTEGRITY_STAGES.index(first_mismatch_stage)
+        if checkpoints[mismatch_index]["previous_equal"] is not False or any(
+            checkpoint["baseline_equal"] is not True
+            or checkpoint["previous_equal"] is not True
+            for checkpoint in checkpoints[:mismatch_index]
+        ):
+            raise LifecycleGuardError("raw integrity timeline is invalid")
+    if raw_integrity_timeline["final_comparison_attempted"] is True and len(
+        checkpoints
+    ) != len(RAW_INTEGRITY_STAGES):
+        raise LifecycleGuardError("raw integrity timeline is invalid")
     if cleanup.get("classification") not in CLEANUP_CLASSIFICATIONS:
         raise LifecycleGuardError("cleanup classification is invalid")
     budget = cleanup.get("total_budget_seconds")

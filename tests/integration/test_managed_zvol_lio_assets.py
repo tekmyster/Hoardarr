@@ -14,6 +14,7 @@ from managed_zvol_lio_lifecycle import (
     CLEANUP_PHASES,
     CLEANUP_TIMEOUTS,
     DIAGNOSTIC_LIMIT,
+    RAW_INTEGRITY_STAGES,
     DiagnosticError,
     LifecycleGuardError,
     NodeParityError,
@@ -227,6 +228,19 @@ def _receipt(
                 },
             },
         },
+        "raw_integrity_timeline": {
+            "schema_version": 1,
+            "checkpoints": [
+                {
+                    "stage": stage,
+                    "baseline_equal": True,
+                    "previous_equal": True,
+                }
+                for stage in RAW_INTEGRITY_STAGES
+            ],
+            "first_mismatch_stage": "NONE",
+            "final_comparison_attempted": True,
+        },
         "cleanup": {
             "classification": "cleanup_complete",
             "total_budget_seconds": 191,
@@ -321,6 +335,147 @@ def _receipt(
             }
         )
     return receipt
+
+
+@pytest.mark.parametrize("mismatch_index", range(1, len(RAW_INTEGRITY_STAGES)))
+def test_raw_integrity_timeline_accepts_each_possible_first_mismatch(
+    mismatch_index: int,
+) -> None:
+    receipt = _receipt()
+    timeline = receipt["raw_integrity_timeline"]
+    assert isinstance(timeline, dict)
+    checkpoints = timeline["checkpoints"]
+    assert isinstance(checkpoints, list)
+    checkpoint = checkpoints[mismatch_index]
+    assert isinstance(checkpoint, dict)
+    checkpoint.update({"baseline_equal": False, "previous_equal": False})
+    timeline["first_mismatch_stage"] = RAW_INTEGRITY_STAGES[mismatch_index]
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda timeline: timeline.pop("schema_version"),
+        lambda timeline: timeline.update({"extra": True}),
+        lambda timeline: timeline.update({"first_mismatch_stage": "unknown"}),
+        lambda timeline: timeline["checkpoints"].pop(1),
+        lambda timeline: timeline["checkpoints"].append(
+            {
+                "stage": "after_post_restart_idempotent_apply",
+                "baseline_equal": True,
+                "previous_equal": True,
+            }
+        ),
+        lambda timeline: timeline["checkpoints"].reverse(),
+        lambda timeline: timeline["checkpoints"][1].update({"stage": "after_logout"}),
+        lambda timeline: timeline["checkpoints"][1].update({"baseline_equal": "true"}),
+        lambda timeline: timeline["checkpoints"][1].update({"previous_equal": "true"}),
+        lambda timeline: timeline["checkpoints"][1].update({"previous_equal": False}),
+        lambda timeline: timeline.update(
+            {"first_mismatch_stage": "after_idempotent_apply"}
+        ),
+    ],
+)
+def test_raw_integrity_timeline_rejects_shape_order_and_boolean_tampering(
+    mutation: object,
+) -> None:
+    receipt = _receipt()
+    timeline = receipt["raw_integrity_timeline"]
+    assert isinstance(timeline, dict)
+    mutation(timeline)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError, match="raw integrity timeline"):
+        validate_receipt(receipt)
+
+
+def test_raw_integrity_timeline_rejects_impossible_first_checkpoint_and_prefix() -> (
+    None
+):
+    receipt = _receipt()
+    timeline = receipt["raw_integrity_timeline"]
+    assert isinstance(timeline, dict)
+    checkpoints = timeline["checkpoints"]
+    assert isinstance(checkpoints, list)
+    checkpoints[0]["baseline_equal"] = False
+    timeline["first_mismatch_stage"] = "after_logout"
+    with pytest.raises(LifecycleGuardError, match="raw integrity timeline"):
+        validate_receipt(receipt)
+
+
+def test_raw_integrity_timeline_allows_earlier_prefix_but_requires_all_rows_at_final() -> (
+    None
+):
+    receipt = _receipt()
+    timeline = receipt["raw_integrity_timeline"]
+    assert isinstance(timeline, dict)
+    checkpoints = timeline["checkpoints"]
+    assert isinstance(checkpoints, list)
+    checkpoints.pop()
+    timeline["final_comparison_attempted"] = False
+    validate_receipt(receipt)
+
+    timeline["final_comparison_attempted"] = True
+    with pytest.raises(LifecycleGuardError, match="raw integrity timeline"):
+        validate_receipt(receipt)
+
+
+def test_raw_integrity_timeline_rejects_non_boolean_final_comparison_flag() -> None:
+    receipt = _receipt()
+    timeline = receipt["raw_integrity_timeline"]
+    assert isinstance(timeline, dict)
+    timeline["final_comparison_attempted"] = "true"
+    with pytest.raises(LifecycleGuardError, match="raw integrity timeline"):
+        validate_receipt(receipt)
+
+    receipt = _receipt()
+    timeline = receipt["raw_integrity_timeline"]
+    assert isinstance(timeline, dict)
+    checkpoints = timeline["checkpoints"]
+    assert isinstance(checkpoints, list)
+    checkpoints.pop()
+    timeline["first_mismatch_stage"] = "after_post_restart_idempotent_apply"
+    with pytest.raises(LifecycleGuardError, match="raw integrity timeline"):
+        validate_receipt(receipt)
+
+
+def test_raw_integrity_timeline_is_sanitized_and_source_ordered() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    receipt = _receipt()
+    serialized = json.dumps(receipt, sort_keys=True)
+    assert "raw_hash_before" not in serialized
+    assert "zvol_device" not in serialized
+    assert script.count("record_raw_integrity_checkpoint") == 8
+    stages = [
+        f'record_raw_integrity_checkpoint "{stage}"' for stage in RAW_INTEGRITY_STAGES
+    ]
+    assert [script.index(stage) for stage in stages] == sorted(
+        script.index(stage) for stage in stages
+    )
+    assert script.count("targetcli saveconfig >/dev/null") == 2
+    assert script.count("systemctl restart rtslib-fb-targetctl.service") == 1
+    assert script.count('restart_json="$(helper readback 2>/dev/null)"') == 1
+    assert script.count('post_restart_json="$(helper apply)"') == 1
+    assert script.index("targetcli saveconfig >/dev/null") < script.index(stages[3])
+    assert script.index(stages[3]) < script.index(
+        "systemctl restart rtslib-fb-targetctl.service"
+    )
+    assert script.index("systemctl restart rtslib-fb-targetctl.service") < script.index(
+        stages[4]
+    )
+    assert script.index(stages[4]) < script.rindex("restart_json=")
+    assert script.index("post_restart_json=") < script.index(stages[6])
+    final_attempt = "raw_integrity_final_comparison_attempted=true"
+    assert script.index(stages[6]) < script.rindex(final_attempt)
+    assert script.rindex(final_attempt) < script.rindex(
+        '[[ "$(sha256sum "$zvol_device"'
+    )
+    receipt_writer = script.split("write_receipt() {", 1)[1].split("finalize() {", 1)[0]
+    assert "raw_integrity_timeline" in receipt_writer
+    assert "raw_hash_before" not in receipt_writer
+    assert script.count("sync") == 1
+    assert script.count("--login") == 1
+    assert script.count("mkfs.ext4") == 1
+    assert script.count('mount "$by_path"') == 1
 
 
 def _tpg_saveconfig(authentication: object = 1) -> dict[str, object]:

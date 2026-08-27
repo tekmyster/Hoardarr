@@ -69,6 +69,13 @@ restart_json='{}'
 remove_json='{}'
 data_hash_before=""
 data_hash_after=""
+raw_integrity_stages=()
+raw_integrity_baseline_equal=()
+raw_integrity_previous_equal=()
+raw_integrity_previous_hash=""
+raw_integrity_first_mismatch_stage="NONE"
+raw_integrity_final_comparison_attempted=false
+raw_integrity_timeline_json='{"schema_version":1,"checkpoints":[],"first_mismatch_stage":"NONE","final_comparison_attempted":false}'
 pool_guid=""
 cleanup_started=false
 cleanup_first_failure="NONE"
@@ -391,9 +398,39 @@ build_cleanup_json() {
   fi
 }
 
+record_raw_integrity_checkpoint() {
+  local stage="$1" current baseline_equal=false previous_equal=false
+  current="$(sha256sum "$zvol_device" | awk '{print $1}')"
+  [[ "$current" == "$raw_hash_before" ]] && baseline_equal=true
+  [[ "$current" == "$raw_integrity_previous_hash" ]] && previous_equal=true
+  raw_integrity_stages+=("$stage")
+  raw_integrity_baseline_equal+=("$baseline_equal")
+  raw_integrity_previous_equal+=("$previous_equal")
+  if [[ "$baseline_equal" != true && "$raw_integrity_first_mismatch_stage" == "NONE" ]]; then
+    raw_integrity_first_mismatch_stage="$stage"
+  fi
+  raw_integrity_previous_hash="$current"
+}
+
+build_raw_integrity_timeline_json() {
+  local index separator="" checkpoint
+  raw_integrity_timeline_json='['
+  for index in "${!raw_integrity_stages[@]}"; do
+    printf -v checkpoint '{"stage":"%s","baseline_equal":%s,"previous_equal":%s}' \
+      "${raw_integrity_stages[$index]}" "${raw_integrity_baseline_equal[$index]}" \
+      "${raw_integrity_previous_equal[$index]}"
+    raw_integrity_timeline_json+="$separator$checkpoint"; separator=","
+  done
+  raw_integrity_timeline_json+=']'
+  printf -v raw_integrity_timeline_json '{"schema_version":1,"checkpoints":%s,"first_mismatch_stage":"%s","final_comparison_attempted":%s}' \
+    "$raw_integrity_timeline_json" "$raw_integrity_first_mismatch_stage" \
+    "$raw_integrity_final_comparison_attempted"
+}
+
 write_receipt() {
   local draft_tmp receipt_rc
   build_cleanup_json
+  build_raw_integrity_timeline_json
   mkdir -p "$receipt_dir"
   draft_tmp="$(mktemp "$receipt_dir/.managed-zvol-a5-draft.XXXXXX")"
   chmod 600 "$draft_tmp"
@@ -411,6 +448,7 @@ write_receipt() {
     --argjson bounded_io "$bounded_io_passed" --argjson idempotent "$idempotent_passed" \
     --argjson reconciled "$reconciled_passed" --argjson restart "$restart_passed" \
     --argjson remove "$remove_passed" --argjson backing_retained "$backing_retained" \
+    --argjson raw_integrity_timeline "$raw_integrity_timeline_json" \
     --arg cleanup_classification "$cleanup_classification" --arg cleanup_first_failure "$cleanup_first_failure" \
     --argjson cleanup_phases "$cleanup_phases_json" --argjson loop_release "$loop_release_json" \
     '{schema_version:2,classification:$classification,workflow:"storage-integration",
@@ -427,6 +465,7 @@ write_receipt() {
       downstream:{bounded_io:$bounded_io,idempotent_apply:$idempotent,
         state_only_recovery:$reconciled,target_persistence_restart:$restart,
         remove_absence:$remove,backing_retained:$backing_retained},
+      raw_integrity_timeline:$raw_integrity_timeline,
       cleanup:{classification:$cleanup_classification,first_failure:$cleanup_first_failure,
         total_budget_seconds:191,phases:$cleanup_phases,loop_release:$loop_release},
       prohibited_actions:{physical_media:0,host_or_vm:0,network_storage:0,multipath:0,
@@ -656,6 +695,8 @@ umount -- "$mountpoint"; mounted=false
 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --logout >/dev/null; logged_in=false
 udevadm settle
 raw_hash_before="$(sha256sum "$zvol_device" | awk '{print $1}')"
+raw_integrity_previous_hash="$raw_hash_before"
+record_raw_integrity_checkpoint "after_logout"
 bounded_io_passed=true
 
 state_hash_before="$(sha256sum "$state_file" | awk '{print $1}')"
@@ -667,6 +708,7 @@ idempotent_json="$(helper apply)"
 [[ "$(sha256sum "$state_file" | awk '{print $1}')" == "$state_hash_before" ]]
 [[ "$(stat -c %Y "$state_file")" == "$state_mtime_before" ]]
 [[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
+record_raw_integrity_checkpoint "after_idempotent_apply"
 idempotent_passed=true
 
 rm -f -- "$state_file"
@@ -674,15 +716,21 @@ reconciled_json="$(helper apply)"
 [[ "$(jq -r '.reconciled_existing and .counters.targetcli == 0 and .counters.state_writes == 1' <<<"$reconciled_json")" == "true" ]]
 [[ "$(jq -r .readback.evidence_sha256 <<<"$reconciled_json")" == "$initial_digest" ]]
 [[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
+record_raw_integrity_checkpoint "after_state_only_reconciliation"
 reconciled_passed=true
 
 targetcli saveconfig >/dev/null
+record_raw_integrity_checkpoint "after_saveconfig"
 systemctl restart rtslib-fb-targetctl.service
+record_raw_integrity_checkpoint "after_target_persistence_restart"
 restart_json=""
 for _attempt in $(seq 1 30); do if restart_json="$(helper readback 2>/dev/null)"; then break; fi; sleep 1; done
 [[ "$(jq -r .readback.evidence_sha256 <<<"$restart_json")" == "$initial_digest" ]]
+record_raw_integrity_checkpoint "after_persistence_readback"
 post_restart_json="$(helper apply)"
 [[ "$(jq -r '.already_active and .counters.targetcli == 0 and .counters.state_writes == 0' <<<"$post_restart_json")" == "true" ]]
+record_raw_integrity_checkpoint "after_post_restart_idempotent_apply"
+raw_integrity_final_comparison_attempted=true
 [[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
 restart_passed=true
 
