@@ -1,12 +1,22 @@
 # WO-OWNER-006-A2 result — exact standalone LIO managed-zvol readback
 
-Status: **IMPLEMENTED AND PUSHED — awaiting Supervisor QA**
+Status: **CORRECTED AND PUSHED — awaiting repeat Supervisor QA**
 
 Authority: ACC-087 / DEC-2026-08-26-127
 
 Implementation commit: `71f2a702716b2b2e59ee3dcd26ee8772766e38e8`
 
 Implementation tree: `21eaba234f9d39e29ec7303e6a79090d6d09268a`
+
+Parser correction commit: `8605d3f7772a6bb8da1fdbc91854d340b346e3e6`
+
+Parser correction tree: `389c55e9727f652b586b66d19f7e0db1a2c21916`
+
+## Supervisor correction
+
+Supervisor QA reproduced two under-4-MiB parser escapes in the original A2 result: an unrelated 5,000-level JSON array raised raw `RecursionError`, and an unrelated 5,000-digit JSON integer raised raw `ValueError` from Python's integer-conversion limit. Correction `8605d3f` changes only the JSON exception boundary so `RecursionError` and `ValueError` become the existing bounded `LioReadbackError`; the prior explicit `LioReadbackError` branch remains first and unchanged.
+
+Both exact inputs now have direct-reader and executor regressions. Direct reads return the generic bounded message and stable readback code. At executor level, each performs exactly two fake targetcli calls (the original apply plus the single allowed cleanup), returns `needs_attention=true`, and writes state 0 times. No success schema, targetcli script, executor ordering, cleanup policy or other production path changed. A concurrent non-overlapping H8I handoff commit `58a8db5` became the correction parent and was not edited or staged by A2.
 
 ## Certified inputs and ancestry
 
@@ -61,13 +71,14 @@ The A1 `_targetcli` mutation function is byte-identical and still appends exactl
 - Removal-readback failure: one remove call -> one failed absence read -> no retry and 0 state writes. A disposable prior state file remained byte-identical.
 - `delete_backing_data=true`: targetcli 0, readback 0, state read 0, state write 0.
 
-The eight executor-level file/structure reader negatives each made exactly two fake targetcli calls (apply plus the one allowed cleanup), one failed apply read, one failed absence read, and 0 state writes. The explicit apply mismatch and uncertain-cleanup cases each made two fake calls and 0 state writes. Successful apply/removal each made one fake mutation and one state write. Failed removal made one fake mutation, 0 retries and 0 state writes. Across every managed negative, backing-file allocation, truncate/fallocate, chmod/chown, unlink, format, mount, ZFS create/destroy and system-service commands were all 0.
+The ten executor-level file/structure/parser reader negatives each made exactly two fake targetcli calls (apply plus the one allowed cleanup), one failed apply read, one failed absence read, and 0 state writes. The explicit apply mismatch and uncertain-cleanup cases each made two fake calls and 0 state writes. Successful apply/removal each made one fake mutation and one state write. Failed removal made one fake mutation, 0 retries and 0 state writes. Across every managed negative, backing-file allocation, truncate/fallocate, chmod/chown, unlink, format, mount, ZFS create/destroy and system-service commands were all 0.
 
 ## QA and scope proof
 
 - Complete focused A2/A1 connectivity, API, worker, storage-volume and migration set: **207 passed, 1 expected Windows/POSIX descriptor skip**.
 - Fresh final parser/readback run after formatting and digest assertions: **56 passed**.
-- The matrix includes 9 direct file-reader negatives, 8 executor reader/state-write negatives, 22 selected-graph mutations, both wildcard mismatch directions, 4 CHAP disagreement cases, 3 removal-presence cases, proven and uncertain apply cleanup, successful/failed removal ordering, prior-state preservation and destructive-delete zero calls.
+- Correction-focused connectivity matrix: **95 passed, 1 expected Windows/POSIX descriptor skip**; exact reproduced-case selection: **4 passed**.
+- The corrected matrix includes 11 direct file/parser-reader negatives, 10 executor reader/state-write negatives, 22 selected-graph mutations, both wildcard mismatch directions, 4 CHAP disagreement cases, 3 removal-presence cases, proven and uncertain apply cleanup, successful/failed removal ordering, prior-state preservation and destructive-delete zero calls.
 - Ruff format/check on all four changed files: pass.
 - Python compile: pass.
 - `git diff --check`: pass.
