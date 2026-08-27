@@ -379,6 +379,88 @@ def main():
 raise SystemExit(main())
 """
 
+F29_F21_RUNNER_SCRIPT = r"""#!/usr/bin/python3
+from __future__ import annotations
+import hashlib, json, os, pathlib, re, stat, subprocess, sys
+
+SCHEMA=1
+MAX_OUTPUT=8*1024
+SECRET=re.compile(rb"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|Authorization:[ \t]*Bearer|(?:token|password|secret)=\S+)",re.IGNORECASE)
+KNOWN={
+    "F21 capture stderr unsafe or truncated":"UNSAFE_OR_TRUNCATED",
+    "F21 capture stderr encoding invalid":"ENCODING_INVALID",
+    "F21 capture stderr framing invalid":"FRAMING_INVALID",
+    "F21 capture argv invalid":"ARGV_INVALID",
+    "F21 capture path escapes fixture":"PATH_IDENTITY_INVALID",
+    "F21 capture path identity invalid":"PATH_IDENTITY_INVALID",
+    "F21 capture stderr metadata invalid":"METADATA_INVALID",
+    "F21 capture record already exists":"OUTPUT_EXISTS",
+}
+
+def regular(path,mode):
+    try: meta=path.lstat()
+    except OSError: raise SystemExit("F29 required path is unavailable")
+    if not stat.S_ISREG(meta.st_mode) or path.is_symlink() or meta.st_uid!=0 or meta.st_gid!=0 or stat.S_IMODE(meta.st_mode)!=mode or meta.st_nlink!=1: raise SystemExit("F29 required path metadata is invalid")
+    return meta
+
+def source_file(path):
+    try: meta=path.lstat()
+    except OSError: raise SystemExit("F29 source is unavailable")
+    if not stat.S_ISREG(meta.st_mode) or path.is_symlink() or stat.S_IMODE(meta.st_mode)!=0o644 or meta.st_nlink!=1: raise SystemExit("F29 source metadata is invalid")
+    return meta
+
+def classify(raw):
+    if not raw: return "EMPTY"
+    if len(raw)>MAX_OUTPUT or SECRET.search(raw): return "UNSAFE_OR_TRUNCATED"
+    try: text=raw.decode("utf-8")
+    except UnicodeDecodeError: return "ENCODING_INVALID"
+    if text.count("\n")!=1 or not text.endswith("\n") or "\r" in text: return "FRAMING_INVALID"
+    message=text[:-1]
+    if message in KNOWN: return KNOWN[message]
+    if "Permission denied" in message: return "PERMISSION_DENIED"
+    if "Traceback" in message or "Exception" in message: return "PYTHON_EXCEPTION_SANITIZED"
+    return "UNCLASSIFIED_BOUNDED"
+
+def main():
+    if len(sys.argv)!=9: raise SystemExit("F29 runner argv invalid")
+    stage,status_text,stderr_arg,source_arg,output_arg,attempt_arg,work_arg,source_sha=sys.argv[1:]
+    if stage not in {"f19-after","f20-after"} or not re.fullmatch(r"[1-9][0-9]{0,2}",status_text) or int(status_text)>255: raise SystemExit("F29 runner stage or status is invalid")
+    work=pathlib.Path(work_arg).resolve(strict=True)
+    stderr_path=pathlib.Path(stderr_arg); source=pathlib.Path(source_arg); output=pathlib.Path(output_arg); attempt=pathlib.Path(attempt_arg)
+    if stderr_path.parent.resolve(strict=True)!=work or stderr_path.name!=stage+".stderr" or output.parent.resolve(strict=True)!=work or output.name!="f21-capture-error.json" or attempt.parent.resolve(strict=True)!=work or attempt.name!="f29-f21-attempt.json": raise SystemExit("F29 runner path identity is invalid")
+    if source.parent.resolve(strict=True)!=work.parent.resolve(strict=True) or source.name!="f21-capture-error.py" or not re.fullmatch(r"[0-9a-f]{64}",source_sha): raise SystemExit("F29 runner source identity is invalid")
+    regular(stderr_path,0o600); source_file(source)
+    if hashlib.sha256(source.read_bytes()).hexdigest()!=source_sha: raise SystemExit("F29 runner source digest is invalid")
+    if output.exists() or output.is_symlink() or attempt.exists() or attempt.is_symlink() or attempt.with_suffix(attempt.suffix+".partial").exists(): raise SystemExit("F29 runner output exists")
+    timed_out=False
+    try:
+        child=subprocess.run([sys.executable,str(source),stage,status_text,str(stderr_path),str(output),str(work)],capture_output=True,check=False,timeout=15)
+        child_status=child.returncode; stdout=child.stdout; stderr=child.stderr
+    except subprocess.TimeoutExpired as exc:
+        timed_out=True; child_status=124; stdout=exc.stdout or b""; stderr=exc.stderr or b""
+    if len(stdout)>MAX_OUTPUT or len(stderr)>MAX_OUTPUT: stdout=stdout[:MAX_OUTPUT+1]; stderr=stderr[:MAX_OUTPUT+1]
+    if child_status==0:
+        if not output.exists() or output.is_symlink(): raise SystemExit("F29 successful child did not create F21 receipt")
+        return 0
+    receipt={"schema_version":SCHEMA,"stage":stage,"snapshot_status":int(status_text),"child_status":child_status,"timed_out":timed_out,"stdout_size":len(stdout),"stdout_sha256":hashlib.sha256(stdout).hexdigest(),"stderr_size":len(stderr),"stderr_sha256":hashlib.sha256(stderr).hexdigest(),"stderr_class":classify(stderr),"source_sha256":source_sha}
+    encoded=(json.dumps(receipt,sort_keys=True,separators=(",",":"))+"\n").encode("ascii")
+    if len(encoded)>2048: raise SystemExit("F29 runner receipt exceeds cap")
+    partial=attempt.with_suffix(attempt.suffix+".partial")
+    fd=os.open(partial,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,"wb") as stream: stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+    try:
+        os.link(partial,attempt,follow_symlinks=False)
+    except FileExistsError:
+        raise SystemExit("F29 attempt receipt already exists")
+    finally:
+        try: partial.unlink()
+        except FileNotFoundError: pass
+    with attempt.open("rb") as stream: os.fsync(stream.fileno())
+    regular(attempt,0o600)
+    return child_status
+raise SystemExit(main())
+"""
+
 F23_SYSTEMCTL_OUTPUT_MAX_BYTES = 8 * 1024
 F24_SYSTEMCTL_OUTPUT_MAX_LINES = 64
 F24_SYSTEMCTL_OUTPUT_MAX_LINE_BYTES = 512
@@ -2000,6 +2082,78 @@ def _validate_f21_capture_error(
         or receipt["stderr_mode"] != "0600"
     ):
         raise AssertionError("F21 capture-error values are invalid")
+    return receipt, hashlib.sha256(raw).hexdigest()
+
+
+F29_F21_ATTEMPT_MAX_BYTES = 2048
+F29_F21_OUTPUT_MAX_BYTES = 8 * 1024 + 1
+F29_F21_CLASSES = {
+    "EMPTY",
+    "UNSAFE_OR_TRUNCATED",
+    "ENCODING_INVALID",
+    "FRAMING_INVALID",
+    "ARGV_INVALID",
+    "PATH_IDENTITY_INVALID",
+    "METADATA_INVALID",
+    "OUTPUT_EXISTS",
+    "PERMISSION_DENIED",
+    "PYTHON_EXCEPTION_SANITIZED",
+    "UNCLASSIFIED_BOUNDED",
+}
+
+
+def _validate_f29_f21_attempt(
+    path: pathlib.Path, fixture_root: pathlib.Path, expected_source_sha256: str
+) -> tuple[dict[str, object], str]:
+    raw = _read_strict_root_file(
+        path,
+        fixture_root,
+        expected_name="f29-f21-attempt.json",
+        max_bytes=F29_F21_ATTEMPT_MAX_BYTES,
+    )
+    if not raw or not raw.endswith(b"\n"):
+        raise AssertionError("F29 attempt framing is invalid")
+    try:
+        receipt = json.loads(raw.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssertionError("F29 attempt JSON is invalid") from exc
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "stage",
+        "snapshot_status",
+        "child_status",
+        "timed_out",
+        "stdout_size",
+        "stdout_sha256",
+        "stderr_size",
+        "stderr_sha256",
+        "stderr_class",
+        "source_sha256",
+    }:
+        raise AssertionError("F29 attempt schema is not exact")
+    if (
+        receipt["schema_version"] != 1
+        or receipt["stage"] not in {"f19-after", "f20-after"}
+        or not isinstance(receipt["snapshot_status"], int)
+        or not 1 <= receipt["snapshot_status"] <= 255
+        or not isinstance(receipt["child_status"], int)
+        or not 1 <= receipt["child_status"] <= 255
+        or type(receipt["timed_out"]) is not bool
+        or receipt["timed_out"] is not (receipt["child_status"] == 124)
+        or receipt["stderr_class"] not in F29_F21_CLASSES
+        or receipt["source_sha256"] != expected_source_sha256
+    ):
+        raise AssertionError("F29 attempt values are invalid")
+    for key in ("stdout_size", "stderr_size"):
+        if (
+            not isinstance(receipt[key], int)
+            or isinstance(receipt[key], bool)
+            or not 0 <= receipt[key] <= F29_F21_OUTPUT_MAX_BYTES
+        ):
+            raise AssertionError("F29 attempt output size is invalid")
+    for key in ("stdout_sha256", "stderr_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(receipt[key])):
+            raise AssertionError("F29 attempt output digest is invalid")
     return receipt, hashlib.sha256(raw).hexdigest()
 
 
@@ -4779,6 +4933,15 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                 encoding="utf-8",
                 newline="\n",
             )
+            f29_f21_runner = root / "f29-f21-runner.py"
+            f29_f21_runner.write_text(
+                F29_F21_RUNNER_SCRIPT,
+                encoding="utf-8",
+                newline="\n",
+            )
+            f21_capture_error_sha256 = hashlib.sha256(
+                f21_capture_error.read_bytes()
+            ).hexdigest()
             host_sysv_before, host_sysv_before_sha256 = _capture_f20_host_manifest()
 
             harness = root / "pcp-service-guard.sh"
@@ -4813,6 +4976,8 @@ f19_snapshot="$8"
 f19_finalizer_source="$9"
 f20_snapshot="${10}"
 f21_capture_error="${11}"
+f29_f21_runner="${12}"
+f21_capture_error_sha256="${13}"
 trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
 mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install,f20-sysv/init.d}
@@ -5283,6 +5448,7 @@ f20_before="$work/f20-before.json"
 f20_after="$work/f20-after.json"
 f20_capture_status_file="$work/f20-capture-status.txt"
 f21_capture_error_receipt="$work/f21-capture-error.json"
+f29_f21_attempt_receipt="$work/f29-f21-attempt.json"
 python3 "$f19_snapshot" before "$f19_before" "$f19_finalizer_source" \
     "$phase09_outcomes" "$f19_command_trace" 0 0 none none
 python3 "$f20_snapshot" before "$f20_before" "$work" "$work/f20-sysv"
@@ -5306,8 +5472,9 @@ f19_capture_after_failure() {
         [[ ! -s "$snapshot_stderr" ]] || snapshot_status=126
         rm -f -- "$snapshot_stderr" || snapshot_status=126
     else
-        python3 "$f21_capture_error" f19-after "$snapshot_status" \
-            "$snapshot_stderr" "$f21_capture_error_receipt" "$work" || :
+        python3 "$f29_f21_runner" f19-after "$snapshot_status" \
+            "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
+            "$f29_f21_attempt_receipt" "$work" "$f21_capture_error_sha256" || :
         capture_status="$snapshot_status"
     fi
     snapshot_status=0
@@ -5320,8 +5487,9 @@ f19_capture_after_failure() {
         rm -f -- "$snapshot_stderr" || snapshot_status=126
     else
         if [[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]; then
-            python3 "$f21_capture_error" f20-after "$snapshot_status" \
-                "$snapshot_stderr" "$f21_capture_error_receipt" "$work" || :
+            python3 "$f29_f21_runner" f20-after "$snapshot_status" \
+                "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
+                "$f29_f21_attempt_receipt" "$work" "$f21_capture_error_sha256" || :
         fi
         (( capture_status != 0 )) || capture_status="$snapshot_status"
     fi
@@ -5497,6 +5665,8 @@ exit 0
             ownership_error: OSError | subprocess.TimeoutExpired | None = None
             precleanup_capture_error: tuple[dict[str, object], str] | None = None
             precleanup_capture_error_failure: AssertionError | None = None
+            precleanup_f29_attempt: tuple[dict[str, object], str] | None = None
+            precleanup_f29_attempt_failure: AssertionError | None = None
             f23_outputs: dict[str, dict[str, object]] | None = None
             f23_output_failure: AssertionError | None = None
             manager_receipt_diagnostic = ""
@@ -5524,6 +5694,8 @@ exit 0
                             str(finalizer_source),
                             str(f20_snapshot),
                             str(f21_capture_error),
+                            str(f29_f21_runner),
+                            f21_capture_error_sha256,
                         ],
                         text=True,
                         capture_output=True,
@@ -5543,6 +5715,16 @@ exit 0
                             )
                         except AssertionError as exc:
                             precleanup_capture_error_failure = exc
+                    f29_attempt_path = namespace_path / "f29-f21-attempt.json"
+                    if f29_attempt_path.exists() or f29_attempt_path.is_symlink():
+                        try:
+                            precleanup_f29_attempt = _validate_f29_f21_attempt(
+                                f29_attempt_path,
+                                namespace_path,
+                                f21_capture_error_sha256,
+                            )
+                        except AssertionError as exc:
+                            precleanup_f29_attempt_failure = exc
                     try:
                         f23_outputs = {
                             "stdout": _validate_f23_systemctl_output(
@@ -5654,24 +5836,48 @@ exit 0
                         "F21 snapshot capture failed without a valid sanitized "
                         f"record: {precleanup_capture_error_failure}\n{trace_text}"
                     )
-                if precleanup_capture_error is None:
+                if precleanup_capture_error is not None:
+                    capture_error, capture_error_sha256 = precleanup_capture_error
                     self.fail(
-                        "F21 snapshot capture failed without a root-owned receipt\n"
+                        "F21 validated capture error: "
+                        f"stage={capture_error['stage']} "
+                        f"status={capture_error['status']} "
+                        f"stderr_class={capture_error['stderr_class']} "
+                        f"stderr_size={capture_error['stderr_size']} "
+                        f"stderr_sha256={capture_error['stderr_sha256']} "
+                        f"receipt_sha256={capture_error_sha256}\n{trace_text}"
+                    )
+                if precleanup_f29_attempt_failure is not None:
+                    self.fail(
+                        "F29 runner failed without a valid root-owned receipt: "
+                        f"{precleanup_f29_attempt_failure}\n{trace_text}"
+                    )
+                if precleanup_f29_attempt is None:
+                    self.fail(
+                        "F21 snapshot capture failed without an F29 root-owned receipt\n"
                         + trace_text
                     )
-                capture_error, capture_error_sha256 = precleanup_capture_error
+                attempt, attempt_sha256 = precleanup_f29_attempt
                 self.fail(
-                    "F21 validated capture error: "
-                    f"stage={capture_error['stage']} "
-                    f"status={capture_error['status']} "
-                    f"stderr_class={capture_error['stderr_class']} "
-                    f"stderr_size={capture_error['stderr_size']} "
-                    f"stderr_sha256={capture_error['stderr_sha256']} "
-                    f"receipt_sha256={capture_error_sha256}\n{trace_text}"
+                    "F29 validated sanitizer attempt: "
+                    f"stage={attempt['stage']} "
+                    f"snapshot_status={attempt['snapshot_status']} "
+                    f"child_status={attempt['child_status']} "
+                    f"timed_out={attempt['timed_out']} "
+                    f"stdout_size={attempt['stdout_size']} "
+                    f"stdout_sha256={attempt['stdout_sha256']} "
+                    f"stderr_size={attempt['stderr_size']} "
+                    f"stderr_sha256={attempt['stderr_sha256']} "
+                    f"stderr_class={attempt['stderr_class']} "
+                    f"receipt_sha256={attempt_sha256}\n{trace_text}"
                 )
             self.assertFalse(
                 (namespace_path / "f21-capture-error.json").exists()
                 or (namespace_path / "f21-capture-error.json").is_symlink()
+            )
+            self.assertFalse(
+                (namespace_path / "f29-f21-attempt.json").exists()
+                or (namespace_path / "f29-f21-attempt.json").is_symlink()
             )
             f20_before_receipt, f20_before_sha256 = _validate_f20_snapshot(
                 namespace_path / "f20-before.json", namespace_path, "before"
@@ -6970,6 +7176,197 @@ Description: Backup program for disk arrays
             self.assertEqual(duplicate.stderr, "F21 capture record already exists\n")
             self.assertEqual(output.read_text(encoding="ascii"), "preserved\n")
             outside.unlink()
+
+    def test_f29_runner_contract_and_validator_are_fail_closed(self) -> None:
+        compile(F29_F21_RUNNER_SCRIPT, "f29-f21-runner.py", "exec")
+        prefix = F29_F21_RUNNER_SCRIPT.rsplit("raise SystemExit(main())", 1)[0]
+        namespace: dict[str, object] = {}
+        exec(  # noqa: S102 - execute only the fixed generated diagnostic helper
+            prefix, namespace
+        )
+        classify = namespace["classify"]
+        self.assertTrue(callable(classify))
+        classification_cases = {
+            b"": "EMPTY",
+            b"F21 capture stderr unsafe or truncated\n": "UNSAFE_OR_TRUNCATED",
+            b"F21 capture stderr encoding invalid\n": "ENCODING_INVALID",
+            b"F21 capture stderr framing invalid\n": "FRAMING_INVALID",
+            b"F21 capture argv invalid\n": "ARGV_INVALID",
+            b"F21 capture path identity invalid\n": "PATH_IDENTITY_INVALID",
+            b"F21 capture stderr metadata invalid\n": "METADATA_INVALID",
+            b"F21 capture record already exists\n": "OUTPUT_EXISTS",
+            b"Permission denied\n": "PERMISSION_DENIED",
+            b"Traceback fixture exception\n": "PYTHON_EXCEPTION_SANITIZED",
+            b"unclassified bounded fixture\n": "UNCLASSIFIED_BOUNDED",
+        }
+        for raw, expected in classification_cases.items():
+            with self.subTest(expected=expected):
+                self.assertEqual(classify(raw), expected)
+        for raw, expected in (
+            (b"\xff", "ENCODING_INVALID"),
+            (b"line-one\nline-two\n", "FRAMING_INVALID"),
+            (b"password=not-a-real-test-value\n", "UNSAFE_OR_TRUNCATED"),
+            (b"x" * (F29_F21_OUTPUT_MAX_BYTES + 1), "UNSAFE_OR_TRUNCATED"),
+        ):
+            with self.subTest(adversarial=expected):
+                self.assertEqual(classify(raw), expected)
+
+        expected_source = "a" * 64
+        valid = {
+            "schema_version": 1,
+            "stage": "f20-after",
+            "snapshot_status": 1,
+            "child_status": 7,
+            "timed_out": False,
+            "stdout_size": 0,
+            "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+            "stderr_size": 1,
+            "stderr_sha256": hashlib.sha256(b"x").hexdigest(),
+            "stderr_class": "UNCLASSIFIED_BOUNDED",
+            "source_sha256": expected_source,
+        }
+        raw = (json.dumps(valid, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "ascii"
+        )
+        with mock.patch(f"{__name__}._read_strict_root_file", return_value=raw):
+            receipt, receipt_hash = _validate_f29_f21_attempt(
+                pathlib.Path("fixture/f29-f21-attempt.json"),
+                pathlib.Path("fixture"),
+                expected_source,
+            )
+        self.assertEqual(receipt, valid)
+        self.assertEqual(receipt_hash, hashlib.sha256(raw).hexdigest())
+        for label, mutation in {
+            "missing": {key: value for key, value in valid.items() if key != "stage"},
+            "stage": {**valid, "stage": "other"},
+            "status": {**valid, "snapshot_status": 0},
+            "timeout": {**valid, "timed_out": True},
+            "output-size": {**valid, "stderr_size": F29_F21_OUTPUT_MAX_BYTES + 1},
+            "digest": {**valid, "stdout_sha256": "x" * 64},
+            "class": {**valid, "stderr_class": "arbitrary"},
+            "source": {**valid, "source_sha256": "b" * 64},
+        }.items():
+            candidate = (
+                json.dumps(mutation, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            with (
+                self.subTest(mutation=label),
+                mock.patch(
+                    f"{__name__}._read_strict_root_file", return_value=candidate
+                ),
+                self.assertRaises(AssertionError),
+            ):
+                _validate_f29_f21_attempt(
+                    pathlib.Path("fixture/f29-f21-attempt.json"),
+                    pathlib.Path("fixture"),
+                    expected_source,
+                )
+
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        phase12 = source.split(
+            "trace_begin 12-final-disable-readback final-disable-readback\n", 1
+        )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
+        self.assertEqual(phase12.count('python3 "$f29_f21_runner"'), 2)
+        self.assertNotIn('python3 "$f21_capture_error" f19-after', phase12)
+        self.assertNotIn('python3 "$f21_capture_error" f20-after', phase12)
+        self.assertEqual(phase12.count("disable_unmasked_units\n"), 1)
+        self.assertIn("timeout=15", F29_F21_RUNNER_SCRIPT)
+        self.assertIn("os.O_EXCL|os.O_NOFOLLOW", F29_F21_RUNNER_SCRIPT)
+        self.assertIn("return child_status", F29_F21_RUNNER_SCRIPT)
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "requires root-owned private receipt metadata and a POSIX subprocess",
+    )
+    def test_f29_runner_retains_one_root_owned_failed_child_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            work = root / "namespace"
+            work.mkdir()
+            source = root / "f21-capture-error.py"
+            source.write_text(
+                "import sys\nsys.stderr.write('F21 capture path identity invalid\\n')\nsys.exit(7)\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            source.chmod(0o644)
+            runner = root / "f29-f21-runner.py"
+            runner.write_text(F29_F21_RUNNER_SCRIPT, encoding="utf-8", newline="\n")
+            snapshot_stderr = work / "f20-after.stderr"
+            snapshot_stderr.write_bytes(b"F20 bounded fixture failure\n")
+            snapshot_stderr.chmod(0o600)
+            subprocess.run(
+                ["sudo", "-n", "chown", "0:0", "--", str(snapshot_stderr)],
+                check=True,
+            )
+            output = work / "f21-capture-error.json"
+            attempt = work / "f29-f21-attempt.json"
+            source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            command = [
+                "sudo",
+                "-n",
+                sys.executable,
+                str(runner),
+                "f20-after",
+                "1",
+                str(snapshot_stderr),
+                str(source),
+                str(output),
+                str(attempt),
+                str(work),
+                source_sha256,
+            ]
+            completed = subprocess.run(
+                command, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(completed.returncode, 7, completed.stderr)
+            self.assertEqual(completed.stdout, "")
+            receipt, _ = _validate_f29_f21_attempt(attempt, work, source_sha256)
+            self.assertEqual(receipt["child_status"], 7)
+            self.assertEqual(receipt["stderr_class"], "PATH_IDENTITY_INVALID")
+            before = attempt.read_bytes()
+            duplicate = subprocess.run(
+                command, text=True, capture_output=True, check=False
+            )
+            self.assertNotEqual(duplicate.returncode, 0)
+            self.assertEqual(attempt.read_bytes(), before)
+            for label, mutate in (
+                ("source-drift", lambda: source.write_text("x", encoding="ascii")),
+                ("output-collision", lambda: output.write_bytes(b"preserved\n")),
+            ):
+                with self.subTest(mutation=label):
+                    case = root / label
+                    case.mkdir()
+                    stderr_path = case / "f20-after.stderr"
+                    stderr_path.write_bytes(b"F20 bounded fixture failure\n")
+                    stderr_path.chmod(0o600)
+                    subprocess.run(
+                        ["sudo", "-n", "chown", "0:0", "--", str(stderr_path)],
+                        check=True,
+                    )
+                    candidate_output = case / "f21-capture-error.json"
+                    candidate_attempt = case / "f29-f21-attempt.json"
+                    if label == "output-collision":
+                        candidate_output.write_bytes(b"preserved\n")
+                    altered = [
+                        "sudo",
+                        "-n",
+                        sys.executable,
+                        str(runner),
+                        "f20-after",
+                        "1",
+                        str(stderr_path),
+                        str(source),
+                        str(candidate_output),
+                        str(candidate_attempt),
+                        str(case),
+                        source_sha256,
+                    ]
+                    rejected = subprocess.run(
+                        altered, text=True, capture_output=True, check=False
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(candidate_attempt.exists())
 
     def test_f23_instrumentation_preserves_the_single_systemctl_call(self) -> None:
         payload = (
