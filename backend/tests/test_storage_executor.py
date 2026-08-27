@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from concurrent.futures import CancelledError
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
@@ -1598,7 +1599,334 @@ def test_test_only_executor_finishes_without_mount_or_storage_command(
     assert result["topology"] == "test"
     assert result["mountpoint"] is None
     assert commands == []
+    assert result["action_results"] == [
+        {
+            "schema_version": 1,
+            "action_id": f"identity:{DEVICE_ID}",
+            "device_id": DEVICE_ID,
+            "type": "drive.identity.verify",
+            "outcome": "passed",
+            "code": "identity_verified",
+            "evidence": {
+                "kind": "immutable_device_revalidation",
+                "stable_plan_identity": DEVICE_ID,
+                "current_revalidation": "matched_selected_device",
+                "identity_facts": {"stable_identity": True},
+            },
+        }
+    ]
     assert storage_operation_status(str(request["operation_id"]), paths=paths)["percent"] == 100
+
+
+def _test_action_document(action_types: list[str]) -> dict[str, object]:
+    document = _document()
+    storage = document["storage"]
+    assert isinstance(storage, dict)
+    storage["topology"] = "test"
+    storage["actions"] = [
+        {
+            "action_id": f"action-{index}",
+            "type": action_type,
+            "device_id": DEVICE_ID,
+            "destructive": action_type == "drive.write_read.destructive",
+        }
+        for index, action_type in enumerate(action_types, start=1)
+    ]
+    storage["risk"] = {"destructive": any(item["destructive"] for item in storage["actions"])}
+    return document
+
+
+def _test_action_journal(count: int) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "state": "running",
+        "completed_actions": [],
+        "completed_steps": 0,
+        "total_steps": count,
+        "notices": [],
+        "action_results": [],
+        "current_action": None,
+    }
+
+
+def test_test_actions_publish_common_results_atomically_in_plan_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    action_types = [
+        "drive.identity.verify",
+        "drive.surface.read",
+        "drive.write_read.destructive",
+        "drive.smart.short",
+        "drive.smart.extended",
+    ]
+    document = _test_action_document(action_types)
+    paths = Paths(transaction_root=tmp_path / "transactions")
+    journal = _test_action_journal(len(action_types))
+    commands: list[tuple[list[str], int]] = []
+    writes: list[dict[str, object]] = []
+    real_atomic_json = executor.atomic_json
+
+    def capture(path: Path, payload: dict[str, object]) -> None:
+        writes.append(deepcopy(payload))
+        real_atomic_json(path, payload)
+
+    monkeypatch.setattr(executor, "atomic_json", capture)
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: _live_disk()})
+    monkeypatch.setattr(
+        executor,
+        "_run_smart_test",
+        lambda _device, kind, **_kwargs: {
+            "outcome": "passed",
+            "code": "smart_self_test_passed",
+            "message": "synthetic SMART success",
+            "test_kind": "extended" if kind == "long" else kind,
+            "started_at": 1.0,
+            "finished_at": 2.0,
+        },
+    )
+
+    result = executor._execute_actions(
+        operation_id="11111111-1111-4111-8111-111111111111",
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": [_live_disk()]},
+        runner=lambda command, timeout: commands.append((command, timeout)),
+        journal=journal,
+    )
+
+    assert commands == [
+        (["/usr/sbin/badblocks", "-sv", os.fspath(Path("/dev/sdz"))], 7 * 24 * 3600),
+        (["/usr/sbin/badblocks", "-wsv", os.fspath(Path("/dev/sdz"))], 14 * 24 * 3600),
+    ]
+    records = result["action_results"]
+    assert [item["type"] for item in records] == action_types
+    assert all(item["schema_version"] == 1 for item in records)
+    assert all(item["outcome"] == "passed" for item in records)
+    assert records[1]["evidence"]["target_capacity_bytes"] == 256_000_000_000
+    assert records[1]["evidence"]["command_profile"] == "badblocks_-sv_full_device"
+    assert records[2]["evidence"]["target_capacity_bytes"] == 256_000_000_000
+    assert records[2]["evidence"]["command_profile"] == "badblocks_-wsv_full_device"
+    for action_id in result["completed_actions"]:
+        published = [write for write in writes if action_id in write.get("completed_actions", [])]
+        assert published
+        assert any(
+            item.get("action_id") == action_id for item in published[0].get("action_results", [])
+        )
+
+
+@pytest.mark.parametrize("action_type", ["drive.surface.read", "drive.write_read.destructive"])
+@pytest.mark.parametrize(
+    "runner_error",
+    [
+        ExecutorFailure("synthetic_nonzero", "synthetic nonzero"),
+        InterruptedError("synthetic interruption"),
+        CancelledError("synthetic cancellation"),
+    ],
+)
+def test_test_action_runner_failure_never_publishes_result_or_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action_type: str,
+    runner_error: Exception,
+) -> None:
+    document = _test_action_document([action_type])
+    paths = Paths(transaction_root=tmp_path / "transactions")
+    journal = _test_action_journal(1)
+    monkeypatch.setattr(executor, "_tool", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: _live_disk()})
+
+    with pytest.raises(type(runner_error)):
+        executor._execute_actions(
+            operation_id="11111111-1111-4111-8111-111111111111",
+            document=document,
+            paths=paths,
+            inventory_provider=lambda: {"disks": [_live_disk()]},
+            runner=lambda *_args: (_ for _ in ()).throw(runner_error),
+            journal=journal,
+        )
+
+    persisted = json.loads(
+        (paths.transaction_root / "11111111-1111-4111-8111-111111111111.json").read_text()
+    )
+    assert persisted["completed_actions"] == []
+    assert persisted["action_results"] == []
+
+
+def test_test_action_invalid_capacity_fails_before_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _test_action_document(["drive.surface.read"])
+    live = {**_live_disk(), "capacity_bytes": None}
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: live})
+    called = False
+
+    def runner(*_args: object) -> None:
+        nonlocal called
+        called = True
+
+    with pytest.raises(ExecutorFailure) as failure:
+        executor._execute_actions(
+            operation_id="11111111-1111-4111-8111-111111111111",
+            document=document,
+            paths=Paths(transaction_root=tmp_path / "transactions"),
+            inventory_provider=lambda: {"disks": [live]},
+            runner=runner,
+            journal=_test_action_journal(1),
+        )
+    assert failure.value.code == "test_action_capacity_invalid"
+    assert called is False
+
+
+def test_smart_skip_uses_common_non_pass_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _test_action_document(["drive.smart.short"])
+    monkeypatch.setattr(executor, "_revalidate", lambda *_args: {DEVICE_ID: _live_disk()})
+    monkeypatch.setattr(
+        executor,
+        "_run_smart_test",
+        lambda *_args, **_kwargs: {
+            "outcome": "skipped",
+            "code": "smart_self_test_unavailable",
+            "message": "synthetic bridge does not expose the log",
+        },
+    )
+    result = executor._execute_actions(
+        operation_id="11111111-1111-4111-8111-111111111111",
+        document=document,
+        paths=Paths(transaction_root=tmp_path / "transactions"),
+        inventory_provider=lambda: {"disks": [_live_disk()]},
+        runner=lambda *_args: pytest.fail("SMART is synthetic"),
+        journal=_test_action_journal(1),
+    )
+    record = result["action_results"][0]
+    assert record["outcome"] == "skipped"
+    assert record["code"] == "smart_self_test_unavailable"
+    assert record["message"] == "synthetic bridge does not expose the log"
+    assert record["evidence"]["command_success"] is False
+
+
+def test_test_action_resume_is_idempotent_and_discards_orphan_before_reexecution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _test_action_document(["drive.identity.verify"])
+    action = document["storage"]["actions"][0]  # type: ignore[index]
+    record = executor._identity_result(action, _live_disk())
+    monkeypatch.setattr(executor, "_resume_revalidate", lambda *_args: {DEVICE_ID: _live_disk()})
+    paths = Paths(transaction_root=tmp_path / "transactions")
+
+    completed = _test_action_journal(1)
+    completed["completed_actions"] = ["action-1"]
+    completed["completed_steps"] = 1
+    completed["action_results"] = [record]
+    replay = executor._execute_actions(
+        operation_id="11111111-1111-4111-8111-111111111111",
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": [_live_disk()]},
+        runner=lambda *_args: pytest.fail("completed action must not rerun"),
+        journal=completed,
+        resume=True,
+    )
+    assert replay["action_results"] == [record]
+
+    orphan = _test_action_journal(1)
+    orphan["action_results"] = [record]
+    reexecuted = executor._execute_actions(
+        operation_id="22222222-2222-4222-8222-222222222222",
+        document=document,
+        paths=paths,
+        inventory_provider=lambda: {"disks": [_live_disk()]},
+        runner=lambda *_args: pytest.fail("identity has no command"),
+        journal=orphan,
+        resume=True,
+    )
+    assert reexecuted["completed_actions"] == ["action-1"]
+    assert reexecuted["action_results"] == [record]
+
+
+def test_legacy_checkpoint_without_result_and_identity_drift_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _test_action_document(["drive.identity.verify"])
+    legacy = _test_action_journal(1)
+    legacy["completed_actions"] = ["action-1"]
+    legacy["completed_steps"] = 1
+    monkeypatch.setattr(executor, "_resume_revalidate", lambda *_args: {DEVICE_ID: _live_disk()})
+    with pytest.raises(ExecutorFailure) as missing:
+        executor._execute_actions(
+            operation_id="11111111-1111-4111-8111-111111111111",
+            document=document,
+            paths=Paths(transaction_root=tmp_path / "transactions"),
+            inventory_provider=lambda: {"disks": [_live_disk()]},
+            runner=lambda *_args: pytest.fail("legacy checkpoint must not execute"),
+            journal=legacy,
+            resume=True,
+        )
+    assert missing.value.code == "test_action_result_missing"
+    assert missing.value.needs_attention is True
+
+    drifted = _test_action_journal(1)
+    monkeypatch.setattr(
+        executor,
+        "_resume_revalidate",
+        lambda *_args: (_ for _ in ()).throw(
+            ExecutorFailure("drive_identity_changed", "synthetic drift", needs_attention=True)
+        ),
+    )
+    with pytest.raises(ExecutorFailure) as drift:
+        executor._execute_actions(
+            operation_id="22222222-2222-4222-8222-222222222222",
+            document=document,
+            paths=Paths(transaction_root=tmp_path / "transactions"),
+            inventory_provider=lambda: {"disks": []},
+            runner=lambda *_args: pytest.fail("identity drift must not execute"),
+            journal=drifted,
+            resume=True,
+        )
+    assert drift.value.code == "drive_identity_changed"
+    assert drifted["completed_actions"] == []
+    assert drifted["action_results"] == []
+
+
+@pytest.mark.parametrize(
+    "tamper", ["duplicate", "wrong-device", "wrong-schema", "altered-evidence"]
+)
+def test_tampered_test_action_result_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    document = _test_action_document(["drive.identity.verify"])
+    action = document["storage"]["actions"][0]  # type: ignore[index]
+    record = executor._identity_result(action, _live_disk())
+    journal = _test_action_journal(1)
+    journal["completed_actions"] = ["action-1"]
+    journal["completed_steps"] = 1
+    if tamper == "duplicate":
+        journal["action_results"] = [record, record]
+    else:
+        changed = deepcopy(record)
+        if tamper == "altered-evidence":
+            changed["evidence"]["current_revalidation"] = "not-verified"
+        else:
+            changed["device_id" if tamper == "wrong-device" else "schema_version"] = (
+                "other" if tamper == "wrong-device" else 2
+            )
+        journal["action_results"] = [changed]
+    monkeypatch.setattr(executor, "_resume_revalidate", lambda *_args: {DEVICE_ID: _live_disk()})
+    with pytest.raises(ExecutorFailure) as failure:
+        executor._execute_actions(
+            operation_id="11111111-1111-4111-8111-111111111111",
+            document=document,
+            paths=Paths(transaction_root=tmp_path / "transactions"),
+            inventory_provider=lambda: {"disks": [_live_disk()]},
+            runner=lambda *_args: pytest.fail("tampered journal must not execute"),
+            journal=journal,
+            resume=True,
+        )
+    assert failure.value.code == "test_action_result_invalid"
+    assert failure.value.needs_attention is True
 
 
 def test_mixed_layout_executor_revalidates_and_builds_component_pools_before_mergerfs(

@@ -182,6 +182,16 @@ ACTION_ESTIMATED_SECONDS = {
     "filesystem.create": 45,
     "storage.layout.ensure": 15,
 }
+DRIVE_TEST_ACTION_TYPES = frozenset(
+    {
+        "drive.identity.verify",
+        "drive.surface.read",
+        "drive.smart.short",
+        "drive.smart.extended",
+        "drive.write_read.destructive",
+    }
+)
+ACTION_RESULT_OUTCOMES = frozenset({"passed", "failed", "skipped", "unsupported"})
 INITIAL_SURFACE_READ_BYTES_PER_SECOND = 100 * 1024 * 1024
 IDENTITY_FIELDS = (
     "id",
@@ -1672,6 +1682,230 @@ def _work_estimate(
     }
 
 
+def _bounded_identity_fact(value: Any) -> Any:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value[:128]
+    if isinstance(value, list) and len(value) <= 32:
+        return [
+            item[:128] if isinstance(item, str) else item
+            for item in value
+            if item is None or isinstance(item, (bool, int, str))
+        ]
+    if isinstance(value, Mapping) and len(value) <= 32:
+        return {
+            str(key)[:64]: _bounded_identity_fact(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+            and (
+                item is None
+                or isinstance(item, (bool, str))
+                or (isinstance(item, list) and len(item) <= 32)
+            )
+        }
+    return None
+
+
+def _identity_result(action: Mapping[str, Any], device: Mapping[str, Any]) -> dict[str, Any]:
+    facts = {"stable_identity": device.get("stable_identity") is True}
+    for name in (
+        "identity_confidence",
+        "identity_conflict",
+        "identity_conflicts",
+        "identity_stability",
+        "duplicate_identity",
+        "duplicate_identities",
+    ):
+        if name in device:
+            facts[name] = _bounded_identity_fact(device.get(name))
+    identity_evidence = device.get("identity_evidence")
+    if isinstance(identity_evidence, Mapping):
+        page_83 = identity_evidence.get("scsi_vpd_page_83")
+        if isinstance(page_83, Mapping):
+            for source_name, result_name in (
+                ("quality", "identity_evidence_quality"),
+                ("source", "identity_evidence_source"),
+                ("identity_conflict", "identity_evidence_conflict"),
+            ):
+                value = page_83.get(source_name)
+                if isinstance(value, (bool, str)):
+                    facts[result_name] = _bounded_identity_fact(value)
+    return {
+        "schema_version": 1,
+        "action_id": action["action_id"],
+        "device_id": action["device_id"],
+        "type": action["type"],
+        "outcome": "passed",
+        "code": "identity_verified",
+        "evidence": {
+            "kind": "immutable_device_revalidation",
+            "stable_plan_identity": action["device_id"],
+            "current_revalidation": "matched_selected_device",
+            "identity_facts": facts,
+        },
+    }
+
+
+def _test_capacity(device: Mapping[str, Any]) -> int:
+    capacity = device.get("capacity_bytes")
+    if (
+        isinstance(capacity, bool)
+        or not isinstance(capacity, int)
+        or capacity <= 0
+        or capacity > 2**63 - 1
+    ):
+        raise ExecutorFailure(
+            "test_action_capacity_invalid",
+            "The revalidated drive capacity is unavailable or invalid.",
+            needs_attention=True,
+        )
+    return capacity
+
+
+def _command_action_result(action: Mapping[str, Any], device: Mapping[str, Any]) -> dict[str, Any]:
+    action_type = str(action["type"])
+    destructive = action_type == "drive.write_read.destructive"
+    return {
+        "schema_version": 1,
+        "action_id": action["action_id"],
+        "device_id": action["device_id"],
+        "type": action_type,
+        "outcome": "passed",
+        "code": (
+            "destructive_write_read_completed" if destructive else "full_surface_read_completed"
+        ),
+        "evidence": {
+            "kind": "command_success",
+            "mode": "destructive_write_read" if destructive else "read_only",
+            "full_device_intended_coverage": True,
+            "target_capacity_bytes": _test_capacity(device),
+            "command_profile": (
+                "badblocks_-wsv_full_device" if destructive else "badblocks_-sv_full_device"
+            ),
+            "command_success": True,
+        },
+    }
+
+
+def _smart_action_result(action: Mapping[str, Any], outcome: Mapping[str, Any]) -> dict[str, Any]:
+    test_kind = "extended" if action["type"] == "drive.smart.extended" else "short"
+    return {
+        "schema_version": 1,
+        "action_id": action["action_id"],
+        "device_id": action["device_id"],
+        "type": action["type"],
+        **dict(outcome),
+        "evidence": {
+            "kind": "smart_self_test_result",
+            "test_kind": outcome.get("test_kind", test_kind),
+            "command_success": outcome.get("outcome") == "passed",
+        },
+    }
+
+
+def _validate_action_result(
+    result: Mapping[str, Any],
+    action: Mapping[str, Any],
+    device: Mapping[str, Any],
+) -> dict[str, Any]:
+    if (
+        result.get("schema_version") != 1
+        or result.get("action_id") != action.get("action_id")
+        or result.get("device_id") != action.get("device_id")
+        or result.get("type") != action.get("type")
+        or result.get("outcome") not in ACTION_RESULT_OUTCOMES
+        or not isinstance(result.get("code"), str)
+        or not re.fullmatch(r"[a-z0-9_]{1,64}", str(result.get("code")))
+        or not isinstance(result.get("evidence"), Mapping)
+    ):
+        raise ExecutorFailure(
+            "test_action_result_invalid",
+            "A durable drive-test result is invalid or does not match its plan action.",
+            needs_attention=True,
+        )
+    try:
+        encoded = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ExecutorFailure(
+            "test_action_result_invalid",
+            "A durable drive-test result contains invalid evidence.",
+            needs_attention=True,
+        ) from exc
+    if len(encoded.encode("utf-8")) > 16 * 1024:
+        raise ExecutorFailure(
+            "test_action_result_invalid",
+            "A durable drive-test result exceeds its evidence bound.",
+            needs_attention=True,
+        )
+    action_type = action.get("type")
+    if action_type == "drive.identity.verify" and dict(result) != _identity_result(action, device):
+        raise ExecutorFailure(
+            "test_action_result_invalid",
+            "The identity action result is not a verified success.",
+            needs_attention=True,
+        )
+    expected_code = {
+        "drive.surface.read": "full_surface_read_completed",
+        "drive.write_read.destructive": "destructive_write_read_completed",
+    }.get(str(action_type))
+    if expected_code is not None and dict(result) != _command_action_result(action, device):
+        raise ExecutorFailure(
+            "test_action_result_invalid",
+            "The command action result is not an explicit success.",
+            needs_attention=True,
+        )
+    if action_type in {"drive.smart.short", "drive.smart.extended"}:
+        expected_kind = "extended" if action_type == "drive.smart.extended" else "short"
+        evidence = result["evidence"]
+        outcome = result["outcome"]
+        expected_codes = {
+            "passed": "smart_self_test_passed",
+            "skipped": "smart_self_test_unavailable",
+        }
+        expected_keys = {
+            "schema_version",
+            "action_id",
+            "device_id",
+            "type",
+            "outcome",
+            "code",
+            "message",
+            "evidence",
+        }
+        if outcome == "passed":
+            expected_keys.update({"test_kind", "started_at", "finished_at"})
+        if (
+            outcome not in expected_codes
+            or result["code"] != expected_codes[outcome]
+            or set(result) != expected_keys
+            or dict(evidence)
+            != {
+                "kind": "smart_self_test_result",
+                "test_kind": result.get("test_kind", expected_kind),
+                "command_success": outcome == "passed",
+            }
+            or result.get("test_kind", expected_kind) != expected_kind
+            or not isinstance(result.get("message"), str)
+            or (
+                outcome == "passed"
+                and (
+                    isinstance(result.get("started_at"), bool)
+                    or not isinstance(result.get("started_at"), (int, float))
+                    or isinstance(result.get("finished_at"), bool)
+                    or not isinstance(result.get("finished_at"), (int, float))
+                    or result["finished_at"] < result["started_at"]
+                )
+            )
+        ):
+            raise ExecutorFailure(
+                "test_action_result_invalid",
+                "The SMART action result is invalid or has been altered.",
+                needs_attention=True,
+            )
+    return dict(result)
+
+
 def storage_operation_status(operation_id: str, *, paths: Paths | None = None) -> dict[str, Any]:
     paths = paths or Paths()
     if not OPERATION_ID_RE.fullmatch(operation_id):
@@ -2508,6 +2742,65 @@ def _execute_actions(
     completed: list[str] = [
         item for item in journal.get("completed_actions", []) if isinstance(item, str)
     ]
+    if len(completed) != len(set(completed)):
+        raise ExecutorFailure(
+            "test_action_checkpoint_invalid",
+            "The storage journal contains a duplicate completed-action checkpoint.",
+            needs_attention=True,
+        )
+    action_by_id = {
+        str(action["action_id"]): action
+        for action in storage["actions"]
+        if action.get("type") in DRIVE_TEST_ACTION_TYPES
+    }
+    raw_results = journal.get("action_results", [])
+    if not isinstance(raw_results, list) or any(
+        not isinstance(item, Mapping) for item in raw_results
+    ):
+        raise ExecutorFailure(
+            "test_action_result_invalid",
+            "The storage journal contains invalid drive-test results.",
+            needs_attention=True,
+        )
+    results_by_id: dict[str, dict[str, Any]] = {}
+    orphaned_result = False
+    for raw_result in raw_results:
+        action_id = raw_result.get("action_id")
+        action = action_by_id.get(str(action_id)) if isinstance(action_id, str) else None
+        if action is None or action_id in results_by_id:
+            raise ExecutorFailure(
+                "test_action_result_invalid",
+                "The storage journal contains a duplicate or unplanned drive-test result.",
+                needs_attention=True,
+            )
+        identifier = action.get("device_id")
+        if not isinstance(identifier, str) or identifier not in devices:
+            raise ExecutorFailure(
+                "test_action_result_invalid",
+                "A durable drive-test result names an unavailable plan device.",
+                needs_attention=True,
+            )
+        validated = _validate_action_result(raw_result, action, devices[identifier])
+        if action_id not in completed:
+            orphaned_result = True
+            continue
+        results_by_id[action_id] = validated
+    for action_id in completed:
+        if action_id in action_by_id and action_id not in results_by_id:
+            raise ExecutorFailure(
+                "test_action_result_missing",
+                "A completed drive-test checkpoint has no explicit durable result.",
+                needs_attention=True,
+            )
+    ordered_results = [
+        results_by_id[action_id] for action_id in action_by_id if action_id in results_by_id
+    ]
+    if orphaned_result or list(raw_results) != ordered_results:
+        journal["action_results"] = ordered_results
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+    else:
+        journal["action_results"] = ordered_results
 
     def complete_checkpoint(checkpoint_id: str) -> None:
         if checkpoint_id not in completed:
@@ -2517,6 +2810,42 @@ def _execute_actions(
         total_steps = journal.get("total_steps")
         if isinstance(total_steps, int) and total_steps >= 0:
             journal["completed_steps"] = min(int(journal["completed_steps"]), total_steps)
+        journal["current_action"] = None
+        journal["updated_at"] = time.time()
+        atomic_json(_journal_path(paths, operation_id), journal)
+
+    def complete_test_action(action: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+        action_id = str(action["action_id"])
+        if action_id in completed or any(
+            item.get("action_id") == action_id
+            for item in journal.get("action_results", [])
+            if isinstance(item, Mapping)
+        ):
+            raise ExecutorFailure(
+                "test_action_result_invalid",
+                "A drive-test action result would duplicate existing durable evidence.",
+                needs_attention=True,
+            )
+        identifier = action.get("device_id")
+        if not isinstance(identifier, str) or identifier not in devices:
+            raise ExecutorFailure(
+                "test_action_result_invalid",
+                "A drive-test result names an unavailable plan device.",
+                needs_attention=True,
+            )
+        validated = _validate_action_result(result, action, devices[identifier])
+        results_by_id[action_id] = validated
+        journal["action_results"] = [
+            results_by_id[planned_id] for planned_id in action_by_id if planned_id in results_by_id
+        ]
+        completed.append(action_id)
+        journal["completed_actions"] = list(completed)
+        total_steps = journal.get("total_steps")
+        journal["completed_steps"] = (
+            min(len(completed), total_steps)
+            if isinstance(total_steps, int) and total_steps >= 0
+            else len(completed)
+        )
         journal["current_action"] = None
         journal["updated_at"] = time.time()
         atomic_json(_journal_path(paths, operation_id), journal)
@@ -2552,15 +2881,18 @@ def _execute_actions(
         if action["destructive"]:
             devices = _revalidate(document, inventory_provider, paths)
         device = _kernel_path(devices[identifier]) if isinstance(identifier, str) else None
+        action_result: dict[str, Any] | None = None
         if action_type == "drive.identity.verify":
-            pass
+            assert isinstance(identifier, str)
+            action_result = _identity_result(action, devices[identifier])
         elif action_type == "drive.surface.read":
+            assert isinstance(identifier, str)
+            _test_capacity(devices[identifier])
             runner([_tool("badblocks"), "-sv", os.fspath(device)], 7 * 24 * 3600)
+            action_result = _command_action_result(action, devices[identifier])
         elif action_type == "drive.smart.short":
             smart_outcome = _run_smart_test(device, "short", progress_callback=smart_progress)
-            journal.setdefault("action_results", []).append(
-                {"action_id": action["action_id"], "device_id": identifier, **smart_outcome}
-            )
+            action_result = _smart_action_result(action, smart_outcome)
             if smart_outcome["outcome"] == "skipped":
                 journal.setdefault("notices", []).append(
                     {
@@ -2572,9 +2904,7 @@ def _execute_actions(
                 )
         elif action_type == "drive.smart.extended":
             smart_outcome = _run_smart_test(device, "long", progress_callback=smart_progress)
-            journal.setdefault("action_results", []).append(
-                {"action_id": action["action_id"], "device_id": identifier, **smart_outcome}
-            )
+            action_result = _smart_action_result(action, smart_outcome)
             if smart_outcome["outcome"] == "skipped":
                 journal.setdefault("notices", []).append(
                     {
@@ -2585,7 +2915,10 @@ def _execute_actions(
                     }
                 )
         elif action_type == "drive.write_read.destructive":
+            assert isinstance(identifier, str)
+            _test_capacity(devices[identifier])
             runner([_tool("badblocks"), "-wsv", os.fspath(device)], 14 * 24 * 3600)
+            action_result = _command_action_result(action, devices[identifier])
         elif action_type == "disk.partition_table.create":
             table = action.get("table")
             if table not in SAFE_TABLES:
@@ -2635,7 +2968,16 @@ def _execute_actions(
             raise ExecutorFailure(
                 "plan_invalid", "The layout action does not match the storage plan."
             )
-        complete_checkpoint(str(action["action_id"]))
+        if action_type in DRIVE_TEST_ACTION_TYPES:
+            if action_result is None:
+                raise ExecutorFailure(
+                    "test_action_result_missing",
+                    "A drive-test action did not produce explicit durable evidence.",
+                    needs_attention=True,
+                )
+            complete_test_action(action, action_result)
+        else:
+            complete_checkpoint(str(action["action_id"]))
 
     if topology == "test":
         return {
@@ -2645,7 +2987,9 @@ def _execute_actions(
             "mountpoint": None,
             "completed_actions": completed,
             "notices": list(journal.get("notices", [])),
-            "action_results": list(journal.get("action_results", [])),
+            "action_results": [
+                results_by_id[action_id] for action_id in action_by_id if action_id in results_by_id
+            ],
             "replayed": False,
         }
 
