@@ -1062,7 +1062,7 @@ def main() -> int:
         "schema_version": SCHEMA,
         "stage": stage,
         "inputs": {
-            "payload_sha256": "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+            "payload_sha256": "3116215f4f2dde376f591b06cb192b3cc725e4261885c5a0bc88e23b8867005b",
             "verifier_sha256": "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
             "disable_unmasked_units_sha256": sha(function),
         },
@@ -1609,7 +1609,7 @@ def _validate_f19_snapshot(
         raise AssertionError("F19 receipt version/stage is invalid")
     inputs = receipt["inputs"]
     if not isinstance(inputs, dict) or inputs != {
-        "payload_sha256": "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+        "payload_sha256": "3116215f4f2dde376f591b06cb192b3cc725e4261885c5a0bc88e23b8867005b",
         "verifier_sha256": "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
         "disable_unmasked_units_sha256": expected_function_sha256,
     }:
@@ -3460,6 +3460,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 shell_function("remove_recovery_unit_guards"),
                 shell_function("prepare_temporary_unit_mask"),
                 shell_function("cleanup_temporary_masks"),
+                shell_function("remove_denied_unit_enablement_links"),
                 shell_function("disable_unmasked_units"),
                 "reset_tracking() {",
                 "  temporary_masks=()",
@@ -3623,6 +3624,20 @@ class OfflineApplianceTests(unittest.TestCase):
                 '  NF != 6 || $4 != "not-queried-offline" || $5 != -1 { exit 1 }',
                 '\' "$state_root/service-policy-readback.tsv"',
                 '[[ "$denied_units_finalized" == true ]]',
+                "",
+                "# A cleanup success cannot replace the mandatory fresh readback.",
+                "reset_tracking",
+                "denied_units=(iscsid.service)",
+                'target="$root/still-enabled-target"',
+                'state_root="$root/still-enabled-state"',
+                'mkdir -p -- "$state_root"',
+                "remove_denied_unit_enablement_links() { return 0; }",
+                "systemctl() {",
+                '  if [[ "$*" == *" is-enabled "* ]]; then printf \'%s\\n\' enabled; return 0; fi',
+                "  return 1",
+                "}",
+                "if disable_unmasked_units; then exit 96; fi",
+                '[[ ! -e "$state_root/service-policy-readback.tsv" ]]',
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -3637,6 +3652,178 @@ class OfflineApplianceTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("command not found", result.stderr)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and shutil.which("bash"),
+        "requires Linux symlink and directory permission semantics",
+    )
+    def test_denied_unit_enablement_cleanup_is_exact_and_fail_closed(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            r"^remove_denied_unit_enablement_links\(\) \{\n.*?^\}\n",
+            payload,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        cleanup_function = match.group(0)
+        self.assertNotIn("find ", cleanup_function)
+        self.assertNotIn("rm ", cleanup_function)
+        self.assertNotIn("glob", cleanup_function)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = root / "cleanup.sh"
+            script.write_text(
+                "set -euo pipefail\n"
+                + cleanup_function
+                + '\ntarget="$1"\nremove_denied_unit_enablement_links "$2"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            bash = shutil.which("bash") or "bash"
+            syntax = subprocess.run(
+                [bash, "-n", str(script)], capture_output=True, text=True, check=False
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+            def prepare(label: str) -> tuple[pathlib.Path, pathlib.Path]:
+                target = root / label / "target"
+                vendor = target / "usr/lib/systemd/system"
+                wants = target / "etc/systemd/system/multi-user.target.wants"
+                vendor.mkdir(parents=True)
+                wants.mkdir(parents=True)
+                (vendor / "fixture.service").write_text(
+                    "[Unit]\nDescription=fixture\n", encoding="ascii"
+                )
+                return target, wants / "fixture.service"
+
+            def invoke(target: pathlib.Path) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [bash, str(script), str(target), "fixture.service"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            target, candidate = prepare("exact")
+            candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
+            result = invoke(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.lexists(candidate))
+
+            target, candidate = prepare("validated-alias")
+            vendor = target / "usr/lib/systemd/system"
+            canonical = vendor / "canonical.service"
+            canonical.write_text("[Unit]\nDescription=canonical\n", encoding="ascii")
+            (vendor / "fixture.service").unlink()
+            (vendor / "fixture.service").symlink_to("canonical.service")
+            candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
+            result = invoke(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.lexists(candidate))
+            self.assertTrue((vendor / "fixture.service").is_symlink())
+
+            target, candidate = prepare("wrong-target")
+            wrong = target / "usr/lib/systemd/system/wrong.service"
+            wrong.write_text("[Unit]\nDescription=wrong\n", encoding="ascii")
+            candidate.symlink_to("/usr/lib/systemd/system/wrong.service")
+            result = invoke(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(candidate.is_symlink())
+
+            target, candidate = prepare("non-link")
+            candidate.write_text("preserved\n", encoding="ascii")
+            before = candidate.read_bytes()
+            result = invoke(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(candidate.read_bytes(), before)
+
+            target, candidate = prepare("alias-mismatch")
+            vendor = target / "usr/lib/systemd/system"
+            wrong = vendor / "wrong.service"
+            wrong.write_text("[Unit]\nDescription=wrong\n", encoding="ascii")
+            alias = vendor / "wrong-alias.service"
+            alias.symlink_to("wrong.service")
+            candidate.symlink_to("/usr/lib/systemd/system/wrong-alias.service")
+            result = invoke(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(candidate.is_symlink())
+
+            target, candidate = prepare("outside-root")
+            wants = candidate.parent
+            wants.rmdir()
+            outside = root / "outside-root"
+            outside.mkdir()
+            outside_candidate = outside / "fixture.service"
+            outside_candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
+            wants.symlink_to(outside, target_is_directory=True)
+            result = invoke(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(outside_candidate.is_symlink())
+
+            target = root / "symlink-configuration-root" / "target"
+            vendor = target / "usr/lib/systemd/system"
+            redirected = target / "redirected-systemd"
+            wants = redirected / "multi-user.target.wants"
+            vendor.mkdir(parents=True)
+            wants.mkdir(parents=True)
+            (vendor / "fixture.service").write_text(
+                "[Unit]\nDescription=fixture\n", encoding="ascii"
+            )
+            redirected_candidate = wants / "fixture.service"
+            redirected_candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
+            configuration_root = target / "etc/systemd/system"
+            configuration_root.parent.mkdir(parents=True)
+            configuration_root.symlink_to(redirected, target_is_directory=True)
+            redirected_before = redirected_candidate.lstat()
+            redirected_target = os.readlink(redirected_candidate)
+            result = invoke(target)
+            self.assertNotEqual(result.returncode, 0)
+            redirected_after = redirected_candidate.lstat()
+            self.assertEqual(
+                (redirected_after.st_dev, redirected_after.st_ino),
+                (redirected_before.st_dev, redirected_before.st_ino),
+            )
+            self.assertEqual(os.readlink(redirected_candidate), redirected_target)
+
+            target, first_candidate = prepare("prevalidate-all-candidates")
+            first_candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
+            later_parent = target / "etc/systemd/system/z-last.target.wants"
+            later_parent.mkdir()
+            later_candidate = later_parent / "fixture.service"
+            later_candidate.write_text("preserved\n", encoding="ascii")
+            first_before = first_candidate.lstat()
+            first_target = os.readlink(first_candidate)
+            later_before = later_candidate.lstat()
+            later_bytes = later_candidate.read_bytes()
+            result = invoke(target)
+            self.assertNotEqual(result.returncode, 0)
+            first_after = first_candidate.lstat()
+            later_after = later_candidate.lstat()
+            self.assertEqual(
+                (first_after.st_dev, first_after.st_ino),
+                (first_before.st_dev, first_before.st_ino),
+            )
+            self.assertEqual(os.readlink(first_candidate), first_target)
+            self.assertEqual(
+                (later_after.st_dev, later_after.st_ino),
+                (later_before.st_dev, later_before.st_ino),
+            )
+            self.assertEqual(later_candidate.read_bytes(), later_bytes)
+
+            if os.geteuid() != 0:
+                target, candidate = prepare("failed-removal")
+                candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
+                candidate.parent.chmod(0o500)
+                try:
+                    result = invoke(target)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(candidate.is_symlink())
+                finally:
+                    candidate.parent.chmod(0o700)
 
     def test_package_backed_iscsi_alias_lifecycle_is_fail_closed(self) -> None:
         payload = (
@@ -3716,6 +3903,7 @@ class OfflineApplianceTests(unittest.TestCase):
                 shell_function("cleanup_guard"),
                 shell_function("exit_cleanup"),
                 shell_function("signal_exit"),
+                shell_function("remove_denied_unit_enablement_links"),
                 shell_function("disable_unmasked_units"),
                 r"""
 root="$1"
@@ -5216,7 +5404,7 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
         verifier_path = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
         self.assertEqual(
             hashlib.sha256(payload_path.read_bytes()).hexdigest(),
-            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+            "3116215f4f2dde376f591b06cb192b3cc725e4261885c5a0bc88e23b8867005b",
         )
         self.assertEqual(
             hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
@@ -5386,6 +5574,7 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                         shell_function("prepare_temporary_unit_mask"),
                         shell_function("cleanup_temporary_masks"),
                         shell_function("cleanup_service_guards"),
+                        shell_function("remove_denied_unit_enablement_links"),
                         _instrument_f23_disable_unmasked_units(
                             shell_function("disable_unmasked_units")
                         ),
@@ -5985,6 +6174,8 @@ set -x
 disable_unmasked_units
 set +x
 exec 19>&-
+[[ ! -e "$work/etc-systemd/multi-user.target.wants/iscsid.service" && \
+    ! -L "$work/etc-systemd/multi-user.target.wants/iscsid.service" ]]
 python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv"
 printf '0\n' >"$f20_capture_status_file"
 [[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]
@@ -6577,7 +6768,7 @@ exit 0
                 before_receipt["phase09_outcomes"],
                 after_receipt["phase09_outcomes"],
             )
-            self.assertIn(
+            self.assertNotIn(
                 "offline install denied unit remains enabled: iscsid.service=enabled",
                 result.stderr,
             )
@@ -6617,6 +6808,11 @@ exit 0
                 "command_checks": command_checks,
                 "systemctl_disable": f23_systemctl_evidence,
                 "helper_entry_classification": f25_classification,
+                "sysv_compatibility_cause": (
+                    "systemctl-sysv-delegation-returned-nonzero-before-"
+                    "native-enablement-link-removal"
+                ),
+                "enablement_link_after_finalization": "absent",
             }
             f20_helper = f20_after_receipt["helper"]
             assert isinstance(f20_helper, dict)
@@ -7330,7 +7526,7 @@ Description: Backup program for disk arrays
         verifier_path = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
         self.assertEqual(
             hashlib.sha256(payload_path.read_bytes()).hexdigest(),
-            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+            "3116215f4f2dde376f591b06cb192b3cc725e4261885c5a0bc88e23b8867005b",
         )
         self.assertEqual(
             hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
@@ -7384,7 +7580,7 @@ Description: Backup program for disk arrays
         verifier = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
         self.assertEqual(
             hashlib.sha256(payload.read_bytes()).hexdigest(),
-            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+            "3116215f4f2dde376f591b06cb192b3cc725e4261885c5a0bc88e23b8867005b",
         )
         self.assertEqual(
             hashlib.sha256(verifier.read_bytes()).hexdigest(),
@@ -8415,7 +8611,7 @@ Description: Backup program for disk arrays
         )
         self.assertNotIn("str(f21),stage", F29_OUTER_RUNNER_SCRIPT)
         expected_script_hashes = {
-            "F19": "4b8fe01485d8c5e97bcd525a07dbcac4b2240a15cf0751b44f30a5dff1d4cde2",
+            "F19": "c156b0938b0af78a5c2e04504fb195e0f3f841dfcfe2c603c2096e764774cc73",
             "F20": "ea2e8f6b08b56e834c4d093b794f4196f4be481d0b292a0a0d84924c3e5a5709",
             "F21": "13366ef44f4065b716d42a3294d297bb8c77be7a46e61ae1093e1885a9ffdccd",
             "F29": "6d0c55cca01e2512a1234a42ebbfaba258e54edc88e55b47295f411a1faffc24",
@@ -8513,7 +8709,7 @@ Description: Backup program for disk arrays
                     ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
                 ).read_bytes()
             ).hexdigest(),
-            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+            "3116215f4f2dde376f591b06cb192b3cc725e4261885c5a0bc88e23b8867005b",
         )
         self.assertEqual(
             hashlib.sha256(

@@ -1159,6 +1159,141 @@ signal_exit() {
     trap - HUP INT TERM
     exit "$signal_status"
 }
+remove_denied_unit_enablement_links() {
+    local unit="$1"
+    python3 - "$target" "$unit" <<'PY'
+import os
+import pathlib
+import re
+import stat
+import sys
+
+target = pathlib.Path(sys.argv[1]).resolve(strict=True)
+unit = sys.argv[2]
+if not re.fullmatch(r"[A-Za-z0-9@_.:-]+\.(service|socket|timer|target)", unit):
+    raise SystemExit("offline enablement cleanup unit is invalid")
+
+configuration_roots = (
+    target / "etc/systemd/system",
+    target / "run/systemd/system",
+)
+unit_roots = (
+    *configuration_roots,
+    target / "usr/local/lib/systemd/system",
+    target / "usr/lib/systemd/system",
+    target / "lib/systemd/system",
+)
+
+def lexists(path):
+    return os.path.lexists(path)
+
+def confined(path, root):
+    return path == root or root in path.parents
+
+for root in configuration_roots:
+    if not lexists(root):
+        continue
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or root.is_symlink():
+        raise SystemExit("offline systemd configuration root is invalid")
+
+def resolve_target_link(path):
+    current = path
+    seen = set()
+    for _ in range(32):
+        current_text = str(current)
+        if current_text in seen:
+            raise SystemExit("offline unit link cycle detected")
+        seen.add(current_text)
+        metadata = current.lstat()
+        if not stat.S_ISLNK(metadata.st_mode):
+            resolved = current.resolve(strict=True)
+            if not confined(resolved, target):
+                raise SystemExit("offline unit link escapes target")
+            return resolved
+        link_target = pathlib.Path(os.readlink(current))
+        if link_target.is_absolute():
+            current = target / str(link_target).lstrip("/")
+        else:
+            current = current.parent / link_target
+        current = pathlib.Path(os.path.abspath(os.path.normpath(current)))
+        if not confined(current, target):
+            raise SystemExit("offline unit link escapes target")
+    raise SystemExit("offline unit link depth exceeds limit")
+
+canonical = None
+for root in unit_roots:
+    candidate = root / unit
+    if not lexists(candidate):
+        continue
+    metadata = candidate.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        resolved = resolve_target_link(candidate)
+        resolved_metadata = resolved.stat()
+        if not stat.S_ISREG(resolved_metadata.st_mode):
+            raise SystemExit("offline unit alias target is not regular")
+        canonical = resolved
+    elif stat.S_ISREG(metadata.st_mode):
+        canonical = candidate.resolve(strict=True)
+    else:
+        raise SystemExit("offline canonical unit object is invalid")
+    break
+if canonical is None:
+    raise SystemExit("offline canonical unit is missing")
+
+candidates = []
+for root in configuration_roots:
+    if not lexists(root):
+        continue
+    direct = root / unit
+    if lexists(direct) and direct.is_symlink():
+        candidates.append((root, direct))
+    for directory in root.iterdir():
+        if not (directory.name.endswith(".wants") or directory.name.endswith(".requires")):
+            continue
+        candidate = directory / unit
+        if not lexists(candidate):
+            continue
+        directory_metadata = directory.lstat()
+        if not stat.S_ISDIR(directory_metadata.st_mode) or directory.is_symlink():
+            raise SystemExit("offline enablement parent is invalid")
+        candidates.append((root, candidate))
+
+seen = set()
+validated = []
+for root, candidate in sorted(candidates, key=lambda item: str(item[1])):
+    candidate_text = str(candidate)
+    if candidate_text in seen:
+        raise SystemExit("offline enablement candidate is duplicated")
+    seen.add(candidate_text)
+    if candidate.name != unit or not confined(candidate.parent, root):
+        raise SystemExit("offline enablement candidate escapes configuration root")
+    metadata = candidate.lstat()
+    if not stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("offline enablement candidate is not a symbolic link")
+    link_target = os.readlink(candidate)
+    if resolve_target_link(candidate) != canonical:
+        raise SystemExit("offline enablement candidate target does not match unit")
+    validated.append((root, candidate, metadata.st_dev, metadata.st_ino, link_target))
+
+for root, candidate, expected_device, expected_inode, link_target in validated:
+    revalidated = candidate.lstat()
+    if (
+        not stat.S_ISLNK(revalidated.st_mode)
+        or revalidated.st_dev != expected_device
+        or revalidated.st_ino != expected_inode
+        or os.readlink(candidate) != link_target
+        or resolve_target_link(candidate) != canonical
+    ):
+        raise SystemExit("offline enablement candidate changed before removal")
+    try:
+        candidate.unlink()
+    except OSError as exc:
+        raise SystemExit("offline enablement candidate removal failed") from exc
+    if lexists(candidate):
+        raise SystemExit("offline enablement candidate remains after removal")
+PY
+}
 disable_unmasked_units() {
     local unit
     local preserved_mask
@@ -1170,6 +1305,9 @@ disable_unmasked_units() {
     local destination
     local enabled_state
     local enabled_status
+    local enablement_cleanup_performed
+    local post_disable_state
+    local post_disable_status
     local activity_state=not-queried-offline
     local activity_status=-1
     local disable_status
@@ -1251,8 +1389,22 @@ disable_unmasked_units() {
             continue
         fi
         disable_status=0
+        enablement_cleanup_performed=false
         SYSTEMD_OFFLINE=1 systemctl --root="$target" disable "$unit" \
             >/dev/null 2>&1 || disable_status=$?
+        post_disable_status=0
+        post_disable_state="$(SYSTEMD_OFFLINE=1 systemctl --root="$target" \
+            is-enabled "$unit" 2>&1)" || post_disable_status=$?
+        post_disable_state="$(printf '%s\n' "$post_disable_state" | head -n 1)"
+        case "$post_disable_state" in
+            enabled|enabled-runtime|linked|linked-runtime|alias)
+                remove_denied_unit_enablement_links "$unit" || {
+                    echo "offline install could not remove denied unit enablement: $unit" >&2
+                    return 1
+                }
+                enablement_cleanup_performed=true
+                ;;
+        esac
         enabled_status=0
         enabled_state="$(SYSTEMD_OFFLINE=1 systemctl --root="$target" \
             is-enabled "$unit" 2>&1)" || enabled_status=$?
@@ -1264,7 +1416,8 @@ disable_unmasked_units() {
                 return 1
                 ;;
         esac
-        if (( disable_status != 0 )) && [[ "$enabled_state" == disabled ]]; then
+        if (( disable_status != 0 )) && [[ "$enabled_state" == disabled && \
+            "$enablement_cleanup_performed" != true ]]; then
             echo "offline install could not disable denied unit: $unit" >&2
             return 1
         fi
