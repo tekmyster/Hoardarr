@@ -37,6 +37,7 @@ CLASSIFICATIONS = {
     "LOGIN_FAILURE_DIAGNOSED",
     "LOGIN_FAILURE_UNRESOLVED",
     "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+    "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION",
     "HARNESS_ERROR",
 }
 CLEANUP_CLASSIFICATIONS = {
@@ -575,8 +576,67 @@ def loop_release_postcondition(evidence: dict[str, Any]) -> bool:
 def validate_receipt(document: object) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("schema_version") != 2:
         raise LifecycleGuardError("receipt schema is invalid")
+    if set(document) != {
+        "schema_version",
+        "classification",
+        "workflow",
+        "job",
+        "run_id",
+        "failure",
+        "topology",
+        "prelogin",
+        "parity",
+        "login",
+        "downstream",
+        "payload_verification",
+        "raw_integrity_timeline",
+        "cleanup",
+        "prohibited_actions",
+    }:
+        raise LifecycleGuardError("receipt schema is invalid")
+    if (
+        document.get("workflow") != "storage-integration"
+        or document.get("job") != "managed-zvol-lio-lifecycle"
+        or not isinstance(document.get("run_id"), str)
+        or not document["run_id"]
+    ):
+        raise LifecycleGuardError("receipt identity is invalid")
     if document.get("classification") not in CLASSIFICATIONS:
         raise LifecycleGuardError("receipt classification is invalid")
+    failure = document.get("failure")
+    downstream = document.get("downstream")
+    payload_verification = document.get("payload_verification")
+    if (
+        not isinstance(failure, dict)
+        or set(failure) != {"code", "status", "line"}
+        or not isinstance(failure.get("code"), str)
+        or not failure["code"]
+        or not isinstance(failure.get("status"), int)
+        or isinstance(failure.get("status"), bool)
+        or not isinstance(failure.get("line"), int)
+        or isinstance(failure.get("line"), bool)
+        or failure["line"] < 0
+        or not isinstance(downstream, dict)
+        or set(downstream)
+        != {
+            "bounded_io",
+            "idempotent_apply",
+            "state_only_recovery",
+            "target_persistence_restart",
+            "persistence_control_plane",
+            "remove_absence",
+            "backing_retained",
+        }
+        or any(not isinstance(value, bool) for value in downstream.values())
+        or not isinstance(payload_verification, dict)
+        or set(payload_verification) != {"attempted", "matched"}
+        or any(not isinstance(value, bool) for value in payload_verification.values())
+        or (
+            payload_verification["matched"] is True
+            and payload_verification["attempted"] is not True
+        )
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
     parity = document.get("parity")
     prelogin = document.get("prelogin")
     login = document.get("login")
@@ -811,6 +871,7 @@ def validate_receipt(document: object) -> dict[str, Any]:
         "LOGIN_FAILURE_DIAGNOSED",
         "LOGIN_FAILURE_UNRESOLVED",
         "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+        "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION",
     } and (parity.get("exact") is not True or login_count != 1):
         raise LifecycleGuardError("login classification lacks exact parity")
     if (
@@ -833,7 +894,11 @@ def validate_receipt(document: object) -> dict[str, Any]:
     ):
         raise LifecycleGuardError("unresolved login failure contains diagnosis")
     if (
-        document["classification"] == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
+        document["classification"]
+        in {
+            "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+            "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION",
+        }
         and login.get("succeeded") is not True
     ):
         raise LifecycleGuardError("successful login classification is inconsistent")
@@ -899,6 +964,78 @@ def validate_receipt(document: object) -> dict[str, Any]:
         checkpoints
     ) != len(RAW_INTEGRITY_STAGES):
         raise LifecycleGuardError("raw integrity timeline is invalid")
+    raw_transition = bool(mismatches)
+    lifecycle_success = document["classification"] == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
+    transition_result = (
+        document["classification"] == "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION"
+    )
+    if downstream["persistence_control_plane"] and (
+        raw_integrity_timeline["final_comparison_attempted"] is not True
+        or len(checkpoints) != len(RAW_INTEGRITY_STAGES)
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
+    if downstream["target_persistence_restart"] and (
+        not downstream["persistence_control_plane"] or raw_transition
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
+    if (any(downstream.values()) or payload_verification["attempted"]) and login.get(
+        "succeeded"
+    ) is not True:
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
+    if (
+        downstream["idempotent_apply"]
+        and not downstream["bounded_io"]
+        or downstream["state_only_recovery"]
+        and not downstream["idempotent_apply"]
+        or downstream["persistence_control_plane"]
+        and not all(
+            downstream[key]
+            for key in ("bounded_io", "idempotent_apply", "state_only_recovery")
+        )
+        or payload_verification["attempted"]
+        and not downstream["persistence_control_plane"]
+        or downstream["remove_absence"]
+        and payload_verification["matched"] is not True
+        or downstream["backing_retained"] is not downstream["remove_absence"]
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
+    if lifecycle_success and (
+        failure != {"code": "NONE", "status": 0, "line": 0}
+        or raw_transition
+        or raw_integrity_timeline["final_comparison_attempted"] is not True
+        or any(value is not True for value in downstream.values())
+        or payload_verification != {"attempted": True, "matched": True}
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
+    if transition_result and (
+        failure
+        != {
+            "code": "RAW_RESTART_TRANSITION_OBSERVED",
+            "status": 44,
+            "line": 0,
+        }
+        or not raw_transition
+        or raw_integrity_timeline["final_comparison_attempted"] is not True
+        or downstream
+        != {
+            "bounded_io": True,
+            "idempotent_apply": True,
+            "state_only_recovery": True,
+            "target_persistence_restart": False,
+            "persistence_control_plane": True,
+            "remove_absence": True,
+            "backing_retained": True,
+        }
+        or payload_verification != {"attempted": True, "matched": True}
+        or cleanup.get("classification") != "cleanup_complete"
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
+    if not transition_result and (
+        failure.get("code") == "RAW_RESTART_TRANSITION_OBSERVED"
+        or document["classification"]
+        == "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION"
+    ):
+        raise LifecycleGuardError("receipt lifecycle result is invalid")
     if cleanup.get("classification") not in CLEANUP_CLASSIFICATIONS:
         raise LifecycleGuardError("cleanup classification is invalid")
     budget = cleanup.get("total_budget_seconds")

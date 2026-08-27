@@ -150,6 +150,10 @@ def _parity(tmp_path: Path, **overrides: str) -> dict[str, object]:
 def _receipt(
     *, classification: str = "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
 ) -> dict[str, object]:
+    login_succeeded = classification in {
+        "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+        "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION",
+    }
     phases = [
         {
             "name": name,
@@ -167,6 +171,10 @@ def _receipt(
     receipt: dict[str, object] = {
         "schema_version": 2,
         "classification": classification,
+        "workflow": "storage-integration",
+        "job": "managed-zvol-lio-lifecycle",
+        "run_id": "synthetic-run",
+        "failure": {"code": "NONE", "status": 0, "line": 0},
         "topology": {
             "loop_count": 6,
             "raidz2_vdev_count": 1,
@@ -201,13 +209,11 @@ def _receipt(
         },
         "login": {
             "attempt_count": 1,
-            "status": 0 if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT" else 19,
-            "succeeded": classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+            "status": 0 if login_succeeded else 19,
+            "succeeded": login_succeeded,
             "diagnostic": {
                 "schema_version": 3,
-                "status": 0
-                if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
-                else 19,
+                "status": 0 if login_succeeded else 19,
                 "streams": [
                     {
                         "label": label,
@@ -241,6 +247,16 @@ def _receipt(
             "first_mismatch_stage": "NONE",
             "final_comparison_attempted": True,
         },
+        "downstream": {
+            "bounded_io": True,
+            "idempotent_apply": True,
+            "state_only_recovery": True,
+            "target_persistence_restart": True,
+            "persistence_control_plane": True,
+            "remove_absence": True,
+            "backing_retained": True,
+        },
+        "payload_verification": {"attempted": True, "matched": True},
         "cleanup": {
             "classification": "cleanup_complete",
             "total_budget_seconds": 191,
@@ -281,6 +297,7 @@ def _receipt(
         )
         login.update({"attempt_count": 0, "status": -1, "succeeded": False})
         diagnostic.update({"status": -1, "streams": []})
+        receipt["failure"] = {"code": "PASSWORD_MISMATCH", "status": 41, "line": 0}
     elif classification == "LOGIN_FAILURE_DIAGNOSED":
         diagnostic.update(
             {
@@ -334,6 +351,47 @@ def _receipt(
                 },
             }
         )
+        receipt["failure"] = {
+            "code": "UNCLASSIFIED_HARNESS_STOP",
+            "status": 1,
+            "line": 0,
+        }
+    if classification == "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION":
+        timeline = receipt["raw_integrity_timeline"]
+        assert isinstance(timeline, dict)
+        checkpoints = timeline["checkpoints"]
+        assert isinstance(checkpoints, list)
+        for checkpoint in checkpoints[4:]:
+            assert isinstance(checkpoint, dict)
+            checkpoint.update({"baseline_equal": False, "previous_equal": False})
+        checkpoints[5]["previous_equal"] = True
+        checkpoints[6]["previous_equal"] = True
+        timeline["first_mismatch_stage"] = "after_target_persistence_restart"
+        downstream = receipt["downstream"]
+        assert isinstance(downstream, dict)
+        downstream["target_persistence_restart"] = False
+        receipt["failure"] = {
+            "code": "RAW_RESTART_TRANSITION_OBSERVED",
+            "status": 44,
+            "line": 0,
+        }
+    elif classification != "LOGIN_SUCCEEDED_LIFECYCLE_RESULT":
+        receipt["downstream"] = {
+            "bounded_io": False,
+            "idempotent_apply": False,
+            "state_only_recovery": False,
+            "target_persistence_restart": False,
+            "persistence_control_plane": False,
+            "remove_absence": False,
+            "backing_retained": False,
+        }
+        receipt["payload_verification"] = {"attempted": False, "matched": False}
+        receipt["raw_integrity_timeline"] = {
+            "schema_version": 1,
+            "checkpoints": [],
+            "first_mismatch_stage": "NONE",
+            "final_comparison_attempted": False,
+        }
     return receipt
 
 
@@ -342,8 +400,32 @@ def test_raw_integrity_timeline_accepts_each_possible_first_mismatch(
     mismatch_index: int,
 ) -> None:
     receipt = _receipt()
+    receipt["classification"] = "HARNESS_ERROR"
+    receipt["failure"] = {"code": "LIFECYCLE_COMMAND_FAILED", "status": 45, "line": 1}
+    receipt["downstream"] = {
+        "bounded_io": True,
+        "idempotent_apply": True,
+        "state_only_recovery": True,
+        "target_persistence_restart": False,
+        "persistence_control_plane": True,
+        "remove_absence": False,
+        "backing_retained": False,
+    }
     timeline = receipt["raw_integrity_timeline"]
     assert isinstance(timeline, dict)
+    timeline.update(
+        {
+            "checkpoints": [
+                {
+                    "stage": stage,
+                    "baseline_equal": True,
+                    "previous_equal": True,
+                }
+                for stage in RAW_INTEGRITY_STAGES
+            ],
+            "final_comparison_attempted": True,
+        }
+    )
     checkpoints = timeline["checkpoints"]
     assert isinstance(checkpoints, list)
     checkpoint = checkpoints[mismatch_index]
@@ -406,8 +488,28 @@ def test_raw_integrity_timeline_allows_earlier_prefix_but_requires_all_rows_at_f
     None
 ):
     receipt = _receipt()
+    receipt["classification"] = "HARNESS_ERROR"
+    receipt["failure"] = {"code": "LIFECYCLE_COMMAND_FAILED", "status": 45, "line": 1}
+    receipt["downstream"] = {
+        "bounded_io": True,
+        "idempotent_apply": True,
+        "state_only_recovery": True,
+        "target_persistence_restart": False,
+        "persistence_control_plane": False,
+        "remove_absence": False,
+        "backing_retained": False,
+    }
+    receipt["payload_verification"] = {"attempted": False, "matched": False}
     timeline = receipt["raw_integrity_timeline"]
     assert isinstance(timeline, dict)
+    timeline["checkpoints"] = [
+        {
+            "stage": stage,
+            "baseline_equal": True,
+            "previous_equal": True,
+        }
+        for stage in RAW_INTEGRITY_STAGES
+    ]
     checkpoints = timeline["checkpoints"]
     assert isinstance(checkpoints, list)
     checkpoints.pop()
@@ -467,7 +569,7 @@ def test_raw_integrity_timeline_is_sanitized_and_source_ordered() -> None:
     final_attempt = "raw_integrity_final_comparison_attempted=true"
     assert script.index(stages[6]) < script.rindex(final_attempt)
     assert script.rindex(final_attempt) < script.rindex(
-        '[[ "$(sha256sum "$zvol_device"'
+        'raw_hash_final="$(sha256sum "$zvol_device"'
     )
     receipt_writer = script.split("write_receipt() {", 1)[1].split("finalize() {", 1)[0]
     assert "raw_integrity_timeline" in receipt_writer
@@ -476,6 +578,267 @@ def test_raw_integrity_timeline_is_sanitized_and_source_ordered() -> None:
     assert script.count("--login") == 1
     assert script.count("mkfs.ext4") == 1
     assert script.count('mount "$by_path"') == 1
+
+
+def _raw_transition_receipt() -> dict[str, object]:
+    return _receipt(classification="LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION")
+
+
+def test_payload_verified_raw_transition_and_original_success_are_accepted() -> None:
+    success = _receipt()
+    transition = _raw_transition_receipt()
+    assert validate_receipt(success)["failure"]["status"] == 0  # type: ignore[index]
+    assert validate_receipt(transition)["failure"] == {  # type: ignore[index]
+        "code": "RAW_RESTART_TRANSITION_OBSERVED",
+        "status": 44,
+        "line": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt: receipt.pop("payload_verification"),
+        lambda receipt: receipt.update({"unexpected": False}),
+        lambda receipt: receipt["payload_verification"].update(  # type: ignore[index]
+            {"extra": False}
+        ),
+        lambda receipt: receipt["payload_verification"].update(  # type: ignore[index]
+            {"attempted": "true"}
+        ),
+        lambda receipt: receipt["payload_verification"].update(  # type: ignore[index]
+            {"matched": "true"}
+        ),
+        lambda receipt: receipt["payload_verification"].update(  # type: ignore[index]
+            {"attempted": False}
+        ),
+        lambda receipt: receipt["downstream"].pop(  # type: ignore[index]
+            "persistence_control_plane"
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"extra": False}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"persistence_control_plane": "true"}
+        ),
+    ],
+)
+def test_a8i_new_receipt_shape_mutations_fail_closed(mutation: object) -> None:
+    receipt = _raw_transition_receipt()
+    mutation(receipt)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError):
+        validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt: receipt.update(
+            {"classification": "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"}
+        ),
+        lambda receipt: receipt["failure"].update({"code": "NONE"}),  # type: ignore[index]
+        lambda receipt: receipt["failure"].update({"status": 0}),  # type: ignore[index]
+        lambda receipt: receipt["failure"].update({"line": 1}),  # type: ignore[index]
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"target_persistence_restart": True}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"persistence_control_plane": False}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"remove_absence": False}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"backing_retained": False}
+        ),
+        lambda receipt: receipt["payload_verification"].update(  # type: ignore[index]
+            {"matched": False}
+        ),
+        lambda receipt: receipt["raw_integrity_timeline"].update(  # type: ignore[index]
+            {"first_mismatch_stage": "NONE"}
+        ),
+        lambda receipt: receipt["raw_integrity_timeline"].update(  # type: ignore[index]
+            {"final_comparison_attempted": False}
+        ),
+        lambda receipt: receipt["raw_integrity_timeline"][  # type: ignore[index]
+            "checkpoints"
+        ].pop(),
+        lambda receipt: receipt["cleanup"].update(  # type: ignore[index]
+            {"classification": "cleanup_incomplete_bounded"}
+        ),
+    ],
+)
+def test_a8i_transition_status_and_gate_contradictions_fail_closed(
+    mutation: object,
+) -> None:
+    receipt = _raw_transition_receipt()
+    mutation(receipt)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError):
+        validate_receipt(receipt)
+
+
+def test_a8i_receipt_is_sanitized_and_source_operations_remain_single() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    serialized = json.dumps(_raw_transition_receipt(), sort_keys=True)
+    for forbidden in (
+        "raw_hash",
+        "data_hash",
+        "a5-payload",
+        "/dev/",
+        "iqn.",
+        "fixture_user",
+        SYNTHETIC_CHAP,
+        "password=",
+        "command_output",
+        "exception",
+    ):
+        assert forbidden not in serialized
+    assert script.count("--login") == 1
+    assert script.count("targetcli saveconfig >/dev/null") == 2
+    assert script.count("systemctl restart rtslib-fb-targetctl.service") == 1
+    assert script.count('remove_json="$(helper remove)"') == 1
+    assert script.count('mount -o ro,noload "$zvol_device" "$mountpoint"') == 1
+    assert script.count('data_hash_after="$(sha256sum') == 1
+    assert script.count('[[ "$data_hash_after" == "$data_hash_before" ]]') == 1
+    assert script.count("sync") == 1
+    assert script.count("mkfs.ext4") == 1
+    assert script.count("dd if=/dev/zero") == 1
+    assert "RAW_RESTART_TRANSITION_OBSERVED" in script
+    assert "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION" in script
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_status", "expected_classification", "expected_calls"),
+    [
+        (
+            "equal",
+            0,
+            "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+            [
+                "hash:raw",
+                "helper:remove",
+                "block",
+                "mount",
+                "hash:fixture/a5-payload.bin",
+                "umount",
+                "helper:reject-delete",
+            ],
+        ),
+        (
+            "transition",
+            44,
+            "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION",
+            [
+                "hash:raw",
+                "helper:remove",
+                "block",
+                "mount",
+                "hash:fixture/a5-payload.bin",
+                "umount",
+                "helper:reject-delete",
+            ],
+        ),
+        ("timeline", 45, "HARNESS_ERROR", []),
+        ("raw_read", 45, "HARNESS_ERROR", ["hash:raw"]),
+        ("transient", 45, "HARNESS_ERROR", ["hash:raw"]),
+        (
+            "payload_mismatch",
+            45,
+            "HARNESS_ERROR",
+            [
+                "hash:raw",
+                "helper:remove",
+                "block",
+                "mount",
+                "hash:fixture/a5-payload.bin",
+            ],
+        ),
+        (
+            "payload_read",
+            45,
+            "HARNESS_ERROR",
+            [
+                "hash:raw",
+                "helper:remove",
+                "block",
+                "mount",
+                "hash:fixture/a5-payload.bin",
+            ],
+        ),
+        ("mount", 1, "HARNESS_ERROR", ["hash:raw", "helper:remove", "block", "mount"]),
+        ("remove", 1, "HARNESS_ERROR", ["hash:raw", "helper:remove"]),
+    ],
+)
+def test_a8i_executable_tail_doubles_preserve_order_and_bounded_outcomes(
+    tmp_path: Path,
+    scenario: str,
+    expected_status: int,
+    expected_classification: str,
+    expected_calls: list[str],
+) -> None:
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required to execute the lifecycle tail")
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    timeline_gate = 'if [[ "${#raw_integrity_stages[@]}" -ne 7 ]]; then'
+    tail = timeline_gate + script.split(timeline_gate, 1)[1]
+    tail = tail.replace('[[ -b "$zvol_device" ]]', "record block")
+    calls = tmp_path / "calls"
+    result = tmp_path / "result"
+    program = "\n".join(
+        (
+            "set -euo pipefail",
+            f"calls='{calls.as_posix()}'",
+            f"result='{result.as_posix()}'",
+            'record() { printf \'%s\\n\' "$1" >>"$calls"; }',
+            'helper() { record "helper:$1"; [[ "$A8I_SCENARIO" == remove && "$1" == remove ]] && return 1; printf \'{}\\n\'; }',
+            "jq() { printf 'true\\n'; }",
+            'mount() { record mount; [[ "$A8I_SCENARIO" != mount ]]; }',
+            "umount() { record umount; }",
+            'sha256sum() { record "hash:$1"; if [[ "$1" == raw ]]; then [[ "$A8I_SCENARIO" == raw_read ]] && return 1; [[ "$A8I_SCENARIO" == equal || "$A8I_SCENARIO" == transient ]] && printf \'baseline  raw\\n\' || printf \'changed  raw\\n\'; else [[ "$A8I_SCENARIO" == payload_read ]] && return 1; [[ "$A8I_SCENARIO" == payload_mismatch ]] && printf \'other  payload\\n\' || printf \'payload  payload\\n\'; fi; }',
+            'trap \'status=$?; printf "%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n" "$status" "$classification" "$failure_code" "$restart_passed" "$payload_verification_attempted" "$payload_verification_matched" >"$result"\' EXIT',
+            "classification=HARNESS_ERROR",
+            "failure_code=UNCLASSIFIED_HARNESS_STOP",
+            "raw_hash_before=baseline",
+            "zvol_device=raw",
+            "raw_integrity_stages=(one two three four five six seven)",
+            "raw_integrity_baseline_equal=(true true true true true true true)",
+            'if [[ "$A8I_SCENARIO" == timeline ]]; then raw_integrity_stages=(one two three four five six); fi',
+            'if [[ "$A8I_SCENARIO" == transient ]]; then raw_integrity_baseline_equal=(true true true true false true true); fi',
+            "mountpoint=fixture",
+            "data_hash_before=payload",
+            "restart_passed=false",
+            "remove_passed=false",
+            "backing_retained=false",
+            "payload_verification_attempted=false",
+            "payload_verification_matched=false",
+            "mounted=false",
+            tail,
+        )
+    )
+    completed = subprocess.run(
+        [bash, "-c", program],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "A8I_SCENARIO": scenario},
+    )
+    assert completed.returncode == expected_status
+    retained = result.read_text(encoding="utf-8").splitlines()
+    assert retained[0] == str(expected_status)
+    assert retained[1] == expected_classification
+    observed_calls = (
+        calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    )
+    assert observed_calls == expected_calls
+    assert retained[4:] == (
+        ["true", "true"]
+        if scenario in {"equal", "transition"}
+        else ["true", "false"]
+        if scenario in {"payload_mismatch", "payload_read"}
+        else ["false", "false"]
+    )
 
 
 def _tpg_saveconfig(authentication: object = 1) -> dict[str, object]:
@@ -1048,10 +1411,11 @@ def test_receipt_cleans_output_when_final_mode_change_fails(
         "LOGIN_FAILURE_DIAGNOSED",
         "LOGIN_FAILURE_UNRESOLVED",
         "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+        "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION",
         "HARNESS_ERROR",
     ],
 )
-def test_all_five_receipt_classifications_are_bounded(classification: str) -> None:
+def test_all_six_receipt_classifications_are_bounded(classification: str) -> None:
     assert (
         validate_receipt(_receipt(classification=classification))["classification"]
         == classification

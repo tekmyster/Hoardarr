@@ -59,6 +59,9 @@ reconciled_passed=false
 restart_passed=false
 remove_passed=false
 backing_retained=false
+persistence_control_plane=false
+payload_verification_attempted=false
+payload_verification_matched=false
 parity_json='{"schema_version":1,"exact":false,"mismatch":"NOT_RUN","record_count":0,"auth_method_chap":false,"username_match":false,"password_match":false,"record_count_exact":false,"record_safe":false,"username_length":0,"password_length":0,"target_identity_sha256":"","initiator_identity_sha256":"","parity_sha256":""}'
 diagnostic_json='{"schema_version":3,"status":-1,"streams":[],"ordered_classifications":[],"diagnosed_class":null,"protocol_status":{"observed":false,"status_class":null,"status_detail":null,"meaning":"NONE","source_label":null}}'
 initial_json='{}'
@@ -448,6 +451,9 @@ write_receipt() {
     --argjson bounded_io "$bounded_io_passed" --argjson idempotent "$idempotent_passed" \
     --argjson reconciled "$reconciled_passed" --argjson restart "$restart_passed" \
     --argjson remove "$remove_passed" --argjson backing_retained "$backing_retained" \
+    --argjson persistence_control_plane "$persistence_control_plane" \
+    --argjson payload_attempted "$payload_verification_attempted" \
+    --argjson payload_matched "$payload_verification_matched" \
     --argjson raw_integrity_timeline "$raw_integrity_timeline_json" \
     --arg cleanup_classification "$cleanup_classification" --arg cleanup_first_failure "$cleanup_first_failure" \
     --argjson cleanup_phases "$cleanup_phases_json" --argjson loop_release "$loop_release_json" \
@@ -464,7 +470,9 @@ write_receipt() {
         succeeded:($login_status==0),diagnostic:$diagnostic},
       downstream:{bounded_io:$bounded_io,idempotent_apply:$idempotent,
         state_only_recovery:$reconciled,target_persistence_restart:$restart,
+        persistence_control_plane:$persistence_control_plane,
         remove_absence:$remove,backing_retained:$backing_retained},
+      payload_verification:{attempted:$payload_attempted,matched:$payload_matched},
       raw_integrity_timeline:$raw_integrity_timeline,
       cleanup:{classification:$cleanup_classification,first_failure:$cleanup_first_failure,
         total_budget_seconds:191,phases:$cleanup_phases,loop_release:$loop_release},
@@ -489,6 +497,10 @@ finalize() {
     classification="HARNESS_ERROR"
     failure_code="CLEANUP_INCOMPLETE"
     original_lifecycle_status=44
+  elif [[ "$classification" == "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION" && "$cleanup_first_failure" != "NONE" ]]; then
+    classification="HARNESS_ERROR"
+    failure_code="CLEANUP_INCOMPLETE"
+    original_lifecycle_status=45
   fi
   set +e
   write_receipt
@@ -730,22 +742,49 @@ record_raw_integrity_checkpoint "after_persistence_readback"
 post_restart_json="$(helper apply)"
 [[ "$(jq -r '.already_active and .counters.targetcli == 0 and .counters.state_writes == 0' <<<"$post_restart_json")" == "true" ]]
 record_raw_integrity_checkpoint "after_post_restart_idempotent_apply"
+if [[ "${#raw_integrity_stages[@]}" -ne 7 ]]; then
+  classification="HARNESS_ERROR"; failure_code="RAW_TIMELINE_INCOMPLETE"; exit 45
+fi
+persistence_control_plane=true
 raw_integrity_final_comparison_attempted=true
-[[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
-restart_passed=true
+if ! raw_hash_final="$(sha256sum "$zvol_device" | awk '{print $1}')"; then
+  classification="HARNESS_ERROR"; failure_code="RAW_FINAL_COMPARISON_FAILED"; exit 45
+fi
+if [[ "$raw_hash_final" == "$raw_hash_before" ]]; then
+  for raw_checkpoint_equal in "${raw_integrity_baseline_equal[@]}"; do
+    if [[ "$raw_checkpoint_equal" != true ]]; then
+      classification="HARNESS_ERROR"; failure_code="RAW_TIMELINE_TRANSIENT_MISMATCH"; exit 45
+    fi
+  done
+  restart_passed=true
+else
+  restart_passed=false
+fi
 
 remove_json="$(helper remove)"
 [[ "$(jq -r '.state == "removed" and (.backing_data_deleted | not) and .readback.target_absent and .readback.backstore_absent' <<<"$remove_json")" == "true" ]]
 [[ "$(jq -r '.counters.targetcli == 1 and .counters.state_writes == 1' <<<"$remove_json")" == "true" ]]
 [[ -b "$zvol_device" ]]
 mount -o ro,noload "$zvol_device" "$mountpoint"; mounted=true
-data_hash_after="$(sha256sum "$mountpoint/a5-payload.bin" | awk '{print $1}')"
-[[ "$data_hash_after" == "$data_hash_before" ]]
+payload_verification_attempted=true
+if ! data_hash_after="$(sha256sum "$mountpoint/a5-payload.bin" | awk '{print $1}')"; then
+  classification="HARNESS_ERROR"; failure_code="PAYLOAD_VERIFICATION_READ_FAILED"; exit 45
+fi
+if [[ "$data_hash_after" == "$data_hash_before" ]]; then
+  payload_verification_matched=true
+else
+  classification="HARNESS_ERROR"; failure_code="PAYLOAD_VERIFICATION_MISMATCH"; exit 45
+fi
 umount -- "$mountpoint"; mounted=false
 reject_json="$(helper reject-delete)"
 [[ "$(jq -r '.rejected_before_mutation and (.counters.targetcli + .counters.state_reads + .counters.state_writes + .counters.readbacks == 0)' <<<"$reject_json")" == "true" ]]
 remove_passed=true
 backing_retained=true
-classification="LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
-failure_code="NONE"
-exit 0
+if [[ "$restart_passed" == true ]]; then
+  classification="LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
+  failure_code="NONE"
+  exit 0
+fi
+classification="LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION"
+failure_code="RAW_RESTART_TRANSITION_OBSERVED"
+exit 44
