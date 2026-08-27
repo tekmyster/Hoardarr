@@ -2386,9 +2386,25 @@ def _validate_f29_direct_capture(
 
 
 def _format_f29_direct_captures(captures: list[dict[str, object]]) -> str:
-    expected_stages = ["f19-after", "f20-after"]
+    expected_keys = {
+        "stage",
+        "attempted",
+        "exit_status",
+        "completed_status_record",
+        "timed_out",
+        "streams",
+    }
+    if any(
+        not isinstance(capture, dict) or set(capture) != expected_keys
+        for capture in captures
+    ):
+        raise AssertionError("F29 direct capture schema is invalid")
     stages = [str(capture["stage"]) for capture in captures]
-    if not captures or stages != expected_stages[: len(captures)]:
+    if stages not in (
+        ["f19-after"],
+        ["f20-after"],
+        ["f19-after", "f20-after"],
+    ):
         raise AssertionError("F29 direct capture order is invalid")
     fields: list[str] = []
     for capture in captures:
@@ -7728,15 +7744,29 @@ Description: Backup program for disk arrays
         with self.assertRaises(AssertionError):
             _validate_f29_direct_capture(pathlib.Path("fixture"), "../escape")
         f20_direct = {**direct, "stage": "f20-after"}
+        for captures, expected_count in (
+            ([direct], 1),
+            ([f20_direct], 1),
+            ([direct, f20_direct], 2),
+        ):
+            with self.subTest(canonical=[item["stage"] for item in captures]):
+                formatted = _format_f29_direct_captures(captures)
+                self.assertTrue(
+                    formatted.startswith(
+                        f"F29 direct outer invocations: count={expected_count} "
+                    )
+                )
+                self.assertNotIn("fixture", formatted)
         formatted = _format_f29_direct_captures([direct, f20_direct])
-        self.assertTrue(formatted.startswith("F29 direct outer invocations: count=2 "))
         self.assertLess(
             formatted.index("stage=f19-after"), formatted.index("stage=f20-after")
         )
-        self.assertNotIn("fixture", formatted)
         for malformed in (
             [],
+            [direct, direct],
             [f20_direct, direct],
+            [{**direct, "stage": "unknown"}],
+            [{key: value for key, value in direct.items() if key != "streams"}],
             [{**direct, "completed_status_record": False}],
             [{**direct, "timed_out": True}],
         ):
@@ -7949,9 +7979,24 @@ Description: Backup program for disk arrays
     @unittest.skipIf(sys.platform == "win32", "requires Bash subprocess coverage")
     def test_f29_capture_status_tracks_snapshots_not_original_phase(self) -> None:
         source = pathlib.Path(__file__).read_text(encoding="utf-8")
-        start = source.index("capture_f29_outer_invocation() {\n")
-        end = source.index("\n}\ntrap 'f19_status=", start) + 2
-        function = source[start:end]
+
+        def exact_shell_function(name: str) -> str:
+            start = source.index(f"{name}() {{\n")
+            end = source.index("\n}\n", start) + 3
+            return source[start:end]
+
+        outer_function = exact_shell_function("capture_f29_outer_invocation")
+        capture_function = exact_shell_function("f19_capture_after_failure")
+        function = outer_function + "\n" + capture_function
+        forbidden_before_calls = (
+            'python3 "$f19_snapshot" before',
+            'python3 "$f20_snapshot" before',
+        )
+        for extracted in (outer_function, capture_function, function):
+            for forbidden in forbidden_before_calls:
+                self.assertNotIn(forbidden, extracted)
+        self.assertEqual(function.count("capture_f29_outer_invocation() {"), 1)
+        self.assertEqual(function.count("f19_capture_after_failure() {"), 1)
 
         def run_case(
             f19_status: int,
