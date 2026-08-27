@@ -14,6 +14,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hoardarr.connectivity.service import (
+    ManagedZvolBindingError,
+    validate_managed_zvol_binding,
+)
+
 STATE_FILE = Path("/var/lib/hoardarr/connectivity/services.json")
 SMB_FILE = Path("/etc/samba/hoardarr-connectivity.conf")
 SMB_MAIN = Path("/etc/samba/smb.conf")
@@ -195,8 +200,13 @@ def _validate_common(config: object) -> dict[str, Any]:
     }
     legacy_smb_keys = {"protocol", "name", "path", "read_only", "valid_users", "browseable"}
     previous_smb_keys = legacy_smb_keys | {"write_users", "read_users"}
-    if set(config) != allowed[protocol] and not (
-        protocol == "smb" and set(config) in (legacy_smb_keys, previous_smb_keys)
+    managed_iscsi_keys = (allowed["iscsi"] - {"backing_path", "size_bytes"}) | {
+        "managed_zvol_binding"
+    }
+    if (
+        set(config) != allowed[protocol]
+        and not (protocol == "smb" and set(config) in (legacy_smb_keys, previous_smb_keys))
+        and not (protocol == "iscsi" and set(config) == managed_iscsi_keys)
     ):
         raise ExecutorFailure("connectivity_request_invalid", "Connectivity request is invalid.")
     if protocol == "smb":
@@ -250,7 +260,14 @@ def _validate_common(config: object) -> dict[str, Any]:
                 "connectivity_request_invalid", "NFS client network is invalid."
             ) from exc
     elif protocol == "iscsi":
-        _validate_block(config, "target_iqn", IQN_RE, "initiator_iqns", IQN_RE)
+        if "managed_zvol_binding" in config:
+            try:
+                validate_managed_zvol_binding(config["managed_zvol_binding"])
+            except ManagedZvolBindingError as exc:
+                raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
+            _validate_block_names(config, "target_iqn", IQN_RE, "initiator_iqns", IQN_RE)
+        else:
+            _validate_block(config, "target_iqn", IQN_RE, "initiator_iqns", IQN_RE)
         portals = config["portal_ips"]
         if not isinstance(portals, list) or not portals or len(portals) > 16:
             raise ExecutorFailure("connectivity_request_invalid", "iSCSI portals are invalid.")
@@ -401,10 +418,20 @@ def _validate_block(
     if not parent.is_dir():
         raise ExecutorFailure("connectivity_path_invalid", "Backing folder is unavailable.")
     size = config["size_bytes"]
-    target = config[target_field]
-    initiators = config[initiators_field]
     if not isinstance(size, int) or isinstance(size, bool) or size < 1024**3 or size > 8 * 1024**5:
         raise ExecutorFailure("connectivity_request_invalid", "Block size is invalid.")
+    _validate_block_names(config, target_field, target_re, initiators_field, initiator_re)
+
+
+def _validate_block_names(
+    config: Mapping[str, Any],
+    target_field: str,
+    target_re: re.Pattern[str],
+    initiators_field: str,
+    initiator_re: re.Pattern[str],
+) -> None:
+    target = config[target_field]
+    initiators = config[initiators_field]
     targets = target if isinstance(target, list) else [target]
     if (
         not targets
@@ -769,13 +796,26 @@ def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None)
         not secret or re.fullmatch(r"[A-Za-z0-9._~-]{12,255}", secret) is None
     ):
         raise ExecutorFailure("connectivity_secret_invalid", "iSCSI password is invalid.")
-    path, created = _ensure_backing_file(config)
-    backstore = f"hoardarr-{service_id[:12]}"
+    binding = config.get("managed_zvol_binding")
+    managed = isinstance(binding, Mapping)
+    if managed:
+        try:
+            binding = validate_managed_zvol_binding(binding)
+        except ManagedZvolBindingError as exc:
+            raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
+        path = binding["device_path"]
+        created = False
+        backstore_kind = "block"
+        backstore = f"hoardarr-zvol-{hashlib.sha256(service_id.encode()).hexdigest()[:24]}"
+    else:
+        path, created = _ensure_backing_file(config)
+        backstore_kind = "fileio"
+        backstore = f"hoardarr-{service_id[:12]}"
     target = config["target_iqn"]
     commands = [
-        f"/backstores/fileio create {backstore} {path}",
+        f"/backstores/{backstore_kind} create {backstore} {path}",
         f"/iscsi create {target}",
-        f"/iscsi/{target}/tpg1/luns create /backstores/fileio/{backstore}",
+        f"/iscsi/{target}/tpg1/luns create /backstores/{backstore_kind}/{backstore}",
         f"/iscsi/{target}/tpg1 set attribute generate_node_acls=0 demo_mode_write_protect=1",
     ]
     if config["portal_ips"] != ["0.0.0.0"]:
@@ -791,17 +831,31 @@ def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None)
             )
     try:
         _targetcli(commands)
-    except Exception:
+    except Exception as exc:
         if created:
             with contextlib.suppress(ExecutorFailure, OSError):
                 _unlink_backing_file(config["backing_path"], missing_ok=True)
-        raise
+        if managed:
+            try:
+                _remove_iscsi(service_id, config)
+            except Exception as cleanup_exc:
+                raise ExecutorFailure(
+                    "connectivity_iscsi_rollback_failed",
+                    "Managed iSCSI setup failed and cleanup requires attention.",
+                    needs_attention=True,
+                ) from cleanup_exc
+        raise exc
 
 
 def _remove_iscsi(service_id: str, config: Mapping[str, Any]) -> None:
     target = config["target_iqn"]
-    backstore = f"hoardarr-{service_id[:12]}"
-    _targetcli([f"/iscsi delete {target}", f"/backstores/fileio delete {backstore}"])
+    if "managed_zvol_binding" in config:
+        backstore_kind = "block"
+        backstore = f"hoardarr-zvol-{hashlib.sha256(service_id.encode()).hexdigest()[:24]}"
+    else:
+        backstore_kind = "fileio"
+        backstore = f"hoardarr-{service_id[:12]}"
+    _targetcli([f"/iscsi delete {target}", f"/backstores/{backstore_kind} delete {backstore}"])
 
 
 def _fcoe_config_path(interface: str) -> Path:
@@ -1000,6 +1054,11 @@ def remove(
     config = _validate_common(raw_config)
     if not isinstance(delete_backing_data, bool):
         raise ExecutorFailure("connectivity_request_invalid", "Connectivity request is invalid.")
+    if delete_backing_data and "managed_zvol_binding" in config:
+        raise ExecutorFailure(
+            "connectivity_managed_zvol_delete_forbidden",
+            "Managed ZFS volume data cannot be deleted through connectivity removal.",
+        )
     if (
         hashlib.sha256(
             json.dumps(config, sort_keys=True, separators=(",", ":")).encode()

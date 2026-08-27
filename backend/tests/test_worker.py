@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from hoardarr.connectivity.service import config_hash, resolve_managed_zvol_binding
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.engine import create_database_engine, create_session_factory
 from hoardarr.db.models import (
     AuditEvent,
     Base,
+    ConnectivityService,
     HardwareSnapshot,
     IntegrationConnection,
     Operation,
@@ -87,6 +89,131 @@ def _enqueue(
         session.flush()
         append_event(session, operation, "queued", "Operation queued")
         return operation.id
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "lifecycle",
+        "capability",
+        "stable_identity",
+        "provider_resource_id",
+        "device_path",
+        "size_bytes",
+        "stored_binding",
+    ],
+)
+def test_managed_zvol_worker_revalidation_blocks_apply_and_resume(
+    tmp_path: Path, drift: str
+) -> None:
+    settings, session_factory = _runtime(tmp_path)
+    volume_id = "91111111-1111-4111-8111-111111111111"
+    service_id = "92222222-2222-4222-8222-222222222222"
+    with session_factory() as session, session.begin():
+        volume = StorageVolume(
+            id=volume_id,
+            stable_identity="zfs:zvol:tank/worker-lab",
+            name="Worker lab zvol",
+            provider="zfs",
+            resource_type="zvol",
+            provider_resource_id="tank/worker-lab",
+            presentation="block",
+            device_path="/dev/zvol/tank/worker-lab",
+            size_bytes=4 * 1024**3,
+            lifecycle_state="active",
+            capabilities_json={
+                "size": {"support": "supported", "availability": "available"},
+                "block_presentation": {
+                    "support": "supported",
+                    "availability": "available",
+                },
+            },
+        )
+        session.add(volume)
+        session.flush()
+        binding = resolve_managed_zvol_binding(session, storage_volume_id=volume_id)
+        config = {
+            "protocol": "iscsi",
+            "name": "worker-lab",
+            "managed_zvol_binding": binding,
+            "target_iqn": "iqn.2026-08.com.hoardarr:worker-lab",
+            "portal_ips": ["192.0.2.10"],
+            "initiator_iqns": ["iqn.2026-08.com.hoardarr:worker-client"],
+            "chap_username": None,
+            "chap_enabled": False,
+        }
+        digest = config_hash(config)
+        service = ConnectivityService(
+            id=service_id,
+            protocol="iscsi",
+            name="worker-lab",
+            config_json=config,
+            config_sha256=digest,
+        )
+        session.add(service)
+
+    operation_id = _enqueue(
+        session_factory,
+        kind="connectivity.apply",
+        resource_type="connectivity_service",
+        resource_id=service_id,
+        request={"service_id": service_id, "config_sha256": digest},
+    )
+    with session_factory() as session, session.begin():
+        volume = session.get(StorageVolume, volume_id)
+        service = session.get(ConnectivityService, service_id)
+        assert volume is not None and service is not None
+        if drift == "lifecycle":
+            volume.lifecycle_state = "deleting"
+        elif drift == "capability":
+            capabilities = deepcopy(volume.capabilities_json)
+            capabilities["block_presentation"]["availability"] = "not_reported"
+            volume.capabilities_json = capabilities
+        elif drift == "stable_identity":
+            volume.stable_identity = "zfs:zvol:tank/changed"
+        elif drift == "provider_resource_id":
+            volume.provider_resource_id = "tank/changed"
+        elif drift == "device_path":
+            volume.device_path = "/dev/zvol/tank/changed"
+        elif drift == "size_bytes":
+            volume.size_bytes = 5 * 1024**3
+        else:
+            changed = deepcopy(service.config_json)
+            changed["managed_zvol_binding"]["binding_sha256"] = "0" * 64
+            service.config_json = changed
+
+    calls: list[dict[str, Any]] = []
+
+    def apply_connectivity(_socket: object, **values: Any) -> dict[str, Any]:
+        calls.append(values)
+        return values
+
+    secret_box = SecretBox.from_file(settings.secret_key_file, create=True)
+    assert run_once(
+        session_factory=session_factory,
+        settings=settings,
+        secret_box=secret_box,
+        connectivity_applier=apply_connectivity,
+    )
+    assert calls == []
+    with session_factory() as session, session.begin():
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        assert operation.status == "needs_attention"
+        assert operation.error_json is not None
+        assert "tank/" not in json.dumps(operation.error_json)
+        operation.status = "queued"
+        operation.lease_owner = None
+        operation.lease_expires_at = None
+        operation.result_json = {"resume_requested": True, "resume_attempt": 1}
+
+    assert run_once(
+        session_factory=session_factory,
+        settings=settings,
+        secret_box=secret_box,
+        connectivity_applier=apply_connectivity,
+    )
+    assert calls == []
 
 
 def test_running_host_mutation_cannot_be_recorded_as_cancelled(tmp_path: Path) -> None:

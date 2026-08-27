@@ -16,11 +16,17 @@ from hoardarr.api.dependencies import (
 )
 from hoardarr.api.problem import Problem
 from hoardarr.api.schemas import ConnectivityDeleteRequest, ConnectivityServiceRequest
-from hoardarr.api.serializers import connectivity_document, operation_document
+from hoardarr.api.serializers import connectivity_document as _connectivity_document
+from hoardarr.api.serializers import operation_document
 from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.connectivity.executor import ExecutorFailure, capabilities, resolve_fcoe_interfaces
-from hoardarr.connectivity.service import config_hash, normalize_connectivity_request
+from hoardarr.connectivity.service import (
+    ManagedZvolBindingError,
+    config_hash,
+    normalize_connectivity_request,
+    resolve_managed_zvol_binding,
+)
 from hoardarr.core.secrets import SecretBox
 from hoardarr.db.models import ConnectivityService, Operation, new_id, utc_now
 from hoardarr.operations.service import OperationConflict, create_operation
@@ -29,10 +35,39 @@ router = APIRouter(prefix="/connectivity", tags=["connectivity"])
 SECRET_RECORD = "connectivity_service"
 
 
+def connectivity_document(service: ConnectivityService) -> dict[str, object]:
+    document = _connectivity_document(service)
+    config = dict(service.config_json)
+    binding = config.get("managed_zvol_binding")
+    if isinstance(binding, dict):
+        config["managed_zvol_binding"] = {
+            key: value
+            for key, value in binding.items()
+            if key not in {"stable_identity", "provider_resource_id", "device_path"}
+        }
+    document["config"] = config
+    return document
+
+
 def _normalized_config(
-    payload: ConnectivityServiceRequest, *, require_secret: bool
+    payload: ConnectivityServiceRequest,
+    *,
+    require_secret: bool,
+    session: Session,
+    expected_binding: object | None = None,
 ) -> dict[str, object]:
-    config = normalize_connectivity_request(payload, require_secret=require_secret)
+    binding = None
+    if payload.storage_volume_id is not None:
+        binding = resolve_managed_zvol_binding(
+            session,
+            storage_volume_id=payload.storage_volume_id,
+            expected=expected_binding,
+        )
+    config = normalize_connectivity_request(
+        payload,
+        require_secret=require_secret,
+        managed_zvol_binding=binding,
+    )
     if payload.protocol == "fcoe":
         try:
             resolved = resolve_fcoe_interfaces(config["interfaces"])
@@ -84,7 +119,9 @@ def create_service(
     secret_box: SecretBox = Depends(secret_box_from_request),
 ) -> dict[str, object]:
     try:
-        config = _normalized_config(payload, require_secret=True)
+        config = _normalized_config(payload, require_secret=True, session=session)
+    except ManagedZvolBindingError as exc:
+        raise Problem(422, exc.code, "Managed volume unavailable", str(exc)) from exc
     except ValueError as exc:
         raise Problem(422, "connectivity_invalid", "Invalid settings", str(exc)) from exc
     service_id = new_id()
@@ -185,7 +222,30 @@ def update_service(
             "Remove this connection before changing its type.",
         )
     try:
-        config = _normalized_config(payload, require_secret=False)
+        existing_binding = service.config_json.get("managed_zvol_binding")
+        config = _normalized_config(
+            payload,
+            require_secret=False,
+            session=session,
+            expected_binding=existing_binding,
+        )
+        replacement_binding = config.get("managed_zvol_binding")
+        if (existing_binding is None) != (replacement_binding is None):
+            raise Problem(
+                409,
+                "connectivity_recreate_required",
+                "Recreate required",
+                "Remove and recreate this connection to change its backing kind.",
+            )
+    except ManagedZvolBindingError as exc:
+        if exc.code == "connectivity_managed_zvol_changed":
+            raise Problem(
+                409,
+                "connectivity_recreate_required",
+                "Recreate required",
+                "Remove and recreate this connection to change its backing volume.",
+            ) from exc
+        raise Problem(422, exc.code, "Managed volume unavailable", str(exc)) from exc
     except ValueError as exc:
         raise Problem(422, "connectivity_invalid", "Invalid settings", str(exc)) from exc
     password = payload.chap_password.get_secret_value() if payload.chap_password else None
@@ -281,6 +341,13 @@ def delete_service(
             "connectivity_delete_invalid",
             "Invalid setting",
             "This service has no backing file.",
+        )
+    if payload.delete_backing_data and "managed_zvol_binding" in service.config_json:
+        raise Problem(
+            422,
+            "connectivity_managed_zvol_delete_forbidden",
+            "Backing data preserved",
+            "Managed ZFS volume data cannot be deleted through connectivity removal.",
         )
     try:
         operation, created = create_operation(

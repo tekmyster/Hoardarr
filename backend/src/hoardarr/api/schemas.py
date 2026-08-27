@@ -254,6 +254,7 @@ class ConnectivityServiceRequest(StrictModel):
     inherit_acl: bool = True
     clients: list[str] = Field(default_factory=list, max_length=64)
     backing_path: str | None = Field(default=None, max_length=4096)
+    storage_volume_id: str | None = Field(default=None, min_length=36, max_length=36)
     size_bytes: int | None = Field(default=None, ge=1024**3, le=8 * 1024**5)
     target_iqn: str | None = Field(default=None, max_length=223)
     portal_ips: list[str] = Field(default_factory=list, max_length=16)

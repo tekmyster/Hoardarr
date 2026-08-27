@@ -2005,6 +2005,130 @@ def test_connectivity_service_create_apply_and_remove(api_runtime: Any) -> None:
         assert session.get(ConnectivityService, service_id) is None
 
 
+def test_managed_zvol_connectivity_is_bound_redacted_and_immutable(api_runtime: Any) -> None:
+    client, app, setup_token, secret_box = api_runtime
+    csrf = _claim_owner(client, setup_token)
+    volume_ids = (
+        "81111111-1111-4111-8111-111111111111",
+        "82222222-2222-4222-8222-222222222222",
+    )
+    with app.state.session_factory() as session, session.begin():
+        for index, volume_id in enumerate(volume_ids, start=1):
+            provider_id = f"tank/lab-{index}"
+            session.add(
+                StorageVolume(
+                    id=volume_id,
+                    stable_identity=f"zfs:zvol:{provider_id}",
+                    name=f"Lab zvol {index}",
+                    provider="zfs",
+                    resource_type="zvol",
+                    provider_resource_id=provider_id,
+                    presentation="block",
+                    device_path=f"/dev/zvol/{provider_id}",
+                    size_bytes=index * 1024**3,
+                    lifecycle_state="active",
+                    capabilities_json={
+                        "size": {"support": "supported", "availability": "available"},
+                        "block_presentation": {
+                            "support": "supported",
+                            "availability": "available",
+                        },
+                    },
+                )
+            )
+
+    body = {
+        "protocol": "iscsi",
+        "name": "managed-lab",
+        "storage_volume_id": volume_ids[0],
+        "target_iqn": "iqn.2026-08.com.hoardarr:managed-lab",
+        "portal_ips": ["192.0.2.10", "192.0.2.11"],
+        "initiator_iqns": ["iqn.2026-08.com.hoardarr:lab-client"],
+        "chap_enabled": False,
+    }
+    for field, value in (("backing_path", "/data/forbidden.img"), ("size_bytes", 1024**3)):
+        conflict = client.post(
+            "/api/v1/connectivity",
+            headers=_state_headers(
+                csrf, **{"Idempotency-Key": f"managed-zvol-conflict-{field}"}
+            ),
+            json={**body, field: value},
+        )
+        assert conflict.status_code == 422
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count(Operation.id))) == 0
+
+    created = client.post(
+        "/api/v1/connectivity",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "managed-zvol-create"}),
+        json=body,
+    )
+    assert created.status_code == 202, created.text
+    service_id = created.json()["service"]["id"]
+    public_binding = created.json()["service"]["config"]["managed_zvol_binding"]
+    assert public_binding["kind"] == "managed_zvol"
+    assert public_binding["storage_volume_id"] == volume_ids[0]
+    assert "stable_identity" not in public_binding
+    assert "provider_resource_id" not in public_binding
+    assert "device_path" not in public_binding
+    assert "backing_path" not in created.json()["service"]["config"]
+
+    executor_calls: list[dict[str, Any]] = []
+
+    def apply_connectivity(_socket: object, **values: Any) -> dict[str, Any]:
+        executor_calls.append(values)
+        return {
+            "operation_id": values["operation_id"],
+            "service_id": values["service_id"],
+            "protocol": "iscsi",
+            "state": "active",
+        }
+
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        connectivity_applier=apply_connectivity,
+    )
+    assert len(executor_calls) == 1
+
+    destructive = client.request(
+        "DELETE",
+        f"/api/v1/connectivity/{service_id}",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "managed-zvol-destructive"}),
+        json={"confirmation": "I AGREE", "delete_backing_data": True},
+    )
+    assert destructive.status_code == 422
+    assert destructive.json()["code"] == "connectivity_managed_zvol_delete_forbidden"
+
+    exact = client.put(
+        f"/api/v1/connectivity/{service_id}",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "managed-zvol-exact"}),
+        json=body,
+    )
+    assert exact.status_code == 202, exact.text
+    assert run_once(
+        session_factory=app.state.session_factory,
+        settings=app.state.settings,
+        secret_box=secret_box,
+        connectivity_applier=apply_connectivity,
+    )
+
+    replacement = client.put(
+        f"/api/v1/connectivity/{service_id}",
+        headers=_state_headers(csrf, **{"Idempotency-Key": "managed-zvol-replacement"}),
+        json={**body, "storage_volume_id": volume_ids[1]},
+    )
+    assert replacement.status_code == 409
+    assert replacement.json()["code"] == "connectivity_recreate_required"
+
+    with app.state.session_factory() as session:
+        stored = session.get(ConnectivityService, service_id)
+        assert stored is not None
+        assert stored.config_json["managed_zvol_binding"]["device_path"].startswith("/dev/zvol/")
+        assert stored.config_json["managed_zvol_binding"]["binding_sha256"]
+
+
 def test_setup_accepts_a_one_character_password(api_runtime: Any) -> None:
     client, _app, setup_token, _secret_box = api_runtime
     response = client.post(

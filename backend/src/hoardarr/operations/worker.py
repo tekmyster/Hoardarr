@@ -32,6 +32,13 @@ from hoardarr.backups.service import (
 from hoardarr.connectivity.executor import ExecutorFailure as ConnectivityExecutorFailure
 from hoardarr.connectivity.executor import apply as apply_connectivity
 from hoardarr.connectivity.executor import remove as remove_connectivity
+from hoardarr.connectivity.service import (
+    ManagedZvolBindingError,
+    resolve_managed_zvol_binding,
+)
+from hoardarr.connectivity.service import (
+    config_hash as connectivity_config_hash,
+)
 from hoardarr.core.config import Settings
 from hoardarr.core.secrets import SecretBox, SecretStoreError
 from hoardarr.db.models import (
@@ -1373,6 +1380,35 @@ def _execute_connectivity(
             raise WorkFailure(
                 "connectivity_config_changed", "Connectivity settings changed; try again"
             )
+        if connectivity_config_hash(service.config_json) != service.config_sha256:
+            raise WorkFailure(
+                "connectivity_config_changed",
+                "Connectivity settings changed; try again",
+                needs_attention=True,
+            )
+        binding = service.config_json.get("managed_zvol_binding")
+        if binding is not None:
+            if not isinstance(binding, Mapping) or not isinstance(
+                binding.get("storage_volume_id"), str
+            ):
+                raise WorkFailure(
+                    "connectivity_managed_zvol_binding_invalid",
+                    "The managed block volume binding is invalid",
+                    needs_attention=True,
+                )
+            try:
+                resolve_managed_zvol_binding(
+                    session,
+                    storage_volume_id=binding["storage_volume_id"],
+                    expected=binding,
+                )
+            except ManagedZvolBindingError as exc:
+                raise WorkFailure(exc.code, str(exc), needs_attention=True) from exc
+            if item.kind == "connectivity.remove" and item.request.get("delete_backing_data"):
+                raise WorkFailure(
+                    "connectivity_managed_zvol_delete_forbidden",
+                    "Managed ZFS volume data cannot be deleted through connectivity removal",
+                )
         config = deepcopy(service.config_json)
         ciphertext = bytes(service.secret_ciphertext) if service.secret_ciphertext else None
         config_sha256 = service.config_sha256
