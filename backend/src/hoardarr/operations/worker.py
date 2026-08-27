@@ -40,6 +40,7 @@ from hoardarr.db.models import (
     HardwareSnapshot,
     IntegrationConnection,
     Operation,
+    OperationEvent,
     Plan,
     PlanApproval,
     RemoteBackupRun,
@@ -117,6 +118,7 @@ from hoardarr.storage.foreign_migration_worker import (
     mark_foreign_migration_paused,
 )
 from hoardarr.storage.groups import reconcile_snapshot_disks
+from hoardarr.storage.intake import IntakeEvaluationError, persist_completed_intake
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     matching_devices,
@@ -2063,6 +2065,22 @@ def _finalize_success(
             # executor journal, not to the continued presence of an editable wizard.
             # Preserve an explicitly cancelled wizard while still registering the
             # storage that the executor demonstrably completed.
+            try:
+                persist_completed_intake(
+                    session,
+                    operation=operation,
+                    plan=plan,
+                    execution_result=execution.result,
+                )
+            except IntakeEvaluationError as exc:
+                fail_operation(
+                    session,
+                    operation,
+                    code=exc.code,
+                    message="The completed drive intake result could not be bound safely",
+                    needs_attention=True,
+                )
+                return
             if wizard.status != "cancelled":
                 wizard.status = "applied"
                 wizard.updated_at = utc_now()
@@ -2780,23 +2798,55 @@ def reconcile_completed_storage_state(
             select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
         )
         reconciled = 0
+
+        def defer_intake(operation: Operation, code: str) -> None:
+            prior_error = session.scalar(
+                select(OperationEvent).where(
+                    OperationEvent.operation_id == operation.id,
+                    OperationEvent.event_type == "drive_intake_reconciliation_deferred",
+                )
+            )
+            if prior_error is None:
+                append_event(
+                    session,
+                    operation,
+                    "drive_intake_reconciliation_deferred",
+                    "Drive intake history reconciliation requires attention",
+                    {"code": code},
+                )
+
         for operation in reversed(operations):
             plan_id = operation.request_json.get("plan_id")
             if not isinstance(plan_id, str) or not isinstance(operation.result_json, dict):
+                if (
+                    isinstance(operation.result_json, dict)
+                    and operation.result_json.get("topology") == "test"
+                ):
+                    defer_intake(operation, "drive_intake_plan_binding_invalid")
                 continue
             plan = session.get(Plan, plan_id)
             if plan is None or document_hash(plan.document_json) != plan.sha256:
+                if operation.result_json.get("topology") == "test":
+                    defer_intake(operation, "drive_intake_plan_binding_invalid")
                 continue
-            if (
-                register_completed_storage(
+            try:
+                intake = persist_completed_intake(
                     session,
-                    plan.document_json,
-                    operation.result_json,
-                    hardware_snapshot=snapshot.payload_json if snapshot is not None else None,
-                    reconcile_only=True,
+                    operation=operation,
+                    plan=plan,
+                    execution_result=operation.result_json,
                 )
-                is not None
-            ):
+            except IntakeEvaluationError as exc:
+                defer_intake(operation, exc.code)
+                continue
+            registered = register_completed_storage(
+                session,
+                plan.document_json,
+                operation.result_json,
+                hardware_snapshot=snapshot.payload_json if snapshot is not None else None,
+                reconcile_only=True,
+            )
+            if registered is not None or intake.created:
                 reconciled += 1
         return reconciled
 

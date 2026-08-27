@@ -12,6 +12,7 @@ from hoardarr.api.dependencies import (
     authenticated_principal,
     database_session,
     idempotency_key,
+    require_scope,
     require_state_scope,
     settings_from_request,
 )
@@ -104,6 +105,7 @@ from hoardarr.storage.groups import (
     set_disk_reservation,
     transition_backend,
 )
+from hoardarr.storage.intake import current_assessment, disposition_history
 from hoardarr.storage.inventory import discover_storage_inventory
 from hoardarr.storage.maintenance import MaintenanceError, build_plan, validate_plan
 from hoardarr.storage.mergerfs import discover_mergerfs
@@ -240,6 +242,46 @@ def storage_inventory(
         ),
         "active_operations": active_storage_reservations(session),
     }
+
+
+@router.get("/disks/{physical_disk_id}/intake-history")
+def drive_intake_history(
+    physical_disk_id: str,
+    _principal: Principal = Depends(require_scope("read")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Return redacted immutable intake history for one durable disk row."""
+
+    try:
+        items = disposition_history(session, physical_disk_id=physical_disk_id)
+    except LookupError as exc:
+        raise Problem(
+            404,
+            "physical_disk_not_found",
+            "Physical disk not found",
+            "The durable physical-disk record does not exist.",
+        ) from exc
+    return {"schema_version": 1, "physical_disk_id": physical_disk_id, "items": items}
+
+
+@router.get("/disks/{physical_disk_id}/intake-assessment")
+def drive_intake_assessment(
+    physical_disk_id: str,
+    _principal: Principal = Depends(require_scope("read")),
+    session: Session = Depends(database_session),
+) -> dict[str, object]:
+    """Return the current/stale assessment; no history is explicitly NOT_TESTED."""
+
+    try:
+        assessment = current_assessment(session, physical_disk_id=physical_disk_id)
+    except LookupError as exc:
+        raise Problem(
+            404,
+            "physical_disk_not_found",
+            "Physical disk not found",
+            "The durable physical-disk record does not exist.",
+        ) from exc
+    return {"schema_version": 1, **assessment}
 
 
 @router.get("/groups")

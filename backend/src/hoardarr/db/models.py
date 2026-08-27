@@ -660,6 +660,67 @@ class PhysicalDiskIdentityAlias(Base):
     )
 
 
+class DriveIntakeDisposition(Base):
+    """Immutable policy evaluation for one plan-bound physical-disk test."""
+
+    __tablename__ = "drive_intake_dispositions"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "physical_disk_id",
+            "policy_sha256",
+            name="uq_drive_intake_operation_disk_policy",
+        ),
+        CheckConstraint(
+            "disposition IN ('PASS','FAIL','QUARANTINED','INCOMPLETE','UNSUPPORTED','SOURCE_ONLY')",
+            name="ck_drive_intake_disposition",
+        ),
+        Index(
+            "ix_drive_intake_disk_evaluated",
+            "physical_disk_id",
+            "evaluated_at",
+        ),
+        Index("ix_drive_intake_disposition", "disposition"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    physical_disk_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("physical_disks.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_identity: Mapped[str] = mapped_column(String(512), nullable=False)
+    operation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("operations.id", ondelete="RESTRICT"), nullable=False
+    )
+    evaluating_operation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("operations.id", ondelete="RESTRICT"), nullable=False
+    )
+    plan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("plans.id", ondelete="RESTRICT"), nullable=False
+    )
+    plan_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    wizard_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    hardware_snapshot_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("hardware_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    hardware_snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_binding_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_fingerprint_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_fingerprint_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    execution_result_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    intended_use: Mapped[str] = mapped_column(String(64), nullable=False)
+    required_tests_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    test_results_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    disposition: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class StorageBackend(Base):
     """A lifecycle-managed backend assigned to a stable Storage Group namespace."""
 
