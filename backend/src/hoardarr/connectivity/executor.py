@@ -17,6 +17,7 @@ from typing import Any
 from hoardarr.connectivity.lio_readback import (
     RTSLIB_SAVECONFIG_PATH,
     LioReadbackError,
+    classify_managed_graph,
     managed_backstore_name,
     read_saveconfig,
     verify_managed_absent,
@@ -91,6 +92,20 @@ def _managed_absence_readback(service_id: str, config: Mapping[str, Any]) -> dic
             _read_lio_saveconfig(),
             service_id=service_id,
             target_iqn=str(config["target_iqn"]),
+        )
+    except LioReadbackError as exc:
+        raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
+
+
+def _managed_preflight(
+    service_id: str, config: Mapping[str, Any], secret: str | None
+) -> dict[str, Any]:
+    try:
+        return classify_managed_graph(
+            _read_lio_saveconfig(),
+            service_id=service_id,
+            config=config,
+            secret=secret,
         )
     except LioReadbackError as exc:
         raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
@@ -1059,6 +1074,36 @@ def apply(
     services = _load_state()
     previous = dict(services)
     previous_service = previous.get(service_id)
+    incoming_secret = secret if isinstance(secret, str) else None
+    if "managed_zvol_binding" in config and (
+        previous_service is None or previous_service == config
+    ):
+        preflight = _managed_preflight(service_id, config, incoming_secret)
+        classification = preflight["classification"]
+        if classification == "exact_active":
+            if previous_service is None:
+                services[service_id] = config
+                _save_state(services)
+                return {
+                    "service_id": service_id,
+                    "protocol": "iscsi",
+                    "state": "active",
+                    "reconciled_existing": True,
+                    "readback": preflight["evidence"],
+                }
+            return {
+                "service_id": service_id,
+                "protocol": "iscsi",
+                "state": "active",
+                "already_active": True,
+                "readback": preflight["evidence"],
+            }
+        if previous_service is not None:
+            raise ExecutorFailure(
+                "connectivity_lio_preflight_absent",
+                "The managed iSCSI target is unexpectedly absent.",
+                needs_attention=True,
+            )
     services[service_id] = config
     protocol = config["protocol"]
     result_details: dict[str, Any] = {}
@@ -1075,9 +1120,7 @@ def apply(
                     _remove_iscsi(service_id, previous_service)
                 elif previous_service.get("protocol") == "fcoe":
                     _remove_fcoe(service_id, previous_service)
-            result_details = _apply_iscsi(
-                service_id, config, secret if isinstance(secret, str) else None
-            )
+            result_details = _apply_iscsi(service_id, config, incoming_secret)
         else:
             if previous_service is not None:
                 if previous_service.get("protocol") == "iscsi":

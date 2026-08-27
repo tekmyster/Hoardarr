@@ -283,3 +283,32 @@ def verify_managed_absent(
     }
     evidence["evidence_sha256"] = _digest(evidence)
     return evidence
+
+
+def classify_managed_graph(
+    document: Mapping[str, Any],
+    *,
+    service_id: str,
+    config: Mapping[str, Any],
+    secret: str | None,
+) -> dict[str, Any]:
+    try:
+        evidence = verify_managed_apply(
+            document,
+            service_id=service_id,
+            config=config,
+            secret=secret,
+        )
+    except LioReadbackError:
+        pass
+    else:
+        return {"classification": "exact_active", "evidence": evidence}
+    try:
+        evidence = verify_managed_absent(
+            document,
+            service_id=service_id,
+            target_iqn=str(config.get("target_iqn")),
+        )
+    except LioReadbackError as exc:
+        raise _failure("connectivity_lio_preflight_conflict") from exc
+    return {"classification": "exact_absent", "evidence": evidence}

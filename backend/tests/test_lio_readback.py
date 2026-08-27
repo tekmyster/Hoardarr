@@ -22,6 +22,32 @@ INITIATORS = [
 PORTALS = ["192.0.2.10", "192.0.2.11"]
 DEVICE_FIXTURE = "/dev/zvol/tank/readback-fixture"
 CHAP_FIXTURE = "fixture-value-456"
+GRAPH_MUTATIONS = [
+    "missing_backstore",
+    "duplicate_backstore",
+    "wrong_plugin",
+    "wrong_device",
+    "missing_target",
+    "duplicate_target",
+    "wrong_fabric",
+    "duplicate_tpg",
+    "tpg_tag",
+    "boolean_tpg_tag",
+    "lun_number",
+    "lun_mapping",
+    "extra_lun",
+    "missing_portal",
+    "extra_portal",
+    "duplicate_portal",
+    "wrong_port",
+    "wildcard_portal",
+    "missing_acl",
+    "extra_acl",
+    "duplicate_acl",
+    "missing_safety",
+    "wrong_safety",
+    "type_confusion",
+]
 
 
 def _config(*, chap: bool = True, wildcard: bool = False) -> dict[str, Any]:
@@ -97,6 +123,15 @@ def _document(*, chap: bool = True, wildcard: bool = False) -> dict[str, Any]:
     }
 
 
+def _absent_document() -> dict[str, Any]:
+    return {
+        "storage_objects": [
+            {"name": "unrelated-file", "plugin": "fileio", "dev": "/srv/unrelated"}
+        ],
+        "targets": [{"fabric": "loopback", "wwn": "naa.6001405unrelated", "tpgs": []}],
+    }
+
+
 def _write(path: Path, document: object) -> None:
     path.write_text(json.dumps(document), encoding="utf-8")
 
@@ -108,6 +143,63 @@ def _verify(document: dict[str, Any], *, chap: bool = True, wildcard: bool = Fal
         config=_config(chap=chap, wildcard=wildcard),
         secret=CHAP_FIXTURE if chap else None,
     )
+
+
+def _mutate_graph(document: dict[str, Any], mutation: str) -> None:
+    storage = document["storage_objects"]
+    targets = document["targets"]
+    target = targets[1]
+    tpg = target["tpgs"][0]
+    if mutation == "missing_backstore":
+        storage.pop()
+    elif mutation == "duplicate_backstore":
+        storage.append(copy.deepcopy(storage[-1]))
+    elif mutation == "wrong_plugin":
+        storage[-1]["plugin"] = "fileio"
+    elif mutation == "wrong_device":
+        storage[-1]["dev"] = "/dev/zvol/tank/other-fixture"
+    elif mutation == "missing_target":
+        targets.pop()
+    elif mutation == "duplicate_target":
+        targets.append(copy.deepcopy(target))
+    elif mutation == "wrong_fabric":
+        target["fabric"] = "loopback"
+    elif mutation == "duplicate_tpg":
+        target["tpgs"].append(copy.deepcopy(tpg))
+    elif mutation == "tpg_tag":
+        tpg["tag"] = 2
+    elif mutation == "boolean_tpg_tag":
+        tpg["tag"] = True
+    elif mutation == "lun_number":
+        tpg["luns"][0]["index"] = 1
+    elif mutation == "lun_mapping":
+        tpg["luns"][0]["storage_object"] = "/backstores/block/other"
+    elif mutation == "extra_lun":
+        tpg["luns"].append(copy.deepcopy(tpg["luns"][0]))
+    elif mutation == "missing_portal":
+        tpg["portals"].pop()
+    elif mutation == "extra_portal":
+        tpg["portals"].append({"ip_address": "192.0.2.12", "port": 3260})
+    elif mutation == "duplicate_portal":
+        tpg["portals"].append(copy.deepcopy(tpg["portals"][0]))
+    elif mutation == "wrong_port":
+        tpg["portals"][0]["port"] = 3261
+    elif mutation == "wildcard_portal":
+        tpg["portals"] = [{"ip_address": "0.0.0.0", "port": 3260}]
+    elif mutation == "missing_acl":
+        tpg["node_acls"].pop()
+    elif mutation == "extra_acl":
+        extra = copy.deepcopy(tpg["node_acls"][0])
+        extra["node_wwn"] = "iqn.2026-08.com.hoardarr:unexpected"
+        tpg["node_acls"].append(extra)
+    elif mutation == "duplicate_acl":
+        tpg["node_acls"].append(copy.deepcopy(tpg["node_acls"][0]))
+    elif mutation == "missing_safety":
+        tpg["attributes"].pop("generate_node_acls")
+    elif mutation == "type_confusion":
+        tpg["portals"][0] = ["192.0.2.10", 3260]
+    else:
+        tpg["attributes"]["demo_mode_write_protect"] = 0
 
 
 def test_exact_apply_readback_is_versioned_sanitized_and_deterministic() -> None:
@@ -226,10 +318,12 @@ def test_saveconfig_reader_rejects_unreadable_file(
         "duplicate_key",
         "wrong_top_level",
         "overflow",
+        "unreadable",
     ],
 )
+@pytest.mark.parametrize("stored_state", [False, True])
 def test_reader_failure_after_targetcli_never_saves_executor_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, stored_state: bool
 ) -> None:
     path = tmp_path / "saveconfig.json"
     if case == "symlink":
@@ -263,8 +357,20 @@ def test_reader_failure_after_targetcli_never_saves_executor_state(
     elif case == "overflow":
         monkeypatch.setattr(readback, "MAX_COLLECTION_ENTRIES", 2)
         _write(path, {"storage_objects": [{}, {}, {}], "targets": []})
+    else:
+        _write(path, _document())
+        monkeypatch.setattr(
+            readback.os,
+            "open",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError()),
+        )
     monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
-    monkeypatch.setattr(executor, "_load_state", lambda: {})
+    config = _config()
+    monkeypatch.setattr(
+        executor,
+        "_load_state",
+        lambda: {SERVICE_ID: config} if stored_state else {},
+    )
     monkeypatch.setattr(
         executor,
         "capabilities",
@@ -274,93 +380,27 @@ def test_reader_failure_after_targetcli_never_saves_executor_state(
     monkeypatch.setattr(executor, "_targetcli", lambda values: targetcli_calls.append(list(values)))
     state_writes: list[object] = []
     monkeypatch.setattr(executor, "_save_state", lambda value: state_writes.append(value))
-    config = _config()
+    reads = 0
+    original_read = executor._read_lio_saveconfig
+
+    def tracked_read() -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        return original_read()
+
+    monkeypatch.setattr(executor, "_read_lio_saveconfig", tracked_read)
     with pytest.raises(executor.ExecutorFailure) as caught:
         executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
     assert caught.value.needs_attention is True
-    assert len(targetcli_calls) == 2
+    assert reads == 1
+    assert targetcli_calls == []
     assert state_writes == []
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "missing_backstore",
-        "duplicate_backstore",
-        "wrong_plugin",
-        "wrong_device",
-        "missing_target",
-        "duplicate_target",
-        "wrong_fabric",
-        "duplicate_tpg",
-        "tpg_tag",
-        "lun_number",
-        "lun_mapping",
-        "extra_lun",
-        "missing_portal",
-        "extra_portal",
-        "duplicate_portal",
-        "wrong_port",
-        "missing_acl",
-        "extra_acl",
-        "duplicate_acl",
-        "missing_safety",
-        "wrong_safety",
-        "type_confusion",
-    ],
-)
+@pytest.mark.parametrize("mutation", GRAPH_MUTATIONS)
 def test_selected_graph_negative_matrix_is_fail_closed(mutation: str) -> None:
     document = _document()
-    storage = document["storage_objects"]
-    targets = document["targets"]
-    target = targets[1]
-    tpg = target["tpgs"][0]
-    if mutation == "missing_backstore":
-        storage.pop()
-    elif mutation == "duplicate_backstore":
-        storage.append(copy.deepcopy(storage[-1]))
-    elif mutation == "wrong_plugin":
-        storage[-1]["plugin"] = "fileio"
-    elif mutation == "wrong_device":
-        storage[-1]["dev"] = "/dev/zvol/tank/other-fixture"
-    elif mutation == "missing_target":
-        targets.pop()
-    elif mutation == "duplicate_target":
-        targets.append(copy.deepcopy(target))
-    elif mutation == "wrong_fabric":
-        target["fabric"] = "loopback"
-    elif mutation == "duplicate_tpg":
-        target["tpgs"].append(copy.deepcopy(tpg))
-    elif mutation == "tpg_tag":
-        tpg["tag"] = 2
-    elif mutation == "lun_number":
-        tpg["luns"][0]["index"] = 1
-    elif mutation == "lun_mapping":
-        tpg["luns"][0]["storage_object"] = "/backstores/block/other"
-    elif mutation == "extra_lun":
-        tpg["luns"].append(copy.deepcopy(tpg["luns"][0]))
-    elif mutation == "missing_portal":
-        tpg["portals"].pop()
-    elif mutation == "extra_portal":
-        tpg["portals"].append({"ip_address": "192.0.2.12", "port": 3260})
-    elif mutation == "duplicate_portal":
-        tpg["portals"].append(copy.deepcopy(tpg["portals"][0]))
-    elif mutation == "wrong_port":
-        tpg["portals"][0]["port"] = 3261
-    elif mutation == "missing_acl":
-        tpg["node_acls"].pop()
-    elif mutation == "extra_acl":
-        extra = copy.deepcopy(tpg["node_acls"][0])
-        extra["node_wwn"] = "iqn.2026-08.com.hoardarr:unexpected"
-        tpg["node_acls"].append(extra)
-    elif mutation == "duplicate_acl":
-        tpg["node_acls"].append(copy.deepcopy(tpg["node_acls"][0]))
-    elif mutation == "missing_safety":
-        tpg["attributes"].pop("generate_node_acls")
-    elif mutation == "type_confusion":
-        tpg["portals"][0] = ["192.0.2.10", 3260]
-    else:
-        tpg["attributes"]["demo_mode_write_protect"] = 0
+    _mutate_graph(document, mutation)
     with pytest.raises(readback.LioReadbackError) as caught:
         _verify(document)
     assert DEVICE_FIXTURE not in str(caught.value)
@@ -428,11 +468,226 @@ def test_removal_absence_rejects_each_remaining_identity(remaining: str) -> None
     assert caught.value.code == "connectivity_lio_readback_removal_incomplete"
 
 
+@pytest.mark.parametrize("stored_state", [False, True])
+@pytest.mark.parametrize("mutation", GRAPH_MUTATIONS)
+def test_preflight_conflict_never_mutates_target_or_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    stored_state: bool,
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    document = _document()
+    _mutate_graph(document, mutation)
+    _write(path, document)
+    config = _config()
+    monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
+    monkeypatch.setattr(
+        executor,
+        "_load_state",
+        lambda: {SERVICE_ID: config} if stored_state else {},
+    )
+    monkeypatch.setattr(
+        executor,
+        "capabilities",
+        lambda: {"protocols": {"iscsi": {"available": True}}},
+    )
+    commands: list[list[str]] = []
+    saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(executor, "_targetcli", lambda values: commands.append(list(values)))
+    monkeypatch.setattr(executor, "_save_state", lambda value: saves.append(dict(value)))
+    reads = 0
+    original_read = executor._read_lio_saveconfig
+
+    def tracked_read() -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        return original_read()
+
+    monkeypatch.setattr(executor, "_read_lio_saveconfig", tracked_read)
+    with pytest.raises(executor.ExecutorFailure) as caught:
+        executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
+    assert caught.value.code == "connectivity_lio_preflight_conflict"
+    assert caught.value.needs_attention is True
+    assert reads == 1
+    assert commands == []
+    assert saves == []
+    rendered = str(caught.value)
+    assert DEVICE_FIXTURE not in rendered
+    assert CHAP_FIXTURE not in rendered
+
+
+@pytest.mark.parametrize("stored_state", [False, True])
+@pytest.mark.parametrize("mutation", ["wrong_user", "wrong_password", "mutual_chap"])
+def test_preflight_chap_conflict_never_mutates_target_or_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    stored_state: bool,
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    document = _document()
+    acl = document["targets"][1]["tpgs"][0]["node_acls"][0]
+    if mutation == "wrong_user":
+        acl["chap_userid"] = "unexpected-user"
+    elif mutation == "wrong_password":
+        acl["chap_password"] = "different-fixture-value"
+    else:
+        acl["chap_mutual_userid"] = "unexpected-user"
+        acl["chap_mutual_password"] = "different-fixture-value"
+    _write(path, document)
+    config = _config()
+    monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
+    monkeypatch.setattr(
+        executor,
+        "_load_state",
+        lambda: {SERVICE_ID: config} if stored_state else {},
+    )
+    monkeypatch.setattr(
+        executor,
+        "capabilities",
+        lambda: {"protocols": {"iscsi": {"available": True}}},
+    )
+    commands: list[list[str]] = []
+    saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(executor, "_targetcli", lambda values: commands.append(list(values)))
+    monkeypatch.setattr(executor, "_save_state", lambda value: saves.append(dict(value)))
+    with pytest.raises(executor.ExecutorFailure) as caught:
+        executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
+    assert caught.value.code == "connectivity_lio_preflight_conflict"
+    assert caught.value.needs_attention is True
+    assert commands == []
+    assert saves == []
+    rendered = str(caught.value)
+    assert CHAP_FIXTURE not in rendered
+    assert "different-fixture-value" not in rendered
+    assert "unexpected-user" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("stored_state", "expected_flag", "expected_writes"),
+    [(False, "reconciled_existing", 1), (True, "already_active", 0)],
+)
+def test_exact_active_is_reconciled_without_target_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_state: bool,
+    expected_flag: str,
+    expected_writes: int,
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    _write(path, _document())
+    config = _config()
+    monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
+    monkeypatch.setattr(
+        executor,
+        "_load_state",
+        lambda: {SERVICE_ID: config} if stored_state else {},
+    )
+    monkeypatch.setattr(
+        executor,
+        "capabilities",
+        lambda: {"protocols": {"iscsi": {"available": True}}},
+    )
+    monkeypatch.setattr(
+        executor,
+        "_targetcli",
+        lambda _values: pytest.fail("exact live state invoked targetcli"),
+    )
+    saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(executor, "_save_state", lambda value: saves.append(dict(value)))
+    reads = 0
+    original_read = executor._read_lio_saveconfig
+
+    def tracked_read() -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        return original_read()
+
+    monkeypatch.setattr(executor, "_read_lio_saveconfig", tracked_read)
+    result = executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
+    assert reads == 1
+    assert len(saves) == expected_writes
+    assert result[expected_flag] is True
+    assert result["readback"]["state"] == "active"
+    rendered = json.dumps(result, sort_keys=True)
+    assert DEVICE_FIXTURE not in rendered
+    assert CHAP_FIXTURE not in rendered
+
+
+def test_identical_row_with_exact_absence_fails_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    _write(path, _absent_document())
+    config = _config()
+    monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
+    monkeypatch.setattr(executor, "_load_state", lambda: {SERVICE_ID: config})
+    monkeypatch.setattr(
+        executor,
+        "capabilities",
+        lambda: {"protocols": {"iscsi": {"available": True}}},
+    )
+    commands: list[list[str]] = []
+    saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(executor, "_targetcli", lambda values: commands.append(list(values)))
+    monkeypatch.setattr(executor, "_save_state", lambda value: saves.append(dict(value)))
+    with pytest.raises(executor.ExecutorFailure) as caught:
+        executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
+    assert caught.value.code == "connectivity_lio_preflight_absent"
+    assert caught.value.needs_attention is True
+    assert commands == []
+    assert saves == []
+
+
+def test_different_existing_row_preserves_update_path_without_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    _write(path, {"unrelated": "not a valid graph"})
+    config = _config()
+    previous = copy.deepcopy(config)
+    previous["target_iqn"] = "iqn.2026-08.com.hoardarr:previous"
+    monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
+    monkeypatch.setattr(executor, "_load_state", lambda: {SERVICE_ID: previous})
+    monkeypatch.setattr(
+        executor,
+        "capabilities",
+        lambda: {"protocols": {"iscsi": {"available": True}}},
+    )
+    commands: list[list[str]] = []
+
+    def targetcli(values: list[str]) -> None:
+        commands.append(list(values))
+        if len(commands) == 2:
+            _write(path, _document())
+
+    monkeypatch.setattr(executor, "_targetcli", targetcli)
+    saves: list[dict[str, Any]] = []
+    monkeypatch.setattr(executor, "_save_state", lambda value: saves.append(dict(value)))
+    reads = 0
+    original_read = executor._read_lio_saveconfig
+
+    def tracked_read() -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        return original_read()
+
+    monkeypatch.setattr(executor, "_read_lio_saveconfig", tracked_read)
+    result = executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
+    assert reads == 1
+    assert len(commands) == 2
+    assert commands[0][0] == f"/iscsi delete {previous['target_iqn']}"
+    assert commands[1][0].startswith("/backstores/block create ")
+    assert len(saves) == 1
+    assert result["state"] == "active"
+
+
 def test_apply_readback_precedes_state_write_and_preserves_a1_script(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "saveconfig.json"
-    _write(path, _document())
+    _write(path, _absent_document())
     monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
     monkeypatch.setattr(executor, "_load_state", lambda: {})
     monkeypatch.setattr(
@@ -441,20 +696,34 @@ def test_apply_readback_precedes_state_write_and_preserves_a1_script(
         lambda: {"protocols": {"iscsi": {"available": True}}},
     )
     commands: list[list[str]] = []
-    monkeypatch.setattr(executor, "_targetcli", lambda values: commands.append(list(values)))
+
+    def targetcli(values: list[str]) -> None:
+        commands.append(list(values))
+        _write(path, _document())
+
+    monkeypatch.setattr(executor, "_targetcli", targetcli)
     reads = 0
+    total_reads = 0
+    original_document_read = executor._read_lio_saveconfig
     original_read = executor._managed_apply_readback
+
+    def tracked_document_read() -> dict[str, Any]:
+        nonlocal total_reads
+        total_reads += 1
+        return original_document_read()
 
     def tracked_read(*args: Any) -> dict[str, Any]:
         nonlocal reads
         reads += 1
         return original_read(*args)
 
+    monkeypatch.setattr(executor, "_read_lio_saveconfig", tracked_document_read)
     monkeypatch.setattr(executor, "_managed_apply_readback", tracked_read)
     saves: list[dict[str, Any]] = []
 
     def save_state(services: Any) -> None:
         assert reads == 1
+        assert total_reads == 2
         saves.append(dict(services))
 
     monkeypatch.setattr(executor, "_save_state", save_state)
@@ -490,6 +759,7 @@ def test_apply_readback_precedes_state_write_and_preserves_a1_script(
         ]
     ]
     assert len(saves) == 1
+    assert total_reads == 2
     assert result["readback"]["state"] == "active"
 
 
@@ -499,7 +769,7 @@ def test_apply_readback_failure_cleans_once_and_never_writes_state(
     path = tmp_path / "saveconfig.json"
     wrong = _document()
     wrong["targets"][1]["tpgs"][0]["luns"][0]["index"] = 1
-    _write(path, wrong)
+    _write(path, {"storage_objects": [], "targets": []})
     monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
     monkeypatch.setattr(executor, "_load_state", lambda: {})
     monkeypatch.setattr(
@@ -511,7 +781,9 @@ def test_apply_readback_failure_cleans_once_and_never_writes_state(
 
     def targetcli(values: list[str]) -> None:
         commands.append(list(values))
-        if len(commands) == 2:
+        if len(commands) == 1:
+            _write(path, wrong)
+        else:
             _write(path, {"storage_objects": [], "targets": []})
 
     monkeypatch.setattr(executor, "_targetcli", targetcli)
@@ -537,7 +809,7 @@ def test_uncertain_apply_cleanup_is_needs_attention_without_state_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "saveconfig.json"
-    _write(path, _document())
+    _write(path, {"storage_objects": [], "targets": []})
     monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
     monkeypatch.setattr(executor, "_load_state", lambda: {})
     monkeypatch.setattr(
@@ -546,7 +818,12 @@ def test_uncertain_apply_cleanup_is_needs_attention_without_state_write(
         lambda: {"protocols": {"iscsi": {"available": True}}},
     )
     calls: list[list[str]] = []
-    monkeypatch.setattr(executor, "_targetcli", lambda values: calls.append(list(values)))
+
+    def targetcli(values: list[str]) -> None:
+        calls.append(list(values))
+        _write(path, _document())
+
+    monkeypatch.setattr(executor, "_targetcli", targetcli)
     monkeypatch.setattr(executor, "_save_state", lambda _services: pytest.fail("state written"))
     config = _config()
     wrong_credential_fixture = "wrong-fixture-value"
