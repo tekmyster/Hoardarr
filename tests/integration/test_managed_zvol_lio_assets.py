@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -208,6 +209,24 @@ def _receipt(
             "classification": "cleanup_complete",
             "total_budget_seconds": 191,
             "phases": phases,
+            "loop_release": [
+                {
+                    "index": number,
+                    "precheck": "ORIGINAL_OWNED",
+                    "holder_count": 0,
+                    "holder_identity_sha256": [],
+                    "holder_probe_state": "COMPLETE",
+                    "detach_exit_status": 0,
+                    "detach_timed_out": False,
+                    "stderr_classification": "EMPTY",
+                    "stderr_size_bytes": 0,
+                    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                    "post_detach_state": "ABSENT",
+                    "owned_image_released": True,
+                    "release_probe_state": "RELEASED",
+                }
+                for number in range(1, 7)
+            ],
         },
         "prohibited_actions": {"physical_media": 0, "login_retries": 0},
     }
@@ -566,6 +585,220 @@ def test_cleanup_timeout_tamper_fails_closed() -> None:
     phases = receipt["cleanup"]["phases"]  # type: ignore[index]
     phases[0]["timeout_seconds"] = 301  # type: ignore[index]
     with pytest.raises(LifecycleGuardError, match="phase result"):
+        validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda item: item.update({"precheck": "DIFFERENT_BACKING"}),
+        lambda item: item.update({"holder_count": 1}),
+        lambda item: item.update({"holder_identity_sha256": ["x" * 64]}),
+        lambda item: item.update({"holder_probe_state": "OVER_LIMIT"}),
+        lambda item: item.update({"detach_exit_status": 1}),
+        lambda item: item.update({"detach_timed_out": True}),
+        lambda item: item.update({"stderr_classification": "RAW_PATH"}),
+        lambda item: item.update({"stderr_size_bytes": 1}),
+        lambda item: item.update({"stderr_sha256": "0" * 64}),
+        lambda item: item.update({"stderr_size_bytes": DIAGNOSTIC_LIMIT + 1}),
+        lambda item: item.update({"stderr_sha256": "not-a-hash"}),
+        lambda item: item.update({"post_detach_state": "RAW_PATH"}),
+        lambda item: item.update({"owned_image_released": "true"}),
+        lambda item: item.update({"owned_image_released": False}),
+        lambda item: item.update({"release_probe_state": "STILL_MAPPED"}),
+    ],
+)
+def test_loop_release_receipt_mutations_fail_closed(mutation: object) -> None:
+    receipt = _receipt()
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    mutation(evidence)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError, match="loop release evidence"):
+        validate_receipt(receipt)
+
+
+def test_loop_release_diagnostic_contract_is_bounded_and_preserves_strict_absence() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    assert "loop_mapping_state" in script
+    assert "/sys/block/${candidate##*/}/holders" in script
+    assert "loop_holder_limit=8" in script
+    assert "DEVICE_BUSY" in script
+    assert "NO_SUCH_DEVICE" in script
+    assert "INVALID_ARGUMENT_OR_OPTION" in script
+    assert "PERMISSION_DENIED" in script
+    assert "UNCLASSIFIED_BOUNDED" in script
+    assert "losetup -j \"$image\"" in script
+    assert 'precheck="IDENTITY_CHANGED"' in script
+    assert ".loop-holders." in script and "holder_probe_state" in script
+    assert ".loop-release." in script and "release_probe" in script
+    assert '[[ "$post_state" == "ABSENT" ]]' in script
+    assert "lsof" not in script and "fuser" not in script and "/proc" not in script
+
+
+def _failed_loop_receipt(stderr_classification: str) -> dict[str, object]:
+    receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
+    phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    phase.update({"status": "failed", "exit_status": 1, "postcondition": False})
+    evidence.update(
+        {
+            "detach_exit_status": 1,
+            "detach_timed_out": False,
+            "stderr_classification": stderr_classification,
+            "stderr_size_bytes": 12,
+            "stderr_sha256": "c" * 64,
+            "post_detach_state": "ORIGINAL_OWNED",
+            "owned_image_released": False,
+            "release_probe_state": "STILL_MAPPED",
+        }
+    )
+    receipt["cleanup"]["classification"] = "cleanup_incomplete_bounded"  # type: ignore[index]
+    return receipt
+
+
+@pytest.mark.parametrize(
+    "stderr_classification",
+    [
+        "DEVICE_BUSY",
+        "NO_SUCH_DEVICE",
+        "INVALID_ARGUMENT_OR_OPTION",
+        "PERMISSION_DENIED",
+        "UNCLASSIFIED_BOUNDED",
+    ],
+)
+def test_each_nonempty_allowlisted_loop_stderr_fixture_is_accepted(
+    stderr_classification: str,
+) -> None:
+    validate_receipt(_failed_loop_receipt(stderr_classification))
+
+
+def test_empty_allowlisted_loop_stderr_fixture_is_accepted() -> None:
+    receipt = _receipt()
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    assert evidence["stderr_classification"] == "EMPTY"
+    assert evidence["stderr_size_bytes"] == 0
+    assert evidence["stderr_sha256"] == hashlib.sha256(b"").hexdigest()
+    validate_receipt(receipt)
+
+
+def test_loop_release_busy_reuse_and_original_backing_are_diagnostic_only() -> None:
+    receipt = _failed_loop_receipt("DEVICE_BUSY")
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    evidence.update(
+        {
+            "holder_count": 2,
+            "holder_identity_sha256": ["a" * 64, "b" * 64],
+            "post_detach_state": "DIFFERENT_BACKING",
+        }
+    )
+    validate_receipt(receipt)
+
+    evidence["holder_identity_sha256"] = ["/dev/loop-test"]
+    with pytest.raises(LifecycleGuardError, match="loop release evidence"):
+        validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "already_absent",
+        "timeout",
+        "unsafe_probe",
+        "identity_replacement",
+        "release_probe_error",
+        "zero_holders",
+        "multiple_holders",
+    ],
+)
+def test_loop_release_bounded_fixture_shapes_are_accepted(kind: str) -> None:
+    if kind == "already_absent":
+        receipt = _receipt()
+        phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+        evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+        phase.update({"attempted": False, "status": "skipped", "exit_status": 0})
+        evidence.update(
+            {
+                "precheck": "ABSENT",
+                "holder_probe_state": "NOT_APPLICABLE",
+                "post_detach_state": "ABSENT",
+            }
+        )
+    elif kind == "timeout":
+        receipt = _failed_loop_receipt("UNCLASSIFIED_BOUNDED")
+        phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+        evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+        phase.update({"status": "timeout", "exit_status": 124})
+        evidence.update({"detach_exit_status": 124, "detach_timed_out": True})
+    elif kind == "unsafe_probe":
+        receipt = _failed_loop_receipt("UNCLASSIFIED_BOUNDED")
+        phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+        evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+        phase.update({"attempted": False, "status": "skipped", "exit_status": 0})
+        evidence.update(
+            {
+                "precheck": "UNSAFE",
+                "holder_probe_state": "PROBE_ERROR",
+                "detach_exit_status": 0,
+                "stderr_classification": "EMPTY",
+                "stderr_size_bytes": 0,
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                "post_detach_state": "UNSAFE",
+                "release_probe_state": "PROBE_ERROR",
+            }
+        )
+    elif kind == "identity_replacement":
+        receipt = _failed_loop_receipt("UNCLASSIFIED_BOUNDED")
+        phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+        evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+        phase.update({"attempted": False, "status": "skipped", "exit_status": 0})
+        evidence.update(
+            {
+                "precheck": "IDENTITY_CHANGED",
+                "detach_exit_status": 0,
+                "stderr_classification": "EMPTY",
+                "stderr_size_bytes": 0,
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                "post_detach_state": "DIFFERENT_BACKING",
+            }
+        )
+    elif kind == "release_probe_error":
+        receipt = _failed_loop_receipt("DEVICE_BUSY")
+        evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+        evidence.update({"release_probe_state": "PROBE_ERROR"})
+    else:
+        receipt = _failed_loop_receipt("DEVICE_BUSY")
+        evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+        if kind == "multiple_holders":
+            evidence.update(
+                {
+                    "holder_count": 2,
+                    "holder_identity_sha256": ["a" * 64, "b" * 64],
+                }
+            )
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda evidence: evidence.update({"holder_probe_state": "OVER_LIMIT"}),
+        lambda evidence: evidence.update({"holder_probe_state": "INVALID_NAME"}),
+        lambda evidence: evidence.update({"holder_count": 9}),
+        lambda evidence: evidence.update({"holder_identity_sha256": ["holder-name"]}),
+        lambda evidence: evidence.update(
+            {"post_detach_state": "ORIGINAL_OWNED", "owned_image_released": True}
+        ),
+        lambda evidence: evidence.update(
+            {"post_detach_state": "ORIGINAL_OWNED", "release_probe_state": "RELEASED"}
+        ),
+    ],
+)
+def test_loop_release_unsafe_or_inconsistent_fixture_shapes_are_rejected(
+    mutation: object,
+) -> None:
+    receipt = _failed_loop_receipt("DEVICE_BUSY")
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    mutation(evidence)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError, match="loop release evidence"):
         validate_receipt(receipt)
 
 

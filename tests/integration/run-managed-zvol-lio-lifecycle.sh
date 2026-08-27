@@ -77,6 +77,8 @@ phase_statuses=()
 phase_exits=()
 phase_timeouts=()
 phase_postconditions=()
+loop_release_json="[]"
+loop_holder_limit=8
 
 safe_work_root() {
   [[ -n "$work" && "$work" == /tmp/hoardarr-managed-zvol.* ]]
@@ -90,6 +92,82 @@ assert_owned_loop() {
   [[ -f "$expected" && "$expected" == "$work"/disk[1-6].img ]]
   backing="$(losetup --noheadings --output BACK-FILE "$candidate" | xargs realpath)"
   [[ "$backing" == "$(realpath "$expected")" ]]
+}
+
+loop_mapping_state() {
+  local candidate="$1" expected="$2" probe stderr_probe rc backing stdout_size stderr_size
+  probe="$(mktemp "$work/.loop-mapping.XXXXXX")"
+  stderr_probe="$(mktemp "$work/.loop-mapping-stderr.XXXXXX")"
+  chmod 600 "$probe"
+  chmod 600 "$stderr_probe"
+  set +e
+  (ulimit -f 8; timeout --signal=TERM --kill-after=1s 2s losetup --noheadings --output BACK-FILE "$candidate" >"$probe" 2>"$stderr_probe")
+  rc=$?
+  set -e
+  stdout_size="$(stat -c %s "$probe")"; stderr_size="$(stat -c %s "$stderr_probe")"
+  if [[ "$rc" -eq 1 && "$stdout_size" -eq 0 && "$stderr_size" -le 16384 ]] && grep -Eqi '^losetup:.*no such device' "$stderr_probe"; then
+    rm -f -- "$probe" "$stderr_probe"; printf '%s' "ABSENT"; return
+  fi
+  if [[ "$rc" -ne 0 || "$stdout_size" -eq 0 || "$stdout_size" -gt 16384 || "$stderr_size" -gt 16384 ]]; then
+    rm -f -- "$probe" "$stderr_probe"; printf '%s' "UNSAFE"; return
+  fi
+  backing="$(xargs realpath <"$probe" 2>/dev/null || true)"
+  rm -f -- "$probe" "$stderr_probe"
+  if [[ "$backing" == "$(realpath "$expected")" ]]; then printf '%s' "ORIGINAL_OWNED"; else printf '%s' "DIFFERENT_BACKING"; fi
+}
+
+collect_loop_holders() {
+  local candidate="$1" holder_dir holder name probe rc
+  loop_holder_count=0
+  loop_holder_hashes_json="[]"
+  loop_holder_probe_state="NOT_APPLICABLE"
+  holder_dir="/sys/block/${candidate##*/}/holders"
+  [[ -d "$holder_dir" ]] || { loop_holder_probe_state="PROBE_ERROR"; return 1; }
+  probe="$(mktemp "$work/.loop-holders.XXXXXX")"
+  chmod 600 "$probe"
+  set +e
+  (ulimit -f 8; timeout --signal=TERM --kill-after=1s 2s find "$holder_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | head -n $((loop_holder_limit + 1)) >"$probe")
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 && "$(stat -c %s "$probe")" -le 16384 ]] || { loop_holder_probe_state="PROBE_ERROR"; rm -f -- "$probe"; return 1; }
+  mapfile -t loop_holder_names <"$probe"
+  rm -f -- "$probe"
+  [[ "${#loop_holder_names[@]}" -le "$loop_holder_limit" ]] || { loop_holder_probe_state="OVER_LIMIT"; return 1; }
+  for holder in "${loop_holder_names[@]}"; do
+    [[ "$holder" =~ ^[A-Za-z0-9_.:-]+$ ]] || { loop_holder_probe_state="INVALID_NAME"; return 1; }
+  done
+  loop_holder_count="${#loop_holder_names[@]}"
+  if [[ "$loop_holder_count" -gt 0 ]]; then
+    loop_holder_hashes_json="["
+    for name in "${loop_holder_names[@]}"; do
+      [[ "$loop_holder_hashes_json" == "[" ]] || loop_holder_hashes_json+=","
+      loop_holder_hashes_json+="\"$(printf '%s' "$name" | sha256sum | cut -d' ' -f1)\""
+    done
+    loop_holder_hashes_json+="]"
+  fi
+  loop_holder_probe_state="COMPLETE"
+}
+
+classify_loop_stderr() {
+  local stream="$1" text
+  loop_stderr_size="$(stat -c %s "$stream")"
+  loop_stderr_sha256="$(sha256sum "$stream" | cut -d' ' -f1)"
+  [[ "$loop_stderr_size" -le 16384 ]] || { printf '%s' "UNCLASSIFIED_BOUNDED"; return; }
+  text="$(cat "$stream")"
+  if [[ -z "$text" ]]; then printf '%s' "EMPTY"
+  elif grep -Eqi 'device or resource busy|device busy' <<<"$text"; then printf '%s' "DEVICE_BUSY"
+  elif grep -Eqi 'no such device' <<<"$text"; then printf '%s' "NO_SUCH_DEVICE"
+  elif grep -Eqi 'invalid argument|invalid option|unrecognized option' <<<"$text"; then printf '%s' "INVALID_ARGUMENT_OR_OPTION"
+  elif grep -Eqi 'permission denied|operation not permitted' <<<"$text"; then printf '%s' "PERMISSION_DENIED"
+  else printf '%s' "UNCLASSIFIED_BOUNDED"; fi
+}
+
+append_loop_release() {
+  local index="$1" precheck="$2" post_state="$3" released="$4" release_probe="$5" separator object
+  separator=","; [[ "$loop_release_json" == "[]" ]] && separator=""
+  printf -v object '{"index":%d,"precheck":"%s","holder_count":%d,"holder_identity_sha256":%s,"holder_probe_state":"%s","detach_exit_status":%d,"detach_timed_out":%s,"stderr_classification":"%s","stderr_size_bytes":%d,"stderr_sha256":"%s","post_detach_state":"%s","owned_image_released":%s,"release_probe_state":"%s"}' \
+    "$index" "$precheck" "$loop_holder_count" "$loop_holder_hashes_json" "$loop_holder_probe_state" "$rc" "$loop_timed_out" "$loop_stderr_classification" "$loop_stderr_size" "$loop_stderr_sha256" "$post_state" "$released" "$release_probe"
+  loop_release_json="${loop_release_json%]}${separator}${object}]"
 }
 
 target_absent() {
@@ -147,7 +225,7 @@ phase_result() {
 }
 
 cleanup_controller() {
-  local attempted post loop image number session_output
+  local attempted post loop image number session_output precheck post_state released release_probe loop_stderr loop_timed_out loop_stderr_classification release_stdout release_stderr release_rc release_stdout_size release_stderr_size
   cleanup_started=true
 
   attempted=false
@@ -221,14 +299,42 @@ cleanup_controller() {
     if [[ ${#loops[@]} -ge "$number" ]]; then
       loop="${loops[$((number - 1))]}"; image="${images[$((number - 1))]}"
       attempted=false
-      if timeout 2s losetup "$loop" >/dev/null 2>&1 && assert_owned_loop "$loop" "$image"; then attempted=true; fi
+      precheck="$(loop_mapping_state "$loop" "$image")"
+      loop_holder_count=0; loop_holder_hashes_json="[]"; loop_holder_probe_state="NOT_APPLICABLE"
+      if [[ "$precheck" == "ORIGINAL_OWNED" ]] && ! collect_loop_holders "$loop"; then
+        precheck="UNSAFE"
+      fi
+      if [[ "$precheck" == "ORIGINAL_OWNED" ]] && [[ "$(loop_mapping_state "$loop" "$image")" != "ORIGINAL_OWNED" ]]; then
+        precheck="IDENTITY_CHANGED"
+      fi
+      [[ "$precheck" == "ORIGINAL_OWNED" ]] && attempted=true
+      loop_stderr="$work/loop-detach-$number.stderr"
+      install -m 600 /dev/null "$loop_stderr"
       set +e
-      if [[ "$attempted" == true ]]; then run_bounded 5 losetup -d -- "$loop"; rc=$?; else rc=0; fi
+      if [[ "$attempted" == true ]]; then (ulimit -f 8; timeout --signal=TERM --kill-after=2s 5s losetup -d -- "$loop" >/dev/null 2>"$loop_stderr"); rc=$?; else rc=0; fi
       set -e
-      set +e; timeout --signal=TERM --kill-after=1s 2s losetup "$loop" >/dev/null 2>&1; probe_rc=$?; set -e
-      post=false; [[ "$probe_rc" -eq 1 ]] && post=true
+      loop_timed_out=false; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && loop_timed_out=true
+      loop_stderr_classification="$(classify_loop_stderr "$loop_stderr")"
+      post_state="$(loop_mapping_state "$loop" "$image")"
+      post=false; [[ "$post_state" == "ABSENT" ]] && post=true
+      release_stdout="$(mktemp "$work/.loop-release.XXXXXX")"; release_stderr="$(mktemp "$work/.loop-release-stderr.XXXXXX")"
+      chmod 600 "$release_stdout" "$release_stderr"
+      set +e
+      (ulimit -f 8; timeout --signal=TERM --kill-after=1s 2s losetup -j "$image" >"$release_stdout" 2>"$release_stderr")
+      release_rc=$?
+      set -e
+      release_stdout_size="$(stat -c %s "$release_stdout")"; release_stderr_size="$(stat -c %s "$release_stderr")"
+      released=false; release_probe="PROBE_ERROR"
+      if [[ "$release_rc" -eq 0 && "$release_stdout_size" -eq 0 && "$release_stderr_size" -eq 0 ]]; then released=true; release_probe="RELEASED"; fi
+      if [[ "$release_rc" -eq 0 && "$release_stdout_size" -gt 0 && "$release_stdout_size" -le 16384 && "$release_stderr_size" -le 16384 ]]; then release_probe="STILL_MAPPED"; fi
+      rm -f -- "$release_stdout" "$release_stderr"
+      append_loop_release "$number" "$precheck" "$post_state" "$released" "$release_probe"
     else
-      attempted=false; rc=0; post=true
+      attempted=false; rc=0; post=true; precheck="ABSENT"; post_state="ABSENT"; released=true
+      loop_holder_count=0; loop_holder_hashes_json="[]"; loop_holder_probe_state="NOT_APPLICABLE"; loop_timed_out=false
+      loop_stderr="$work/loop-detach-$number.stderr"; install -m 600 /dev/null "$loop_stderr"
+      loop_stderr_classification="$(classify_loop_stderr "$loop_stderr")"
+      append_loop_release "$number" "$precheck" "$post_state" "$released" "RELEASED"
     fi
     status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
     record_phase "loop_detach_$number" "$attempted" "$status" "$rc" 5 "$post"
@@ -302,7 +408,7 @@ write_receipt() {
     --argjson reconciled "$reconciled_passed" --argjson restart "$restart_passed" \
     --argjson remove "$remove_passed" --argjson backing_retained "$backing_retained" \
     --arg cleanup_classification "$cleanup_classification" --arg cleanup_first_failure "$cleanup_first_failure" \
-    --argjson cleanup_phases "$cleanup_phases_json" \
+    --argjson cleanup_phases "$cleanup_phases_json" --argjson loop_release "$loop_release_json" \
     '{schema_version:2,classification:$classification,workflow:"storage-integration",
       job:"managed-zvol-lio-lifecycle",run_id:$run_id,
       failure:{code:$failure_code,status:$failure_status,line:$failure_line},
@@ -317,7 +423,7 @@ write_receipt() {
         state_only_recovery:$reconciled,target_persistence_restart:$restart,
         remove_absence:$remove,backing_retained:$backing_retained},
       cleanup:{classification:$cleanup_classification,first_failure:$cleanup_first_failure,
-        total_budget_seconds:191,phases:$cleanup_phases},
+        total_budget_seconds:191,phases:$cleanup_phases,loop_release:$loop_release},
       prohibited_actions:{physical_media:0,host_or_vm:0,network_storage:0,multipath:0,
         controller_or_ha:0,credential_output:0,raw_saveconfig_output:0,login_retries:0}}' >"$draft_tmp"
   set +e

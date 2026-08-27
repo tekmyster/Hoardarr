@@ -46,6 +46,37 @@ CLEANUP_CLASSIFICATIONS = {
 }
 DIAGNOSTIC_LIMIT = 16 * 1024
 NODE_RECORD_LIMIT = 16 * 1024
+LOOP_HOLDER_LIMIT = 8
+LOOP_RELEASE_PRECHECKS = {
+    "ORIGINAL_OWNED",
+    "ABSENT",
+    "DIFFERENT_BACKING",
+    "IDENTITY_CHANGED",
+    "UNSAFE",
+}
+LOOP_RELEASE_POST_STATES = {
+    "ABSENT",
+    "ORIGINAL_OWNED",
+    "DIFFERENT_BACKING",
+    "UNSAFE",
+}
+LOOP_RELEASE_STDERR_CLASSES = {
+    "DEVICE_BUSY",
+    "NO_SUCH_DEVICE",
+    "INVALID_ARGUMENT_OR_OPTION",
+    "PERMISSION_DENIED",
+    "EMPTY",
+    "UNCLASSIFIED_BOUNDED",
+}
+LOOP_HOLDER_PROBE_STATES = {
+    "COMPLETE",
+    "OVER_LIMIT",
+    "INVALID_NAME",
+    "PROBE_ERROR",
+    "NOT_APPLICABLE",
+}
+LOOP_RELEASE_PROBE_STATES = {"RELEASED", "STILL_MAPPED", "PROBE_ERROR"}
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 CLEANUP_PHASES = [
     "unmount",
     "logout",
@@ -619,6 +650,126 @@ def validate_receipt(document: object) -> dict[str, Any]:
         for phase in phases
     ):
         raise LifecycleGuardError("cleanup incompleteness is invalid")
+    loop_release = cleanup.get("loop_release")
+    if not isinstance(loop_release, list) or len(loop_release) != 6:
+        raise LifecycleGuardError("loop release evidence is invalid")
+    for index, evidence in enumerate(loop_release, start=1):
+        phase = phases[6 + index]
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence)
+            != {
+                "index",
+                "precheck",
+                "holder_count",
+                "holder_identity_sha256",
+                "holder_probe_state",
+                "detach_exit_status",
+                "detach_timed_out",
+                "stderr_classification",
+                "stderr_size_bytes",
+                "stderr_sha256",
+                "post_detach_state",
+                "owned_image_released",
+                "release_probe_state",
+            }
+            or evidence.get("index") != index
+            or evidence.get("precheck") not in LOOP_RELEASE_PRECHECKS
+            or not isinstance(evidence.get("holder_count"), int)
+            or isinstance(evidence.get("holder_count"), bool)
+            or not 0 <= evidence["holder_count"] <= LOOP_HOLDER_LIMIT
+            or not isinstance(evidence.get("holder_identity_sha256"), list)
+            or len(evidence["holder_identity_sha256"]) != evidence["holder_count"]
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(holder)) is None
+                for holder in evidence["holder_identity_sha256"]
+            )
+            or evidence.get("holder_probe_state") not in LOOP_HOLDER_PROBE_STATES
+            or not isinstance(evidence.get("detach_exit_status"), int)
+            or isinstance(evidence.get("detach_exit_status"), bool)
+            or evidence["detach_exit_status"] != phase["exit_status"]
+            or not isinstance(evidence.get("detach_timed_out"), bool)
+            or evidence["detach_timed_out"]
+            is not (evidence["detach_exit_status"] in {124, 137})
+            or evidence.get("stderr_classification") not in LOOP_RELEASE_STDERR_CLASSES
+            or not isinstance(evidence.get("stderr_size_bytes"), int)
+            or isinstance(evidence.get("stderr_size_bytes"), bool)
+            or not 0 <= evidence["stderr_size_bytes"] <= DIAGNOSTIC_LIMIT
+            or re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("stderr_sha256")))
+            is None
+            or evidence.get("post_detach_state") not in LOOP_RELEASE_POST_STATES
+            or not isinstance(evidence.get("owned_image_released"), bool)
+            or evidence.get("release_probe_state") not in LOOP_RELEASE_PROBE_STATES
+            or phase["attempted"] is not (evidence["precheck"] == "ORIGINAL_OWNED")
+            or (
+                evidence["holder_probe_state"] != "COMPLETE"
+                and (
+                    evidence["holder_count"] != 0
+                    or evidence["holder_identity_sha256"] != []
+                )
+            )
+            or (
+                evidence["precheck"] in {"ORIGINAL_OWNED", "IDENTITY_CHANGED"}
+                and evidence["holder_probe_state"] != "COMPLETE"
+            )
+            or (
+                evidence["precheck"] in {"ABSENT", "DIFFERENT_BACKING"}
+                and evidence["holder_probe_state"] != "NOT_APPLICABLE"
+            )
+            or (
+                evidence["holder_probe_state"]
+                in {"OVER_LIMIT", "INVALID_NAME", "PROBE_ERROR"}
+                and evidence["precheck"] != "UNSAFE"
+            )
+            or (
+                evidence["holder_probe_state"] == "COMPLETE"
+                and evidence["precheck"]
+                not in {"ORIGINAL_OWNED", "IDENTITY_CHANGED"}
+            )
+            or (
+                evidence["holder_probe_state"] == "NOT_APPLICABLE"
+                and evidence["precheck"] == "IDENTITY_CHANGED"
+            )
+            or (
+                evidence["stderr_classification"] == "EMPTY"
+                and (
+                    evidence["stderr_size_bytes"] != 0
+                    or evidence["stderr_sha256"] != EMPTY_SHA256
+                )
+            )
+            or (
+                evidence["stderr_classification"] != "EMPTY"
+                and evidence["stderr_size_bytes"] == 0
+            )
+            or (
+                evidence["release_probe_state"] == "RELEASED"
+                and evidence["owned_image_released"] is not True
+            )
+            or (
+                evidence["release_probe_state"] != "RELEASED"
+                and evidence["owned_image_released"] is not False
+            )
+            or (
+                evidence["post_detach_state"] == "ORIGINAL_OWNED"
+                and (
+                    evidence["release_probe_state"] == "RELEASED"
+                    or evidence["owned_image_released"] is True
+                )
+            )
+            or (
+                phase["postcondition"]
+                is not (evidence["post_detach_state"] == "ABSENT")
+            )
+            or (
+                phase["status"] == "timeout"
+                and evidence["detach_timed_out"] is not True
+            )
+            or (
+                phase["attempted"] is False
+                and evidence["stderr_classification"] != "EMPTY"
+            )
+        ):
+            raise LifecycleGuardError("loop release evidence is invalid")
     prohibited = document.get("prohibited_actions")
     if (
         not isinstance(prohibited, dict)
