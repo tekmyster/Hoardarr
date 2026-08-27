@@ -126,7 +126,7 @@ def test_resolver_rejects_missing_and_every_bound_field_drift(tmp_path: Path) ->
             resolve_managed_zvol_binding(session, storage_volume_id=VOLUME_ID, expected=changed)
 
 
-def _config(binding: dict[str, Any]) -> dict[str, Any]:
+def _config(binding: dict[str, Any], *, chap: bool = True) -> dict[str, Any]:
     return {
         "protocol": "iscsi",
         "name": "lab-target",
@@ -134,8 +134,8 @@ def _config(binding: dict[str, Any]) -> dict[str, Any]:
         "target_iqn": "iqn.2026-08.com.hoardarr:lab",
         "portal_ips": ["192.0.2.10", "192.0.2.11"],
         "initiator_iqns": ["iqn.2026-08.com.hoardarr:initiator"],
-        "chap_username": "hoardarr_lab",
-        "chap_enabled": True,
+        "chap_username": "hoardarr_lab" if chap else None,
+        "chap_enabled": chap,
     }
 
 
@@ -185,6 +185,20 @@ def test_managed_apply_and_remove_use_only_block_backstore(
     assert "iqn.2026-08.com.hoardarr:initiator" in apply_script
     assert f"userid=hoardarr_lab password={CHAP_FIXTURE}" in apply_script
     assert "/backstores/block delete hoardarr-zvol-" in remove_script
+    policy_command = (
+        f"/iscsi/{config['target_iqn']}/tpg1 set attribute "
+        "generate_node_acls=0 demo_mode_write_protect=1 authentication=1"
+    )
+    assert scripts[0].count(policy_command) == 1
+    acl_auth_commands = [
+        command
+        for command in scripts[0]
+        if command.startswith(
+            f"/iscsi/{config['target_iqn']}/tpg1/acls/iqn.2026-08.com.hoardarr:initiator set auth "
+        )
+    ]
+    assert len(acl_auth_commands) == 1
+    assert scripts[0].index(policy_command) < scripts[0].index(acl_auth_commands[0])
 
     service_id = "22222222-2222-4222-8222-222222222222"
     monkeypatch.setattr(executor, "_load_state", lambda: {service_id: config})
@@ -196,6 +210,46 @@ def test_managed_apply_and_remove_use_only_block_backstore(
     result = executor.remove(service_id, digest, config, False)
     assert result["backing_data_deleted"] is False
     assert saved == [{}]
+
+
+def test_managed_apply_sets_disabled_tpg_authentication_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts: list[list[str]] = []
+    monkeypatch.setattr(
+        executor, "capabilities", lambda: {"protocols": {"iscsi": {"available": True}}}
+    )
+    monkeypatch.setattr(executor, "_targetcli", lambda commands: scripts.append(list(commands)))
+    monkeypatch.setattr(
+        executor,
+        "_managed_apply_readback",
+        lambda *_args: {"schema_version": 1, "state": "active"},
+    )
+    monkeypatch.setattr(
+        executor,
+        "_ensure_backing_file",
+        lambda _config: pytest.fail("managed zvol allocated a backing file"),
+    )
+    config = executor._validate_common(_config(_binding(tmp_path), chap=False))
+    service_id = "23232323-2323-4232-8232-232323232323"
+    backstore = executor.managed_backstore_name(service_id)
+    executor._apply_iscsi(service_id, config, None)
+    policy_command = (
+        f"/iscsi/{config['target_iqn']}/tpg1 set attribute "
+        "generate_node_acls=0 demo_mode_write_protect=1 authentication=0"
+    )
+    assert scripts == [
+        [
+            f"/backstores/block create {backstore} /dev/zvol/tank/hoardarr-lab",
+            f"/iscsi create {config['target_iqn']}",
+            f"/iscsi/{config['target_iqn']}/tpg1/luns create /backstores/block/{backstore}",
+            policy_command,
+            f"/iscsi/{config['target_iqn']}/tpg1/portals delete 0.0.0.0 3260",
+            f"/iscsi/{config['target_iqn']}/tpg1/portals create 192.0.2.10 3260",
+            f"/iscsi/{config['target_iqn']}/tpg1/portals create 192.0.2.11 3260",
+            f"/iscsi/{config['target_iqn']}/tpg1/acls create iqn.2026-08.com.hoardarr:initiator",
+        ]
+    ]
 
 
 def test_managed_apply_rollback_is_lio_only_and_delete_data_fails_before_state(

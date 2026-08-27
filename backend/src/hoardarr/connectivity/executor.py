@@ -875,7 +875,8 @@ def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None)
         f"/backstores/{backstore_kind} create {backstore} {path}",
         f"/iscsi create {target}",
         f"/iscsi/{target}/tpg1/luns create /backstores/{backstore_kind}/{backstore}",
-        f"/iscsi/{target}/tpg1 set attribute generate_node_acls=0 demo_mode_write_protect=1",
+        f"/iscsi/{target}/tpg1 set attribute generate_node_acls=0 "
+        f"demo_mode_write_protect=1 authentication={1 if config['chap_enabled'] else 0}",
     ]
     if config["portal_ips"] != ["0.0.0.0"]:
         commands.append(f"/iscsi/{target}/tpg1/portals delete 0.0.0.0 3260")

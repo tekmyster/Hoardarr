@@ -213,6 +213,7 @@ def verify_managed_apply(
     attributes = _object(tpg.get("attributes"))
     generate_node_acls = attributes.get("generate_node_acls")
     demo_write_protect = attributes.get("demo_mode_write_protect")
+    authentication = attributes.get("authentication")
     if (
         not isinstance(generate_node_acls, int)
         or isinstance(generate_node_acls, bool)
@@ -220,8 +221,13 @@ def verify_managed_apply(
         or not isinstance(demo_write_protect, int)
         or isinstance(demo_write_protect, bool)
         or demo_write_protect != 1
+        or not isinstance(authentication, int)
+        or isinstance(authentication, bool)
+        or authentication not in (0, 1)
     ):
         raise _failure("connectivity_lio_readback_mismatch")
+    if authentication != int(chap_enabled):
+        raise _failure("connectivity_lio_readback_auth_mismatch")
 
     volume_id = binding.get("storage_volume_id")
     if not isinstance(volume_id, str) or len(volume_id) < 8:
@@ -247,6 +253,7 @@ def verify_managed_apply(
         "safety_attributes": {
             "generate_node_acls": 0,
             "demo_mode_write_protect": 1,
+            "authentication": authentication,
         },
     }
     evidence["evidence_sha256"] = _digest(evidence)

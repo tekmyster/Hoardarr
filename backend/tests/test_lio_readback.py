@@ -103,6 +103,7 @@ def _document(*, chap: bool = True, wildcard: bool = False) -> dict[str, Any]:
                         "attributes": {
                             "generate_node_acls": 0,
                             "demo_mode_write_protect": 1,
+                            "authentication": int(chap),
                         },
                         "luns": [
                             {
@@ -212,6 +213,7 @@ def test_exact_apply_readback_is_versioned_sanitized_and_deterministic() -> None
     assert evidence["chap_configured"] is True
     assert evidence["chap_user_matches"] is True
     assert evidence["chap_secret_matches"] is True
+    assert evidence["safety_attributes"]["authentication"] == 1
     assert len(evidence["evidence_sha256"]) == 64
     digest = evidence["evidence_sha256"]
     unsigned = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
@@ -448,6 +450,33 @@ def test_disabled_chap_exact_fixture_passes() -> None:
     assert evidence["chap_configured"] is False
     assert evidence["chap_user_matches"] is True
     assert evidence["chap_secret_matches"] is True
+    assert evidence["safety_attributes"]["authentication"] == 0
+
+
+@pytest.mark.parametrize("value", [None, True, False, "1", "0", -1, 2])
+def test_authentication_attribute_requires_exact_integer_zero_or_one(value: object) -> None:
+    document = _document()
+    document["targets"][1]["tpgs"][0]["attributes"]["authentication"] = value
+    with pytest.raises(readback.LioReadbackError) as caught:
+        _verify(document)
+    assert caught.value.code == "connectivity_lio_readback_mismatch"
+
+
+def test_missing_authentication_attribute_fails_closed() -> None:
+    document = _document()
+    document["targets"][1]["tpgs"][0]["attributes"].pop("authentication")
+    with pytest.raises(readback.LioReadbackError) as caught:
+        _verify(document)
+    assert caught.value.code == "connectivity_lio_readback_mismatch"
+
+
+@pytest.mark.parametrize("chap", [True, False])
+def test_authentication_attribute_must_match_requested_chap_policy(chap: bool) -> None:
+    document = _document(chap=chap)
+    document["targets"][1]["tpgs"][0]["attributes"]["authentication"] = int(not chap)
+    with pytest.raises(readback.LioReadbackError) as caught:
+        _verify(document, chap=chap)
+    assert caught.value.code == "connectivity_lio_readback_auth_mismatch"
 
 
 @pytest.mark.parametrize("remaining", ["target", "backstore", "both"])
@@ -746,7 +775,7 @@ def test_apply_readback_precedes_state_write_and_preserves_a1_script(
             f"/iscsi create {TARGET_IQN}",
             f"/iscsi/{TARGET_IQN}/tpg1/luns create /backstores/block/{backstore}",
             f"/iscsi/{TARGET_IQN}/tpg1 set attribute "
-            "generate_node_acls=0 demo_mode_write_protect=1",
+            "generate_node_acls=0 demo_mode_write_protect=1 authentication=1",
             f"/iscsi/{TARGET_IQN}/tpg1/portals delete 0.0.0.0 3260",
             f"/iscsi/{TARGET_IQN}/tpg1/portals create 192.0.2.10 3260",
             f"/iscsi/{TARGET_IQN}/tpg1/portals create 192.0.2.11 3260",
@@ -763,12 +792,25 @@ def test_apply_readback_precedes_state_write_and_preserves_a1_script(
     assert result["readback"]["state"] == "active"
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("lun", "connectivity_lio_readback_mismatch"),
+        ("authentication", "connectivity_lio_readback_auth_mismatch"),
+    ],
+)
 def test_apply_readback_failure_cleans_once_and_never_writes_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_code: str,
 ) -> None:
     path = tmp_path / "saveconfig.json"
     wrong = _document()
-    wrong["targets"][1]["tpgs"][0]["luns"][0]["index"] = 1
+    if failure == "lun":
+        wrong["targets"][1]["tpgs"][0]["luns"][0]["index"] = 1
+    else:
+        wrong["targets"][1]["tpgs"][0]["attributes"]["authentication"] = 0
     _write(path, {"storage_objects": [], "targets": []})
     monkeypatch.setattr(executor, "RTSLIB_SAVECONFIG_PATH", path)
     monkeypatch.setattr(executor, "_load_state", lambda: {})
@@ -797,7 +839,7 @@ def test_apply_readback_failure_cleans_once_and_never_writes_state(
     with pytest.raises(executor.ExecutorFailure) as caught:
         executor.apply(SERVICE_ID, config_hash(config), config, CHAP_FIXTURE)
     assert caught.value.needs_attention is True
-    assert caught.value.code == "connectivity_lio_readback_mismatch"
+    assert caught.value.code == expected_code
     assert len(commands) == 2
     assert commands[1] == [
         f"/iscsi delete {TARGET_IQN}",

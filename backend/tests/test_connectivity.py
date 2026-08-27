@@ -287,6 +287,20 @@ def test_iscsi_builds_multipath_ready_portals_acls_and_chap(
     assert f"/iscsi/{config['target_iqn']}/tpg1/portals create 10.0.0.12 3260" in commands
     assert sum("/acls create " in item for item in commands) == 2
     assert sum(" set auth " in item for item in commands) == 2
+    policy_command = (
+        f"/iscsi/{config['target_iqn']}/tpg1 set attribute "
+        "generate_node_acls=0 demo_mode_write_protect=1 authentication=1"
+    )
+    assert commands.count(policy_command) == 1
+    acl_auth_commands = [
+        command
+        for command in commands
+        if command.startswith(
+            f"/iscsi/{config['target_iqn']}/tpg1/acls/{config['initiator_iqns'][0]} set auth "
+        )
+    ]
+    assert len(acl_auth_commands) == 1
+    assert commands.index(policy_command) < commands.index(acl_auth_commands[0])
 
 
 def test_iscsi_failure_removes_only_a_new_backing_file(
@@ -322,6 +336,43 @@ def test_iscsi_failure_removes_only_a_new_backing_file(
     with pytest.raises(executor.ExecutorFailure, match="failed"):
         executor._apply_iscsi("service-1", config, None)
     assert not backing.exists()
+
+
+def test_iscsi_explicitly_disables_tpg_authentication_without_chap(
+    tmp_path: Path,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    backing = tmp_path / "media.img"
+    config = {
+        "backing_path": "/data/targets/media.img",
+        "size_bytes": 1024**3,
+        "target_iqn": "iqn.2026-08.local.hoardarr:media",
+        "portal_ips": ["0.0.0.0"],
+        "initiator_iqns": ["iqn.2026-08.local.client:one"],
+        "chap_username": None,
+        "chap_enabled": False,
+    }
+    commands: list[str] = []
+    monkeypatch.setattr(
+        executor, "capabilities", lambda: {"protocols": {"iscsi": {"available": True}}}
+    )
+    monkeypatch.setattr(executor, "_ensure_backing_file", lambda _config: (backing, True))
+    monkeypatch.setattr(executor, "_targetcli", lambda values: commands.extend(values))
+
+    executor._apply_iscsi("service-1234567890", config, None)
+
+    policy_command = (
+        f"/iscsi/{config['target_iqn']}/tpg1 set attribute "
+        "generate_node_acls=0 demo_mode_write_protect=1 authentication=0"
+    )
+    assert commands.count(policy_command) == 1
+    assert commands == [
+        f"/backstores/fileio create hoardarr-service-1234 {backing}",
+        f"/iscsi create {config['target_iqn']}",
+        f"/iscsi/{config['target_iqn']}/tpg1/luns create /backstores/fileio/hoardarr-service-1234",
+        policy_command,
+        f"/iscsi/{config['target_iqn']}/tpg1/acls create iqn.2026-08.local.client:one",
+    ]
 
 
 def test_connectivity_paths_must_be_canonical(
