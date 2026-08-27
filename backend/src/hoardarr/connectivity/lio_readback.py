@@ -71,7 +71,7 @@ def read_saveconfig(path: Path = RTSLIB_SAVECONFIG_PATH) -> dict[str, Any]:
         document = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     except LioReadbackError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, RecursionError, ValueError) as exc:
         raise _failure() from exc
     if not isinstance(document, dict):
         raise _failure()

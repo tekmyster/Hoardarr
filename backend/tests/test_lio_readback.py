@@ -144,6 +144,8 @@ def test_exact_apply_readback_is_versioned_sanitized_and_deterministic() -> None
         "directory",
         "oversize",
         "malformed",
+        "deep_nesting",
+        "huge_integer",
         "duplicate_key",
         "wrong_top_level",
         "overflow",
@@ -162,6 +164,16 @@ def test_saveconfig_reader_fails_closed(
         path.write_bytes(b"{" + b"x" * 16 + b"}")
     elif case == "malformed":
         path.write_text("{not-json", encoding="utf-8")
+    elif case == "deep_nesting":
+        path.write_text(
+            '{"storage_objects":[],"targets":[],"unrelated":' + "[" * 5000 + "0" + "]" * 5000 + "}",
+            encoding="utf-8",
+        )
+    elif case == "huge_integer":
+        path.write_text(
+            '{"storage_objects":[],"targets":[],"unrelated":' + "9" * 5000 + "}",
+            encoding="utf-8",
+        )
     elif case == "duplicate_key":
         path.write_text(
             '{"storage_objects":[],"storage_objects":[],"targets":[]}', encoding="utf-8"
@@ -209,6 +221,8 @@ def test_saveconfig_reader_rejects_unreadable_file(
         "directory",
         "oversize",
         "malformed",
+        "deep_nesting",
+        "huge_integer",
         "duplicate_key",
         "wrong_top_level",
         "overflow",
@@ -229,6 +243,16 @@ def test_reader_failure_after_targetcli_never_saves_executor_state(
         path.write_bytes(b"{" + b"x" * 16 + b"}")
     elif case == "malformed":
         path.write_text("{not-json", encoding="utf-8")
+    elif case == "deep_nesting":
+        path.write_text(
+            '{"storage_objects":[],"targets":[],"unrelated":' + "[" * 5000 + "0" + "]" * 5000 + "}",
+            encoding="utf-8",
+        )
+    elif case == "huge_integer":
+        path.write_text(
+            '{"storage_objects":[],"targets":[],"unrelated":' + "9" * 5000 + "}",
+            encoding="utf-8",
+        )
     elif case == "duplicate_key":
         path.write_text(
             '{"storage_objects":[],"storage_objects":[],"targets":[]}',
