@@ -352,6 +352,130 @@ def main():
 raise SystemExit(main())
 """
 
+F23_SYSTEMCTL_OUTPUT_MAX_BYTES = 8 * 1024
+F23_ROOT_READER_SCRIPT = r"""import os, stat, sys
+path=sys.argv[1]
+expected_dev=int(sys.argv[2])
+expected_ino=int(sys.argv[3])
+limit=int(sys.argv[4])
+flags=os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0)
+fd=os.open(path,flags)
+try:
+    metadata=os.fstat(fd)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_dev!=expected_dev or
+        metadata.st_ino!=expected_ino or metadata.st_uid!=0 or metadata.st_gid!=0 or
+        stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_nlink!=1):
+        raise SystemExit(73)
+    raw=os.read(fd,limit+1)
+    if len(raw)>limit: raise SystemExit(74)
+    if os.read(fd,1): raise SystemExit(74)
+finally:
+    os.close(fd)
+os.write(1,raw)
+"""
+
+
+def _read_strict_root_file(
+    path: pathlib.Path,
+    fixture_root: pathlib.Path,
+    *,
+    expected_name: str,
+    max_bytes: int,
+) -> bytes:
+    root = fixture_root.resolve(strict=True)
+    if path.name != expected_name:
+        raise AssertionError("root receipt name is invalid")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise AssertionError("root receipt is missing") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or path.resolve(strict=True).parent != root
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise AssertionError("root receipt metadata is invalid")
+    if sys.platform == "win32":
+        raw = path.read_bytes()
+    else:
+        completed = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "/usr/bin/python3",
+                "-c",
+                F23_ROOT_READER_SCRIPT,
+                str(path),
+                str(metadata.st_dev),
+                str(metadata.st_ino),
+                str(max_bytes + 1),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        if completed.returncode != 0:
+            raise AssertionError("bounded root receipt reader failed")
+        if completed.stderr:
+            raise AssertionError("bounded root receipt reader emitted stderr")
+        raw = completed.stdout
+    if len(raw) > max_bytes:
+        raise AssertionError("root receipt exceeds cap")
+    return raw
+
+
+def _instrument_f23_disable_unmasked_units(function: str) -> str:
+    original = "            >/dev/null 2>&1 || disable_status=$?"
+    replacement = (
+        '            >"${f23_systemctl_stdout_by_unit[$unit]:-/dev/null}" '
+        '2>"${f23_systemctl_stderr_by_unit[$unit]:-/dev/null}" || disable_status=$?'
+    )
+    if function.count(original) != 1:
+        raise AssertionError("F23 systemctl redirection source is not unique")
+    instrumented = function.replace(original, replacement, 1)
+    if instrumented.count(replacement) != 1 or instrumented.count(original) != 0:
+        raise AssertionError("F23 systemctl redirection substitution failed")
+    return instrumented
+
+
+def _validate_f23_systemctl_output(
+    path: pathlib.Path, fixture_root: pathlib.Path, expected_name: str
+) -> dict[str, object]:
+    raw = _read_strict_root_file(
+        path,
+        fixture_root,
+        expected_name=expected_name,
+        max_bytes=F23_SYSTEMCTL_OUTPUT_MAX_BYTES,
+    )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AssertionError("F23 systemctl output is not UTF-8") from exc
+    if any(ord(character) < 32 and character not in "\t\n" for character in text):
+        raise AssertionError("F23 systemctl output contains control characters")
+    if re.search(
+        r"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|"
+        r"github_pat_[A-Za-z0-9_]{20,}|Authorization:[ \t]*Bearer|"
+        r"(?:token|password|secret)=\S+)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        raise AssertionError("F23 systemctl output contains secret-like material")
+    lines = text.splitlines()
+    first_line = lines[0] if lines else ""
+    if len(first_line.encode("utf-8")) > 240:
+        raise AssertionError("F23 systemctl first line exceeds cap")
+    return {
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "first_line": first_line,
+    }
+
+
 F19_SNAPSHOT_SCRIPT = r"""#!/usr/bin/python3
 from __future__ import annotations
 
@@ -1654,22 +1778,12 @@ def _validate_f20_snapshot(
 def _validate_f21_capture_error(
     path: pathlib.Path, fixture_root: pathlib.Path
 ) -> tuple[dict[str, object], str]:
-    root = fixture_root.resolve(strict=True)
-    if path.name != "f21-capture-error.json":
-        raise AssertionError("F21 capture-error name is invalid")
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError as exc:
-        raise AssertionError("F21 capture-error record is missing") from exc
-    if (
-        path.is_symlink()
-        or not path.is_file()
-        or path.resolve(strict=True).parent != root
-        or metadata.st_mode & 0o7777 != 0o600
-        or metadata.st_nlink != 1
-    ):
-        raise AssertionError("F21 capture-error metadata is invalid")
-    raw = path.read_bytes()
+    raw = _read_strict_root_file(
+        path,
+        fixture_root,
+        expected_name="f21-capture-error.json",
+        max_bytes=1024,
+    )
     if not raw or len(raw) > 1024 or not raw.endswith(b"\n"):
         raise AssertionError("F21 capture-error framing is invalid")
     try:
@@ -4503,7 +4617,9 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                         shell_function("prepare_temporary_unit_mask"),
                         shell_function("cleanup_temporary_masks"),
                         shell_function("cleanup_service_guards"),
-                        shell_function("disable_unmasked_units"),
+                        _instrument_f23_disable_unmasked_units(
+                            shell_function("disable_unmasked_units")
+                        ),
                         r"""
 postinst="$1"
 data="$2"
@@ -4951,6 +5067,18 @@ f19_capture_after_failure() {
     return 0
 }
 trap 'f19_status=$?; f19_line=$LINENO; f19_function=${FUNCNAME[0]:-main}; f19_command=$BASH_COMMAND; f19_capture_after_failure "$f19_status" "$f19_line" "$f19_function" "$f19_command"; trace_failure "$f19_status" "$f19_line"' ERR
+f23_systemctl_stdout="$work/f23-systemctl-stdout.bin"
+f23_systemctl_stderr="$work/f23-systemctl-stderr.bin"
+[[ ! -e "$f23_systemctl_stdout" && ! -L "$f23_systemctl_stdout" ]]
+[[ ! -e "$f23_systemctl_stderr" && ! -L "$f23_systemctl_stderr" ]]
+install -m 0600 -- /dev/null "$f23_systemctl_stdout"
+install -m 0600 -- /dev/null "$f23_systemctl_stderr"
+declare -A f23_systemctl_stdout_by_unit=(
+    [iscsid.service]="$f23_systemctl_stdout"
+)
+declare -A f23_systemctl_stderr_by_unit=(
+    [iscsid.service]="$f23_systemctl_stderr"
+)
 : >"$f19_command_trace"
 chmod 0600 -- "$f19_command_trace"
 exec 19>"$f19_command_trace"
@@ -5104,6 +5232,10 @@ exit 0
             run_error: OSError | subprocess.TimeoutExpired | None = None
             ownership: subprocess.CompletedProcess[str] | None = None
             ownership_error: OSError | subprocess.TimeoutExpired | None = None
+            precleanup_capture_error: tuple[dict[str, object], str] | None = None
+            precleanup_capture_error_failure: AssertionError | None = None
+            f23_outputs: dict[str, dict[str, object]] | None = None
+            f23_output_failure: AssertionError | None = None
             manager_receipt_diagnostic = ""
             systemd_receipt_diagnostic = ""
             f19_diagnostic = ""
@@ -5139,6 +5271,30 @@ exit 0
                     run_error = exc
             finally:
                 if namespace_path.exists():
+                    capture_error_path = namespace_path / "f21-capture-error.json"
+                    if capture_error_path.exists() or capture_error_path.is_symlink():
+                        try:
+                            precleanup_capture_error = _validate_f21_capture_error(
+                                capture_error_path,
+                                namespace_path,
+                            )
+                        except AssertionError as exc:
+                            precleanup_capture_error_failure = exc
+                    try:
+                        f23_outputs = {
+                            "stdout": _validate_f23_systemctl_output(
+                                namespace_path / "f23-systemctl-stdout.bin",
+                                namespace_path,
+                                "f23-systemctl-stdout.bin",
+                            ),
+                            "stderr": _validate_f23_systemctl_output(
+                                namespace_path / "f23-systemctl-stderr.bin",
+                                namespace_path,
+                                "f23-systemctl-stderr.bin",
+                            ),
+                        }
+                    except AssertionError as exc:
+                        f23_output_failure = exc
                     try:
                         ownership = subprocess.run(
                             [
@@ -5230,16 +5386,17 @@ exit 0
             )
             self.assertEqual(capture_statuses[0], capture_statuses[1])
             if capture_statuses[0] != "0\n":
-                try:
-                    capture_error, capture_error_sha256 = _validate_f21_capture_error(
-                        namespace_path / "f21-capture-error.json",
-                        namespace_path,
-                    )
-                except AssertionError as exc:
+                if precleanup_capture_error_failure is not None:
                     self.fail(
                         "F21 snapshot capture failed without a valid sanitized "
-                        f"record: {exc}\n{trace_text}"
+                        f"record: {precleanup_capture_error_failure}\n{trace_text}"
                     )
+                if precleanup_capture_error is None:
+                    self.fail(
+                        "F21 snapshot capture failed without a root-owned receipt\n"
+                        + trace_text
+                    )
+                capture_error, capture_error_sha256 = precleanup_capture_error
                 self.fail(
                     "F21 validated capture error: "
                     f"stage={capture_error['stage']} "
@@ -5323,6 +5480,38 @@ exit 0
                 namespace_path,
                 str(command_trace["sha256"]),
             )
+            if f23_output_failure is not None:
+                self.fail(
+                    f"F23 systemctl output validation failed: {f23_output_failure}\n"
+                    + trace_text
+                )
+            self.assertIsNotNone(f23_outputs, trace_text)
+            assert f23_outputs is not None
+            self.assertGreater(
+                sum(int(output["size"]) for output in f23_outputs.values()),
+                0,
+                "the exact systemctl rejection produced no bounded diagnostic output",
+            )
+            self.assertEqual(
+                command_diagnostic.count("systemctl --root=/ disable iscsid.service"),
+                1,
+                command_diagnostic,
+            )
+            disable_statuses = [
+                int(value)
+                for value in re.findall(
+                    r"disable_status=([0-9]{1,3})", command_diagnostic
+                )
+            ]
+            self.assertTrue(disable_statuses, command_diagnostic)
+            self.assertEqual(disable_statuses[-1], 1, command_diagnostic)
+            f23_systemctl_evidence = {
+                "argv": ["systemctl", "--root=/", "disable", "iscsid.service"],
+                "environment": {"SYSTEMD_OFFLINE": "1"},
+                "call_count": 1,
+                "status": disable_statuses[-1],
+                "outputs": f23_outputs,
+            }
             self.assertEqual(before_receipt["systemd"], after_receipt["systemd"])
             self.assertEqual(before_receipt["mounts"], after_receipt["mounts"])
             self.assertEqual(
@@ -5371,6 +5560,7 @@ exit 0
                 "failure": after_receipt["failure"],
                 "command_trace": after_receipt["command_trace"],
                 "command_checks": command_checks,
+                "systemctl_disable": f23_systemctl_evidence,
             }
             f20_helper = f20_after_receipt["helper"]
             assert isinstance(f20_helper, dict)
@@ -5431,6 +5621,8 @@ exit 0
                 + command_diagnostic
                 + "\nVALIDATED F20 SANITIZED DIAGNOSTIC\n"
                 + json.dumps(f20_sanitized, indent=2, sort_keys=True)
+                + "\nVALIDATED F23 SYSTEMCTL OUTPUT\n"
+                + json.dumps(f23_systemctl_evidence, indent=2, sort_keys=True)
             )
         self.assertEqual(
             result.returncode,
@@ -6478,6 +6670,231 @@ Description: Backup program for disk arrays
             self.assertEqual(duplicate.stderr, "F21 capture record already exists\n")
             self.assertEqual(output.read_text(encoding="ascii"), "preserved\n")
             outside.unlink()
+
+    def test_f23_instrumentation_preserves_the_single_systemctl_call(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            r"^disable_unmasked_units\(\) \{\n.*?^\}\n",
+            payload,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        original = match.group(0)
+        instrumented = _instrument_f23_disable_unmasked_units(original)
+        replacement = (
+            '            >"${f23_systemctl_stdout_by_unit[$unit]:-/dev/null}" '
+            '2>"${f23_systemctl_stderr_by_unit[$unit]:-/dev/null}" || '
+            "disable_status=$?"
+        )
+        self.assertEqual(
+            original.count(
+                'SYSTEMD_OFFLINE=1 systemctl --root="$target" disable "$unit"'
+            ),
+            instrumented.count(
+                'SYSTEMD_OFFLINE=1 systemctl --root="$target" disable "$unit"'
+            ),
+        )
+        self.assertEqual(instrumented.count(replacement), 1)
+        self.assertEqual(
+            instrumented.replace(
+                replacement,
+                "            >/dev/null 2>&1 || disable_status=$?",
+                1,
+            ),
+            original,
+        )
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        phase12 = source.split(
+            "trace_begin 12-final-disable-readback final-disable-readback\n", 1
+        )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
+        self.assertEqual(phase12.count("\ndisable_unmasked_units\n"), 1)
+        self.assertIn(
+            '[iscsid.service]="$f23_systemctl_stdout"',
+            phase12,
+        )
+        self.assertIn(
+            '[iscsid.service]="$f23_systemctl_stderr"',
+            phase12,
+        )
+        self.assertNotIn("systemctl is-active", phase12)
+
+    def test_f23_output_sanitizer_is_bounded_and_fail_closed(self) -> None:
+        root = pathlib.Path("fixture")
+        path = root / "f23-systemctl-stderr.bin"
+        valid = b"Failed to disable unit: fixture rejection\n"
+        with mock.patch(f"{__name__}._read_strict_root_file", return_value=valid):
+            receipt = _validate_f23_systemctl_output(
+                path, root, "f23-systemctl-stderr.bin"
+            )
+        self.assertEqual(receipt["size"], len(valid))
+        self.assertEqual(receipt["sha256"], hashlib.sha256(valid).hexdigest())
+        self.assertEqual(
+            receipt["first_line"], "Failed to disable unit: fixture rejection"
+        )
+        for label, content in (
+            ("invalid-utf8", b"\xff"),
+            ("control", b"bad\rline\n"),
+            ("secret", b"password=not-a-real-test-value\n"),
+            ("long-line", b"x" * 241),
+        ):
+            with (
+                self.subTest(label=label),
+                mock.patch(f"{__name__}._read_strict_root_file", return_value=content),
+                self.assertRaises(AssertionError),
+            ):
+                _validate_f23_systemctl_output(path, root, "f23-systemctl-stderr.bin")
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "requires real POSIX root ownership, mode, link, and sudo reader semantics",
+    )
+    def test_f23_root_receipt_reader_preserves_strict_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            receipt = root / "f21-capture-error.json"
+            raw = b'{"schema_version":1}\n'
+            receipt.write_bytes(raw)
+            receipt.chmod(0o600)
+            subprocess.run(
+                ["sudo", "-n", "chown", "0:0", "--", str(receipt)], check=True
+            )
+            self.assertEqual(
+                _read_strict_root_file(
+                    receipt,
+                    root,
+                    expected_name="f21-capture-error.json",
+                    max_bytes=1024,
+                ),
+                raw,
+            )
+            for label, completed in (
+                ("reader-nonzero", subprocess.CompletedProcess([], 73, b"", b"")),
+                (
+                    "reader-oversized",
+                    subprocess.CompletedProcess([], 0, b"x" * 1025, b""),
+                ),
+                (
+                    "reader-stderr",
+                    subprocess.CompletedProcess([], 0, raw, b"unexpected\n"),
+                ),
+            ):
+                with (
+                    self.subTest(label=label),
+                    mock.patch("subprocess.run", return_value=completed),
+                    self.assertRaises(AssertionError),
+                ):
+                    _read_strict_root_file(
+                        receipt,
+                        root,
+                        expected_name="f21-capture-error.json",
+                        max_bytes=1024,
+                    )
+
+            hardlink = root / "receipt-hardlink"
+            subprocess.run(
+                ["sudo", "-n", "ln", "--", str(receipt), str(hardlink)], check=True
+            )
+            with self.assertRaises(AssertionError):
+                _read_strict_root_file(
+                    receipt,
+                    root,
+                    expected_name="f21-capture-error.json",
+                    max_bytes=1024,
+                )
+            subprocess.run(["sudo", "-n", "rm", "--", str(hardlink)], check=True)
+
+            for label, command in (
+                ("wrong-mode", ["chmod", "0640", "--", str(receipt)]),
+                (
+                    "wrong-owner",
+                    ["chown", f"{os.getuid()}:{os.getgid()}", "--", str(receipt)],
+                ),
+            ):
+                with self.subTest(label=label):
+                    subprocess.run(["sudo", "-n", *command], check=True)
+                    with self.assertRaises(AssertionError):
+                        _read_strict_root_file(
+                            receipt,
+                            root,
+                            expected_name="f21-capture-error.json",
+                            max_bytes=1024,
+                        )
+                    subprocess.run(
+                        ["sudo", "-n", "chown", "0:0", "--", str(receipt)],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["sudo", "-n", "chmod", "0600", "--", str(receipt)],
+                        check=True,
+                    )
+
+            moved = root / "receipt-original"
+            subprocess.run(
+                ["sudo", "-n", "mv", "--", str(receipt), str(moved)], check=True
+            )
+            subprocess.run(
+                ["sudo", "-n", "ln", "-s", "--", str(moved), str(receipt)], check=True
+            )
+            with self.assertRaises(AssertionError):
+                _read_strict_root_file(
+                    receipt,
+                    root,
+                    expected_name="f21-capture-error.json",
+                    max_bytes=1024,
+                )
+            subprocess.run(["sudo", "-n", "rm", "--", str(receipt)], check=True)
+            subprocess.run(["sudo", "-n", "mkdir", "--", str(receipt)], check=True)
+            with self.assertRaises(AssertionError):
+                _read_strict_root_file(
+                    receipt,
+                    root,
+                    expected_name="f21-capture-error.json",
+                    max_bytes=1024,
+                )
+            subprocess.run(["sudo", "-n", "rmdir", "--", str(receipt)], check=True)
+            subprocess.run(
+                ["sudo", "-n", "mv", "--", str(moved), str(receipt)], check=True
+            )
+            wrong_path = root / "wrong-name.json"
+            wrong_path.write_bytes(raw)
+            with self.assertRaises(AssertionError):
+                _read_strict_root_file(
+                    wrong_path,
+                    root,
+                    expected_name="f21-capture-error.json",
+                    max_bytes=1024,
+                )
+            nested = root / "nested"
+            nested.mkdir()
+            nested_receipt = nested / "f21-capture-error.json"
+            nested_receipt.write_bytes(raw)
+            nested_receipt.chmod(0o600)
+            subprocess.run(
+                ["sudo", "-n", "chown", "0:0", "--", str(nested_receipt)],
+                check=True,
+            )
+            with self.assertRaises(AssertionError):
+                _read_strict_root_file(
+                    nested_receipt,
+                    root,
+                    expected_name="f21-capture-error.json",
+                    max_bytes=1024,
+                )
+            subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "chown",
+                    "-R",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--",
+                    str(root),
+                ],
+                check=True,
+            )
 
     @unittest.skipUnless(
         sys.platform == "win32",
