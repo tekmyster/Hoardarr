@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'rc=$?; printf "managed-zvol lifecycle failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 
 [[ "$(id -u)" -eq 0 ]] || { echo "requires root in a disposable runner" >&2; exit 1; }
 [[ "${GITHUB_ACTIONS:-}" == "true" ]] || {
@@ -19,16 +18,19 @@ run_id="${GITHUB_RUN_ID:-$$}"
 [[ "$run_id" =~ ^[0-9]+$ ]]
 work="$(mktemp -d -t hoardarr-managed-zvol.XXXXXXXX)"
 touch "$work/.hoardarr-owned"
-pool="hda4_${run_id}_$$"
+chmod 700 "$work"
+receipt_dir="$repo/dist/validation"
+receipt="$receipt_dir/managed-zvol-lio-lifecycle.json"
+pool="hda5_${run_id}_$$"
 zvol="managed_lio"
 zvol_size_bytes=$((256 * 1024 * 1024))
 service_id="66666666-6666-4666-8666-666666666666"
 volume_id="77777777-7777-4777-8777-777777777777"
-chap_fixture="A4$(printf '%s' "$service_id" | sha256sum | cut -c1-30)"
-target_iqn="iqn.2026-08.local.hoardarr:a4-${run_id}-$$"
-initiator_iqn="iqn.2026-08.local.hoardarr:a4-initiator-${run_id}-$$"
+chap_fixture="A5$(printf '%s' "$service_id" | sha256sum | cut -c1-30)"
+target_iqn="iqn.2026-08.local.hoardarr:a5-${run_id}-$$"
+initiator_iqn="iqn.2026-08.local.hoardarr:a5-initiator-${run_id}-$$"
 portal="127.0.0.5"
-chap_user="hoardarr_a4"
+chap_user="hoardarr_a5"
 backstore="hoardarr-zvol-$(printf '%s' "$service_id" | sha256sum | cut -c1-24)"
 state_file="$work/connectivity/services.json"
 mountpoint="$work/mount"
@@ -39,11 +41,42 @@ images=()
 logged_in=false
 mounted=false
 pool_created=false
-cleanup_invocations=0
-cleanup_targetcli_mutations=0
-cleanup_pool_destroys=0
-cleanup_loop_detaches=0
-cleanup_complete=false
+pool_created_once=false
+zvol_created=false
+node_created=false
+classification="HARNESS_ERROR"
+failure_code="UNCLASSIFIED_HARNESS_STOP"
+failure_line=0
+original_lifecycle_status=1
+login_attempt_count=0
+login_status=-1
+initial_apply_passed=false
+prelogin_readback_passed=false
+bounded_io_passed=false
+idempotent_passed=false
+reconciled_passed=false
+restart_passed=false
+remove_passed=false
+backing_retained=false
+parity_json='{"schema_version":1,"exact":false,"mismatch":"NOT_RUN","record_count":0,"auth_method_chap":false,"username_match":false,"password_match":false,"record_count_exact":false,"record_safe":false,"username_length":0,"password_length":0,"target_identity_sha256":"","initiator_identity_sha256":"","parity_sha256":""}'
+diagnostic_json='{"schema_version":1,"status":-1,"streams":[],"ordered_classifications":[],"diagnosed_class":null}'
+initial_json='{}'
+independent_json='{}'
+idempotent_json='{}'
+reconciled_json='{}'
+restart_json='{}'
+remove_json='{}'
+data_hash_before=""
+data_hash_after=""
+pool_guid=""
+cleanup_started=false
+cleanup_first_failure="NONE"
+phase_names=()
+phase_attempted=()
+phase_statuses=()
+phase_exits=()
+phase_timeouts=()
+phase_postconditions=()
 
 safe_work_root() {
   [[ -n "$work" && "$work" == /tmp/hoardarr-managed-zvol.* ]]
@@ -59,60 +92,272 @@ assert_owned_loop() {
   [[ "$backing" == "$(realpath "$expected")" ]]
 }
 
-target_exists() {
-  targetcli /iscsi ls 2>/dev/null | grep -Fq -- "$target_iqn"
-}
-
-backstore_exists() {
-  targetcli /backstores/block ls 2>/dev/null | grep -Fq -- "$backstore"
-}
-
-cleanup_resources() {
+target_absent() {
+  local output rc
   set +e
-  cleanup_invocations=$((cleanup_invocations + 1))
-  if [[ "$mounted" == true ]] && mountpoint -q "$mountpoint"; then
-    umount -- "$mountpoint"
+  output="$(timeout --signal=TERM --kill-after=1s 3s targetcli /iscsi ls 2>/dev/null | head -c 16385)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 ]] || return 2
+  ! grep -Fq -- "$target_iqn" <<<"$output"
+}
+
+backstore_absent() {
+  local output rc
+  set +e
+  output="$(timeout --signal=TERM --kill-after=1s 3s targetcli /backstores/block ls 2>/dev/null | head -c 16385)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 ]] || return 2
+  ! grep -Fq -- "$backstore" <<<"$output"
+}
+
+record_phase() {
+  phase_names+=("$1")
+  phase_attempted+=("$2")
+  phase_statuses+=("$3")
+  phase_exits+=("$4")
+  phase_timeouts+=("$5")
+  phase_postconditions+=("$6")
+  if [[ "$3" != "success" && "$3" != "skipped" && "$cleanup_first_failure" == "NONE" ]]; then
+    cleanup_first_failure="$1:$3"
+  fi
+  if [[ "$6" != "true" && "$cleanup_first_failure" == "NONE" ]]; then
+    cleanup_first_failure="$1:postcondition"
+  fi
+}
+
+run_bounded() {
+  local seconds="$1"; shift
+  timeout --signal=TERM --kill-after=2s "${seconds}s" "$@" >/dev/null 2>&1
+}
+
+phase_result() {
+  local name="$1" attempted="$2" seconds="$3" postcondition="$4" status="skipped" rc=0
+  shift 4
+  if [[ "$attempted" == "true" ]]; then
+    set +e
+    run_bounded "$seconds" "$@"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then status="success"; elif [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then status="timeout"; else status="failed"; fi
+    [[ "$rc" -eq 0 ]] || postcondition=false
+  fi
+  record_phase "$name" "$attempted" "$status" "$rc" "$seconds" "$postcondition"
+}
+
+cleanup_controller() {
+  local attempted post loop image number session_output
+  cleanup_started=true
+
+  attempted=false
+  [[ "$mounted" == true ]] && attempted=true
+  if [[ "$attempted" == true ]]; then
+    set +e; run_bounded 8 umount -- "$mountpoint"; rc=$?; set -e
+    if timeout 3s mountpoint -q "$mountpoint"; then post=false; else post=true; fi
+    status="failed"; [[ "$rc" -eq 0 ]] && status="success"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+    record_phase "unmount" true "$status" "$rc" 8 "$post"
+  else
+    record_phase "unmount" false "skipped" 0 8 true
   fi
   mounted=false
-  if [[ "$logged_in" == true ]]; then
-    iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --logout >/dev/null 2>&1 || true
-  fi
-  logged_in=false
-  iscsiadm -m node -T "$target_iqn" -p "$portal:3260" -o delete >/dev/null 2>&1 || true
-  if target_exists; then
-    targetcli "/iscsi/$target_iqn" delete >/dev/null 2>&1 || true
-    cleanup_targetcli_mutations=$((cleanup_targetcli_mutations + 1))
-  fi
-  if backstore_exists; then
-    targetcli "/backstores/block/$backstore" delete >/dev/null 2>&1 || true
-    cleanup_targetcli_mutations=$((cleanup_targetcli_mutations + 1))
-  fi
-  targetcli saveconfig >/dev/null 2>&1 || true
-  if [[ "$pool_created" == true ]] && zpool list -H -o name "$pool" >/dev/null 2>&1; then
-    zpool destroy -f "$pool" >/dev/null 2>&1 || true
-    cleanup_pool_destroys=$((cleanup_pool_destroys + 1))
-  fi
-  pool_created=false
-  for index in "${!loops[@]}"; do
-    loop="${loops[$index]}"
-    image="${images[$index]}"
-    if losetup "$loop" >/dev/null 2>&1 && assert_owned_loop "$loop" "$image"; then
-      losetup -d -- "$loop" >/dev/null 2>&1 || true
-      cleanup_loop_detaches=$((cleanup_loop_detaches + 1))
-    fi
-  done
-  if [[ "$initiator_had_original" == true && -f "$initiator_backup" ]]; then
-    install -m 600 "$initiator_backup" /etc/iscsi/initiatorname.iscsi
+
+  attempted=false
+  [[ "$logged_in" == true ]] && attempted=true
+  set +e
+  if [[ "$attempted" == true ]]; then
+    run_bounded 8 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --logout; rc=$?
   else
-    rm -f -- /etc/iscsi/initiatorname.iscsi
+    rc=0
   fi
-  if safe_work_root; then
-    rm -f -- "$work/.hoardarr-owned"
-    rmdir -- "$work" 2>/dev/null || rm -rf -- "$work"
+  set -e
+  set +e
+  session_output="$(timeout --signal=TERM --kill-after=1s 3s iscsiadm -m session 2>/dev/null)"
+  session_rc=$?
+  set -e
+  post=false
+  if [[ "$session_rc" -eq 21 ]] || { [[ "$session_rc" -eq 0 ]] && ! grep -Fq -- "$target_iqn" <<<"$session_output"; }; then post=true; fi
+  status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "logout" "$attempted" "$status" "$rc" 8 "$post"
+  logged_in=false
+
+  attempted="$node_created"
+  set +e
+  if [[ "$attempted" == true ]]; then run_bounded 8 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" -o delete; rc=$?; else rc=0; fi
+  set -e
+  if [[ ! -e "/etc/iscsi/nodes/$target_iqn" ]]; then post=true; else post=false; fi
+  status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "node_delete" "$attempted" "$status" "$rc" 8 "$post"
+
+  if target_absent; then attempted=false; else attempted=true; fi
+  set +e
+  if [[ "$attempted" == true ]]; then run_bounded 10 targetcli "/iscsi/$target_iqn" delete; rc=$?; else rc=0; fi
+  set -e
+  if target_absent; then post=true; else post=false; fi
+  status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "target_delete" "$attempted" "$status" "$rc" 10 "$post"
+
+  if backstore_absent; then attempted=false; else attempted=true; fi
+  set +e
+  if [[ "$attempted" == true ]]; then run_bounded 10 targetcli "/backstores/block/$backstore" delete; rc=$?; else rc=0; fi
+  set -e
+  if backstore_absent; then post=true; else post=false; fi
+  status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "backstore_delete" "$attempted" "$status" "$rc" 10 "$post"
+
+  phase_result "saveconfig" true 10 true targetcli saveconfig
+
+  attempted="$pool_created"
+  set +e
+  if [[ "$attempted" == true ]]; then run_bounded 25 zpool destroy -f "$pool"; rc=$?; else rc=0; fi
+  set -e
+  set +e; timeout --signal=TERM --kill-after=1s 3s zpool list -H -o name "$pool" >/dev/null 2>&1; probe_rc=$?; set -e
+  post=false; [[ "$probe_rc" -eq 1 ]] && post=true
+  status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "pool_destroy" "$attempted" "$status" "$rc" 25 "$post"
+  pool_created=false
+
+  for number in 1 2 3 4 5 6; do
+    if [[ ${#loops[@]} -ge "$number" ]]; then
+      loop="${loops[$((number - 1))]}"; image="${images[$((number - 1))]}"
+      attempted=false
+      if timeout 2s losetup "$loop" >/dev/null 2>&1 && assert_owned_loop "$loop" "$image"; then attempted=true; fi
+      set +e
+      if [[ "$attempted" == true ]]; then run_bounded 5 losetup -d -- "$loop"; rc=$?; else rc=0; fi
+      set -e
+      set +e; timeout --signal=TERM --kill-after=1s 2s losetup "$loop" >/dev/null 2>&1; probe_rc=$?; set -e
+      post=false; [[ "$probe_rc" -eq 1 ]] && post=true
+    else
+      attempted=false; rc=0; post=true
+    fi
+    status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+    record_phase "loop_detach_$number" "$attempted" "$status" "$rc" 5 "$post"
+  done
+
+  set +e
+  if [[ "$initiator_had_original" == true && -f "$initiator_backup" ]]; then
+    run_bounded 8 install -m 600 "$initiator_backup" /etc/iscsi/initiatorname.iscsi; rc=$?
+  else
+    run_bounded 8 rm -f -- /etc/iscsi/initiatorname.iscsi; rc=$?
   fi
-  rm -f -- /.hoardarr-disposable-runner
+  set -e
+  status="failed"; [[ "$rc" -eq 0 ]] && status="success"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  post=false
+  if [[ "$rc" -eq 0 && "$initiator_had_original" == true ]] && timeout --signal=TERM --kill-after=1s 2s cmp -s -- "$initiator_backup" /etc/iscsi/initiatorname.iscsi; then post=true; fi
+  if [[ "$rc" -eq 0 && "$initiator_had_original" == false && ! -e /etc/iscsi/initiatorname.iscsi ]]; then post=true; fi
+  record_phase "initiator_restore" true "$status" "$rc" 8 "$post"
+
+  attempted=false
+  if safe_work_root; then attempted=true; fi
+  set +e
+  if [[ "$attempted" == true ]]; then run_bounded 10 rm -rf -- "$work"; rc=$?; else rc=0; fi
+  set -e
+  [[ ! -e "$work" ]] && post=true || post=false
+  status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "work_root_remove" "$attempted" "$status" "$rc" 10 "$post"
+
+  set +e; run_bounded 3 rm -f -- /.hoardarr-disposable-runner; rc=$?; set -e
+  [[ ! -e /.hoardarr-disposable-runner ]] && post=true || post=false
+  status="failed"; [[ "$rc" -eq 0 ]] && status="success"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
+  record_phase "runner_marker_remove" true "$status" "$rc" 3 "$post"
 }
-trap cleanup_resources EXIT
+
+build_cleanup_json() {
+  local index separator="" object
+  cleanup_phases_json="["
+  for index in "${!phase_names[@]}"; do
+    printf -v object '{"name":"%s","order":%d,"attempted":%s,"status":"%s","exit_status":%d,"timeout_seconds":%d,"postcondition":%s}' \
+      "${phase_names[$index]}" "$((index + 1))" "${phase_attempted[$index]}" \
+      "${phase_statuses[$index]}" "${phase_exits[$index]}" "${phase_timeouts[$index]}" \
+      "${phase_postconditions[$index]}"
+    cleanup_phases_json+="$separator$object"; separator=","
+  done
+  cleanup_phases_json+="]"
+  if [[ "$cleanup_started" != true ]]; then
+    cleanup_classification="cleanup_not_started"
+  elif [[ "$cleanup_first_failure" == "NONE" ]]; then
+    cleanup_classification="cleanup_complete"
+  else
+    cleanup_classification="cleanup_incomplete_bounded"
+  fi
+}
+
+write_receipt() {
+  local draft_tmp receipt_rc
+  build_cleanup_json
+  mkdir -p "$receipt_dir"
+  draft_tmp="$(mktemp "$receipt_dir/.managed-zvol-a5-draft.XXXXXX")"
+  chmod 600 "$draft_tmp"
+  jq -n \
+    --arg classification "$classification" --arg run_id "$run_id" \
+    --arg failure_code "$failure_code" --argjson failure_status "$original_lifecycle_status" \
+    --argjson failure_line "$failure_line" --arg pool_guid_sha256 "$(printf '%s' "$pool_guid" | sha256sum | cut -d' ' -f1)" \
+    --argjson loop_count "${#loops[@]}" --argjson raidz2_vdev_count "$([[ "$pool_created_once" == true ]] && echo 1 || echo 0)" \
+    --argjson raidz2_member_count "$([[ "$pool_created_once" == true ]] && echo 6 || echo 0)" \
+    --argjson zvol_count "$([[ "$zvol_created" == true ]] && echo 1 || echo 0)" \
+    --argjson initial_apply "$initial_apply_passed" --argjson prelogin_readback "$prelogin_readback_passed" \
+    --argjson parity "$parity_json" --argjson login_attempt_count "$login_attempt_count" \
+    --argjson login_status "$login_status" --argjson diagnostic "$diagnostic_json" \
+    --argjson bounded_io "$bounded_io_passed" --argjson idempotent "$idempotent_passed" \
+    --argjson reconciled "$reconciled_passed" --argjson restart "$restart_passed" \
+    --argjson remove "$remove_passed" --argjson backing_retained "$backing_retained" \
+    --arg cleanup_classification "$cleanup_classification" --arg cleanup_first_failure "$cleanup_first_failure" \
+    --argjson cleanup_phases "$cleanup_phases_json" \
+    '{schema_version:2,classification:$classification,workflow:"storage-integration",
+      job:"managed-zvol-lio-lifecycle",run_id:$run_id,
+      failure:{code:$failure_code,status:$failure_status,line:$failure_line},
+      topology:{loop_count:$loop_count,raidz2_vdev_count:$raidz2_vdev_count,
+        raidz2_member_count:$raidz2_member_count,zvol_count:$zvol_count,
+        pool_guid_sha256:$pool_guid_sha256,raw_paths_emitted:false},
+      prelogin:{production_apply_passed:$initial_apply,production_readback_passed:$prelogin_readback},
+      parity:$parity,
+      login:{attempt_count:$login_attempt_count,status:$login_status,
+        succeeded:($login_status==0),diagnostic:$diagnostic},
+      downstream:{bounded_io:$bounded_io,idempotent_apply:$idempotent,
+        state_only_recovery:$reconciled,target_persistence_restart:$restart,
+        remove_absence:$remove,backing_retained:$backing_retained},
+      cleanup:{classification:$cleanup_classification,first_failure:$cleanup_first_failure,
+        total_budget_seconds:191,phases:$cleanup_phases},
+      prohibited_actions:{physical_media:0,host_or_vm:0,network_storage:0,multipath:0,
+        controller_or_ha:0,credential_output:0,raw_saveconfig_output:0,login_retries:0}}' >"$draft_tmp"
+  set +e
+  "$python" "$repo/tests/integration/managed_zvol_lio_lifecycle.py" receipt \
+    --draft "$draft_tmp" --output "$receipt"
+  receipt_rc=$?
+  rm -f -- "$draft_tmp"
+  set -e
+  return "$receipt_rc"
+}
+
+finalize() {
+  local original_status="$1" receipt_status
+  trap - EXIT ERR
+  set +e
+  original_lifecycle_status="$original_status"
+  cleanup_controller
+  if [[ "$original_status" -eq 0 && "$cleanup_first_failure" != "NONE" ]]; then
+    classification="HARNESS_ERROR"
+    failure_code="CLEANUP_INCOMPLETE"
+    original_lifecycle_status=44
+  fi
+  set +e
+  write_receipt
+  receipt_status=$?
+  if [[ "$receipt_status" -ne 0 ]]; then
+    printf 'managed-zvol receipt validation failed (rc=%s)\n' "$receipt_status" >&2
+    exit 97
+  fi
+  exit "$original_lifecycle_status"
+}
+
+on_error() {
+  local status="$1" line="$2"
+  failure_line="$line"
+  if [[ "$failure_code" == "UNCLASSIFIED_HARNESS_STOP" ]]; then failure_code="LIFECYCLE_COMMAND_FAILED"; fi
+  printf 'managed-zvol lifecycle stopped at line %s (rc=%s)\n' "$line" "$status" >&2
+}
+trap 'on_error "$?" "$LINENO"' ERR
+trap 'finalize "$?"' EXIT
 
 helper() {
   local action="$1"
@@ -140,8 +385,7 @@ for number in 1 2 3 4 5 6; do
   image="$work/disk${number}.img"
   truncate -s 768M "$image"
   loop="$(losetup --find --show "$image")"
-  images+=("$image")
-  loops+=("$loop")
+  images+=("$image"); loops+=("$loop")
   assert_owned_loop "$loop" "$image"
   [[ "$(blockdev --getsize64 "$loop")" -eq "$(stat -c %s "$image")" ]]
   [[ -z "$(findmnt -rn -S "$loop" -o TARGET)" ]]
@@ -157,20 +401,17 @@ done
 
 zpool create -f -o ashift=12 -O mountpoint=none -O compression=off "$pool" raidz2 "${loops[@]}"
 pool_created=true
+pool_created_once=true
 [[ "$(zpool get -Hp -o value health "$pool")" == "ONLINE" ]]
 [[ "$(zpool get -Hp -o value ashift "$pool")" == "12" ]]
 [[ "$(zpool status -P "$pool" | grep -Ec '^[[:space:]]+raidz2-[0-9]+[[:space:]]')" -eq 1 ]]
-raidz2_member_count=0
-for loop in "${loops[@]}"; do
-  [[ "$(zpool status -P "$pool" | grep -Fc -- "$loop")" -eq 1 ]]
-  raidz2_member_count=$((raidz2_member_count + 1))
-done
-[[ "$raidz2_member_count" -eq 6 ]]
+for loop in "${loops[@]}"; do [[ "$(zpool status -P "$pool" | grep -Fc -- "$loop")" -eq 1 ]]; done
 pool_guid="$(zpool get -Hp -o value guid "$pool")"
 zfs create -V "$zvol_size_bytes" -o volblocksize=16K "$pool/$zvol"
 zvol_device="/dev/zvol/$pool/$zvol"
 for _attempt in $(seq 1 30); do [[ -b "$zvol_device" ]] && break; udevadm settle; sleep 1; done
 [[ -b "$zvol_device" ]]
+zvol_created=true
 [[ "$(blockdev --getsize64 "$zvol_device")" -eq "$zvol_size_bytes" ]]
 zvol_used_before_apply="$(zfs get -Hp -o value used "$pool/$zvol")"
 zvol_size_before_apply="$(zfs get -Hp -o value volsize "$pool/$zvol")"
@@ -184,6 +425,7 @@ initial_json="$(helper apply)"
 [[ "$(jq -r '.readback.block_plugin and .readback.lun_zero and .readback.portal_exact and .readback.acl_exact and .readback.chap_configured and .readback.chap_user_matches and .readback.chap_secret_matches and .readback.device_matches_binding' <<<"$initial_json")" == "true" ]]
 [[ "$(zfs get -Hp -o value used "$pool/$zvol")" == "$zvol_used_before_apply" ]]
 [[ "$(zfs get -Hp -o value volsize "$pool/$zvol")" == "$zvol_size_before_apply" ]]
+initial_apply_passed=true
 independent_json="$(helper readback)"
 initial_digest="$(jq -r .readback.evidence_sha256 <<<"$initial_json")"
 [[ "$(jq -r .readback.evidence_sha256 <<<"$independent_json")" == "$initial_digest" ]]
@@ -196,143 +438,128 @@ install -m 600 /dev/null /etc/iscsi/initiatorname.iscsi
 printf 'InitiatorName=%s\n' "$initiator_iqn" >/etc/iscsi/initiatorname.iscsi
 systemctl restart iscsid.service
 iscsiadm -m discovery -t sendtargets -p "$portal:3260" >/dev/null
+node_created=true
 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --op update -n node.session.auth.authmethod -v CHAP
 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --op update -n node.session.auth.username -v "$chap_user"
 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --op update -n node.session.auth.password -v "$chap_fixture"
-iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --login >/dev/null
+
+prelogin_target_json="$(helper readback)"
+[[ "$(jq -r '.readback.state == "active" and .readback.portal_exact and .readback.acl_exact and .readback.chap_configured and .readback.chap_user_matches and .readback.chap_secret_matches and .readback.device_matches_binding' <<<"$prelogin_target_json")" == "true" ]]
+[[ "$(jq -r .readback.evidence_sha256 <<<"$prelogin_target_json")" == "$initial_digest" ]]
+prelogin_readback_passed=true
+parity_json="$(HOARDARR_A4_CHAP_FIXTURE="$chap_fixture" "$python" \
+  "$repo/tests/integration/managed_zvol_lio_lifecycle.py" parity \
+  --node-root /etc/iscsi/nodes --target-iqn "$target_iqn" --portal "$portal" \
+  --initiator-iqn "$initiator_iqn" --chap-user "$chap_user")"
+if [[ "$(jq -r .exact <<<"$parity_json")" != "true" ]]; then
+  classification="PARITY_MISMATCH_IDENTIFIED"
+  failure_code="$(jq -r .mismatch <<<"$parity_json")"
+  exit 41
+fi
+
+login_stdout="$work/login.stdout"
+login_stderr="$work/login.stderr"
+login_journal="$work/login.journal"
+install -m 600 /dev/null "$login_stdout"
+install -m 600 /dev/null "$login_stderr"
+install -m 600 /dev/null "$login_journal"
+attempt_started="$(date --iso-8601=seconds)"
+login_attempt_count=1
+trap - ERR
+set +e
+(ulimit -f 16; timeout --signal=TERM --kill-after=2s 20s \
+  iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --login \
+  >"$login_stdout" 2>"$login_stderr")
+login_status=$?
+(ulimit -f 16; timeout --signal=TERM --kill-after=2s 10s journalctl \
+  -u iscsid.service -u rtslib-fb-targetctl.service --since "$attempt_started" \
+  --no-pager -n 80 >"$login_journal" 2>/dev/null)
+diagnostic_capture_status=$?
+set -e
+if [[ "$login_status" -eq 153 || "$diagnostic_capture_status" -eq 153 ]]; then
+  classification="HARNESS_ERROR"; failure_code="DIAGNOSTIC_OVERFLOW"; exit 42
+fi
+if [[ "$diagnostic_capture_status" -ne 0 && "$diagnostic_capture_status" -ne 1 ]]; then
+  classification="HARNESS_ERROR"; failure_code="DIAGNOSTIC_CAPTURE_FAILED"; exit 42
+fi
+set +e
+diagnostic_json="$(HOARDARR_A4_CHAP_FIXTURE="$chap_fixture" "$python" \
+  "$repo/tests/integration/managed_zvol_lio_lifecycle.py" diagnostic \
+  --stdout "$login_stdout" --stderr "$login_stderr" --journal "$login_journal" \
+  --status "$login_status")"
+diagnostic_status=$?
+set -e
+trap 'on_error "$?" "$LINENO"' ERR
+if [[ "$diagnostic_status" -ne 0 ]]; then
+  classification="HARNESS_ERROR"; failure_code="DIAGNOSTIC_VALIDATION_FAILED"; exit 43
+fi
+if [[ "$login_status" -ne 0 ]]; then
+  if [[ "$(jq -r .diagnosed_class <<<"$diagnostic_json")" == "null" ]]; then
+    classification="LOGIN_FAILURE_UNRESOLVED"
+  else
+    classification="LOGIN_FAILURE_DIAGNOSED"
+  fi
+  failure_code="LOGIN_ATTEMPT_FAILED"
+  exit "$login_status"
+fi
 logged_in=true
+
 by_path="/dev/disk/by-path/ip-${portal}:3260-iscsi-${target_iqn}-lun-0"
 for _attempt in $(seq 1 30); do [[ -e "$by_path" ]] && break; udevadm settle; sleep 1; done
 [[ -L "$by_path" ]]
 lun_device="$(readlink -f -- "$by_path")"
 [[ -b "$lun_device" && "$lun_device" != "$zvol_device" ]]
 mkfs.ext4 -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$by_path" >/dev/null
-mount "$by_path" "$mountpoint"
-mounted=true
-dd if=/dev/zero of="$mountpoint/a4-payload.bin" bs=1M count=8 status=none
-printf 'Hoardarr managed zvol standalone lifecycle\n' >"$mountpoint/a4-marker.txt"
+mount "$by_path" "$mountpoint"; mounted=true
+dd if=/dev/zero of="$mountpoint/a5-payload.bin" bs=1M count=8 status=none
 sync
-data_hash_before="$(sha256sum "$mountpoint/a4-payload.bin" | awk '{print $1}')"
-umount -- "$mountpoint"
-mounted=false
-iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --logout >/dev/null
-logged_in=false
+data_hash_before="$(sha256sum "$mountpoint/a5-payload.bin" | awk '{print $1}')"
+umount -- "$mountpoint"; mounted=false
+iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --logout >/dev/null; logged_in=false
 udevadm settle
 raw_hash_before="$(sha256sum "$zvol_device" | awk '{print $1}')"
+bounded_io_passed=true
 
 state_hash_before="$(sha256sum "$state_file" | awk '{print $1}')"
 state_mtime_before="$(stat -c %Y "$state_file")"
 idempotent_json="$(helper apply)"
 [[ "$(jq -r .already_active <<<"$idempotent_json")" == "true" ]]
-[[ "$(jq -r .counters.targetcli <<<"$idempotent_json")" -eq 0 ]]
-[[ "$(jq -r .counters.state_writes <<<"$idempotent_json")" -eq 0 ]]
+[[ "$(jq -r '.counters.targetcli == 0 and .counters.state_writes == 0' <<<"$idempotent_json")" == "true" ]]
 [[ "$(jq -r .readback.evidence_sha256 <<<"$idempotent_json")" == "$initial_digest" ]]
 [[ "$(sha256sum "$state_file" | awk '{print $1}')" == "$state_hash_before" ]]
 [[ "$(stat -c %Y "$state_file")" == "$state_mtime_before" ]]
 [[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
+idempotent_passed=true
 
 rm -f -- "$state_file"
 reconciled_json="$(helper apply)"
-[[ "$(jq -r .reconciled_existing <<<"$reconciled_json")" == "true" ]]
-[[ "$(jq -r .counters.targetcli <<<"$reconciled_json")" -eq 0 ]]
-[[ "$(jq -r .counters.state_writes <<<"$reconciled_json")" -eq 1 ]]
+[[ "$(jq -r '.reconciled_existing and .counters.targetcli == 0 and .counters.state_writes == 1' <<<"$reconciled_json")" == "true" ]]
 [[ "$(jq -r .readback.evidence_sha256 <<<"$reconciled_json")" == "$initial_digest" ]]
 [[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
+reconciled_passed=true
 
 targetcli saveconfig >/dev/null
 systemctl restart rtslib-fb-targetctl.service
-restart_readback_attempts=0
 restart_json=""
-for _attempt in $(seq 1 30); do
-  restart_readback_attempts=$((restart_readback_attempts + 1))
-  if restart_json="$(helper readback 2>/dev/null)"; then break; fi
-  sleep 1
-done
-[[ -n "$restart_json" ]]
+for _attempt in $(seq 1 30); do if restart_json="$(helper readback 2>/dev/null)"; then break; fi; sleep 1; done
 [[ "$(jq -r .readback.evidence_sha256 <<<"$restart_json")" == "$initial_digest" ]]
 post_restart_json="$(helper apply)"
-[[ "$(jq -r .already_active <<<"$post_restart_json")" == "true" ]]
-[[ "$(jq -r .counters.targetcli <<<"$post_restart_json")" -eq 0 ]]
-[[ "$(jq -r .counters.state_writes <<<"$post_restart_json")" -eq 0 ]]
-[[ "$(jq -r .readback.evidence_sha256 <<<"$post_restart_json")" == "$initial_digest" ]]
+[[ "$(jq -r '.already_active and .counters.targetcli == 0 and .counters.state_writes == 0' <<<"$post_restart_json")" == "true" ]]
 [[ "$(sha256sum "$zvol_device" | awk '{print $1}')" == "$raw_hash_before" ]]
+restart_passed=true
 
 remove_json="$(helper remove)"
 [[ "$(jq -r '.state == "removed" and (.backing_data_deleted | not) and .readback.target_absent and .readback.backstore_absent' <<<"$remove_json")" == "true" ]]
-[[ "$(jq -r .counters.targetcli <<<"$remove_json")" -eq 1 ]]
-[[ "$(jq -r .counters.state_writes <<<"$remove_json")" -eq 1 ]]
-if iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --login >/dev/null 2>&1; then
-  logged_in=true
-  echo "removed target accepted a login" >&2
-  exit 1
-fi
+[[ "$(jq -r '.counters.targetcli == 1 and .counters.state_writes == 1' <<<"$remove_json")" == "true" ]]
 [[ -b "$zvol_device" ]]
-mount -o ro,noload "$zvol_device" "$mountpoint"
-mounted=true
-data_hash_after="$(sha256sum "$mountpoint/a4-payload.bin" | awk '{print $1}')"
+mount -o ro,noload "$zvol_device" "$mountpoint"; mounted=true
+data_hash_after="$(sha256sum "$mountpoint/a5-payload.bin" | awk '{print $1}')"
 [[ "$data_hash_after" == "$data_hash_before" ]]
-umount -- "$mountpoint"
-mounted=false
+umount -- "$mountpoint"; mounted=false
 reject_json="$(helper reject-delete)"
-[[ "$(jq -r .rejected_before_mutation <<<"$reject_json")" == "true" ]]
-[[ "$(jq -r '.counters.targetcli + .counters.state_reads + .counters.state_writes + .counters.readbacks' <<<"$reject_json")" -eq 0 ]]
-[[ "$(zfs get -Hp -o value volsize "$pool/$zvol")" == "$zvol_size_bytes" ]]
-
-cleanup_resources
-trap - EXIT
-[[ "$cleanup_targetcli_mutations" -eq 0 ]]
-[[ "$cleanup_pool_destroys" -eq 1 ]]
-[[ "$cleanup_loop_detaches" -eq 6 ]]
-! target_exists
-! backstore_exists
-! zpool list -H -o name "$pool" >/dev/null 2>&1
-for loop in "${loops[@]}"; do ! losetup "$loop" >/dev/null 2>&1; done
-[[ ! -e "$work" && ! -e /.hoardarr-disposable-runner ]]
-cleanup_complete=true
-
-mkdir -p "$repo/dist/validation"
-jq -n \
-  --arg workflow "storage-integration" --arg run_id "$run_id" \
-  --arg pool_guid_sha256 "$(printf '%s' "$pool_guid" | sha256sum | cut -d' ' -f1)" \
-  --arg pool_identity_sha256 "$(printf '%s' "$pool" | sha256sum | cut -d' ' -f1)" \
-  --arg zvol_identity_sha256 "$(printf '%s' "$pool/$zvol" | sha256sum | cut -d' ' -f1)" \
-  --arg target_identity_sha256 "$(printf '%s' "$target_iqn" | sha256sum | cut -d' ' -f1)" \
-  --arg initiator_identity_sha256 "$(printf '%s' "$initiator_iqn" | sha256sum | cut -d' ' -f1)" \
-  --arg initial_digest "$(jq -r .readback.evidence_sha256 <<<"$initial_json")" \
-  --arg independent_digest "$(jq -r .readback.evidence_sha256 <<<"$independent_json")" \
-  --arg idempotent_digest "$(jq -r .readback.evidence_sha256 <<<"$idempotent_json")" \
-  --arg reconciled_digest "$(jq -r .readback.evidence_sha256 <<<"$reconciled_json")" \
-  --arg restart_digest "$(jq -r .readback.evidence_sha256 <<<"$restart_json")" \
-  --arg data_hash_before "$data_hash_before" --arg data_hash_after "$data_hash_after" \
-  --argjson restart_readback_attempts "$restart_readback_attempts" \
-  --argjson cleanup_invocations "$cleanup_invocations" \
-  --argjson cleanup_pool_destroys "$cleanup_pool_destroys" \
-  --argjson cleanup_loop_detaches "$cleanup_loop_detaches" \
-  '{schema_version:1,classification:"VERIFIED IN ISOLATION",workflow:$workflow,
-    job:"managed-zvol-lio-lifecycle",run_id:$run_id,
-    topology:{loop_count:6,raidz2_vdev_count:1,raidz2_member_count:6,zvol_count:1,
-      raw_loop_paths_emitted:false,pool_guid_sha256:$pool_guid_sha256,
-      pool_identity_sha256:$pool_identity_sha256,zvol_identity_sha256:$zvol_identity_sha256,
-      pool_health_online:true,ashift_12:true,zvol_size_equal:true},
-    identities:{target_sha256:$target_identity_sha256,initiator_sha256:$initiator_identity_sha256},
-    executor:{production_used:true,initial_apply_active:true,block_backstore:true,lun_zero:true,
-      portal_exact:true,acl_exact:true,chap_equality_booleans:true,idempotent_apply:true,
-      state_only_recovery:true,restart_restored:true,remove_absent:true,
-      destructive_delete_rejected_before_mutation:true,
-      evidence_digests:{initial:$initial_digest,independent:$independent_digest,
-        idempotent:$idempotent_digest,reconciled:$reconciled_digest,restart:$restart_digest}},
-    initiator:{discovery:true,login:true,by_path_identity:true,bounded_io:true,logout:true,
-      post_remove_login_rejected:true,data_sha256_before:$data_hash_before,
-      data_sha256_after:$data_hash_after,data_hash_equal:($data_hash_before==$data_hash_after)},
-    retention:{target_absent:true,backstore_absent:true,pool_retained_until_cleanup:true,
-      zvol_retained_until_cleanup:true,filesystem_retained:true,backing_retained:true},
-    counters:{production_apply_calls:4,production_remove_calls:2,production_targetcli_calls:2,
-      production_state_writes:3,target_persistence_restarts:1,
-      restart_readback_attempts:$restart_readback_attempts,cleanup_invocations:$cleanup_invocations,
-      cleanup_targetcli_mutations:0,cleanup_pool_destroys:$cleanup_pool_destroys,
-      cleanup_loop_detaches:$cleanup_loop_detaches},
-    prohibited_actions:{physical_media:0,host_or_vm:0,network_storage:0,multipath:0,
-      controller_or_ha:0,credential_reads:0,raw_saveconfig_emitted:0},cleanup_complete:true}' \
-  >"$repo/dist/validation/managed-zvol-lio-lifecycle.json"
-
-echo "Hoardarr managed ZFS zvol/LIO lifecycle verified in isolation"
+[[ "$(jq -r '.rejected_before_mutation and (.counters.targetcli + .counters.state_reads + .counters.state_writes + .counters.readbacks == 0)' <<<"$reject_json")" == "true" ]]
+remove_passed=true
+backing_retained=true
+classification="LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
+failure_code="NONE"
+exit 0

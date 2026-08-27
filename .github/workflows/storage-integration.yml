@@ -46,27 +46,46 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID \
             env HOARDARR_TEST_PYTHON="$PWD/backend/.venv/bin/python" \
             bash tests/integration/run-managed-zvol-lio-lifecycle.sh
-      - name: Validate bounded managed-zvol lifecycle evidence
+      - name: Validate bounded managed-zvol lifecycle receipt
+        id: managed_zvol_receipt
+        if: always()
         run: |
-          jq -e '.schema_version == 1 and .classification == "VERIFIED IN ISOLATION" and
-            .topology.loop_count == 6 and .topology.raidz2_vdev_count == 1 and
-            .topology.raidz2_member_count == 6 and .topology.zvol_count == 1 and
-            .executor.production_used and .executor.initial_apply_active and
-            .executor.block_backstore and .executor.lun_zero and .executor.portal_exact and
-            .executor.acl_exact and .executor.chap_equality_booleans and
-            .executor.idempotent_apply and .executor.state_only_recovery and
-            .executor.restart_restored and .executor.remove_absent and
-            .executor.destructive_delete_rejected_before_mutation and
-            .initiator.by_path_identity and .initiator.bounded_io and
-            .initiator.data_hash_equal and .retention.backing_retained and
-            .counters.production_targetcli_calls == 2 and
-            .counters.production_state_writes == 3 and
-            ([.prohibited_actions[]] | add) == 0 and .cleanup_complete' \
+          test -f dist/validation/managed-zvol-lio-lifecycle.json
+          jq -e '.schema_version == 2 and
+            (.classification == "PARITY_MISMATCH_IDENTIFIED" or
+             .classification == "LOGIN_FAILURE_DIAGNOSED" or
+             .classification == "LOGIN_FAILURE_UNRESOLVED" or
+             .classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT" or
+             .classification == "HARNESS_ERROR") and
+            (if .classification == "HARNESS_ERROR" then
+              (.topology.loop_count >= 0 and .topology.loop_count <= 6 and
+               (.topology.raidz2_vdev_count == 0 or .topology.raidz2_vdev_count == 1) and
+               (.topology.raidz2_member_count == 0 or .topology.raidz2_member_count == 6) and
+               (.topology.zvol_count == 0 or .topology.zvol_count == 1))
+             else
+              (.topology.loop_count == 6 and .topology.raidz2_vdev_count == 1 and
+               .topology.raidz2_member_count == 6 and .topology.zvol_count == 1)
+             end) and .topology.raw_paths_emitted == false and
+            (.parity.exact | type) == "boolean" and
+            (.login.attempt_count == 0 or .login.attempt_count == 1) and
+            (if .classification == "PARITY_MISMATCH_IDENTIFIED" then
+              .login.attempt_count == 0 else true end) and
+            (.cleanup.classification == "cleanup_complete" or
+             .cleanup.classification == "cleanup_incomplete_bounded" or
+             .cleanup.classification == "cleanup_not_started") and
+            .cleanup.total_budget_seconds < 300 and (.cleanup.phases | length) == 16 and
+            ([.cleanup.phases[].order] == [range(1;17)]) and
+            ([.cleanup.phases[].timeout_seconds] == [8,8,8,10,10,10,25,5,5,5,5,5,5,8,10,3]) and
+            ([.cleanup.phases[].status] | all(. == "success" or . == "failed" or
+              . == "timeout" or . == "skipped")) and
+            ([.prohibited_actions[]] | add) == 0' \
             dist/validation/managed-zvol-lio-lifecycle.json
       - uses: actions/upload-artifact@v4
+        if: always() && steps.managed_zvol_receipt.outcome == 'success'
         with:
           name: managed-zvol-lio-lifecycle-evidence
           path: dist/validation/managed-zvol-lio-lifecycle.json
+          if-no-files-found: error
   storage-group-drain-lifecycle:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

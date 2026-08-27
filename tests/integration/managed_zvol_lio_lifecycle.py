@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
+import stat
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -14,6 +17,73 @@ from hoardarr.connectivity.service import config_hash
 
 class LifecycleGuardError(ValueError):
     pass
+
+
+class NodeParityError(ValueError):
+    def __init__(self, code: str, *, record_count: int = 0) -> None:
+        self.code = code
+        self.record_count = record_count
+        super().__init__("initiator node parity could not be established")
+
+
+class DiagnosticError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__("bounded diagnostic validation failed")
+
+
+CLASSIFICATIONS = {
+    "PARITY_MISMATCH_IDENTIFIED",
+    "LOGIN_FAILURE_DIAGNOSED",
+    "LOGIN_FAILURE_UNRESOLVED",
+    "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+    "HARNESS_ERROR",
+}
+CLEANUP_CLASSIFICATIONS = {
+    "cleanup_complete",
+    "cleanup_incomplete_bounded",
+    "cleanup_not_started",
+}
+DIAGNOSTIC_LIMIT = 16 * 1024
+NODE_RECORD_LIMIT = 16 * 1024
+CLEANUP_PHASES = [
+    "unmount",
+    "logout",
+    "node_delete",
+    "target_delete",
+    "backstore_delete",
+    "saveconfig",
+    "pool_destroy",
+    *(f"loop_detach_{number}" for number in range(1, 7)),
+    "initiator_restore",
+    "work_root_remove",
+    "runner_marker_remove",
+]
+CLEANUP_TIMEOUTS = [8, 8, 8, 10, 10, 10, 25, 5, 5, 5, 5, 5, 5, 8, 10, 3]
+PARITY_KEYS = {
+    "schema_version",
+    "exact",
+    "mismatch",
+    "record_count",
+    "auth_method_chap",
+    "username_match",
+    "password_match",
+    "record_count_exact",
+    "record_safe",
+    "username_length",
+    "password_length",
+    "target_identity_sha256",
+    "initiator_identity_sha256",
+    "parity_sha256",
+}
+DIAGNOSTIC_CLASSIFICATIONS = {
+    "acl_rejection",
+    "authentication_method_rejection",
+    "credential_rejection",
+    "transport_rejection",
+    "generic_login_rejection",
+    "unclassified_bounded",
+}
 
 
 def validate_guard(
@@ -53,6 +123,533 @@ def validate_guard(
             != {f"disk{number}.img" for number in range(1, 7)}
         ):
             raise LifecycleGuardError("loop ownership could not be proven")
+
+
+def _safe_owned_directory(path: Path, *, expected_uid: int) -> None:
+    facts = path.lstat()
+    if (
+        not stat.S_ISDIR(facts.st_mode)
+        or stat.S_ISLNK(facts.st_mode)
+        or facts.st_uid != expected_uid
+        or stat.S_IMODE(facts.st_mode) & 0o022
+    ):
+        raise NodeParityError("NODE_RECORD_UNSAFE")
+
+
+def inspect_node_parity(
+    *,
+    node_root: Path,
+    target_iqn: str,
+    portal: str,
+    initiator_iqn: str,
+    chap_user: str,
+    chap_value: str,
+    expected_uid: int = 0,
+) -> dict[str, Any]:
+    if (
+        not node_root.is_absolute()
+        or re.fullmatch(r"iqn\.[A-Za-z0-9._:\-]+", target_iqn) is None
+        or re.fullmatch(r"127\.0\.0\.[0-9]{1,3}", portal) is None
+    ):
+        raise NodeParityError("NODE_RECORD_UNSAFE")
+    try:
+        _safe_owned_directory(node_root, expected_uid=expected_uid)
+        target_root = node_root / target_iqn
+        _safe_owned_directory(target_root, expected_uid=expected_uid)
+    except FileNotFoundError as exc:
+        raise NodeParityError("NODE_RECORD_ZERO") from exc
+    candidates: list[Path] = []
+    prefix = f"{portal},3260,"
+    try:
+        entries = list(os.scandir(target_root))
+    except OSError as exc:
+        raise NodeParityError("NODE_RECORD_UNSAFE") from exc
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+            raise NodeParityError("NODE_RECORD_UNSAFE")
+        record = Path(entry.path) / "default"
+        if record.exists() or record.is_symlink():
+            candidates.append(record)
+    if len(candidates) != 1:
+        raise NodeParityError(
+            "NODE_RECORD_ZERO" if not candidates else "NODE_RECORD_MULTIPLE",
+            record_count=len(candidates),
+        )
+    record = candidates[0]
+    portal_root = record.parent
+    try:
+        _safe_owned_directory(portal_root, expected_uid=expected_uid)
+        root_resolved = node_root.resolve(strict=True)
+        record_resolved = record.resolve(strict=True)
+        record_resolved.relative_to(root_resolved)
+        named = record.lstat()
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1) from exc
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or named.st_uid != expected_uid
+        or stat.S_IMODE(named.st_mode) != 0o600
+        or named.st_nlink != 1
+        or not 0 < named.st_size <= NODE_RECORD_LIMIT
+    ):
+        raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            record,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_uid != expected_uid
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1)
+        raw = os.read(descriptor, NODE_RECORD_LIMIT + 1)
+    except OSError as exc:
+        raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(raw) > NODE_RECORD_LIMIT:
+        raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1) from exc
+    if any(ord(character) < 32 and character not in "\n\r\t" for character in text):
+        raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1)
+    selected: dict[str, str] = {}
+    relevant = {
+        "node.session.auth.authmethod",
+        "node.session.auth.username",
+        "node.session.auth.password",
+    }
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or key not in relevant:
+            continue
+        if key in selected:
+            raise NodeParityError("NODE_RECORD_UNSAFE", record_count=1)
+        selected[key] = value.strip()
+    method = selected.get("node.session.auth.authmethod", "")
+    username = selected.get("node.session.auth.username", "")
+    password = selected.get("node.session.auth.password", "")
+    boolean_parity = {
+        "auth_method_chap": hmac.compare_digest(method, "CHAP"),
+        "username_match": hmac.compare_digest(username, chap_user),
+        "password_match": hmac.compare_digest(password, chap_value),
+        "record_count_exact": True,
+        "record_safe": True,
+    }
+    mismatch = "NONE"
+    if not boolean_parity["auth_method_chap"]:
+        mismatch = "AUTH_METHOD_MISMATCH"
+    elif not boolean_parity["username_match"]:
+        mismatch = "USERNAME_MISMATCH"
+    elif not boolean_parity["password_match"]:
+        mismatch = "PASSWORD_MISMATCH"
+    return {
+        "schema_version": 1,
+        "exact": all(boolean_parity.values()),
+        "mismatch": mismatch,
+        "record_count": 1,
+        **boolean_parity,
+        "username_length": len(username),
+        "password_length": len(password),
+        "target_identity_sha256": _digest(target_iqn),
+        "initiator_identity_sha256": _digest(initiator_iqn),
+        "parity_sha256": hashlib.sha256(
+            json.dumps(boolean_parity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+
+
+def parity_failure(
+    error: NodeParityError, *, target_iqn: str, initiator_iqn: str
+) -> dict[str, Any]:
+    boolean_parity = {
+        "auth_method_chap": False,
+        "username_match": False,
+        "password_match": False,
+        "record_count_exact": False,
+        "record_safe": error.code not in {"NODE_RECORD_UNSAFE"},
+    }
+    return {
+        "schema_version": 1,
+        "exact": False,
+        "mismatch": error.code,
+        "record_count": error.record_count,
+        **boolean_parity,
+        "username_length": 0,
+        "password_length": 0,
+        "target_identity_sha256": _digest(target_iqn),
+        "initiator_identity_sha256": _digest(initiator_iqn),
+        "parity_sha256": hashlib.sha256(
+            json.dumps(boolean_parity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+
+
+def sanitize_diagnostic_bytes(
+    raw: bytes, *, secret: str, label: str, maximum: int = DIAGNOSTIC_LIMIT
+) -> dict[str, Any]:
+    if len(raw) > maximum:
+        raise DiagnosticError("DIAGNOSTIC_OVERFLOW")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DiagnosticError("DIAGNOSTIC_UTF8_INVALID") from exc
+    if any(ord(character) < 32 and character not in "\n\r\t" for character in text):
+        raise DiagnosticError("DIAGNOSTIC_CONTROL_REJECTED")
+    if secret and secret in text:
+        raise DiagnosticError("DIAGNOSTIC_SECRET_REJECTED")
+    if re.search(r"(?i)(password|secret)\s*[:=]\s*\S+", text):
+        raise DiagnosticError("DIAGNOSTIC_SECRET_REJECTED")
+    patterns = [
+        (
+            "acl_rejection",
+            r"(?i)(initiator.*(?:not found|not allowed)|\bacl\b.*reject)",
+        ),
+        (
+            "authentication_method_rejection",
+            r"(?i)(auth(?:entication)? method.*(?:reject|unsupported|mismatch|fail)|chap.*not supported)",
+        ),
+        (
+            "credential_rejection",
+            r"(?i)(credential.*(?:reject|invalid|fail)|authentication failure|authorization failure|chap authentication.*fail)",
+        ),
+        (
+            "transport_rejection",
+            r"(?i)(connection refused|no route|transport.*fail|timed out)",
+        ),
+        (
+            "generic_login_rejection",
+            r"(?i)(could not login|login failure|initiator reported error)",
+        ),
+    ]
+    classifications = [name for name, pattern in patterns if re.search(pattern, text)]
+    if not classifications and text.strip():
+        classifications = ["unclassified_bounded"]
+    return {
+        "label": label,
+        "size_bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "classifications": classifications,
+    }
+
+
+def _read_safe_diagnostic(path: Path, *, expected_uid: int = 0) -> bytes:
+    try:
+        named = path.lstat()
+    except OSError as exc:
+        raise DiagnosticError("DIAGNOSTIC_FILE_UNSAFE") from exc
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or named.st_uid != expected_uid
+        or stat.S_IMODE(named.st_mode) != 0o600
+        or named.st_nlink != 1
+        or named.st_size > DIAGNOSTIC_LIMIT
+    ):
+        raise DiagnosticError("DIAGNOSTIC_FILE_UNSAFE")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_uid != expected_uid
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or opened.st_size > DIAGNOSTIC_LIMIT
+        ):
+            raise DiagnosticError("DIAGNOSTIC_FILE_UNSAFE")
+        raw = os.read(descriptor, DIAGNOSTIC_LIMIT + 1)
+    except OSError as exc:
+        raise DiagnosticError("DIAGNOSTIC_FILE_UNSAFE") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return raw
+
+
+def validate_receipt(document: object) -> dict[str, Any]:
+    if not isinstance(document, dict) or document.get("schema_version") != 2:
+        raise LifecycleGuardError("receipt schema is invalid")
+    if document.get("classification") not in CLASSIFICATIONS:
+        raise LifecycleGuardError("receipt classification is invalid")
+    parity = document.get("parity")
+    login = document.get("login")
+    cleanup = document.get("cleanup")
+    if (
+        not isinstance(parity, dict)
+        or not isinstance(login, dict)
+        or not isinstance(cleanup, dict)
+    ):
+        raise LifecycleGuardError("receipt sections are invalid")
+    topology = document.get("topology")
+    if not isinstance(topology, dict) or topology.get("raw_paths_emitted") is not False:
+        raise LifecycleGuardError("receipt topology is invalid")
+    counts = tuple(
+        topology.get(key)
+        for key in (
+            "loop_count",
+            "raidz2_vdev_count",
+            "raidz2_member_count",
+            "zvol_count",
+        )
+    )
+    if document["classification"] == "HARNESS_ERROR":
+        if (
+            any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for value in counts
+            )
+            or not 0 <= counts[0] <= 6
+            or counts[1] not in {0, 1}
+            or counts[2] not in {0, 6}
+            or counts[3] not in {0, 1}
+        ):
+            raise LifecycleGuardError("receipt topology is invalid")
+    elif counts != (6, 1, 6, 1):
+        raise LifecycleGuardError("receipt topology is invalid")
+    login_count = login.get("attempt_count")
+    if login_count not in {0, 1}:
+        raise LifecycleGuardError("receipt login count is invalid")
+    parity_placeholder = (
+        document["classification"] == "HARNESS_ERROR"
+        and parity.get("mismatch") == "NOT_RUN"
+    )
+    if (
+        set(parity) != PARITY_KEYS
+        or parity.get("schema_version") != 1
+        or parity.get("mismatch")
+        not in {
+            "NONE",
+            "NOT_RUN",
+            "AUTH_METHOD_MISMATCH",
+            "USERNAME_MISMATCH",
+            "PASSWORD_MISMATCH",
+            "NODE_RECORD_ZERO",
+            "NODE_RECORD_MULTIPLE",
+            "NODE_RECORD_UNSAFE",
+        }
+        or not isinstance(parity.get("exact"), bool)
+        or any(
+            not isinstance(parity.get(key), bool)
+            for key in (
+                "auth_method_chap",
+                "username_match",
+                "password_match",
+                "record_count_exact",
+                "record_safe",
+            )
+        )
+        or any(
+            not isinstance(parity.get(key), int)
+            or isinstance(parity.get(key), bool)
+            or not 0 <= parity[key] <= NODE_RECORD_LIMIT
+            for key in ("record_count", "username_length", "password_length")
+        )
+        or (
+            not parity_placeholder
+            and any(
+                re.fullmatch(r"[0-9a-f]{64}", str(parity.get(key))) is None
+                for key in (
+                    "target_identity_sha256",
+                    "initiator_identity_sha256",
+                    "parity_sha256",
+                )
+            )
+        )
+    ):
+        raise LifecycleGuardError("receipt parity is invalid")
+    login_status = login.get("status")
+    if (
+        not isinstance(login_status, int)
+        or isinstance(login_status, bool)
+        or login.get("succeeded") is not (login_status == 0)
+    ):
+        raise LifecycleGuardError("receipt login status is invalid")
+    diagnostic = login.get("diagnostic")
+    if (
+        not isinstance(diagnostic, dict)
+        or set(diagnostic)
+        != {
+            "schema_version",
+            "status",
+            "streams",
+            "ordered_classifications",
+            "diagnosed_class",
+        }
+        or diagnostic.get("schema_version") != 1
+        or diagnostic.get("status") != login_status
+        or not isinstance(diagnostic.get("streams"), list)
+        or len(diagnostic["streams"]) > 3
+        or not isinstance(diagnostic.get("ordered_classifications"), list)
+        or len(diagnostic["ordered_classifications"])
+        != len(set(diagnostic["ordered_classifications"]))
+        or not set(diagnostic["ordered_classifications"]).issubset(
+            DIAGNOSTIC_CLASSIFICATIONS
+        )
+        or diagnostic.get("diagnosed_class")
+        not in {
+            None,
+            "acl_rejection",
+            "authentication_method_rejection",
+            "credential_rejection",
+            "transport_rejection",
+        }
+    ):
+        raise LifecycleGuardError("receipt diagnostic is invalid")
+    if (
+        document["classification"] != "HARNESS_ERROR"
+        and len(diagnostic["streams"]) != login_count * 3
+    ):
+        raise LifecycleGuardError("receipt diagnostic stream count is invalid")
+    labels: set[str] = set()
+    for stream in diagnostic["streams"]:
+        if (
+            not isinstance(stream, dict)
+            or set(stream) != {"label", "size_bytes", "sha256", "classifications"}
+            or stream.get("label") not in {"stdout", "stderr", "iscsid_target"}
+            or stream["label"] in labels
+            or not isinstance(stream.get("size_bytes"), int)
+            or isinstance(stream.get("size_bytes"), bool)
+            or not 0 <= stream["size_bytes"] <= DIAGNOSTIC_LIMIT
+            or re.fullmatch(r"[0-9a-f]{64}", str(stream.get("sha256"))) is None
+            or not isinstance(stream.get("classifications"), list)
+            or not set(stream["classifications"]).issubset(DIAGNOSTIC_CLASSIFICATIONS)
+        ):
+            raise LifecycleGuardError("receipt diagnostic stream is invalid")
+        labels.add(stream["label"])
+    if document["classification"] == "PARITY_MISMATCH_IDENTIFIED" and login_count != 0:
+        raise LifecycleGuardError("parity mismatch attempted login")
+    if (
+        document["classification"] == "PARITY_MISMATCH_IDENTIFIED"
+        and parity.get("exact") is not False
+    ):
+        raise LifecycleGuardError("parity mismatch receipt is inconsistent")
+    if (
+        parity.get("exact") is True
+        and document["classification"] != "HARNESS_ERROR"
+        and login_count != 1
+    ):
+        raise LifecycleGuardError("exact parity did not make one login attempt")
+    if document["classification"] in {
+        "LOGIN_FAILURE_DIAGNOSED",
+        "LOGIN_FAILURE_UNRESOLVED",
+        "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
+    } and (parity.get("exact") is not True or login_count != 1):
+        raise LifecycleGuardError("login classification lacks exact parity")
+    if (
+        document["classification"]
+        in {
+            "LOGIN_FAILURE_DIAGNOSED",
+            "LOGIN_FAILURE_UNRESOLVED",
+        }
+        and login_status == 0
+    ):
+        raise LifecycleGuardError("login failure classification is inconsistent")
+    if (
+        document["classification"] == "LOGIN_FAILURE_DIAGNOSED"
+        and diagnostic["diagnosed_class"] is None
+    ):
+        raise LifecycleGuardError("diagnosed login failure lacks diagnosis")
+    if (
+        document["classification"] == "LOGIN_FAILURE_UNRESOLVED"
+        and diagnostic["diagnosed_class"] is not None
+    ):
+        raise LifecycleGuardError("unresolved login failure contains diagnosis")
+    if (
+        document["classification"] == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
+        and login.get("succeeded") is not True
+    ):
+        raise LifecycleGuardError("successful login classification is inconsistent")
+    if cleanup.get("classification") not in CLEANUP_CLASSIFICATIONS:
+        raise LifecycleGuardError("cleanup classification is invalid")
+    budget = cleanup.get("total_budget_seconds")
+    if not isinstance(budget, int) or isinstance(budget, bool) or not 0 < budget < 300:
+        raise LifecycleGuardError("cleanup budget is invalid")
+    phases = cleanup.get("phases")
+    if (
+        not isinstance(phases, list)
+        or [phase.get("name") for phase in phases] != CLEANUP_PHASES
+    ):
+        raise LifecycleGuardError("cleanup phase order is invalid")
+    for order, phase in enumerate(phases, start=1):
+        if (
+            not isinstance(phase, dict)
+            or phase.get("order") != order
+            or phase.get("status") not in {"success", "failed", "timeout", "skipped"}
+            or not isinstance(phase.get("attempted"), bool)
+            or not isinstance(phase.get("exit_status"), int)
+            or isinstance(phase.get("exit_status"), bool)
+            or phase.get("timeout_seconds") != CLEANUP_TIMEOUTS[order - 1]
+            or not isinstance(phase.get("postcondition"), bool)
+        ):
+            raise LifecycleGuardError("cleanup phase result is invalid")
+        if (
+            (phase["status"] == "success" and phase["exit_status"] != 0)
+            or (
+                phase["status"] == "skipped"
+                and (phase["attempted"] or phase["exit_status"] != 0)
+            )
+            or (phase["status"] == "timeout" and phase["exit_status"] not in {124, 137})
+            or (phase["status"] == "failed" and phase["exit_status"] in {0, 124, 137})
+        ):
+            raise LifecycleGuardError("cleanup phase status is inconsistent")
+    if cleanup["classification"] == "cleanup_complete" and not all(
+        phase["status"] in {"success", "skipped"} and phase["postcondition"]
+        for phase in phases
+    ):
+        raise LifecycleGuardError("cleanup completeness is invalid")
+    if cleanup["classification"] == "cleanup_incomplete_bounded" and all(
+        phase["status"] in {"success", "skipped"} and phase["postcondition"]
+        for phase in phases
+    ):
+        raise LifecycleGuardError("cleanup incompleteness is invalid")
+    prohibited = document.get("prohibited_actions")
+    if (
+        not isinstance(prohibited, dict)
+        or not prohibited
+        or any(value != 0 for value in prohibited.values())
+    ):
+        raise LifecycleGuardError("prohibited action counters are invalid")
+    return document
+
+
+def atomic_write_receipt(document: object, output: Path) -> None:
+    validated = validate_receipt(document)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{output.name}.", dir=output.parent
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as stream:
+            json.dump(validated, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _digest(value: str) -> str:
@@ -213,6 +810,20 @@ def _parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--portal", required=True)
     lifecycle.add_argument("--initiator-iqn", required=True)
     lifecycle.add_argument("--chap-user", required=True)
+    parity = subparsers.add_parser("parity")
+    parity.add_argument("--node-root", type=Path, required=True)
+    parity.add_argument("--target-iqn", required=True)
+    parity.add_argument("--portal", required=True)
+    parity.add_argument("--initiator-iqn", required=True)
+    parity.add_argument("--chap-user", required=True)
+    diagnostic = subparsers.add_parser("diagnostic")
+    diagnostic.add_argument("--stdout", type=Path, required=True)
+    diagnostic.add_argument("--stderr", type=Path, required=True)
+    diagnostic.add_argument("--journal", type=Path, required=True)
+    diagnostic.add_argument("--status", type=int, required=True)
+    receipt = subparsers.add_parser("receipt")
+    receipt.add_argument("--draft", type=Path, required=True)
+    receipt.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -234,13 +845,79 @@ def main() -> None:
         )
         print(json.dumps({"safe": True, "loop_count": len(pairs)}, sort_keys=True))
         return
+    if args.command == "receipt":
+        atomic_write_receipt(
+            json.loads(args.draft.read_text(encoding="utf-8")), args.output
+        )
+        return
     args.chap_value = os.environ.get("HOARDARR_A4_CHAP_FIXTURE")
     if (
         not isinstance(args.chap_value, str)
         or re.fullmatch(r"[A-Za-z0-9._~-]{12,255}", args.chap_value) is None
     ):
         raise LifecycleGuardError("the test-only CHAP fixture is unavailable")
-    print(json.dumps(_run_product_action(args), sort_keys=True))
+    if args.command == "lifecycle":
+        print(json.dumps(_run_product_action(args), sort_keys=True))
+        return
+    if args.command == "parity":
+        try:
+            result = inspect_node_parity(
+                node_root=args.node_root,
+                target_iqn=args.target_iqn,
+                portal=args.portal,
+                initiator_iqn=args.initiator_iqn,
+                chap_user=args.chap_user,
+                chap_value=args.chap_value,
+            )
+        except NodeParityError as exc:
+            result = parity_failure(
+                exc,
+                target_iqn=args.target_iqn,
+                initiator_iqn=args.initiator_iqn,
+            )
+        print(json.dumps(result, sort_keys=True))
+        return
+    streams = []
+    for label, path in (
+        ("stdout", args.stdout),
+        ("stderr", args.stderr),
+        ("iscsid_target", args.journal),
+    ):
+        streams.append(
+            sanitize_diagnostic_bytes(
+                _read_safe_diagnostic(path), secret=args.chap_value, label=label
+            )
+        )
+    ordered = []
+    for stream in streams:
+        for classification in stream["classifications"]:
+            if classification not in ordered:
+                ordered.append(classification)
+    diagnosed = next(
+        (
+            value
+            for value in (
+                "acl_rejection",
+                "authentication_method_rejection",
+                "credential_rejection",
+                "transport_rejection",
+            )
+            if value in ordered
+        ),
+        None,
+    )
+    print(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": args.status,
+                "streams": streams,
+                "ordered_classifications": ordered,
+                "diagnosed_class": diagnosed,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":
