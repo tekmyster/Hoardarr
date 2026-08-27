@@ -14,6 +14,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hoardarr.connectivity.lio_readback import (
+    RTSLIB_SAVECONFIG_PATH,
+    LioReadbackError,
+    managed_backstore_name,
+    read_saveconfig,
+    verify_managed_absent,
+    verify_managed_apply,
+)
 from hoardarr.connectivity.service import (
     ManagedZvolBindingError,
     validate_managed_zvol_binding,
@@ -50,6 +58,42 @@ class ExecutorFailure(RuntimeError):
         self.code = code
         self.needs_attention = needs_attention
         super().__init__(message)
+
+
+class _ManagedApplyReadbackFailure(ExecutorFailure):
+    pass
+
+
+def _read_lio_saveconfig() -> dict[str, Any]:
+    try:
+        return read_saveconfig(RTSLIB_SAVECONFIG_PATH)
+    except LioReadbackError as exc:
+        raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
+
+
+def _managed_apply_readback(
+    service_id: str, config: Mapping[str, Any], secret: str | None
+) -> dict[str, Any]:
+    try:
+        return verify_managed_apply(
+            _read_lio_saveconfig(),
+            service_id=service_id,
+            config=config,
+            secret=secret,
+        )
+    except LioReadbackError as exc:
+        raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
+
+
+def _managed_absence_readback(service_id: str, config: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return verify_managed_absent(
+            _read_lio_saveconfig(),
+            service_id=service_id,
+            target_iqn=str(config["target_iqn"]),
+        )
+    except LioReadbackError as exc:
+        raise ExecutorFailure(exc.code, str(exc), needs_attention=True) from exc
 
 
 def _command(name: str) -> str:
@@ -789,7 +833,7 @@ def _unlink_backing_file(value: object, *, missing_ok: bool) -> bool:
         os.close(parent_fd)
 
 
-def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None) -> None:
+def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None) -> dict[str, Any]:
     if not capabilities()["protocols"]["iscsi"]["available"]:
         raise ExecutorFailure("iscsi_unavailable", "iSCSI is unavailable on this server.")
     if config["chap_enabled"] and (
@@ -806,7 +850,7 @@ def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None)
         path = binding["device_path"]
         created = False
         backstore_kind = "block"
-        backstore = f"hoardarr-zvol-{hashlib.sha256(service_id.encode()).hexdigest()[:24]}"
+        backstore = managed_backstore_name(service_id)
     else:
         path, created = _ensure_backing_file(config)
         backstore_kind = "fileio"
@@ -845,13 +889,32 @@ def _apply_iscsi(service_id: str, config: Mapping[str, Any], secret: str | None)
                     needs_attention=True,
                 ) from cleanup_exc
         raise exc
+    if managed:
+        try:
+            return {"readback": _managed_apply_readback(service_id, config, secret)}
+        except ExecutorFailure as readback_exc:
+            try:
+                _remove_iscsi(service_id, config)
+                _managed_absence_readback(service_id, config)
+            except Exception as cleanup_exc:
+                raise _ManagedApplyReadbackFailure(
+                    "connectivity_lio_readback_cleanup_uncertain",
+                    "iSCSI readback failed and cleanup could not be verified.",
+                    needs_attention=True,
+                ) from cleanup_exc
+            raise _ManagedApplyReadbackFailure(
+                readback_exc.code,
+                "The current iSCSI target state could not be verified.",
+                needs_attention=True,
+            ) from readback_exc
+    return {}
 
 
 def _remove_iscsi(service_id: str, config: Mapping[str, Any]) -> None:
     target = config["target_iqn"]
     if "managed_zvol_binding" in config:
         backstore_kind = "block"
-        backstore = f"hoardarr-zvol-{hashlib.sha256(service_id.encode()).hexdigest()[:24]}"
+        backstore = managed_backstore_name(service_id)
     else:
         backstore_kind = "fileio"
         backstore = f"hoardarr-{service_id[:12]}"
@@ -1012,7 +1075,9 @@ def apply(
                     _remove_iscsi(service_id, previous_service)
                 elif previous_service.get("protocol") == "fcoe":
                     _remove_fcoe(service_id, previous_service)
-            _apply_iscsi(service_id, config, secret if isinstance(secret, str) else None)
+            result_details = _apply_iscsi(
+                service_id, config, secret if isinstance(secret, str) else None
+            )
         else:
             if previous_service is not None:
                 if previous_service.get("protocol") == "iscsi":
@@ -1021,7 +1086,7 @@ def apply(
                     _remove_fcoe(service_id, previous_service)
             result_details = _apply_fcoe(service_id, config)
         _save_state(services)
-    except Exception:
+    except Exception as exc:
         if acl_previous is not None:
             with contextlib.suppress(Exception):
                 _run([_command("setfacl"), "--restore=-"], input_text=acl_previous, timeout=300)
@@ -1029,7 +1094,7 @@ def apply(
             with contextlib.suppress(Exception):
                 _render_file_services(previous)
                 _reload_file_services(protocol)
-        elif previous_service is not None:
+        elif previous_service is not None and not isinstance(exc, _ManagedApplyReadbackFailure):
             with contextlib.suppress(Exception):
                 if previous_service.get("protocol") == "iscsi":
                     _apply_iscsi(
@@ -1069,11 +1134,17 @@ def remove(
     services = _load_state()
     managed = services.get(service_id)
     if managed is None:
+        readback = (
+            _managed_absence_readback(service_id, config)
+            if "managed_zvol_binding" in config
+            else None
+        )
         return {
             "service_id": service_id,
             "state": "removed",
             "already_absent": True,
             "backing_data_deleted": False,
+            **({"readback": readback} if readback is not None else {}),
         }
     if managed != config:
         raise ExecutorFailure(
@@ -1082,12 +1153,15 @@ def remove(
     protocol = config["protocol"]
     previous = dict(services)
     services.pop(service_id)
+    result_details: dict[str, Any] = {}
     try:
         if protocol in {"smb", "nfs"}:
             _render_file_services(services)
             _reload_file_services(protocol)
         elif protocol == "iscsi":
             _remove_iscsi(service_id, config)
+            if "managed_zvol_binding" in config:
+                result_details = {"readback": _managed_absence_readback(service_id, config)}
         else:
             _remove_fcoe(service_id, config)
         if delete_backing_data and protocol in {"iscsi", "fcoe"}:
@@ -1104,4 +1178,5 @@ def remove(
         "protocol": protocol,
         "state": "removed",
         "backing_data_deleted": bool(delete_backing_data and protocol in {"iscsi", "fcoe"}),
+        **result_details,
     }

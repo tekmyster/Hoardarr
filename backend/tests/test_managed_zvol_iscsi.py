@@ -151,6 +151,16 @@ def test_managed_apply_and_remove_use_only_block_backstore(
     monkeypatch.setattr(executor, "_targetcli", lambda commands: scripts.append(commands))
     monkeypatch.setattr(
         executor,
+        "_managed_apply_readback",
+        lambda *_args: {"schema_version": 1, "state": "active"},
+    )
+    monkeypatch.setattr(
+        executor,
+        "_managed_absence_readback",
+        lambda *_args: {"schema_version": 1, "state": "absent"},
+    )
+    monkeypatch.setattr(
+        executor,
         "_ensure_backing_file",
         lambda _config: pytest.fail("managed zvol allocated a backing file"),
     )
