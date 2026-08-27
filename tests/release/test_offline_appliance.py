@@ -6174,6 +6174,8 @@ set -x
 disable_unmasked_units
 set +x
 exec 19>&-
+python3 "$f19_snapshot" after "$f19_after" "$f19_finalizer_source" \
+    "$phase09_outcomes" "$f19_command_trace" 0 0 none none
 printf '0\n' >"$f19_capture_status_file"
 [[ ! -e "$work/etc-systemd/multi-user.target.wants/iscsid.service" && \
     ! -L "$work/etc-systemd/multi-user.target.wants/iscsid.service" ]]
@@ -7543,6 +7545,22 @@ Description: Backup program for disk arrays
         self.assertNotRegex(
             phase12,
             r"(?:if|until|while)\s+disable_unmasked_units|disable_unmasked_units\s*(?:\|\||&&)",
+        )
+        success_snapshot = (
+            'python3 "$f19_snapshot" after "$f19_after" "$f19_finalizer_source" \\\n'
+            '    "$phase09_outcomes" "$f19_command_trace" 0 0 none none'
+        )
+        self.assertEqual(phase12.count(success_snapshot), 1)
+        self.assertLess(phase12.index("exec 19>&-"), phase12.index(success_snapshot))
+        self.assertLess(
+            phase12.index(success_snapshot),
+            phase12.index("printf '0\\n' >\"$f19_capture_status_file\""),
+        )
+        self.assertLess(
+            phase12.index("printf '0\\n' >\"$f19_capture_status_file\""),
+            phase12.index(
+                '[[ ! -e "$work/etc-systemd/multi-user.target.wants/iscsid.service"'
+            ),
         )
         self.assertNotIn("systemctl is-active", F19_SNAPSHOT_SCRIPT)
 
