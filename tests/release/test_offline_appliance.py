@@ -472,6 +472,63 @@ validate_and_remove_local_systemd_marker() {
 }
 """.strip()
 
+PCP_PHASE11_WATCHDOG_GUARD_LOOKUP = r"""
+watchdog_guard="${recovery_guard_paths_by_unit[watchdog.service]-}"
+[[ -n "$watchdog_guard" ]]
+[[ "${recovery_guard_paths_by_unit[watchdog.service]-}" == "$watchdog_guard" ]]
+[[ "${recovery_guard_path_owners[$watchdog_guard]-}" == watchdog.service ]]
+watchdog_guard_inode="${recovery_guard_file_inodes[$watchdog_guard]-}"
+[[ "$watchdog_guard_inode" =~ ^[1-9][0-9]*$ && \
+    -f "$watchdog_guard" && ! -L "$watchdog_guard" ]]
+watchdog_guard_inode_now="$(stat -c %i -- "$watchdog_guard")"
+[[ "$watchdog_guard_inode_now" == "$watchdog_guard_inode" ]]
+[[ -n "${recovery_guard_condition_paths[$watchdog_guard]+present}" ]]
+watchdog_condition="${recovery_guard_condition_paths[$watchdog_guard]-}"
+[[ -n "$watchdog_condition" ]]
+""".strip()
+
+PCP_PHASE14_PEER_GUARD_LOOKUP = r"""
+[[ -n "$peer_guard" && \
+    "${recovery_guard_paths_by_unit[zfs.target]-}" == "$peer_guard" ]]
+[[ "${recovery_guard_path_owners[$peer_guard]-}" == zfs.target ]]
+peer_guard_inode="${recovery_guard_file_inodes[$peer_guard]-}"
+[[ "$peer_guard_inode" =~ ^[1-9][0-9]*$ && \
+    -f "$peer_guard" && ! -L "$peer_guard" ]]
+peer_guard_inode_now="$(stat -c %i -- "$peer_guard")"
+[[ "$peer_guard_inode_now" == "$peer_guard_inode" ]]
+[[ -n "${recovery_guard_condition_paths[$peer_guard]+present}" ]]
+peer_condition="${recovery_guard_condition_paths[$peer_guard]-}"
+[[ -n "$peer_condition" ]]
+""".strip()
+
+
+def _assert_recovery_guard_path_key_contract(harness: str) -> None:
+    for direct_key in (
+        "recovery_guard_condition_paths[watchdog.service]",
+        "recovery_guard_condition_paths[zfs.target]",
+    ):
+        if direct_key in harness:
+            raise AssertionError(f"condition map uses unit-name key: {direct_key}")
+    required = (
+        PCP_PHASE11_WATCHDOG_GUARD_LOOKUP,
+        '"ConditionPathExists=$watchdog_condition"',
+        PCP_PHASE14_PEER_GUARD_LOOKUP,
+        '"ConditionPathExists=$peer_condition"',
+    )
+    for fragment in required:
+        if harness.count(fragment) != 1:
+            raise AssertionError(
+                f"recovery guard path-key contract is ambiguous: {fragment}"
+            )
+    if harness.index(PCP_PHASE11_WATCHDOG_GUARD_LOOKUP) > harness.index(
+        '"ConditionPathExists=$watchdog_condition"'
+    ):
+        raise AssertionError("watchdog condition runs before path-key validation")
+    if harness.index(PCP_PHASE14_PEER_GUARD_LOOKUP) > harness.index(
+        '"ConditionPathExists=$peer_condition"'
+    ):
+        raise AssertionError("peer condition runs before path-key validation")
+
 
 def _pcp_phase_ten_with_causal_proof() -> str:
     prefix = "trace_begin 10-host-manager-isolation host-manager-isolation\n"
@@ -2959,6 +3016,124 @@ printf 'local_systemd_marker_oracle_valid=1 negatives=%s cleanup_count=1\n' \
                 "local_systemd_marker_oracle_valid=1 negatives=20 cleanup_count=1\n",
             )
 
+    def test_recovery_guard_condition_lookups_require_path_keys(self) -> None:
+        harness = f"""{PCP_PHASE11_WATCHDOG_GUARD_LOOKUP}
+systemd-analyze condition "ConditionPathExists=$watchdog_condition"
+{PCP_PHASE14_PEER_GUARD_LOOKUP}
+systemd-analyze condition "ConditionPathExists=$peer_condition"
+"""
+        _assert_recovery_guard_path_key_contract(harness)
+        for resolved, direct in (
+            (
+                '"ConditionPathExists=$watchdog_condition"',
+                '"ConditionPathExists=${recovery_guard_condition_paths[watchdog.service]}"',
+            ),
+            (
+                '"ConditionPathExists=$peer_condition"',
+                '"ConditionPathExists=${recovery_guard_condition_paths[zfs.target]}"',
+            ),
+        ):
+            with self.subTest(direct=direct), self.assertRaises(AssertionError):
+                _assert_recovery_guard_path_key_contract(
+                    harness.replace(resolved, direct, 1)
+                )
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and shutil.which("bash"),
+        "requires Linux Bash",
+    )
+    def test_recovery_guard_wrong_domain_fails_before_condition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            guard = root / "90-hoardarr-offline-recovery.conf"
+            guard.write_text("guard\n", encoding="ascii")
+            script = root / "guard-key-domain.sh"
+            script.write_text(
+                "set -Eeuo pipefail\n"
+                'guard="$1"\n'
+                'unit="$2"\n'
+                'mutation="$3"\n'
+                "declare -A recovery_guard_paths_by_unit=()\n"
+                "declare -A recovery_guard_path_owners=()\n"
+                "declare -A recovery_guard_file_inodes=()\n"
+                "declare -A recovery_guard_condition_paths=()\n"
+                'if [[ "$mutation" != missing-unit ]]; then\n'
+                '    recovery_guard_paths_by_unit["$unit"]="$guard"\n'
+                "fi\n"
+                'recovery_guard_path_owners["$guard"]="$unit"\n'
+                'recovery_guard_file_inodes["$guard"]="$(stat -c %i -- "$guard")"\n'
+                'case "$mutation" in\n'
+                '    unit-domain) recovery_guard_condition_paths["$unit"]=/dev/null/wrong-domain ;;\n'
+                "    missing-condition) ;;\n"
+                '    empty-condition) recovery_guard_condition_paths["$guard"]="" ;;\n'
+                '    wrong-owner) recovery_guard_path_owners["$guard"]=other.service ;;\n'
+                '    wrong-path) recovery_guard_paths_by_unit["$unit"]="$guard.other" ;;\n'
+                '    wrong-inode) recovery_guard_file_inodes["$guard"]=1 ;;\n'
+                "    valid|missing-unit) "
+                'recovery_guard_condition_paths["$guard"]=/dev/null/exact ;;\n'
+                "    *) exit 210 ;;\n"
+                "esac\n"
+                'if [[ "$unit" == watchdog.service ]]; then\n'
+                + PCP_PHASE11_WATCHDOG_GUARD_LOOKUP
+                + "\n"
+                '    [[ "$watchdog_condition" == /dev/null/exact ]]\n'
+                "else\n"
+                '    peer_guard="${recovery_guard_paths_by_unit[zfs.target]-}"\n'
+                + PCP_PHASE14_PEER_GUARD_LOOKUP
+                + "\n"
+                '    [[ "$peer_condition" == /dev/null/exact ]]\n'
+                "fi\n"
+                "printf 'condition-command-reached:%s\\n' \"$unit\"\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            syntax = subprocess.run(
+                [shutil.which("bash") or "bash", "-n", str(script)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stdout + syntax.stderr)
+            for unit in ("watchdog.service", "zfs.target"):
+                valid = subprocess.run(
+                    [
+                        shutil.which("bash") or "bash",
+                        str(script),
+                        str(guard),
+                        unit,
+                        "valid",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                self.assertEqual(valid.stdout, f"condition-command-reached:{unit}\n")
+                for mutation in (
+                    "unit-domain",
+                    "missing-unit",
+                    "missing-condition",
+                    "empty-condition",
+                    "wrong-owner",
+                    "wrong-path",
+                    "wrong-inode",
+                ):
+                    with self.subTest(unit=unit, mutation=mutation):
+                        rejected = subprocess.run(
+                            [
+                                shutil.which("bash") or "bash",
+                                str(script),
+                                str(guard),
+                                unit,
+                                mutation,
+                            ],
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertEqual(rejected.stdout, "")
+
     @unittest.skipUnless(
         sys.platform.startswith("linux") and shutil.which("bash"),
         "requires Linux Bash",
@@ -3403,8 +3578,11 @@ rm -f -- "$state_root/service-guard-recovery.txt"
 cleanup_service_guards >/dev/null 2>&1 || interrupted_status=$?
 [[ "$interrupted_status" -ne 0 ]]
 [[ ! -e "$state_root/service-guard-recovery.txt" ]]
+""",
+                        PCP_PHASE11_WATCHDOG_GUARD_LOOKUP,
+                        r"""
 systemd-analyze condition \
-    "ConditionPathExists=${recovery_guard_condition_paths[watchdog.service]}" \
+    "ConditionPathExists=$watchdog_condition" \
     >/dev/null 2>&1 && exit 98
 rm -f -- "$recovery_guard_authorization_root/watchdog.service"
 rmdir -- "$recovery_guard_authorization_root"
@@ -3482,6 +3660,9 @@ trace_begin 14-peer-isolation peer-isolation
 watchdog_guard="${recovery_guard_paths_by_unit[watchdog.service]}"
 peer_guard="${recovery_guard_paths_by_unit[zfs.target]}"
 [[ -f "$watchdog_guard" && -f "$peer_guard" ]]
+""",
+                        PCP_PHASE14_PEER_GUARD_LOOKUP,
+                        r"""
 watchdog_inode="$(stat -c %i -- "$watchdog_guard")"
 watchdog_hash="$(sha256sum -- "$watchdog_guard" | awk '{print $1}')"
 python3 - "$state_root/service-retained-guards.json" "$watchdog_inode" \
@@ -3496,7 +3677,7 @@ PY
 rm -f -- "$watchdog_guard"
 [[ ! -e "$watchdog_guard" && -f "$peer_guard" ]]
 systemd-analyze condition \
-    "ConditionPathExists=${recovery_guard_condition_paths[zfs.target]}" \
+    "ConditionPathExists=$peer_condition" \
     >/dev/null 2>&1 && exit 99
 for unit in "${denied_units[@]}"; do
     state_status=0
@@ -3523,6 +3704,9 @@ exit 0
                 newline="\n",
             )
             _assert_pcp_offline_nonactivation_contract(
+                harness.read_text(encoding="utf-8")
+            )
+            _assert_recovery_guard_path_key_contract(
                 harness.read_text(encoding="utf-8")
             )
             result: subprocess.CompletedProcess[str] | None = None
