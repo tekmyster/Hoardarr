@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 import managed_zvol_lio_lifecycle as lifecycle
@@ -13,6 +14,7 @@ from managed_zvol_lio_lifecycle import (
     DiagnosticError,
     LifecycleGuardError,
     NodeParityError,
+    _read_safe_diagnostic,
     atomic_write_receipt,
     inspect_node_parity,
     sanitize_diagnostic_bytes,
@@ -415,8 +417,118 @@ def test_receipt_is_atomic_and_schema_bounded(tmp_path: Path) -> None:
     output = tmp_path / "receipt.json"
     atomic_write_receipt(receipt, output)
     if os.name != "nt":
-        assert output.stat().st_mode & 0o777 == 0o600
+        facts = output.lstat()
+        assert stat.S_ISREG(facts.st_mode)
+        assert not stat.S_ISLNK(facts.st_mode)
+        assert facts.st_nlink == 1
+        assert stat.S_IMODE(facts.st_mode) == 0o644
     assert validate_receipt(json.loads(output.read_text(encoding="utf-8"))) == receipt
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
+def test_only_validated_final_receipt_becomes_world_readable(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    draft = work / "draft.json"
+    login = work / "login.stderr"
+    journal = work / "login.journal"
+    node = work / "node-record"
+    for raw in (draft, login, journal, node):
+        raw.write_text("bounded raw fixture", encoding="utf-8")
+        raw.chmod(0o600)
+    output = tmp_path / "validation" / "receipt.json"
+
+    atomic_write_receipt(_receipt(), output)
+
+    assert stat.S_IMODE(work.stat().st_mode) == 0o700
+    assert all(
+        stat.S_IMODE(raw.stat().st_mode) == 0o600
+        for raw in (draft, login, journal, node)
+    )
+    assert stat.S_IMODE(output.stat().st_mode) == 0o644
+    login.chmod(0o644)
+    with pytest.raises(DiagnosticError, match="validation failed"):
+        _read_safe_diagnostic(login, expected_uid=login.stat().st_uid)
+
+
+def test_receipt_refuses_preexisting_output_without_changing_it(tmp_path: Path) -> None:
+    output = tmp_path / "receipt.json"
+    output.write_text("unrelated", encoding="utf-8")
+    before = output.read_bytes()
+
+    with pytest.raises(LifecycleGuardError, match="already exists"):
+        atomic_write_receipt(_receipt(), output)
+
+    assert output.read_bytes() == before
+
+
+def test_receipt_refuses_symlink_and_hard_link_outputs(tmp_path: Path) -> None:
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_text("retain", encoding="utf-8")
+    symlink = tmp_path / "symlink-receipt.json"
+    try:
+        symlink.symlink_to(unrelated)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(LifecycleGuardError, match="already exists"):
+        atomic_write_receipt(_receipt(), symlink)
+    assert unrelated.read_text(encoding="utf-8") == "retain"
+
+    hard_link = tmp_path / "hard-link-receipt.json"
+    os.link(unrelated, hard_link)
+    with pytest.raises(LifecycleGuardError, match="already exists"):
+        atomic_write_receipt(_receipt(), hard_link)
+    assert unrelated.read_text(encoding="utf-8") == "retain"
+    assert unrelated.stat().st_nlink == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
+def test_receipt_refuses_unsafe_output_directory(tmp_path: Path) -> None:
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir(mode=0o777)
+    unsafe.chmod(0o777)
+
+    with pytest.raises(LifecycleGuardError, match="directory is unsafe"):
+        atomic_write_receipt(_receipt(), unsafe / "receipt.json")
+
+    assert list(unsafe.iterdir()) == []
+
+
+def test_receipt_cleans_partial_json_and_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "receipt.json"
+
+    def partial_dump(*_args: object, **_kwargs: object) -> None:
+        stream = _args[1]
+        stream.write("partial")  # type: ignore[union-attr]
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(lifecycle.json, "dump", partial_dump)
+    with pytest.raises(OSError, match="synthetic write failure"):
+        atomic_write_receipt(_receipt(), output)
+
+    assert not output.exists()
+    assert list(tmp_path.glob(".receipt.json.*")) == []
+
+
+def test_receipt_cleans_output_when_final_mode_change_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "receipt.json"
+    real_fchmod = lifecycle.os.fchmod
+
+    def fail_final_mode(descriptor: int, mode: int) -> None:
+        if mode == 0o644:
+            raise OSError("synthetic final-mode failure")
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(lifecycle.os, "fchmod", fail_final_mode)
+    with pytest.raises(OSError, match="synthetic final-mode failure"):
+        atomic_write_receipt(_receipt(), output)
+
+    assert not output.exists()
+    assert list(tmp_path.glob(".receipt.json.*")) == []
 
 
 @pytest.mark.parametrize(

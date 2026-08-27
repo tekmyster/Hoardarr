@@ -632,23 +632,116 @@ def validate_receipt(document: object) -> dict[str, Any]:
 def atomic_write_receipt(document: object, output: Path) -> None:
     validated = validate_receipt(document)
     output.parent.mkdir(parents=True, exist_ok=True)
+    parent = output.parent.lstat()
+    expected_uid = getattr(os, "geteuid", lambda: parent.st_uid)()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != expected_uid
+        or stat.S_IMODE(parent.st_mode) & 0o022
+        or output.parent.resolve(strict=True) != output.parent.absolute()
+    ):
+        raise LifecycleGuardError("receipt output directory is unsafe")
+    try:
+        output.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise LifecycleGuardError("receipt output already exists")
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{output.name}.", dir=output.parent
     )
+    placeholder = -1
+    placeholder_identity: tuple[int, int] | None = None
+    receipt_identity: tuple[int, int] | None = None
     try:
         os.fchmod(descriptor, 0o600)
+        temporary_facts = os.fstat(descriptor)
+        if temporary_facts.st_uid != expected_uid:
+            raise LifecycleGuardError("receipt temporary owner is unsafe")
+        receipt_identity = (temporary_facts.st_dev, temporary_facts.st_ino)
+        placeholder = os.open(
+            output,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        os.fchmod(placeholder, 0o600)
+        placeholder_facts = os.fstat(placeholder)
+        placeholder_identity = (placeholder_facts.st_dev, placeholder_facts.st_ino)
+        os.close(placeholder)
+        placeholder = -1
         with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as stream:
             json.dump(validated, stream, sort_keys=True, separators=(",", ":"))
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        descriptor = -1
+        named_placeholder = output.lstat()
+        if (
+            (named_placeholder.st_dev, named_placeholder.st_ino) != placeholder_identity
+            or not stat.S_ISREG(named_placeholder.st_mode)
+            or stat.S_ISLNK(named_placeholder.st_mode)
+            or named_placeholder.st_uid != expected_uid
+            or named_placeholder.st_nlink != 1
+            or stat.S_IMODE(named_placeholder.st_mode) != 0o600
+        ):
+            raise LifecycleGuardError("receipt output placeholder is unsafe")
         os.replace(temporary, output)
-    except Exception:
+        temporary = ""
+        final_descriptor = -1
         try:
-            os.close(descriptor)
-        except OSError:
+            final_descriptor = os.open(
+                output,
+                os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            final_facts = os.fstat(final_descriptor)
+            if (
+                (final_facts.st_dev, final_facts.st_ino) != receipt_identity
+                or not stat.S_ISREG(final_facts.st_mode)
+                or final_facts.st_uid != expected_uid
+                or final_facts.st_nlink != 1
+            ):
+                raise LifecycleGuardError("final receipt identity is unsafe")
+            os.fchmod(final_descriptor, 0o644)
+            published_facts = os.fstat(final_descriptor)
+            if (
+                (published_facts.st_dev, published_facts.st_ino) != receipt_identity
+                or not stat.S_ISREG(published_facts.st_mode)
+                or published_facts.st_uid != expected_uid
+                or published_facts.st_nlink != 1
+                or (
+                    os.name == "posix"
+                    and stat.S_IMODE(published_facts.st_mode) != 0o644
+                )
+            ):
+                raise LifecycleGuardError("final receipt mode is unsafe")
+            os.fsync(final_descriptor)
+        finally:
+            if final_descriptor >= 0:
+                os.close(final_descriptor)
+    except Exception:
+        for open_descriptor in (descriptor, placeholder):
+            if open_descriptor >= 0:
+                try:
+                    os.close(open_descriptor)
+                except OSError:
+                    pass
+        if temporary:
+            Path(temporary).unlink(missing_ok=True)
+        try:
+            named = output.lstat()
+        except FileNotFoundError:
             pass
-        Path(temporary).unlink(missing_ok=True)
+        else:
+            if (named.st_dev, named.st_ino) in {
+                placeholder_identity,
+                receipt_identity,
+            }:
+                output.unlink()
         raise
 
 
