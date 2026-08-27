@@ -634,6 +634,32 @@ def test_loop_release_diagnostic_contract_is_bounded_and_preserves_strict_absenc
     assert "lsof" not in script and "fuser" not in script and "/proc" not in script
 
 
+@pytest.mark.parametrize(
+    ("stream", "classification"),
+    [
+        (b"", "EMPTY"),
+        (b"device or resource busy", "DEVICE_BUSY"),
+        (b"unexpected bounded fixture", "UNCLASSIFIED_BOUNDED"),
+    ],
+)
+def test_loop_stderr_classifier_keeps_all_caller_state_without_subshell(
+    stream: bytes, classification: str
+) -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    classifier = script.split("classify_loop_stderr() {", 1)[1].split(
+        "append_loop_release() {", 1
+    )[0]
+    assert 'loop_stderr_size="$(stat -c %s "$stream")"' in classifier
+    assert 'loop_stderr_sha256="$(sha256sum "$stream" | cut -d\' \' -f1)"' in classifier
+    assert 'loop_stderr_classification="UNCLASSIFIED_BOUNDED"' in classifier
+    assert "printf '%s'" not in classifier
+    assert script.count('classify_loop_stderr "$loop_stderr"') == 2
+    assert '"$(classify_loop_stderr' not in script
+    assert classification in classifier
+    if not stream:
+        assert hashlib.sha256(stream).hexdigest() == hashlib.sha256(b"").hexdigest()
+
+
 def _failed_loop_receipt(stderr_classification: str) -> dict[str, object]:
     receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
     phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]

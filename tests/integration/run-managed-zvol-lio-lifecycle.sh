@@ -152,14 +152,15 @@ classify_loop_stderr() {
   local stream="$1" text
   loop_stderr_size="$(stat -c %s "$stream")"
   loop_stderr_sha256="$(sha256sum "$stream" | cut -d' ' -f1)"
-  [[ "$loop_stderr_size" -le 16384 ]] || { printf '%s' "UNCLASSIFIED_BOUNDED"; return; }
+  loop_stderr_classification="UNCLASSIFIED_BOUNDED"
+  [[ "$loop_stderr_size" -le 16384 ]] || return
   text="$(cat "$stream")"
-  if [[ -z "$text" ]]; then printf '%s' "EMPTY"
-  elif grep -Eqi 'device or resource busy|device busy' <<<"$text"; then printf '%s' "DEVICE_BUSY"
-  elif grep -Eqi 'no such device' <<<"$text"; then printf '%s' "NO_SUCH_DEVICE"
-  elif grep -Eqi 'invalid argument|invalid option|unrecognized option' <<<"$text"; then printf '%s' "INVALID_ARGUMENT_OR_OPTION"
-  elif grep -Eqi 'permission denied|operation not permitted' <<<"$text"; then printf '%s' "PERMISSION_DENIED"
-  else printf '%s' "UNCLASSIFIED_BOUNDED"; fi
+  if [[ -z "$text" ]]; then loop_stderr_classification="EMPTY"
+  elif grep -Eqi 'device or resource busy|device busy' <<<"$text"; then loop_stderr_classification="DEVICE_BUSY"
+  elif grep -Eqi 'no such device' <<<"$text"; then loop_stderr_classification="NO_SUCH_DEVICE"
+  elif grep -Eqi 'invalid argument|invalid option|unrecognized option' <<<"$text"; then loop_stderr_classification="INVALID_ARGUMENT_OR_OPTION"
+  elif grep -Eqi 'permission denied|operation not permitted' <<<"$text"; then loop_stderr_classification="PERMISSION_DENIED"
+  fi
 }
 
 append_loop_release() {
@@ -314,7 +315,7 @@ cleanup_controller() {
       if [[ "$attempted" == true ]]; then (ulimit -f 8; timeout --signal=TERM --kill-after=2s 5s losetup -d -- "$loop" >/dev/null 2>"$loop_stderr"); rc=$?; else rc=0; fi
       set -e
       loop_timed_out=false; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && loop_timed_out=true
-      loop_stderr_classification="$(classify_loop_stderr "$loop_stderr")"
+      classify_loop_stderr "$loop_stderr"
       post_state="$(loop_mapping_state "$loop" "$image")"
       post=false; [[ "$post_state" == "ABSENT" ]] && post=true
       release_stdout="$(mktemp "$work/.loop-release.XXXXXX")"; release_stderr="$(mktemp "$work/.loop-release-stderr.XXXXXX")"
@@ -333,7 +334,7 @@ cleanup_controller() {
       attempted=false; rc=0; post=true; precheck="ABSENT"; post_state="ABSENT"; released=true
       loop_holder_count=0; loop_holder_hashes_json="[]"; loop_holder_probe_state="NOT_APPLICABLE"; loop_timed_out=false
       loop_stderr="$work/loop-detach-$number.stderr"; install -m 600 /dev/null "$loop_stderr"
-      loop_stderr_classification="$(classify_loop_stderr "$loop_stderr")"
+      classify_loop_stderr "$loop_stderr"
       append_loop_release "$number" "$precheck" "$post_state" "$released" "RELEASED"
     fi
     status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
