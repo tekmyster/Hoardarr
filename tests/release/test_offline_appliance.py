@@ -291,8 +291,8 @@ def helper(stage,work):
         if stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_uid!=0 or metadata.st_gid!=0 or metadata.st_nlink!=1: raise SystemExit("F20 helper evidence metadata is invalid")
     invocation=paths[0].read_text("ascii").splitlines()
     if len(invocation)!=6 or invocation[0]!="F20HELPER\t1" or invocation[1]!="ARGC\t3" or invocation[2]!="ARGV0\t--root=/" or invocation[3]!="ARGV1\tdisable" or invocation[4]!="ARGV2\tiscsid" or invocation[5]!="ENV\tSYSTEMD_OFFLINE=1": raise SystemExit("F20 helper invocation is invalid")
-    status_text=paths[3].read_text("ascii")
-    if not re.fullmatch(r"[0-9]{1,3}\n",status_text) or int(status_text)>255: raise SystemExit("F20 helper status is invalid")
+    status_bytes=paths[3].read_bytes()
+    if not re.fullmatch(rb"[0-9]{1,3}\n",status_bytes) or int(status_bytes)>255: raise SystemExit("F20 helper status is invalid")
     outputs={}
     for label,path in (("stdout",paths[1]),("stderr",paths[2])):
         raw=path.read_bytes()
@@ -300,7 +300,7 @@ def helper(stage,work):
         first=raw.splitlines()[0].decode("utf-8","backslashreplace")[:240] if raw else ""
         if any(ord(ch)<32 and ch not in "\\t" for ch in first): raise SystemExit("F20 helper first line is unsafe")
         outputs[label]={"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest(),"safe_first_line":first,"content_base64":base64.b64encode(raw).decode("ascii")}
-    return {"invoked":True,"real_helper":identity,"entry_guard":entry,"argv":["--root=/","disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_text),"invocation_sha256":digest(paths[0]),"outputs":outputs}
+    return {"invoked":True,"real_helper":identity,"entry_guard":entry,"argv":["--root=/","disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_bytes),"invocation_sha256":digest(paths[0]),"outputs":outputs}
 
 def main():
     if len(sys.argv)!=5: raise SystemExit("F20 snapshot argv invalid")
@@ -7625,28 +7625,24 @@ Description: Backup program for disk arrays
             helper_function = helper_namespace["helper"]
             self.assertTrue(callable(helper_function))
             self.assertIn(
-                r're.fullmatch(r"[0-9]{1,3}\n",status_text)',
+                r're.fullmatch(rb"[0-9]{1,3}\n",status_bytes)',
                 F20_SNAPSHOT_SCRIPT,
             )
             self.assertNotIn(
-                r're.fullmatch(r"[0-9]{1,3}\\n",status_text)',
+                'status_text=paths[3].read_text("ascii")',
                 F20_SNAPSHOT_SCRIPT,
             )
             status_patterns = [
                 value
                 for value in helper_function.__code__.co_consts
-                if isinstance(value, str) and value.startswith("[0-9]{1,3}")
+                if isinstance(value, bytes) and value.startswith(b"[0-9]{1,3}")
             ]
-            self.assertEqual(status_patterns, [r"[0-9]{1,3}\n"])
+            self.assertEqual(status_patterns, [rb"[0-9]{1,3}\n"])
 
             def status_is_valid(status: bytes) -> bool:
-                try:
-                    status_text = status.decode("ascii")
-                except UnicodeDecodeError:
-                    return False
                 return (
-                    re.fullmatch(status_patterns[0], status_text) is not None
-                    and int(status_text) <= 255
+                    re.fullmatch(status_patterns[0], status) is not None
+                    and int(status) <= 255
                 )
 
             valid_statuses = (b"0\n", b"1\n", b"124\n", b"255\n")
@@ -7730,18 +7726,65 @@ Description: Backup program for disk arrays
             original_path_stat = pathlib.Path.stat
             projected_paths = frozenset(evidence_paths.values())
 
+            class ExactStatProxy:
+                __slots__ = ("_observed",)
+
+                def __init__(self, observed: os.stat_result) -> None:
+                    object.__setattr__(self, "_observed", observed)
+
+                @property
+                def st_mode(self) -> int:
+                    return stat.S_IFREG | 0o600
+
+                @property
+                def st_nlink(self) -> int:
+                    return 1
+
+                @property
+                def st_uid(self) -> int:
+                    return 0
+
+                @property
+                def st_gid(self) -> int:
+                    return 0
+
+                def __getattr__(self, name: str) -> object:
+                    return getattr(self._observed, name)
+
+                def __getitem__(self, index: object) -> object:
+                    return self._observed[index]
+
+                def __iter__(self) -> object:
+                    return iter(self._observed)
+
+                def __len__(self) -> int:
+                    return len(self._observed)
+
+                def __contains__(self, value: object) -> bool:
+                    return value in self._observed
+
+                def __reversed__(self) -> object:
+                    return reversed(self._observed)
+
+                def count(self, value: object) -> int:
+                    return self._observed.count(value)
+
+                def index(self, value: object, *args: int) -> int:
+                    return self._observed.index(value, *args)
+
+                def __setattr__(self, name: str, value: object) -> None:
+                    raise AttributeError("exact stat proxy is immutable")
+
+                def __delattr__(self, name: str) -> None:
+                    raise AttributeError("exact stat proxy is immutable")
+
             def projected_helper_stat(
                 path: pathlib.Path, *args: object, **kwargs: object
-            ) -> os.stat_result:
+            ) -> object:
                 observed = original_path_stat(path, *args, **kwargs)
                 if path not in projected_paths:
                     return observed
-                fields = list(observed)
-                fields[stat.ST_MODE] = stat.S_IFREG | 0o600
-                fields[stat.ST_NLINK] = 1
-                fields[stat.ST_UID] = 0
-                fields[stat.ST_GID] = 0
-                return os.stat_result(fields)
+                return ExactStatProxy(observed)
 
             with mock.patch.object(pathlib.Path, "stat", new=projected_helper_stat):
                 for status in valid_statuses:
@@ -7760,18 +7803,27 @@ Description: Backup program for disk arrays
                                     ),
                                     (0, 0, 1),
                                 )
-                                for attribute in (
-                                    "st_ino",
-                                    "st_dev",
-                                    "st_size",
-                                    "st_atime",
-                                    "st_mtime",
-                                    "st_ctime",
-                                ):
+                                preserved_attributes = sorted(
+                                    attribute
+                                    for attribute in dir(actual)
+                                    if attribute.startswith("st_")
+                                    and attribute
+                                    not in {"st_mode", "st_nlink", "st_uid", "st_gid"}
+                                )
+                                for attribute in preserved_attributes:
                                     self.assertEqual(
                                         getattr(projected, attribute),
                                         getattr(actual, attribute),
                                     )
+                                self.assertEqual(tuple(projected), tuple(actual))
+                                self.assertEqual(len(projected), len(actual))
+                                self.assertEqual(
+                                    list(reversed(projected)), list(reversed(actual))
+                                )
+                                with self.assertRaisesRegex(
+                                    AttributeError, "exact stat proxy is immutable"
+                                ):
+                                    projected.st_uid = 1
                                 self.assertEqual(
                                     real_helper.stat(), original_path_stat(real_helper)
                                 )
@@ -7785,7 +7837,7 @@ Description: Backup program for disk arrays
                     with self.subTest(invalid_status=label):
                         try:
                             write_helper_evidence(status)
-                            with self.assertRaises((SystemExit, UnicodeDecodeError)):
+                            with self.assertRaises(SystemExit):
                                 helper_function("after", root)
                         finally:
                             remove_helper_evidence()
@@ -8364,7 +8416,7 @@ Description: Backup program for disk arrays
         self.assertNotIn("str(f21),stage", F29_OUTER_RUNNER_SCRIPT)
         expected_script_hashes = {
             "F19": "4b8fe01485d8c5e97bcd525a07dbcac4b2240a15cf0751b44f30a5dff1d4cde2",
-            "F20": "ed3c06580db1bf23fa9d4df4a86002cae13bee629a70f86a3354537219472603",
+            "F20": "ea2e8f6b08b56e834c4d093b794f4196f4be481d0b292a0a0d84924c3e5a5709",
             "F21": "13366ef44f4065b716d42a3294d297bb8c77be7a46e61ae1093e1885a9ffdccd",
             "F29": "6d0c55cca01e2512a1234a42ebbfaba258e54edc88e55b47295f411a1faffc24",
             "F29_OUTER": "9c38bfc1da2751d99bc4a9785bbcce18a09f54210f903c29e23fc863a004e41a",
