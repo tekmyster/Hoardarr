@@ -7324,12 +7324,25 @@ Description: Backup program for disk arrays
             receipt, _ = _validate_f29_f21_attempt(attempt, work, source_sha256)
             self.assertEqual(receipt["child_status"], 7)
             self.assertEqual(receipt["stderr_class"], "PATH_IDENTITY_INVALID")
-            before = attempt.read_bytes()
+            before = _read_strict_root_file(
+                attempt,
+                work,
+                expected_name="f29-f21-attempt.json",
+                max_bytes=F29_F21_ATTEMPT_MAX_BYTES,
+            )
             duplicate = subprocess.run(
                 command, text=True, capture_output=True, check=False
             )
             self.assertNotEqual(duplicate.returncode, 0)
-            self.assertEqual(attempt.read_bytes(), before)
+            self.assertEqual(
+                _read_strict_root_file(
+                    attempt,
+                    work,
+                    expected_name="f29-f21-attempt.json",
+                    max_bytes=F29_F21_ATTEMPT_MAX_BYTES,
+                ),
+                before,
+            )
             for label, mutate in (
                 ("source-drift", lambda: source.write_text("x", encoding="ascii")),
                 ("output-collision", lambda: output.write_bytes(b"preserved\n")),
