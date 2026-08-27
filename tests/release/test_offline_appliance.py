@@ -82,6 +82,341 @@ PCP_SYSTEMD_MARKER_PATH = "/run/systemd/systemd-units-load"
 PCP_SYSTEMD_FALSE_CONDITION = (
     "ConditionPathExists=/dev/null/hoardarr-offline-service-guard/pmcd.service"
 )
+F19_DIAGNOSTIC_SCHEMA = 1
+F19_DIAGNOSTIC_MAX_BYTES = 256 * 1024
+F19_COMMAND_TRACE_MAX_BYTES = 64 * 1024
+F19_TARGET_UNITS = (
+    "corosync.service",
+    "iscsid.service",
+    "iscsid.socket",
+    "iscsi.service",
+    "open-iscsi.service",
+)
+F19_MOUNT_ROOTS = (
+    "/usr/lib/systemd/system",
+    "/etc/systemd/system",
+    "/var/lib/systemd",
+    "/run/systemd",
+)
+
+F19_SNAPSHOT_SCRIPT = r"""#!/usr/bin/python3
+from __future__ import annotations
+
+import base64
+import fnmatch
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import sys
+
+SCHEMA = 1
+MAX_RECEIPT = 256 * 1024
+MAX_CONTENT = 64 * 1024
+MAX_ENTRIES = 192
+UNITS = (
+    "corosync.service",
+    "iscsid.service",
+    "iscsid.socket",
+    "iscsi.service",
+    "open-iscsi.service",
+)
+MOUNTS = (
+    "/usr/lib/systemd/system",
+    "/etc/systemd/system",
+    "/var/lib/systemd",
+    "/run/systemd",
+)
+SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.@:+,=/ -]{0,512}$")
+
+
+def sha(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def classify(path: pathlib.Path, *, include_content: bool = False) -> dict[str, object]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {"path": str(path), "type": "absent"}
+    mode = metadata.st_mode
+    if stat.S_ISLNK(mode):
+        kind = "symlink"
+    elif stat.S_ISREG(mode):
+        kind = "regular"
+    elif stat.S_ISDIR(mode):
+        kind = "directory"
+    elif stat.S_ISSOCK(mode):
+        kind = "socket"
+    else:
+        kind = "other"
+    record: dict[str, object] = {
+        "path": str(path),
+        "type": kind,
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "mode": format(stat.S_IMODE(mode), "04o"),
+        "size": metadata.st_size,
+    }
+    if kind == "symlink":
+        record["link_target"] = os.readlink(path)
+        resolved = path.resolve(strict=False)
+        record["resolved_path"] = str(resolved)
+        record["resolved_confined"] = any(
+            resolved == root or root in resolved.parents
+            for root in (
+                pathlib.Path("/etc/systemd/system"),
+                pathlib.Path("/usr/lib/systemd/system"),
+                pathlib.Path("/dev/null"),
+            )
+        )
+    elif kind == "regular":
+        if metadata.st_size > MAX_CONTENT:
+            raise SystemExit(f"regular object exceeds diagnostic cap: {path}")
+        record["sha256"] = sha(path)
+        if include_content:
+            record["content_base64"] = base64.b64encode(path.read_bytes()).decode("ascii")
+    return record
+
+
+def mount_records(work: pathlib.Path) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for raw in pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        left, right = raw.split(" - ", 1)
+        fields = left.split()
+        mountpoint = fields[4].replace("\\040", " ").replace("\\011", "\t")
+        if mountpoint not in MOUNTS:
+            continue
+        right_fields = right.split()
+        records.append(
+            {
+                "mount_id": int(fields[0]),
+                "parent_id": int(fields[1]),
+                "major_minor": fields[2],
+                "root": fields[3],
+                "mountpoint": mountpoint,
+                "mount_options": fields[5].split(","),
+                "optional_fields": fields[6:],
+                "filesystem_type": right_fields[0],
+                "source": right_fields[1],
+                "super_options": right_fields[2].split(","),
+            }
+        )
+    if [record["mountpoint"] for record in records] != list(MOUNTS):
+        by_mount = {str(record["mountpoint"]): record for record in records}
+        if set(by_mount) != set(MOUNTS) or len(records) != len(MOUNTS):
+            raise SystemExit("fixture mount roots are incomplete or ambiguous")
+        records = [by_mount[mount] for mount in MOUNTS]
+    sources = {
+        "/usr/lib/systemd/system": work / "vendor-units",
+        "/etc/systemd/system": work / "etc-systemd",
+        "/var/lib/systemd": work / "systemd-state",
+        "/run/systemd": work / "run-systemd",
+    }
+    for record in records:
+        source = sources[str(record["mountpoint"])]
+        mountpoint = pathlib.Path(str(record["mountpoint"]))
+        record["fixture_source"] = str(source)
+        record["fixture_source_identity"] = f"{source.stat().st_dev}:{source.stat().st_ino}"
+        record["mountpoint_identity"] = f"{mountpoint.stat().st_dev}:{mountpoint.stat().st_ino}"
+        record["bind_identity_matches"] = (
+            record["fixture_source_identity"] == record["mountpoint_identity"]
+        )
+    return records
+
+
+def enabled_state(unit: str) -> dict[str, object]:
+    completed = subprocess.run(
+        ["/usr/bin/systemctl", "--root=/", "is-enabled", unit],
+        env={**os.environ, "SYSTEMD_OFFLINE": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    first = (completed.stdout + completed.stderr).splitlines()
+    return {
+        "unit": unit,
+        "first_line": first[0] if first else "",
+        "status": completed.returncode,
+    }
+
+
+def matching_etc_entries() -> list[dict[str, object]]:
+    root = pathlib.Path("/etc/systemd/system")
+    records: list[dict[str, object]] = []
+    for parent, directories, files in os.walk(root, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in directories + files:
+            path = pathlib.Path(parent) / name
+            relative = path.relative_to(root)
+            parts = relative.parts
+            if not any(
+                unit in parts or f"{unit}.d" in parts or name == unit for unit in UNITS
+            ):
+                continue
+            if len(parts) > 5 or any(part in {"", ".", ".."} for part in parts):
+                raise SystemExit("unsafe unit entry path")
+            record = classify(path)
+            record["relative_path"] = relative.as_posix()
+            records.append(record)
+            if len(records) > MAX_ENTRIES:
+                raise SystemExit("too many matching unit entries")
+    records.sort(key=lambda item: str(item["relative_path"]))
+    if len({str(item["relative_path"]) for item in records}) != len(records):
+        raise SystemExit("duplicate matching unit entry")
+    return records
+
+
+def preset_records() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    roots = (
+        pathlib.Path("/etc/systemd/system-preset"),
+        pathlib.Path("/run/systemd/system-preset"),
+        pathlib.Path("/usr/local/lib/systemd/system-preset"),
+        pathlib.Path("/usr/lib/systemd/system-preset"),
+    )
+    selected: dict[str, pathlib.Path] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.preset")):
+            selected.setdefault(path.name, path)
+    files: list[dict[str, object]] = []
+    rules: list[tuple[str, str, str, int]] = []
+    for name in sorted(selected):
+        path = selected[name]
+        metadata = path.stat()
+        if metadata.st_size > MAX_CONTENT:
+            raise SystemExit(f"preset exceeds diagnostic cap: {path}")
+        content = path.read_text(encoding="utf-8")
+        files.append(
+            {
+                "name": name,
+                "path": str(path),
+                "size": metadata.st_size,
+                "sha256": sha(path),
+                "content_base64": base64.b64encode(content.encode()).decode("ascii"),
+            }
+        )
+        for line_number, raw in enumerate(content.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] in {"enable", "disable", "ignore"}:
+                rules.append((fields[0], fields[1], name, line_number))
+    effective: list[dict[str, object]] = []
+    for unit in UNITS:
+        match = next((rule for rule in rules if fnmatch.fnmatchcase(unit, rule[1])), None)
+        if match is None:
+            effective.append({"unit": unit, "action": "enable", "source": "default"})
+        else:
+            effective.append(
+                {
+                    "unit": unit,
+                    "action": match[0],
+                    "pattern": match[1],
+                    "source": match[2],
+                    "line": match[3],
+                }
+            )
+    return files, effective
+
+
+def phase09(path: pathlib.Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for raw in path.read_text(encoding="ascii").splitlines():
+        fields = raw.split("\t")
+        if len(fields) != 2 or fields[0] not in UNITS or fields[1] != "0":
+            raise SystemExit("invalid phase-09 outcome")
+        rows.append({"unit": fields[0], "status": 0})
+    if [row["unit"] for row in rows] != list(UNITS):
+        raise SystemExit("phase-09 target outcomes are incomplete or out of order")
+    return rows
+
+
+def main() -> int:
+    if len(sys.argv) != 10:
+        raise SystemExit("invalid diagnostic snapshot argv")
+    stage, output, function_path, phase09_path, trace_path = sys.argv[1:6]
+    failure_status, failure_line, failure_function, failure_command = sys.argv[6:10]
+    if stage not in {"before", "after"}:
+        raise SystemExit("invalid diagnostic stage")
+    if not SAFE_TOKEN.fullmatch(failure_command):
+        raise SystemExit("unsafe failure command label")
+    destination = pathlib.Path(output)
+    work = destination.parent
+    function = pathlib.Path(function_path)
+    systemctl = pathlib.Path("/usr/bin/systemctl")
+    version = subprocess.run(
+        [str(systemctl), "--version"], text=True, capture_output=True, check=True
+    ).stdout.splitlines()[0]
+    unit_records = [classify(pathlib.Path("/usr/lib/systemd/system") / unit, include_content=True) for unit in UNITS]
+    presets, effective_rules = preset_records()
+    command_trace: dict[str, object] | None = None
+    if stage == "after":
+        trace = pathlib.Path(trace_path)
+        size = trace.stat().st_size
+        if size <= 0 or size > 64 * 1024:
+            raise SystemExit("command trace size is outside bounds")
+        command_trace = {"size": size, "sha256": sha(trace)}
+    receipt = {
+        "schema_version": SCHEMA,
+        "stage": stage,
+        "inputs": {
+            "payload_sha256": "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+            "verifier_sha256": "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+            "disable_unmasked_units_sha256": sha(function),
+        },
+        "systemd": {
+            "version_first_line": version,
+            "systemctl_path": str(systemctl.resolve(strict=True)),
+            "systemctl_sha256": sha(systemctl),
+        },
+        "mounts": mount_records(work),
+        "vendor_units": unit_records,
+        "etc_entries": matching_etc_entries(),
+        "presets": presets,
+        "effective_preset_rules": effective_rules,
+        "phase09_outcomes": phase09(pathlib.Path(phase09_path)),
+        "enabled_states": [enabled_state(unit) for unit in UNITS],
+        "phase_boundaries": {
+            "deferred_validator_reached": (work / "f19-validator-reached").exists(),
+            "phase13_reached": (work / "f19-phase13-reached").exists(),
+            "phase14_reached": (work / "f19-phase14-reached").exists(),
+            "phase15_reached": (work / "f19-phase15-reached").exists(),
+        },
+        "failure": None if stage == "before" else {
+            "status": int(failure_status),
+            "line": int(failure_line),
+            "function": failure_function,
+            "command": failure_command,
+        },
+        "command_trace": command_trace,
+    }
+    encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(encoded) > MAX_RECEIPT:
+        raise SystemExit("diagnostic receipt exceeds cap")
+    partial = destination.with_suffix(destination.suffix + ".partial")
+    if destination.exists() or partial.exists():
+        raise SystemExit("diagnostic receipt destination already exists")
+    partial.write_bytes(encoded)
+    os.chmod(partial, 0o600)
+    partial.replace(destination)
+    with destination.open("rb") as stream:
+        os.fsync(stream.fileno())
+    return 0
+
+
+raise SystemExit(main())
+"""
 
 PCP_MANAGER_ROOT_SNAPSHOT_FUNCTION = r"""
 manager_root_snapshot_abort() {
@@ -542,6 +877,306 @@ def _service_policy_readback_validator(payload: str) -> str:
     if "activity_verification" not in validator:
         raise AssertionError("service readback validator lacks activity authority")
     return validator
+
+
+def _validate_f19_snapshot(
+    path: pathlib.Path,
+    fixture_root: pathlib.Path,
+    stage: str,
+    expected_function_sha256: str,
+) -> tuple[dict[str, object], str]:
+    root = fixture_root.resolve(strict=True)
+    receipt_path = path.resolve(strict=True)
+    if receipt_path.parent != root or receipt_path.is_symlink():
+        raise AssertionError("F19 receipt escapes its disposable fixture")
+    raw = receipt_path.read_bytes()
+    if not raw or len(raw) > F19_DIAGNOSTIC_MAX_BYTES or not raw.endswith(b"\n"):
+        raise AssertionError("F19 receipt framing or size is invalid")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssertionError("F19 receipt is not strict UTF-8 JSON") from exc
+    expected_keys = {
+        "schema_version",
+        "stage",
+        "inputs",
+        "systemd",
+        "mounts",
+        "vendor_units",
+        "etc_entries",
+        "presets",
+        "effective_preset_rules",
+        "phase09_outcomes",
+        "enabled_states",
+        "phase_boundaries",
+        "failure",
+        "command_trace",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != expected_keys:
+        raise AssertionError("F19 receipt schema is not exact")
+    if receipt["schema_version"] != F19_DIAGNOSTIC_SCHEMA or receipt["stage"] != stage:
+        raise AssertionError("F19 receipt version/stage is invalid")
+    inputs = receipt["inputs"]
+    if not isinstance(inputs, dict) or inputs != {
+        "payload_sha256": "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+        "verifier_sha256": "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        "disable_unmasked_units_sha256": expected_function_sha256,
+    }:
+        raise AssertionError("F19 immutable input identity is invalid")
+    systemd = receipt["systemd"]
+    if not isinstance(systemd, dict) or set(systemd) != {
+        "version_first_line",
+        "systemctl_path",
+        "systemctl_sha256",
+    }:
+        raise AssertionError("F19 systemd identity schema is invalid")
+    if (
+        not re.fullmatch(
+            r"systemd 255 \(255\.4-[0-9A-Za-z.+:~]+\)",
+            str(systemd["version_first_line"]),
+        )
+        or systemd["systemctl_path"] != "/usr/bin/systemctl"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(systemd["systemctl_sha256"]))
+    ):
+        raise AssertionError("F19 systemd identity is invalid")
+    mounts = receipt["mounts"]
+    if not isinstance(mounts, list) or len(mounts) != len(F19_MOUNT_ROOTS):
+        raise AssertionError("F19 mount coverage is incomplete")
+    if [
+        record.get("mountpoint") for record in mounts if isinstance(record, dict)
+    ] != list(F19_MOUNT_ROOTS):
+        raise AssertionError("F19 mount order is invalid")
+    for record in mounts:
+        if (
+            not isinstance(record, dict)
+            or record.get("bind_identity_matches") is not True
+        ):
+            raise AssertionError("F19 mount does not identify its fixture bind source")
+        if not isinstance(record.get("mount_id"), int) or record["mount_id"] <= 0:
+            raise AssertionError("F19 mount ID is invalid")
+    vendor = receipt["vendor_units"]
+    if not isinstance(vendor, list) or len(vendor) != len(F19_TARGET_UNITS):
+        raise AssertionError("F19 vendor-unit coverage is incomplete")
+    if [
+        pathlib.PurePosixPath(str(item.get("path"))).name
+        for item in vendor
+        if isinstance(item, dict)
+    ] != list(F19_TARGET_UNITS):
+        raise AssertionError("F19 vendor-unit order is invalid")
+    for item in vendor:
+        if not isinstance(item, dict) or item.get("type") not in {
+            "absent",
+            "regular",
+            "symlink",
+            "directory",
+        }:
+            raise AssertionError("F19 vendor-unit object is invalid")
+        if item["type"] == "regular":
+            if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
+                raise AssertionError("F19 regular unit hash is invalid")
+            try:
+                decoded = __import__("base64").b64decode(
+                    str(item.get("content_base64", "")), validate=True
+                )
+            except ValueError as exc:
+                raise AssertionError("F19 regular unit content is invalid") from exc
+            if hashlib.sha256(decoded).hexdigest() != item["sha256"]:
+                raise AssertionError("F19 regular unit content/hash mismatch")
+        if item["type"] == "symlink" and item.get("resolved_confined") is not True:
+            raise AssertionError("F19 vendor symlink escapes fixture roots")
+    etc_entries = receipt["etc_entries"]
+    if not isinstance(etc_entries, list) or len(etc_entries) > 192:
+        raise AssertionError("F19 unit-entry coverage is unbounded")
+    relative_paths = []
+    for item in etc_entries:
+        if not isinstance(item, dict):
+            raise TypeError("F19 unit entry is not an object")
+        relative = str(item.get("relative_path", ""))
+        pure = pathlib.PurePosixPath(relative)
+        if (
+            not relative
+            or pure.is_absolute()
+            or ".." in pure.parts
+            or len(pure.parts) > 5
+            or item.get("type") not in {"regular", "symlink", "directory"}
+        ):
+            raise AssertionError("F19 unit entry path/type is unsafe")
+        if item["type"] == "symlink" and item.get("resolved_confined") is not True:
+            raise AssertionError("F19 unit-entry symlink escapes fixture roots")
+        relative_paths.append(relative)
+    if relative_paths != sorted(set(relative_paths)):
+        raise AssertionError("F19 unit entries are duplicated or unsorted")
+    presets = receipt["presets"]
+    if not isinstance(presets, list) or len(presets) > 128:
+        raise AssertionError("F19 preset coverage is unbounded")
+    preset_names = []
+    for item in presets:
+        if not isinstance(item, dict) or set(item) != {
+            "name",
+            "path",
+            "size",
+            "sha256",
+            "content_base64",
+        }:
+            raise AssertionError("F19 preset schema is invalid")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_.@:+,-]+\.preset", str(item["name"]))
+            or not isinstance(item["size"], int)
+            or not 0 <= item["size"] <= 64 * 1024
+            or not re.fullmatch(r"[0-9a-f]{64}", str(item["sha256"]))
+        ):
+            raise AssertionError("F19 preset identity is invalid")
+        try:
+            decoded = __import__("base64").b64decode(
+                str(item["content_base64"]), validate=True
+            )
+        except ValueError as exc:
+            raise AssertionError("F19 preset content is invalid") from exc
+        if (
+            len(decoded) != item["size"]
+            or hashlib.sha256(decoded).hexdigest() != item["sha256"]
+        ):
+            raise AssertionError("F19 preset content/hash mismatch")
+        preset_names.append(str(item["name"]))
+    if preset_names != sorted(set(preset_names)):
+        raise AssertionError("F19 preset identities are duplicated or unsorted")
+    effective_rules = receipt["effective_preset_rules"]
+    if not isinstance(effective_rules, list) or [
+        row.get("unit") for row in effective_rules if isinstance(row, dict)
+    ] != list(F19_TARGET_UNITS):
+        raise AssertionError("F19 effective preset coverage is incomplete")
+    for row in effective_rules:
+        if not isinstance(row, dict) or row.get("action") not in {
+            "enable",
+            "disable",
+            "ignore",
+        }:
+            raise AssertionError("F19 effective preset rule is invalid")
+        if row.get("source") == "default":
+            if set(row) != {"unit", "action", "source"} or row["action"] != "enable":
+                raise AssertionError("F19 default preset rule is invalid")
+        elif set(row) != {"unit", "action", "pattern", "source", "line"}:
+            raise AssertionError("F19 explicit preset rule schema is invalid")
+    phase09 = receipt["phase09_outcomes"]
+    if phase09 != [{"status": 0, "unit": unit} for unit in F19_TARGET_UNITS]:
+        raise AssertionError("F19 phase-09 outcomes are incomplete")
+    enabled = receipt["enabled_states"]
+    if not isinstance(enabled, list) or [
+        row.get("unit") for row in enabled if isinstance(row, dict)
+    ] != list(F19_TARGET_UNITS):
+        raise AssertionError("F19 enablement observations are incomplete")
+    for row in enabled:
+        if not isinstance(row, dict) or set(row) != {"unit", "first_line", "status"}:
+            raise AssertionError("F19 enablement row schema is invalid")
+        if not isinstance(row["status"], int) or not 0 <= row["status"] <= 255:
+            raise AssertionError("F19 enablement status is invalid")
+        if not re.fullmatch(r"[A-Za-z0-9_.@:+,-]{0,128}", str(row["first_line"])):
+            raise AssertionError("F19 enablement output is unsafe")
+    boundaries = receipt["phase_boundaries"]
+    if not isinstance(boundaries, dict) or set(boundaries) != {
+        "deferred_validator_reached",
+        "phase13_reached",
+        "phase14_reached",
+        "phase15_reached",
+    }:
+        raise AssertionError("F19 phase-boundary schema is invalid")
+    if any(value is not False for value in boundaries.values()):
+        raise AssertionError("F19 diagnostic unexpectedly crossed a later phase")
+    if stage == "before":
+        if receipt["failure"] is not None or receipt["command_trace"] is not None:
+            raise AssertionError("F19 before receipt contains failure evidence")
+    else:
+        failure = receipt["failure"]
+        if not isinstance(failure, dict) or set(failure) != {
+            "status",
+            "line",
+            "function",
+            "command",
+        }:
+            raise AssertionError("F19 failure schema is invalid")
+        if (
+            failure["status"] != 1
+            or not isinstance(failure["line"], int)
+            or not 1 <= failure["line"] <= 999999
+            or failure["function"] != "main"
+            or failure["command"] != "return 1"
+        ):
+            raise AssertionError("F19 first failure identity is invalid")
+        command_trace = receipt["command_trace"]
+        if not isinstance(command_trace, dict) or set(command_trace) != {
+            "size",
+            "sha256",
+        }:
+            raise AssertionError("F19 command-trace identity is invalid")
+        if (
+            not isinstance(command_trace["size"], int)
+            or not 0 < command_trace["size"] <= F19_COMMAND_TRACE_MAX_BYTES
+            or not re.fullmatch(r"[0-9a-f]{64}", str(command_trace["sha256"]))
+        ):
+            raise AssertionError("F19 command-trace bounds are invalid")
+    return receipt, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_f19_command_trace(
+    path: pathlib.Path, fixture_root: pathlib.Path, expected_sha256: str
+) -> tuple[str, dict[str, bool]]:
+    root = fixture_root.resolve(strict=True)
+    trace = path.resolve(strict=True)
+    if trace.parent != root or trace.is_symlink():
+        raise AssertionError("F19 command trace escapes its fixture")
+    raw = trace.read_bytes()
+    if not raw or len(raw) > F19_COMMAND_TRACE_MAX_BYTES or not raw.endswith(b"\n"):
+        raise AssertionError("F19 command trace framing/size is invalid")
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise AssertionError("F19 command trace hash mismatch")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise AssertionError("F19 command trace is not ASCII") from exc
+    lines = text.splitlines()
+    if len(lines) > 1024 or any(len(line) > 768 for line in lines):
+        raise AssertionError("F19 command trace exceeds line bounds")
+    if any(not re.fullmatch(r"\++F19X\|.*", line) for line in lines):
+        raise AssertionError("F19 command trace has an invalid prefix")
+    checks = {
+        "disable_iscsid": any(
+            "systemctl --root=/ disable iscsid.service" in line for line in lines
+        ),
+        "disable_fallback_executed": any(
+            "disable_status=" in line
+            and "iscsid.service" in "\n".join(lines[max(0, index - 4) : index + 1])
+            for index, line in enumerate(lines)
+        ),
+        "is_enabled_iscsid": any(
+            "systemctl --root=/ is-enabled iscsid.service" in line for line in lines
+        ),
+        "enabled_output": any("enabled_state=enabled" in line for line in lines),
+        "enabled_status_zero": any("enabled_status=0" in line for line in lines),
+    }
+    for required in (
+        "disable_iscsid",
+        "is_enabled_iscsid",
+        "enabled_output",
+        "enabled_status_zero",
+    ):
+        if not checks[required]:
+            raise AssertionError(f"F19 command trace lacks {required}")
+    sanitized = "\n".join(
+        line
+        for line in lines
+        if any(
+            token in line
+            for token in (
+                "disable iscsid.service",
+                "is-enabled iscsid.service",
+                "disable_status=",
+                "enabled_state=",
+                "enabled_status=",
+                "return 1",
+            )
+        )
+    )
+    return sanitized + "\n", checks
 
 
 def _pcp_phase_ten_with_causal_proof() -> str:
@@ -3184,9 +3819,17 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
     def test_real_noble_pcp_postinst_presets_with_production_service_guard(
         self,
     ) -> None:
-        payload = (
-            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
-        ).read_text(encoding="utf-8")
+        payload_path = ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        verifier_path = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
+        self.assertEqual(
+            hashlib.sha256(payload_path.read_bytes()).hexdigest(),
+            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+        )
+        self.assertEqual(
+            hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
+            "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        )
+        payload = payload_path.read_text(encoding="utf-8")
 
         def shell_function(name: str) -> str:
             if name == "write_retained_recovery_guard_manifest":
@@ -3287,6 +3930,19 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                 encoding="utf-8",
                 newline="\n",
             )
+            finalizer_source = root / "disable-unmasked-units.sh"
+            finalizer_source.write_text(
+                shell_function("disable_unmasked_units"),
+                encoding="utf-8",
+                newline="\n",
+            )
+            finalizer_sha256 = hashlib.sha256(finalizer_source.read_bytes()).hexdigest()
+            f19_snapshot = root / "f19-snapshot.py"
+            f19_snapshot.write_text(
+                F19_SNAPSHOT_SCRIPT,
+                encoding="utf-8",
+                newline="\n",
+            )
 
             harness = root / "pcp-service-guard.sh"
             harness.write_text(
@@ -3314,6 +3970,8 @@ work="$3"
 denied_file="$4"
 readback_validator="$6"
 readback_matrix="$7"
+f19_snapshot="$8"
+f19_finalizer_source="$9"
 trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
 mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install}
@@ -3574,9 +4232,19 @@ trace_begin 08-pcp-configure pcp-configure
     "$chmod_receipt_hash" ]]
 trace_pass
 trace_begin 09-all-denied-presets all-denied-presets
+phase09_outcomes="$work/f19-phase09.tsv"
+: >"$phase09_outcomes"
+exec 18>"$phase09_outcomes"
 for unit in "${denied_units[@]}"; do
     SYSTEMD_OFFLINE=1 systemctl preset "$unit"
+    case "$unit" in
+        corosync.service|iscsid.service|iscsid.socket|iscsi.service|open-iscsi.service)
+            printf '%s\t0\n' "$unit" >&18
+            ;;
+    esac
 done >"$work/all-denied-presets.log" 2>&1
+exec 18>&-
+[[ "$(wc -l <"$phase09_outcomes")" -eq 5 ]]
 ! grep -Fq 'Failed to preset unit' "$work/all-denied-presets.log"
 [[ "$(sha256sum -- "$HOARDARR_TEST_CHMOD_RECEIPT" | awk '{print $1}')" == \
     "$chmod_receipt_hash" ]]
@@ -3614,9 +4282,41 @@ for path in "${recovery_guard_files[@]}"; do
 done
 trace_pass
 trace_begin 12-final-disable-readback final-disable-readback
+f19_before="$work/f19-before.json"
+f19_after="$work/f19-after.json"
+f19_command_trace="$work/f19-command.trace"
+f19_capture_status_file="$work/f19-capture-status.txt"
+python3 "$f19_snapshot" before "$f19_before" "$f19_finalizer_source" \
+    "$phase09_outcomes" "$f19_command_trace" 0 0 none none
+f19_capture_after_failure() {
+    local original_status="$1"
+    local original_line="$2"
+    local original_function="$3"
+    local original_command="$4"
+    local capture_status=0
+    set +x
+    exec 19>&-
+    python3 "$f19_snapshot" after "$f19_after" "$f19_finalizer_source" \
+        "$phase09_outcomes" "$f19_command_trace" "$original_status" \
+        "$original_line" "$original_function" "$original_command" || \
+        capture_status=$?
+    printf '%s\n' "$capture_status" >"$f19_capture_status_file" || :
+    return 0
+}
+trap 'f19_status=$?; f19_line=$LINENO; f19_function=${FUNCNAME[0]:-main}; f19_command=$BASH_COMMAND; f19_capture_after_failure "$f19_status" "$f19_line" "$f19_function" "$f19_command"; trace_failure "$f19_status" "$f19_line"' ERR
+: >"$f19_command_trace"
+chmod 0600 -- "$f19_command_trace"
+exec 19>"$f19_command_trace"
+export BASH_XTRACEFD=19
+PS4='+F19X|${LINENO}|${FUNCNAME[0]:-main}|'
+set -x
 disable_unmasked_units
+set +x
+exec 19>&-
+trap 'trace_failure "$?" "$LINENO"' ERR
 [[ "$denied_units_finalized" == true ]]
 [[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq "${#denied_units[@]}" ]]
+: >"$work/f19-validator-reached"
 python3 "$readback_validator" / "$readback_matrix" \
     "$state_root/service-policy-readback.tsv" "$state_root/service-policy-readback.json"
 python3 - "$state_root/service-policy-readback.json" "$readback_matrix" <<'PY'
@@ -3660,6 +4360,7 @@ cleanup_service_guards
 [[ "$service_guard_cleanup_complete" == true ]]
 trace_pass
 trace_begin 13-retained-manifest retained-manifest
+: >"$work/f19-phase13-reached"
 write_retained_recovery_guard_manifest
 retained_count=0
 while IFS=$'\t' read -r unit enabled enabled_status active active_status boundary; do
@@ -3695,6 +4396,7 @@ trace_pass
 # Removing one exact verified guard in this disposable fixture cannot release
 # its retained static peer.  Product activation remains out of scope.
 trace_begin 14-peer-isolation peer-isolation
+: >"$work/f19-phase14-reached"
 watchdog_guard="${recovery_guard_paths_by_unit[watchdog.service]}"
 peer_guard="${recovery_guard_paths_by_unit[zfs.target]}"
 [[ -f "$watchdog_guard" && -f "$peer_guard" ]]
@@ -3724,6 +4426,7 @@ for unit in "${denied_units[@]}"; do
 done
 trace_pass
 trace_begin 15-fixture-cleanup fixture-cleanup
+: >"$work/f19-phase15-reached"
 printf '%s\n' \
     real_pcp_old_preset_failure=reproduced \
     real_pcp_corrected_preset_errors=0 \
@@ -3753,6 +4456,7 @@ exit 0
             ownership_error: OSError | subprocess.TimeoutExpired | None = None
             manager_receipt_diagnostic = ""
             systemd_receipt_diagnostic = ""
+            f19_diagnostic = ""
             try:
                 try:
                     result = subprocess.run(
@@ -3771,6 +4475,8 @@ exit 0
                             str(trace_path),
                             str(readback_validator),
                             str(readback_matrix),
+                            str(f19_snapshot),
+                            str(finalizer_source),
                         ],
                         text=True,
                         capture_output=True,
@@ -3859,6 +4565,83 @@ exit 0
             )
             self.assertTrue(package_version.startswith("255.4-"))
             self.assertRegex(executable_hash, r"^[0-9a-f]{64}$")
+            capture_status_path = namespace_path / "f19-capture-status.txt"
+            self.assertTrue(capture_status_path.is_file())
+            self.assertEqual(capture_status_path.read_text(encoding="ascii"), "0\n")
+            before_receipt, before_sha256 = _validate_f19_snapshot(
+                namespace_path / "f19-before.json",
+                namespace_path,
+                "before",
+                finalizer_sha256,
+            )
+            after_receipt, after_sha256 = _validate_f19_snapshot(
+                namespace_path / "f19-after.json",
+                namespace_path,
+                "after",
+                finalizer_sha256,
+            )
+            command_trace = after_receipt["command_trace"]
+            assert isinstance(command_trace, dict)
+            command_diagnostic, command_checks = _validate_f19_command_trace(
+                namespace_path / "f19-command.trace",
+                namespace_path,
+                str(command_trace["sha256"]),
+            )
+            self.assertEqual(before_receipt["systemd"], after_receipt["systemd"])
+            self.assertEqual(before_receipt["mounts"], after_receipt["mounts"])
+            self.assertEqual(
+                before_receipt["effective_preset_rules"],
+                after_receipt["effective_preset_rules"],
+            )
+            self.assertEqual(
+                before_receipt["phase09_outcomes"],
+                after_receipt["phase09_outcomes"],
+            )
+            self.assertIn(
+                "offline install denied unit remains enabled: iscsid.service=enabled",
+                result.stderr,
+            )
+            sanitized = {
+                "schema_version": F19_DIAGNOSTIC_SCHEMA,
+                "before_sha256": before_sha256,
+                "after_sha256": after_sha256,
+                "inputs": after_receipt["inputs"],
+                "systemd": after_receipt["systemd"],
+                "mounts": after_receipt["mounts"],
+                "before_enabled_states": before_receipt["enabled_states"],
+                "after_enabled_states": after_receipt["enabled_states"],
+                "before_etc_entries": before_receipt["etc_entries"],
+                "after_etc_entries": after_receipt["etc_entries"],
+                "effective_preset_rules": after_receipt["effective_preset_rules"],
+                "preset_identities": [
+                    {
+                        "name": item["name"],
+                        "path": item["path"],
+                        "size": item["size"],
+                        "sha256": item["sha256"],
+                    }
+                    for item in after_receipt["presets"]
+                ],
+                "vendor_unit_identities": [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key != "content_base64"
+                    }
+                    for item in after_receipt["vendor_units"]
+                ],
+                "phase09_outcomes": after_receipt["phase09_outcomes"],
+                "phase_boundaries": after_receipt["phase_boundaries"],
+                "failure": after_receipt["failure"],
+                "command_trace": after_receipt["command_trace"],
+                "command_checks": command_checks,
+            }
+            f19_diagnostic = (
+                "\nVALIDATED F19 SANITIZED DIAGNOSTIC\n"
+                + json.dumps(sanitized, indent=2, sort_keys=True)
+                + "\nVALIDATED F19 COMMAND TRACE\n"
+                + command_diagnostic
+            )
         self.assertEqual(
             result.returncode,
             0,
@@ -3866,7 +4649,8 @@ exit 0
             + result.stderr
             + trace_text
             + manager_receipt_diagnostic
-            + systemd_receipt_diagnostic,
+            + systemd_receipt_diagnostic
+            + f19_diagnostic,
         )
         self.assertIn("real_pcp_old_preset_failure=reproduced", result.stdout)
         self.assertIn("real_pcp_corrected_preset_errors=0", result.stdout)
@@ -4501,6 +5285,60 @@ Description: Backup program for disk arrays
         )
         self.assertIn('["systemctl","is-active",unit]', verifier)
         self.assertIn('if active_state == "active":', verifier)
+
+    def test_f19_diagnostic_scope_and_command_trace_are_bounded(self) -> None:
+        payload_path = ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        verifier_path = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
+        self.assertEqual(
+            hashlib.sha256(payload_path.read_bytes()).hexdigest(),
+            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+        )
+        self.assertEqual(
+            hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
+            "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        )
+        compile(F19_SNAPSHOT_SCRIPT, "f19-snapshot.py", "exec")
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        phase12 = source.split(
+            "trace_begin 12-final-disable-readback final-disable-readback\n", 1
+        )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
+        self.assertEqual(phase12.count("\ndisable_unmasked_units\n"), 1)
+        self.assertIn("set -x\ndisable_unmasked_units\nset +x", phase12)
+        self.assertNotRegex(
+            phase12,
+            r"(?:if|until|while)\s+disable_unmasked_units|disable_unmasked_units\s*(?:\|\||&&)",
+        )
+        self.assertNotIn("systemctl is-active", F19_SNAPSHOT_SCRIPT)
+
+        valid = (
+            "+F19X|1200|disable_unmasked_units|disable_status=0\n"
+            "+F19X|1201|disable_unmasked_units|SYSTEMD_OFFLINE=1 systemctl --root=/ disable iscsid.service\n"
+            "+F19X|1202|disable_unmasked_units|enabled_status=0\n"
+            "++F19X|1203|disable_unmasked_units|SYSTEMD_OFFLINE=1 systemctl --root=/ is-enabled iscsid.service\n"
+            "+F19X|1204|disable_unmasked_units|enabled_state=enabled\n"
+            "+F19X|1205|disable_unmasked_units|return 1\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            trace = root / "f19-command.trace"
+            trace.write_text(valid, encoding="ascii", newline="\n")
+            digest = hashlib.sha256(trace.read_bytes()).hexdigest()
+            _, checks = _validate_f19_command_trace(trace, root, digest)
+            self.assertTrue(checks["disable_iscsid"])
+            self.assertFalse(checks["disable_fallback_executed"])
+            self.assertTrue(checks["is_enabled_iscsid"])
+            for label, content, expected_hash in (
+                ("bad-prefix", valid.replace("F19X|", "BAD|", 1), None),
+                ("oversize", "+F19X|1|main|" + "x" * 800 + "\n", None),
+                ("hash-mismatch", valid, "0" * 64),
+            ):
+                with self.subTest(label=label):
+                    trace.write_text(content, encoding="ascii", newline="\n")
+                    candidate_hash = (
+                        expected_hash or hashlib.sha256(trace.read_bytes()).hexdigest()
+                    )
+                    with self.assertRaises(AssertionError):
+                        _validate_f19_command_trace(trace, root, candidate_hash)
 
     def test_actual_install_argv_executes_exact_production_fragment(self) -> None:
         payload = (
