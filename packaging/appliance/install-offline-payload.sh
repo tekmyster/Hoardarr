@@ -1167,13 +1167,11 @@ disable_unmasked_units() {
     local canonical_state
     local canonical_state_status
     local canonical_handled=false
-    local canonical_active_state
-    local canonical_active_status
     local destination
     local enabled_state
     local enabled_status
-    local active_state
-    local active_status
+    local activity_state=not-queried-offline
+    local activity_status=-1
     local disable_status
     local start_boundary
     local readback_tmp="$state_root/.service-policy-readback.tsv.tmp"
@@ -1201,16 +1199,9 @@ disable_unmasked_units() {
                 echo "pre-existing unit mask readback is not masked: $unit" >&2
                 return 1
             }
-            active_status=0
-            active_state="$(SYSTEMD_OFFLINE=1 chroot "$target" systemctl \
-                is-active "$unit" 2>&1)" || active_status=$?
-            active_state="$(printf '%s\n' "$active_state" | head -n 1)"
-            [[ "$active_state" == inactive && "$active_status" -eq 3 ]] || {
-                echo "pre-existing masked unit is not inactive: $unit=$active_state" >&2
-                return 1
-            }
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$unit" "$enabled_state" "$enabled_status" "$active_state" "$active_status" \
+                "$unit" "$enabled_state" "$enabled_status" \
+                "$activity_state" "$activity_status" \
                 pre-existing-mask \
                 >>"$readback_tmp" || return 1
             continue
@@ -1239,18 +1230,9 @@ disable_unmasked_units() {
                 echo "offline install canonical unit is not disabled: $canonical_unit" >&2
                 return 1
             }
-            canonical_active_status=0
-            canonical_active_state="$(SYSTEMD_OFFLINE=1 chroot "$target" systemctl \
-                is-active "$canonical_unit" 2>&1)" || canonical_active_status=$?
-            canonical_active_state="$(printf '%s\n' "$canonical_active_state" | head -n 1)"
-            [[ "$canonical_active_state" == inactive && \
-                "$canonical_active_status" -eq 3 ]] || {
-                echo "offline install canonical unit is not inactive: $canonical_unit" >&2
-                return 1
-            }
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$unit" "$canonical_state" "$canonical_state_status" \
-                "$canonical_active_state" "$canonical_active_status" \
+                "$activity_state" "$activity_status" \
                 disabled-canonical \
                 >>"$readback_tmp" || return 1
             unset 'preserved_package_aliases[$unit]' \
@@ -1263,7 +1245,7 @@ disable_unmasked_units() {
         if [[ "$canonical_handled" == true && "$unit" == open-iscsi.service ]]; then
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$unit" "$canonical_state" "$canonical_state_status" \
-                "$canonical_active_state" "$canonical_active_status" \
+                "$activity_state" "$activity_status" \
                 disabled-canonical \
                 >>"$readback_tmp" || return 1
             continue
@@ -1299,16 +1281,9 @@ disable_unmasked_units() {
             echo "offline install denied unit override appeared during installation: $unit" >&2
             return 1
         fi
-        active_status=0
-        active_state="$(SYSTEMD_OFFLINE=1 chroot "$target" systemctl \
-            is-active "$unit" 2>&1)" || active_status=$?
-        active_state="$(printf '%s\n' "$active_state" | head -n 1)"
-        [[ "$active_state" == inactive && "$active_status" -eq 3 ]] || {
-            echo "offline install denied unit is not inactive: $unit=$active_state" >&2
-            return 1
-        }
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$unit" "$enabled_state" "$enabled_status" "$active_state" "$active_status" \
+            "$unit" "$enabled_state" "$enabled_status" \
+            "$activity_state" "$activity_status" \
             "$start_boundary" \
             >>"$readback_tmp" || return 1
     done
@@ -1451,14 +1426,14 @@ for raw in pathlib.Path(sys.argv[3]).read_text(encoding="utf-8").splitlines():
     row={"unit":unit,"enabled_state":enabled,"enabled_status":int(enabled_status),"active_state":active,"active_status":int(active_status),"start_boundary":start_boundary}
     if enabled not in {"disabled","masked","static","indirect","not-found","generated","transient"}:
         raise SystemExit(f"offline service readback has unsafe enablement: {unit}={enabled}")
-    if active != "inactive" or row["active_status"] != 3:
-        raise SystemExit(f"offline service readback has unsafe activity: {unit}={active}")
+    if active != "not-queried-offline" or row["active_status"] != -1:
+        raise SystemExit(f"offline service readback has invalid deferred activity: {unit}={active}")
     if start_boundary not in {"pre-existing-mask","disabled-canonical","disabled-unit","condition-drop-in"}:
         raise SystemExit(f"offline service readback has unknown start boundary: {unit}")
     rows.append(row)
 if [row["unit"] for row in rows] != matrix["denied_units"]:
     raise SystemExit("offline service readback does not exactly cover the denied-unit policy")
-path=pathlib.Path(sys.argv[4]); path.write_text(json.dumps({"schema_version":1,"systemd_offline":True,"policy_rc_d_exit":101,"units":rows},indent=2,sort_keys=True)+"\n",encoding="utf-8")
+path=pathlib.Path(sys.argv[4]); path.write_text(json.dumps({"schema_version":1,"systemd_offline":True,"policy_rc_d_exit":101,"activity_verification":"deferred-to-first-boot","units":rows},indent=2,sort_keys=True)+"\n",encoding="utf-8")
 PY
 cleanup_service_guards
 write_retained_recovery_guard_manifest

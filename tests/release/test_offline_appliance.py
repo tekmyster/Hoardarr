@@ -530,6 +530,20 @@ def _assert_recovery_guard_path_key_contract(harness: str) -> None:
         raise AssertionError("peer condition runs before path-key validation")
 
 
+def _service_policy_readback_validator(payload: str) -> str:
+    anchor = (
+        'python3 - "$target" "$retained_repo/evidence/compatibility-matrix.json" '
+        '\\\n    "$state_root/service-policy-readback.tsv" '
+        "\"$state_root/service-policy-readback.json\" <<'PY'\n"
+    )
+    start = payload.index(anchor) + len(anchor)
+    end = payload.index("\nPY\ncleanup_service_guards", start)
+    validator = payload[start:end]
+    if "activity_verification" not in validator:
+        raise AssertionError("service readback validator lacks activity authority")
+    return validator
+
+
 def _pcp_phase_ten_with_causal_proof() -> str:
     prefix = "trace_begin 10-host-manager-isolation host-manager-isolation\n"
     if PCP_OFFLINE_NONACTIVATION_PROOF.count(prefix) != 1:
@@ -1558,7 +1572,6 @@ class OfflineApplianceTests(unittest.TestCase):
                 'target="$root/target"',
                 'state_root="$root/state"',
                 'mkdir -p -- "$state_root"',
-                "active_mode=inactive",
                 "systemctl() {",
                 '  printf \'%s\\n\' "$*" >>"$disable_log"',
                 '  if [[ "$*" == *" is-enabled "* ]]; then',
@@ -1568,30 +1581,20 @@ class OfflineApplianceTests(unittest.TestCase):
                 "  return 0",
                 "}",
                 "chroot() {",
-                "  if [[ \"$active_mode\" == active ]]; then printf '%s\\n' active; return 0; fi",
-                "  if [[ \"$active_mode\" == ambiguous ]]; then printf '%s\\n' unknown; return 4; fi",
-                "  printf '%s\\n' inactive; return 3",
+                "  printf 'unexpected offline manager query: %s\\n' \"$*\" >&2",
+                "  return 220",
                 "}",
                 "disable_unmasked_units",
                 '[[ -L "$lifecycle_safe" && "$(readlink -- "$lifecycle_safe")" == /dev/null ]]',
                 '[[ "$(stat -c %i -- "$lifecycle_safe")" == "$lifecycle_inode" ]]',
                 '[[ ! -e "$lifecycle_new" && ! -L "$lifecycle_new" ]]',
                 'grep -Fq -- "--root=$target disable iscsid.service" "$disable_log"',
+                '! grep -Fq -- "is-active" "$disable_log"',
+                '[[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq 2 ]]',
+                "awk -F '\\t' '",
+                '  NF != 6 || $4 != "not-queried-offline" || $5 != -1 { exit 1 }',
+                '\' "$state_root/service-policy-readback.tsv"',
                 '[[ "$denied_units_finalized" == true ]]',
-                "",
-                "# Active and ambiguous target observations both fail closed.",
-                'active_mask="$root/active/iscsi.service"',
-                'mkdir -p -- "$(dirname -- "$active_mask")"',
-                'ln -s -- /dev/null "$active_mask"',
-                "reset_tracking",
-                'prepare_temporary_unit_mask "$active_mask" iscsi.service',
-                "denied_units=(iscsi.service)",
-                "active_mode=active",
-                "if disable_unmasked_units >/dev/null 2>&1; then exit 96; fi",
-                '[[ -L "$active_mask" && "$(readlink -- "$active_mask")" == /dev/null ]]',
-                "active_mode=ambiguous",
-                "if disable_unmasked_units >/dev/null 2>&1; then exit 97; fi",
-                '[[ -L "$active_mask" && "$(readlink -- "$active_mask")" == /dev/null ]]',
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -1885,7 +1888,7 @@ systemctl() {
     printf 'unexpected systemctl argv: %s\n' "$*" >&2
     return 97
 }
-chroot() { printf '%s\n' inactive; return 3; }
+chroot() { printf 'unexpected offline manager query: %s\n' "$*" >&2; return 220; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_unmasked_units
 [[ ! -e "$alias" && ! -L "$alias" ]]
@@ -1903,7 +1906,7 @@ systemctl() {
     [[ "$2" == disable && "$3" == open-iscsi.service ]]
     return 1
 }
-chroot() { printf '%s\n' inactive; return 3; }
+chroot() { printf 'unexpected offline manager query: %s\n' "$*" >&2; return 220; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_failure_status=0
 disable_unmasked_units >/dev/null 2>&1 || disable_failure_status=$?
@@ -1922,7 +1925,7 @@ systemctl() {
     printf '%s\n' disabled
     return 1
 }
-chroot() { printf '%s\n' inactive; return 3; }
+chroot() { printf 'unexpected offline manager query: %s\n' "$*" >&2; return 220; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_incomplete_status=0
 disable_unmasked_units >/dev/null 2>&1 || disable_incomplete_status=$?
@@ -2110,7 +2113,7 @@ systemctl() {
     fi
     return 97
 }
-chroot() { printf '%s\n' inactive; return 3; }
+chroot() { printf 'unexpected offline manager query: %s\n' "$*" >&2; return 220; }
 denied_units=(iscsi.service open-iscsi.service)
 disable_unmasked_units
 cleanup_guard 0
@@ -3272,6 +3275,18 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
             denied_path.write_text(
                 "".join(f"{unit}\n" for unit in denied_units), encoding="utf-8"
             )
+            readback_validator = root / "service-policy-readback-validator.py"
+            readback_validator.write_text(
+                _service_policy_readback_validator(payload),
+                encoding="utf-8",
+                newline="\n",
+            )
+            readback_matrix = root / "compatibility-matrix.json"
+            readback_matrix.write_text(
+                json.dumps({"denied_units": denied_units}) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
 
             harness = root / "pcp-service-guard.sh"
             harness.write_text(
@@ -3297,6 +3312,8 @@ postinst="$1"
 data="$2"
 work="$3"
 denied_file="$4"
+readback_validator="$6"
+readback_matrix="$7"
 trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
 mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install}
@@ -3600,24 +3617,45 @@ trace_begin 12-final-disable-readback final-disable-readback
 disable_unmasked_units
 [[ "$denied_units_finalized" == true ]]
 [[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq "${#denied_units[@]}" ]]
-python3 - "$state_root/service-policy-readback.tsv" \
-    "$state_root/service-policy-readback.json" <<'PY'
+python3 "$readback_validator" / "$readback_matrix" \
+    "$state_root/service-policy-readback.tsv" "$state_root/service-policy-readback.json"
+python3 - "$state_root/service-policy-readback.json" "$readback_matrix" <<'PY'
 import json, pathlib, sys
-rows=[]
-for raw in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-    unit,enabled,enabled_status,active,active_status,boundary=raw.split("\t")
-    rows.append({
-        "unit":unit,
-        "enabled_state":enabled,
-        "enabled_status":int(enabled_status),
-        "active_state":active,
-        "active_status":int(active_status),
-        "start_boundary":boundary,
-    })
-pathlib.Path(sys.argv[2]).write_text(
-    json.dumps({"schema_version":1,"units":rows})+"\n", encoding="utf-8"
-)
+receipt=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+matrix=json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+assert receipt["activity_verification"] == "deferred-to-first-boot"
+assert [row["unit"] for row in receipt["units"]] == matrix["denied_units"]
+assert all(row["active_state"] == "not-queried-offline" for row in receipt["units"])
+assert all(row["active_status"] == -1 for row in receipt["units"])
 PY
+python3 - "$state_root/service-policy-readback.tsv" "$work" <<'PY'
+import pathlib, sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+root=pathlib.Path(sys.argv[2])
+def fields(row): return row.split("\t")
+mutations={}
+rows=[fields(row) for row in source]
+mutations["old-inactive"]=[row[:3]+["inactive","3"]+row[5:] for row in rows]
+mutations["active"]=[row[:3]+["active","0"]+row[5:] for row in rows]
+mutations["missing"]=rows[:-1]
+mixed=[row[:] for row in rows]; mixed[0][3:5]=["inactive","3"]
+mutations["mixed"]=mixed
+arbitrary=[row[:] for row in rows]; arbitrary[0][3:5]=["unknown-runtime","42"]
+mutations["arbitrary"]=arbitrary
+for label, content in mutations.items():
+    (root/f"readback-{label}.tsv").write_text(
+        "".join("\t".join(row)+"\n" for row in content), encoding="utf-8"
+    )
+PY
+for label in old-inactive active missing mixed arbitrary; do
+    rm -f -- "$work/readback-$label.json"
+    if python3 "$readback_validator" / "$readback_matrix" \
+        "$work/readback-$label.tsv" "$work/readback-$label.json" \
+        >"$work/readback-$label.log" 2>&1; then
+        exit 94
+    fi
+    [[ ! -e "$work/readback-$label.json" ]]
+done
 cleanup_service_guards
 [[ "$service_guard_cleanup_complete" == true ]]
 trace_pass
@@ -3731,6 +3769,8 @@ exit 0
                             str(namespace_path),
                             str(denied_path),
                             str(trace_path),
+                            str(readback_validator),
+                            str(readback_matrix),
                         ],
                         text=True,
                         capture_output=True,
@@ -4334,6 +4374,133 @@ Description: Backup program for disk arrays
         self.assertIn("HOARDARR_OFFLINE_EVIDENCE_BEGIN", verifier)
         self.assertIn("list-unit-files", verifier)
         self.assertIn("127.0.0.1:7877/health/ready", verifier)
+
+    def test_offline_activity_is_strictly_deferred_to_first_boot(self) -> None:
+        payload = (
+            ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            r"^disable_unmasked_units\(\) \{\n.*?^\}\n",
+            payload,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        finalizer = match.group(0)
+        self.assertNotIn("is-active", finalizer)
+        self.assertNotRegex(finalizer, r"chroot\s+.*systemctl")
+        self.assertEqual(finalizer.count("not-queried-offline"), 1)
+        self.assertEqual(finalizer.count("activity_status=-1"), 1)
+        self.assertIn('systemctl --root="$target" disable', finalizer)
+        self.assertIn(
+            'systemctl --root="$target" \\\n                is-enabled', finalizer
+        )
+
+        validator = _service_policy_readback_validator(payload)
+        self.assertIn('active != "not-queried-offline"', validator)
+        self.assertIn('row["active_status"] != -1', validator)
+        self.assertIn('"activity_verification":"deferred-to-first-boot"', validator)
+        self.assertNotIn('active != "inactive"', validator)
+
+        units = ["masked.service", "guarded.target"]
+        valid_rows = [
+            [
+                "masked.service",
+                "masked",
+                "1",
+                "not-queried-offline",
+                "-1",
+                "pre-existing-mask",
+            ],
+            [
+                "guarded.target",
+                "static",
+                "0",
+                "not-queried-offline",
+                "-1",
+                "condition-drop-in",
+            ],
+        ]
+        mutations = {
+            "old-inactive": [
+                row[:3] + ["inactive", "3"] + row[5:] for row in valid_rows
+            ],
+            "active": [row[:3] + ["active", "0"] + row[5:] for row in valid_rows],
+            "missing": valid_rows[:-1],
+            "mixed": [
+                valid_rows[0][:3] + ["inactive", "3"] + valid_rows[0][5:],
+                valid_rows[1],
+            ],
+            "arbitrary": [
+                valid_rows[0][:3] + ["unknown-runtime", "42"] + valid_rows[0][5:],
+                valid_rows[1],
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            validator_path = root / "validator.py"
+            validator_path.write_text(validator, encoding="utf-8", newline="\n")
+            matrix_path = root / "matrix.json"
+            matrix_path.write_text(
+                json.dumps({"denied_units": units}) + "\n", encoding="utf-8"
+            )
+
+            def write_rows(path: pathlib.Path, rows: list[list[str]]) -> None:
+                path.write_text(
+                    "".join("\t".join(row) + "\n" for row in rows),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+
+            valid_path = root / "valid.tsv"
+            valid_json = root / "valid.json"
+            write_rows(valid_path, valid_rows)
+            accepted = subprocess.run(
+                [
+                    sys.executable,
+                    str(validator_path),
+                    "/",
+                    str(matrix_path),
+                    str(valid_path),
+                    str(valid_json),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+            receipt = json.loads(valid_json.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["activity_verification"], "deferred-to-first-boot")
+            self.assertEqual([row["unit"] for row in receipt["units"]], units)
+            for label, rows in mutations.items():
+                with self.subTest(label=label):
+                    input_path = root / f"{label}.tsv"
+                    output_path = root / f"{label}.json"
+                    write_rows(input_path, rows)
+                    rejected = subprocess.run(
+                        [
+                            sys.executable,
+                            str(validator_path),
+                            "/",
+                            str(matrix_path),
+                            str(input_path),
+                            str(output_path),
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(output_path.exists())
+
+        verifier_path = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
+        verifier = verifier_path.read_text(encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
+            "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        )
+        self.assertIn('["systemctl","is-active",unit]', verifier)
+        self.assertIn('if active_state == "active":', verifier)
 
     def test_actual_install_argv_executes_exact_production_fragment(self) -> None:
         payload = (
