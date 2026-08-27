@@ -312,7 +312,7 @@ cleanup_controller() {
       loop_stderr="$work/loop-detach-$number.stderr"
       install -m 600 /dev/null "$loop_stderr"
       set +e
-      if [[ "$attempted" == true ]]; then (ulimit -f 8; timeout --signal=TERM --kill-after=2s 5s losetup -d -- "$loop" >/dev/null 2>"$loop_stderr"); rc=$?; else rc=0; fi
+      if [[ "$attempted" == true ]]; then (ulimit -f 8; timeout --signal=TERM --kill-after=2s 5s losetup -d "$loop" >/dev/null 2>"$loop_stderr"); rc=$?; else rc=0; fi
       set -e
       loop_timed_out=false; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && loop_timed_out=true
       classify_loop_stderr "$loop_stderr"

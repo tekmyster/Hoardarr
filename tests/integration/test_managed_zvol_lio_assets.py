@@ -616,7 +616,9 @@ def test_loop_release_receipt_mutations_fail_closed(mutation: object) -> None:
         validate_receipt(receipt)
 
 
-def test_loop_release_diagnostic_contract_is_bounded_and_preserves_strict_absence() -> None:
+def test_loop_release_diagnostic_contract_is_bounded_and_preserves_strict_absence() -> (
+    None
+):
     script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
     assert "loop_mapping_state" in script
     assert "/sys/block/${candidate##*/}/holders" in script
@@ -626,7 +628,7 @@ def test_loop_release_diagnostic_contract_is_bounded_and_preserves_strict_absenc
     assert "INVALID_ARGUMENT_OR_OPTION" in script
     assert "PERMISSION_DENIED" in script
     assert "UNCLASSIFIED_BOUNDED" in script
-    assert "losetup -j \"$image\"" in script
+    assert 'losetup -j "$image"' in script
     assert 'precheck="IDENTITY_CHANGED"' in script
     assert ".loop-holders." in script and "holder_probe_state" in script
     assert ".loop-release." in script and "release_probe" in script
@@ -843,6 +845,13 @@ def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None
     assert "if: always()" in workflow
     assert "test -f dist/validation/managed-zvol-lio-lifecycle.json" in workflow
     assert "if-no-files-found: error" in workflow
+
+
+def test_loop_detach_uses_the_direct_validated_operand_once() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    direct = 'losetup -d "$loop"'
+    assert script.count(direct) == 1
+    assert 'losetup -d -- "$loop"' not in script
 
 
 def test_targetcli_cleanup_uses_exact_parent_child_vectors_in_order() -> None:
