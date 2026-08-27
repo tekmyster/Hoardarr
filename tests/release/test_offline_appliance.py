@@ -379,6 +379,71 @@ def main():
 raise SystemExit(main())
 """
 
+F35G_DIRECT_F19_SCHEMA = 1
+F35G_DIRECT_F19_MAX_STDERR = 1024
+F35G_DIRECT_F19_CLASSES = {
+    "fixture mount roots are incomplete or ambiguous": "MOUNT_ROOTS_INVALID",
+    "unsafe unit entry path": "UNIT_ENTRY_PATH_INVALID",
+    "too many matching unit entries": "UNIT_ENTRY_COUNT_INVALID",
+    "duplicate matching unit entry": "UNIT_ENTRY_DUPLICATE",
+    "invalid phase-09 outcome": "PHASE09_ROW_INVALID",
+    "phase-09 target outcomes are incomplete or out of order": "PHASE09_SET_INVALID",
+    "invalid diagnostic snapshot argv": "ARGV_INVALID",
+    "invalid diagnostic stage": "STAGE_INVALID",
+    "unsafe failure command label": "FAILURE_LABEL_INVALID",
+    "command trace size is outside bounds": "COMMAND_TRACE_SIZE_INVALID",
+    "diagnostic receipt exceeds cap": "RECEIPT_SIZE_INVALID",
+    "diagnostic receipt destination already exists": "DESTINATION_EXISTS",
+}
+F35G_DIRECT_F19_CAPTURE_SCRIPT = r"""#!/usr/bin/python3
+import hashlib, json, os, pathlib, re, stat, sys
+SCHEMA=1
+MAX_STDERR=1024
+CLASSES={
+"fixture mount roots are incomplete or ambiguous":"MOUNT_ROOTS_INVALID",
+"unsafe unit entry path":"UNIT_ENTRY_PATH_INVALID",
+"too many matching unit entries":"UNIT_ENTRY_COUNT_INVALID",
+"duplicate matching unit entry":"UNIT_ENTRY_DUPLICATE",
+"invalid phase-09 outcome":"PHASE09_ROW_INVALID",
+"phase-09 target outcomes are incomplete or out of order":"PHASE09_SET_INVALID",
+"invalid diagnostic snapshot argv":"ARGV_INVALID",
+"invalid diagnostic stage":"STAGE_INVALID",
+"unsafe failure command label":"FAILURE_LABEL_INVALID",
+"command trace size is outside bounds":"COMMAND_TRACE_SIZE_INVALID",
+"diagnostic receipt exceeds cap":"RECEIPT_SIZE_INVALID",
+"diagnostic receipt destination already exists":"DESTINATION_EXISTS",
+}
+SECRET=re.compile(rb"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|Authorization:[ \t]*Bearer|(?:token|password|secret)=\S+)",re.I)
+def regular(path,mode):
+    meta=path.lstat()
+    if not stat.S_ISREG(meta.st_mode) or path.is_symlink() or meta.st_uid!=0 or meta.st_gid!=0 or stat.S_IMODE(meta.st_mode)!=mode or meta.st_nlink!=1: raise SystemExit("F35G capture metadata invalid")
+def main():
+    if len(sys.argv)!=5: raise SystemExit("F35G argv invalid")
+    stderr_arg,receipt_arg,work_arg,status_text=sys.argv[1:]
+    if not re.fullmatch(r"[0-9]{1,3}",status_text) or int(status_text)>255: raise SystemExit("F35G status invalid")
+    status=int(status_text); work=pathlib.Path(work_arg).resolve(strict=True); stderr=pathlib.Path(stderr_arg); receipt=pathlib.Path(receipt_arg)
+    if stderr.parent.resolve(strict=True)!=work or stderr.name!="f35g-direct-f19.stderr" or receipt.parent.resolve(strict=True)!=work or receipt.name!="f35g-direct-f19.json": raise SystemExit("F35G path invalid")
+    regular(stderr,0o600)
+    raw=stderr.read_bytes()
+    if status==0:
+        if raw or receipt.exists() or receipt.is_symlink(): raise SystemExit("F35G zero status evidence invalid")
+        stderr.unlink(); return 0
+    if not raw or len(raw)>MAX_STDERR or SECRET.search(raw) or b"\x00" in raw or b"\r" in raw or raw.count(b"\n")!=1 or not raw.endswith(b"\n"): raise SystemExit("F35G stderr framing invalid")
+    try: message=raw[:-1].decode("utf-8")
+    except UnicodeDecodeError as exc: raise SystemExit("F35G stderr encoding invalid") from exc
+    classification=CLASSES.get(message)
+    if classification is None: raise SystemExit("F35G stderr class invalid")
+    if receipt.exists() or receipt.is_symlink() or receipt.with_suffix(receipt.suffix+".partial").exists(): raise SystemExit("F35G receipt exists")
+    data={"schema_version":SCHEMA,"stage":"f19-after","status":status,"stderr_size":len(raw),"stderr_sha256":hashlib.sha256(raw).hexdigest(),"stderr_class":classification}
+    encoded=(json.dumps(data,sort_keys=True,separators=(",",":"))+"\n").encode("ascii")
+    partial=receipt.with_suffix(receipt.suffix+".partial"); fd=os.open(partial,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,"wb") as stream: stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+    os.link(partial,receipt,follow_symlinks=False); partial.unlink()
+    with receipt.open("rb") as stream: os.fsync(stream.fileno())
+    regular(receipt,0o600); return 0
+raise SystemExit(main())
+"""
+
 F29_F21_RUNNER_SCRIPT = r"""#!/usr/bin/python3
 from __future__ import annotations
 import hashlib, json, os, pathlib, re, stat, subprocess, sys
@@ -608,6 +673,45 @@ def _read_strict_root_file(
     if len(raw) > max_bytes:
         raise AssertionError("root receipt exceeds cap")
     return raw
+
+
+def _validate_f35g_direct_f19_receipt(
+    path: pathlib.Path, fixture_root: pathlib.Path
+) -> tuple[dict[str, object], str]:
+    raw = _read_strict_root_file(
+        path,
+        fixture_root,
+        expected_name="f35g-direct-f19.json",
+        max_bytes=2048,
+    )
+    if not raw.endswith(b"\n") or b"\r" in raw or b"\x00" in raw:
+        raise AssertionError("F35G receipt framing is invalid")
+    try:
+        receipt = json.loads(raw.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssertionError("F35G receipt is not strict ASCII JSON") from exc
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "stage",
+        "status",
+        "stderr_size",
+        "stderr_sha256",
+        "stderr_class",
+    }:
+        raise AssertionError("F35G receipt schema is not exact")
+    if (
+        receipt["schema_version"] != F35G_DIRECT_F19_SCHEMA
+        or receipt["stage"] != "f19-after"
+        or not isinstance(receipt["status"], int)
+        or isinstance(receipt["status"], bool)
+        or not 1 <= receipt["status"] <= 255
+        or not isinstance(receipt["stderr_size"], int)
+        or not 1 <= receipt["stderr_size"] <= F35G_DIRECT_F19_MAX_STDERR
+        or not re.fullmatch(r"[0-9a-f]{64}", str(receipt["stderr_sha256"]))
+        or receipt["stderr_class"] not in set(F35G_DIRECT_F19_CLASSES.values())
+    ):
+        raise AssertionError("F35G receipt values are invalid")
+    return receipt, hashlib.sha256(raw).hexdigest()
 
 
 def _instrument_f23_disable_unmasked_units(function: str) -> str:
@@ -5548,6 +5652,12 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                 encoding="utf-8",
                 newline="\n",
             )
+            f35g_direct_capture = root / "f35g-direct-f19-capture.py"
+            f35g_direct_capture.write_text(
+                F35G_DIRECT_F19_CAPTURE_SCRIPT,
+                encoding="utf-8",
+                newline="\n",
+            )
             f21_capture_error_sha256 = hashlib.sha256(
                 f21_capture_error.read_bytes()
             ).hexdigest()
@@ -5593,6 +5703,7 @@ f29_f21_runner="${12}"
 f21_capture_error_sha256="${13}"
 f29_outer_runner="${14}"
 f29_f21_runner_sha256="${15}"
+f35g_direct_capture="${16}"
 trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
 mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install,f20-sysv/init.d}
@@ -6174,8 +6285,22 @@ set -x
 disable_unmasked_units
 set +x
 exec 19>&-
-python3 "$f19_snapshot" after "$f19_after" "$f19_finalizer_source" \
-    "$phase09_outcomes" "$f19_command_trace" 0 0 none none
+f35g_stderr="$work/f35g-direct-f19.stderr"
+f35g_receipt="$work/f35g-direct-f19.json"
+install -m 0600 -- /dev/null "$f35g_stderr"
+f35g_status=0
+if python3 "$f19_snapshot" after "$f19_after" "$f19_finalizer_source" \
+    "$phase09_outcomes" "$f19_command_trace" 0 0 none none \
+    >/dev/null 2>"$f35g_stderr"; then
+    :
+else
+    f35g_status=$?
+fi
+python3 "$f35g_direct_capture" "$f35g_stderr" "$f35g_receipt" \
+    "$work" "$f35g_status"
+if (( f35g_status != 0 )); then
+    exit "$f35g_status"
+fi
 printf '0\n' >"$f19_capture_status_file"
 [[ ! -e "$work/etc-systemd/multi-user.target.wants/iscsid.service" && \
     ! -L "$work/etc-systemd/multi-user.target.wants/iscsid.service" ]]
@@ -6331,6 +6456,8 @@ exit 0
             precleanup_f29_outer_failure: AssertionError | None = None
             precleanup_f29_direct: list[dict[str, object]] = []
             precleanup_f29_direct_failure: AssertionError | None = None
+            precleanup_f35g: tuple[dict[str, object], str] | None = None
+            precleanup_f35g_failure: AssertionError | None = None
             f23_outputs: dict[str, dict[str, object]] | None = None
             f23_output_failure: AssertionError | None = None
             manager_receipt_diagnostic = ""
@@ -6362,6 +6489,7 @@ exit 0
                             f21_capture_error_sha256,
                             str(f29_outer_runner),
                             f29_f21_runner_sha256,
+                            str(f35g_direct_capture),
                         ],
                         text=True,
                         capture_output=True,
@@ -6441,6 +6569,14 @@ exit 0
                                 )
                             except AssertionError as exc:
                                 precleanup_f29_direct_failure = exc
+                    f35g_path = namespace_path / "f35g-direct-f19.json"
+                    if f35g_path.exists() or f35g_path.is_symlink():
+                        try:
+                            precleanup_f35g = _validate_f35g_direct_f19_receipt(
+                                f35g_path, namespace_path
+                            )
+                        except AssertionError as exc:
+                            precleanup_f35g_failure = exc
                     try:
                         f23_outputs = {
                             "stdout": _validate_f23_systemctl_output(
@@ -6494,6 +6630,20 @@ exit 0
                 self.fail(f"PCP harness execution failed: {run_error}\n{trace_text}")
             assert result is not None
             self.assertEqual(trace_status, result.returncode, trace_text)
+            if precleanup_f35g_failure is not None:
+                self.fail(f"F35G direct receipt is invalid: {precleanup_f35g_failure}")
+            if precleanup_f35g is not None:
+                direct, direct_sha256 = precleanup_f35g
+                self.fail(
+                    "F35G validated direct F19 exit: "
+                    f"status={direct['status']} "
+                    f"stderr_size={direct['stderr_size']} "
+                    f"stderr_sha256={direct['stderr_sha256']} "
+                    f"stderr_class={direct['stderr_class']} "
+                    f"output_exists={(namespace_path / 'f19-after.json').exists()} "
+                    f"partial_exists={(namespace_path / 'f19-after.json.partial').exists()} "
+                    f"receipt_sha256={direct_sha256}\n{trace_text}"
+                )
             try:
                 before_text, before_status, _ = _validate_manager_root_receipt(
                     namespace_path / "manager-root-before.tsv",
@@ -7551,6 +7701,17 @@ Description: Backup program for disk arrays
             '    "$phase09_outcomes" "$f19_command_trace" 0 0 none none'
         )
         self.assertEqual(phase12.count(success_snapshot), 1)
+        self.assertIn("if " + success_snapshot, phase12)
+        self.assertEqual(phase12.count("f35g_status=$?"), 1)
+        self.assertEqual(
+            phase12.count(
+                'python3 "$f35g_direct_capture" "$f35g_stderr" "$f35g_receipt"'
+            ),
+            1,
+        )
+        self.assertIn(
+            'if (( f35g_status != 0 )); then\n    exit "$f35g_status"', phase12
+        )
         self.assertLess(phase12.index("exec 19>&-"), phase12.index(success_snapshot))
         self.assertLess(
             phase12.index(success_snapshot),
@@ -7563,6 +7724,14 @@ Description: Backup program for disk arrays
             ),
         )
         self.assertNotIn("systemctl is-active", F19_SNAPSHOT_SCRIPT)
+        self.assertEqual(
+            hashlib.sha256(F19_SNAPSHOT_SCRIPT.encode()).hexdigest(),
+            "c156b0938b0af78a5c2e04504fb195e0f3f841dfcfe2c603c2096e764774cc73",
+        )
+        self.assertEqual(
+            hashlib.sha256(F21_CAPTURE_ERROR_SCRIPT.encode()).hexdigest(),
+            "13366ef44f4065b716d42a3294d297bb8c77be7a46e61ae1093e1885a9ffdccd",
+        )
 
         valid = (
             "+F19X|1200|disable_unmasked_units|disable_status=0\n"
@@ -7593,6 +7762,166 @@ Description: Backup program for disk arrays
                     )
                     with self.assertRaises(AssertionError):
                         _validate_f19_command_trace(trace, root, candidate_hash)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires root metadata")
+    def test_f35g_direct_f19_capture_is_exact_and_fail_closed(self) -> None:
+        compile(F35G_DIRECT_F19_CAPTURE_SCRIPT, "f35g-direct.py", "exec")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            script = root / "f35g-direct.py"
+            script.write_text(F35G_DIRECT_F19_CAPTURE_SCRIPT, encoding="utf-8")
+            for index, (message, expected_class) in enumerate(
+                F35G_DIRECT_F19_CLASSES.items()
+            ):
+                with self.subTest(classification=expected_class):
+                    stderr = root / "f35g-direct-f19.stderr"
+                    receipt = root / "f35g-direct-f19.json"
+                    stderr.write_bytes((message + "\n").encode())
+                    subprocess.run(
+                        ["sudo", "-n", "chown", "0:0", str(stderr)], check=True
+                    )
+                    subprocess.run(
+                        ["sudo", "-n", "chmod", "0600", str(stderr)], check=True
+                    )
+                    completed = subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "python3",
+                            str(script),
+                            str(stderr),
+                            str(receipt),
+                            str(root),
+                            str((index % 254) + 1),
+                        ],
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    value, _ = _validate_f35g_direct_f19_receipt(receipt, root)
+                    self.assertEqual(value["stderr_class"], expected_class)
+                    subprocess.run(
+                        ["sudo", "-n", "rm", "-f", str(stderr), str(receipt)],
+                        check=True,
+                    )
+            for label, raw in (
+                ("empty", b""),
+                ("unknown", b"unknown producer failure\n"),
+                ("crlf", b"invalid diagnostic stage\r\n"),
+                ("multiline", b"invalid diagnostic stage\nextra\n"),
+                ("secret", b"token=abcdefghijklmnopqrstuvwxyz\n"),
+                ("oversize", b"x" * (F35G_DIRECT_F19_MAX_STDERR + 1)),
+                ("encoding", b"\xff\n"),
+            ):
+                with self.subTest(rejection=label):
+                    stderr = root / "f35g-direct-f19.stderr"
+                    receipt = root / "f35g-direct-f19.json"
+                    stderr.write_bytes(raw)
+                    subprocess.run(
+                        ["sudo", "-n", "chown", "0:0", str(stderr)], check=True
+                    )
+                    subprocess.run(
+                        ["sudo", "-n", "chmod", "0600", str(stderr)], check=True
+                    )
+                    completed = subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "python3",
+                            str(script),
+                            str(stderr),
+                            str(receipt),
+                            str(root),
+                            "1",
+                        ],
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertFalse(receipt.exists())
+                    subprocess.run(["sudo", "-n", "rm", "-f", str(stderr)], check=True)
+            stderr = root / "f35g-direct-f19.stderr"
+            receipt = root / "f35g-direct-f19.json"
+            stderr.write_bytes(b"")
+            subprocess.run(["sudo", "-n", "chown", "0:0", str(stderr)], check=True)
+            subprocess.run(["sudo", "-n", "chmod", "0600", str(stderr)], check=True)
+            completed = subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "python3",
+                    str(script),
+                    str(stderr),
+                    str(receipt),
+                    str(root),
+                    "0",
+                ],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(stderr.exists())
+            self.assertFalse(receipt.exists())
+
+            source = pathlib.Path(__file__).read_text(encoding="utf-8")
+            direct_block = source.split(
+                'f35g_stderr="$work/f35g-direct-f19.stderr"\n', 1
+            )[1].split("printf '0\\n' >\"$f19_capture_status_file\"", 1)[0]
+            direct_block = 'f35g_stderr="$work/f35g-direct-f19.stderr"\n' + direct_block
+            for expected_status in (0, 1):
+                with self.subTest(single_attempt_status=expected_status):
+                    attempt_root = root / f"attempt-{expected_status}"
+                    attempt_root.mkdir()
+                    shell = attempt_root / "single-attempt.sh"
+                    shell.write_text(
+                        "set -Eeuo pipefail\n"
+                        "expected_status=$1\nwork=$2\nf35g_direct_capture=$3\n"
+                        'f19_snapshot=/fixture/f19\nf19_after="$work/f19-after.json"\n'
+                        "f19_finalizer_source=/fixture/finalizer\nphase09_outcomes=/fixture/phase09\n"
+                        "f19_command_trace=/fixture/trace\n"
+                        "python3() {\n"
+                        '  if [[ "$1" == "$f19_snapshot" ]]; then\n'
+                        '    printf x >>"$work/invocations"\n'
+                        '    if (( expected_status != 0 )); then printf "%s\\n" "invalid diagnostic stage" >&2; fi\n'
+                        '    return "$expected_status"\n'
+                        "  fi\n"
+                        '  command /usr/bin/python3 "$@"\n'
+                        "}\n" + direct_block + 'printf reached >"$work/reached"\n',
+                        encoding="utf-8",
+                    )
+                    completed = subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "bash",
+                            str(shell),
+                            str(expected_status),
+                            str(attempt_root),
+                            str(script),
+                        ],
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, expected_status)
+                    self.assertEqual((attempt_root / "invocations").read_bytes(), b"x")
+                    self.assertEqual(
+                        (attempt_root / "reached").exists(), expected_status == 0
+                    )
+                    self.assertEqual(
+                        (attempt_root / "f35g-direct-f19.json").exists(),
+                        expected_status != 0,
+                    )
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "chown",
+                            "-R",
+                            f"{os.getuid()}:{os.getgid()}",
+                            str(attempt_root),
+                        ],
+                        check=True,
+                    )
 
     def test_f20_sysv_diagnostic_scope_and_receipt_are_fail_closed(self) -> None:
         payload = ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
