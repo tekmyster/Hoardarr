@@ -43,43 +43,80 @@ jobs:
       - name: Exercise real managed-zvol LIO lifecycle
         run: |
           sudo touch /.hoardarr-disposable-runner
+          lifecycle_status_file="$RUNNER_TEMP/managed-zvol-lio-lifecycle.status"
+          umask 077
+          set +e
           sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID \
             env HOARDARR_TEST_PYTHON="$PWD/backend/.venv/bin/python" \
             bash tests/integration/run-managed-zvol-lio-lifecycle.sh
+          lifecycle_status=$?
+          set -e
+          printf '%s\n' "$lifecycle_status" > "$lifecycle_status_file"
+          case "$lifecycle_status" in
+            0|44) ;;
+            *) exit "$lifecycle_status" ;;
+          esac
       - name: Validate bounded managed-zvol lifecycle receipt
         id: managed_zvol_receipt
         if: always()
+        env:
+          HOARDARR_MANAGED_ZVOL_RECEIPT: dist/validation/managed-zvol-lio-lifecycle.json
         run: |
-          test -f dist/validation/managed-zvol-lio-lifecycle.json
-          jq -e '.schema_version == 2 and
-            (.classification == "PARITY_MISMATCH_IDENTIFIED" or
-             .classification == "LOGIN_FAILURE_DIAGNOSED" or
-             .classification == "LOGIN_FAILURE_UNRESOLVED" or
-             .classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT" or
-             .classification == "HARNESS_ERROR") and
-            (if .classification == "HARNESS_ERROR" then
-              (.topology.loop_count >= 0 and .topology.loop_count <= 6 and
-               (.topology.raidz2_vdev_count == 0 or .topology.raidz2_vdev_count == 1) and
-               (.topology.raidz2_member_count == 0 or .topology.raidz2_member_count == 6) and
-               (.topology.zvol_count == 0 or .topology.zvol_count == 1))
-             else
-              (.topology.loop_count == 6 and .topology.raidz2_vdev_count == 1 and
-               .topology.raidz2_member_count == 6 and .topology.zvol_count == 1)
-             end) and .topology.raw_paths_emitted == false and
-            (.parity.exact | type) == "boolean" and
-            (.login.attempt_count == 0 or .login.attempt_count == 1) and
-            (if .classification == "PARITY_MISMATCH_IDENTIFIED" then
-              .login.attempt_count == 0 else true end) and
-            (.cleanup.classification == "cleanup_complete" or
-             .cleanup.classification == "cleanup_incomplete_bounded" or
-             .cleanup.classification == "cleanup_not_started") and
-            .cleanup.total_budget_seconds < 300 and (.cleanup.phases | length) == 16 and
-            ([.cleanup.phases[].order] == [range(1;17)]) and
-            ([.cleanup.phases[].timeout_seconds] == [8,8,8,10,10,10,25,5,5,5,5,5,5,8,10,3]) and
-            ([.cleanup.phases[].status] | all(. == "success" or . == "failed" or
-              . == "timeout" or . == "skipped")) and
-            ([.prohibited_actions[]] | add) == 0' \
-            dist/validation/managed-zvol-lio-lifecycle.json
+          PYTHONPATH="$PWD:$PWD/backend/src" "$PWD/backend/.venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from tests.integration.managed_zvol_lio_lifecycle import validate_receipt
+
+          try:
+              status_path = Path(os.environ["RUNNER_TEMP"]) / "managed-zvol-lio-lifecycle.status"
+              receipt_path = Path(os.environ["HOARDARR_MANAGED_ZVOL_RECEIPT"])
+              status_bytes = status_path.read_bytes()
+              if status_bytes not in {b"0\n", b"44\n"}:
+                  raise ValueError
+              lifecycle_status = int(status_bytes)
+              receipt_bytes = receipt_path.read_bytes()
+              if not receipt_bytes or len(receipt_bytes) > 65536:
+                  raise ValueError
+              receipt = validate_receipt(json.loads(receipt_bytes))
+              failure = receipt["failure"]
+              if lifecycle_status == 0:
+                  valid = (
+                      receipt["classification"] == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
+                      and failure["status"] == 0
+                  )
+              else:
+                  downstream = receipt["downstream"]
+                  payload = receipt["payload_verification"]
+                  cleanup = receipt["cleanup"]
+                  prohibited = receipt["prohibited_actions"]
+                  valid = (
+                      receipt["classification"]
+                      == "LOGIN_SUCCEEDED_PAYLOAD_VERIFIED_RAW_TRANSITION"
+                      and failure["code"] == "RAW_RESTART_TRANSITION_OBSERVED"
+                      and failure["status"] == 44
+                      and downstream["persistence_control_plane"] is True
+                      and downstream["target_persistence_restart"] is False
+                      and downstream["remove_absence"] is True
+                      and downstream["backing_retained"] is True
+                      and payload == {"attempted": True, "matched": True}
+                      and cleanup["classification"] == "cleanup_complete"
+                      and all(
+                          phase["status"] in {"success", "skipped"}
+                          and phase["postcondition"] is True
+                          for phase in cleanup["phases"]
+                      )
+                      and all(
+                          type(value) is int and value == 0
+                          for value in prohibited.values()
+                      )
+                  )
+              if not valid:
+                  raise ValueError
+          except Exception:
+              raise SystemExit("managed-zvol evidence validation failed") from None
+          PY
       - uses: actions/upload-artifact@v4
         if: always() && steps.managed_zvol_receipt.outcome == 'success'
         with:

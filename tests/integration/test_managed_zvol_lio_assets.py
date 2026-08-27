@@ -6,6 +6,8 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import managed_zvol_lio_lifecycle as lifecycle
@@ -839,6 +841,246 @@ def test_a8i_executable_tail_doubles_preserve_order_and_bounded_outcomes(
         if scenario in {"payload_mismatch", "payload_read"}
         else ["false", "false"]
     )
+
+
+def _managed_workflow_job() -> str:
+    workflow = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/storage-integration.yml"
+    ).read_text()
+    return workflow.split("  managed-zvol-lio-lifecycle:\n", 1)[1].split(
+        "  storage-group-drain-lifecycle:\n", 1
+    )[0]
+
+
+def _managed_workflow_validator_source() -> str:
+    job = _managed_workflow_job()
+    return textwrap.dedent(job.split("<<'PY'\n", 1)[1].split("\n          PY", 1)[0])
+
+
+def _run_managed_workflow_validator(
+    tmp_path: Path,
+    *,
+    status_bytes: bytes | None,
+    receipt_bytes: bytes | None,
+) -> subprocess.CompletedProcess[str]:
+    if status_bytes is not None:
+        (tmp_path / "managed-zvol-lio-lifecycle.status").write_bytes(status_bytes)
+    receipt_path = tmp_path / "managed-zvol-lio-lifecycle.json"
+    if receipt_bytes is not None:
+        receipt_path.write_bytes(receipt_bytes)
+    repo = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "RUNNER_TEMP": str(tmp_path),
+            "HOARDARR_MANAGED_ZVOL_RECEIPT": str(receipt_path),
+            "PYTHONPATH": os.pathsep.join((str(repo), str(repo / "backend/src"))),
+        }
+    )
+    return subprocess.run(
+        [sys.executable, "-c", _managed_workflow_validator_source()],
+        cwd=repo,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "receipt"),
+    [
+        (0, _receipt()),
+        (44, _raw_transition_receipt()),
+    ],
+)
+def test_a8j_workflow_validator_accepts_only_exact_status_receipt_pairs(
+    tmp_path: Path, status: int, receipt: dict[str, object]
+) -> None:
+    completed = _run_managed_workflow_validator(
+        tmp_path,
+        status_bytes=f"{status}\n".encode(),
+        receipt_bytes=json.dumps(receipt).encode(),
+    )
+    assert completed.returncode == 0
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
+@pytest.mark.parametrize("status", [1, 19, 43, 45, 255])
+def test_a8j_workflow_validator_rejects_every_unexpected_status_fixture(
+    tmp_path: Path, status: int
+) -> None:
+    completed = _run_managed_workflow_validator(
+        tmp_path,
+        status_bytes=f"{status}\n".encode(),
+        receipt_bytes=json.dumps(_raw_transition_receipt()).encode(),
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert completed.stderr.strip() == "managed-zvol evidence validation failed"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt: receipt.update(
+            {"classification": "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"}
+        ),
+        lambda receipt: receipt["failure"].update(  # type: ignore[index]
+            {"code": "NONE"}
+        ),
+        lambda receipt: receipt["failure"].update({"status": 0}),  # type: ignore[index]
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"persistence_control_plane": False}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"target_persistence_restart": True}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"remove_absence": False}
+        ),
+        lambda receipt: receipt["downstream"].update(  # type: ignore[index]
+            {"backing_retained": False}
+        ),
+        lambda receipt: receipt["payload_verification"].update(  # type: ignore[index]
+            {"matched": False}
+        ),
+        lambda receipt: receipt["cleanup"].update(  # type: ignore[index]
+            {"classification": "cleanup_incomplete_bounded"}
+        ),
+        lambda receipt: receipt["prohibited_actions"].update(  # type: ignore[index]
+            {"login_retries": 1}
+        ),
+        lambda receipt: receipt.update({"unexpected": False}),
+    ],
+)
+def test_a8j_status44_binding_mismatches_fail_closed(
+    tmp_path: Path, mutation: object
+) -> None:
+    receipt = json.loads(json.dumps(_raw_transition_receipt()))
+    mutation(receipt)  # type: ignore[operator]
+    completed = _run_managed_workflow_validator(
+        tmp_path,
+        status_bytes=b"44\n",
+        receipt_bytes=json.dumps(receipt).encode(),
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert completed.stderr.strip() == "managed-zvol evidence validation failed"
+
+
+def test_a8j_cleanup_phase_failure_and_status_zero_mismatch_fail_closed(
+    tmp_path: Path,
+) -> None:
+    receipt = _raw_transition_receipt()
+    cleanup = receipt["cleanup"]
+    assert isinstance(cleanup, dict)
+    phases = cleanup["phases"]
+    assert isinstance(phases, list)
+    phases[0].update(  # type: ignore[union-attr]
+        {"status": "failed", "exit_status": 1, "postcondition": False}
+    )
+    cleanup["classification"] = "cleanup_incomplete_bounded"
+    failed_cleanup = _run_managed_workflow_validator(
+        tmp_path,
+        status_bytes=b"44\n",
+        receipt_bytes=json.dumps(receipt).encode(),
+    )
+    assert failed_cleanup.returncode != 0
+
+    mismatch_root = tmp_path / "status-zero-mismatch"
+    mismatch_root.mkdir()
+    status_mismatch = _run_managed_workflow_validator(
+        mismatch_root,
+        status_bytes=b"0\n",
+        receipt_bytes=json.dumps(_raw_transition_receipt()).encode(),
+    )
+    assert status_mismatch.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("status_bytes", "receipt_bytes"),
+    [
+        (None, b"{}"),
+        (b"44\n", None),
+        (b"44", b"{}"),
+        (b"044\n", b"{}"),
+        (b"44\n", b"not-json"),
+        (b"44\n", b"{}"),
+    ],
+)
+def test_a8j_absent_malformed_or_validator_rejected_evidence_fails_closed(
+    tmp_path: Path, status_bytes: bytes | None, receipt_bytes: bytes | None
+) -> None:
+    completed = _run_managed_workflow_validator(
+        tmp_path, status_bytes=status_bytes, receipt_bytes=receipt_bytes
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert completed.stderr.strip() == "managed-zvol evidence validation failed"
+
+
+@pytest.mark.parametrize(("status", "expected"), [(0, 0), (44, 0), (1, 1), (45, 45)])
+def test_a8j_executable_status_capture_is_single_attempt_and_exact(
+    tmp_path: Path, status: int, expected: int
+) -> None:
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required to execute the workflow status wrapper")
+    job = _managed_workflow_job()
+    exercise_step = job.split(
+        "      - name: Exercise real managed-zvol LIO lifecycle", 1
+    )[1].split("      - name: Validate bounded managed-zvol lifecycle receipt", 1)[0]
+    exercise = textwrap.dedent(exercise_step.split("        run: |\n", 1)[1])
+    exercise = "lifecycle_status_file=" + exercise.split("lifecycle_status_file=", 1)[1]
+    lifecycle_command = """sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID \\
+  env HOARDARR_TEST_PYTHON="$PWD/backend/.venv/bin/python" \\
+  bash tests/integration/run-managed-zvol-lio-lifecycle.sh"""
+    assert exercise.count(lifecycle_command) == 1
+    exercise = exercise.replace(lifecycle_command, 'bash "$A8J_FAKE_LIFECYCLE"')
+    fake = tmp_path / "fake-lifecycle.sh"
+    fake.write_text('#!/usr/bin/env bash\nexit "$A8J_STATUS"\n', encoding="utf-8")
+    completed = subprocess.run(
+        [bash, "-c", "set -euo pipefail\n" + exercise],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "RUNNER_TEMP": tmp_path.as_posix(),
+            "A8J_FAKE_LIFECYCLE": fake.as_posix(),
+            "A8J_STATUS": str(status),
+        },
+    )
+    assert completed.returncode == expected
+    retained = (tmp_path / "managed-zvol-lio-lifecycle.status").read_bytes()
+    assert retained == f"{status}\n".encode()
+
+
+def test_a8j_workflow_source_has_one_lifecycle_and_json_only_artifact_gate() -> None:
+    job = _managed_workflow_job()
+    lifecycle = """sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID \\
+            env HOARDARR_TEST_PYTHON="$PWD/backend/.venv/bin/python" \\
+            bash tests/integration/run-managed-zvol-lio-lifecycle.sh"""
+    assert job.count(lifecycle) == 1
+    assert job.count("run-managed-zvol-lio-lifecycle.sh") == 1
+    assert job.count("set +e") == 1
+    assert job.count("lifecycle_status=$?") == 1
+    assert "0|44) ;;" in job
+    assert "retry" not in job and "while " not in job and "until " not in job
+    assert (
+        "from tests.integration.managed_zvol_lio_lifecycle import validate_receipt"
+        in job
+    )
+    assert "jq -e" not in job
+    upload = job.split("- uses: actions/upload-artifact@v4", 1)[1]
+    assert "if: always() && steps.managed_zvol_receipt.outcome == 'success'" in upload
+    assert "path: dist/validation/managed-zvol-lio-lifecycle.json" in upload
+    assert "managed-zvol-lio-lifecycle.status" not in upload
+    assert upload.count("path:") == 1
 
 
 def _tpg_saveconfig(authentication: object = 1) -> dict[str, object]:
@@ -1767,7 +2009,11 @@ def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None
     assert all(f'"{name}"' in script for name in fixed_phases)
     assert 'record_phase "loop_detach_$number"' in script
     assert "if: always()" in workflow
-    assert "test -f dist/validation/managed-zvol-lio-lifecycle.json" in workflow
+    assert (
+        "HOARDARR_MANAGED_ZVOL_RECEIPT: "
+        "dist/validation/managed-zvol-lio-lifecycle.json" in workflow
+    )
+    assert "receipt_path.read_bytes()" in workflow
     assert "if-no-files-found: error" in workflow
 
 
