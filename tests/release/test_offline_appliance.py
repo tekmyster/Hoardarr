@@ -353,6 +353,8 @@ raise SystemExit(main())
 """
 
 F23_SYSTEMCTL_OUTPUT_MAX_BYTES = 8 * 1024
+F24_SYSTEMCTL_OUTPUT_MAX_LINES = 64
+F24_SYSTEMCTL_OUTPUT_MAX_LINE_BYTES = 512
 F23_ROOT_READER_SCRIPT = r"""import os, stat, sys
 path=sys.argv[1]
 expected_dev=int(sys.argv[2])
@@ -451,6 +453,8 @@ def _validate_f23_systemctl_output(
         expected_name=expected_name,
         max_bytes=F23_SYSTEMCTL_OUTPUT_MAX_BYTES,
     )
+    if len(raw) > F23_SYSTEMCTL_OUTPUT_MAX_BYTES:
+        raise AssertionError("F24 systemctl output exceeds total cap")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -465,14 +469,29 @@ def _validate_f23_systemctl_output(
         flags=re.IGNORECASE,
     ):
         raise AssertionError("F23 systemctl output contains secret-like material")
-    lines = text.splitlines()
-    first_line = lines[0] if lines else ""
-    if len(first_line.encode("utf-8")) > 240:
-        raise AssertionError("F23 systemctl first line exceeds cap")
+    trailing_lf = text.endswith("\n")
+    lines = text.split("\n")
+    if trailing_lf:
+        lines.pop()
+    if not text:
+        lines = []
+    if len(lines) > F24_SYSTEMCTL_OUTPUT_MAX_LINES:
+        raise AssertionError("F24 systemctl output exceeds line-count cap")
+    if any(
+        len(line.encode("utf-8")) > F24_SYSTEMCTL_OUTPUT_MAX_LINE_BYTES
+        for line in lines
+    ):
+        raise AssertionError("F24 systemctl output exceeds per-line cap")
+    reconstructed = "\n".join(lines) + ("\n" if trailing_lf else "")
+    if reconstructed.encode("utf-8") != raw:
+        raise AssertionError(
+            "F24 systemctl line representation changed validated bytes"
+        )
     return {
         "size": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "first_line": first_line,
+        "lines": lines,
+        "trailing_lf": trailing_lf,
     }
 
 
@@ -6721,10 +6740,14 @@ Description: Backup program for disk arrays
         )
         self.assertNotIn("systemctl is-active", phase12)
 
-    def test_f23_output_sanitizer_is_bounded_and_fail_closed(self) -> None:
+    def test_f24_complete_output_sanitizer_is_bounded_and_fail_closed(self) -> None:
         root = pathlib.Path("fixture")
         path = root / "f23-systemctl-stderr.bin"
-        valid = b"Failed to disable unit: fixture rejection\n"
+        valid = (
+            b"Synchronizing state of fixture.service.\n"
+            b"Executing a bounded fixture helper.\n"
+            b"Failed to disable unit: fixture rejection.\n"
+        )
         with mock.patch(f"{__name__}._read_strict_root_file", return_value=valid):
             receipt = _validate_f23_systemctl_output(
                 path, root, "f23-systemctl-stderr.bin"
@@ -6732,13 +6755,26 @@ Description: Backup program for disk arrays
         self.assertEqual(receipt["size"], len(valid))
         self.assertEqual(receipt["sha256"], hashlib.sha256(valid).hexdigest())
         self.assertEqual(
-            receipt["first_line"], "Failed to disable unit: fixture rejection"
+            receipt["lines"],
+            [
+                "Synchronizing state of fixture.service.",
+                "Executing a bounded fixture helper.",
+                "Failed to disable unit: fixture rejection.",
+            ],
         )
+        self.assertIs(receipt["trailing_lf"], True)
+        reconstructed = "\n".join(receipt["lines"]) + "\n"
+        self.assertEqual(reconstructed.encode("utf-8"), valid)
         for label, content in (
+            ("total-overflow", b"x" * (F23_SYSTEMCTL_OUTPUT_MAX_BYTES + 1)),
             ("invalid-utf8", b"\xff"),
             ("control", b"bad\rline\n"),
             ("secret", b"password=not-a-real-test-value\n"),
-            ("long-line", b"x" * 241),
+            ("long-line", b"x" * (F24_SYSTEMCTL_OUTPUT_MAX_LINE_BYTES + 1)),
+            (
+                "too-many-lines",
+                b"x\n" * (F24_SYSTEMCTL_OUTPUT_MAX_LINES + 1),
+            ),
         ):
             with (
                 self.subTest(label=label),
