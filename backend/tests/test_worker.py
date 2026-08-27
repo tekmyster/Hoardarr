@@ -189,6 +189,7 @@ def test_checkpoint_resume_uses_immutable_plan_after_wizard_is_cancelled(
         "apply_available": True,
         "blockers": [],
         "storage": {
+            "topology": "test",
             "risk": {"approval_required": True},
             "snapshot_binding": {
                 "snapshot_id": "resume-snapshot",
@@ -268,7 +269,7 @@ def test_checkpoint_resume_uses_immutable_plan_after_wizard_is_cancelled(
 
     def resume_applier(_socket: object, **kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        return {"operation_id": operation.id, "topology": "zfs", "mountpoint": "/data"}
+        return {"operation_id": operation.id, "topology": "test", "mountpoint": None}
 
     with session_factory() as session, session.begin():
         stored = session.get(Operation, operation.id)
@@ -288,7 +289,8 @@ def test_checkpoint_resume_uses_immutable_plan_after_wizard_is_cancelled(
     with session_factory() as session:
         stored = session.get(Operation, operation.id)
         stored_wizard = session.get(WizardSession, wizard.id)
-        assert stored is not None and stored.status == "succeeded"
+        assert stored is not None and stored.status == "needs_attention"
+        assert stored.error_json["code"] == "drive_intake_device_binding_invalid"
         assert stored_wizard is not None and stored_wizard.status == "cancelled"
 
 

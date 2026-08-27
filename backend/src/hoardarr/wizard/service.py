@@ -900,6 +900,10 @@ def _build_plan_document(
     session: Session,
     wizard: WizardSession,
 ) -> dict[str, Any]:
+    # Imported lazily because intake's canonical fingerprint implementation uses
+    # storage_policy, whose package exports this service.
+    from hoardarr.storage.intake import evaluate_storage_admission
+
     raw_layout = wizard.answers_json.get("layout")
     raw_applications = wizard.answers_json.get("applications")
     raw_storage = wizard.answers_json.get("storage")
@@ -1003,6 +1007,15 @@ def _build_plan_document(
         document["summary"]["selected_drives"] = len(storage_plan["selected_devices"])
         document["summary"]["storage_actions"] = len(storage_plan["actions"])
     document["blockers"].extend(_storage_apply_blockers(storage_plan))
+    admission = evaluate_storage_admission(session, document)
+    existing_blocker_codes = {
+        item.get("code") for item in document["blockers"] if isinstance(item, Mapping)
+    }
+    document["blockers"].extend(
+        blocker
+        for blocker in admission.blockers
+        if blocker.get("code") not in existing_blocker_codes
+    )
     document["apply_available"] = not document["blockers"]
     return document
 

@@ -46,6 +46,17 @@ class IntakePersistenceResult:
     created: int
 
 
+@dataclass(frozen=True)
+class IntakeAdmissionResult:
+    admitted: bool
+    qualification_exempt: bool
+    blockers: tuple[dict[str, str], ...]
+
+    @property
+    def allowed(self) -> bool:
+        return self.admitted or self.qualification_exempt
+
+
 def validate_disposition(value: str) -> str:
     if value not in DISPOSITIONS:
         raise ValueError("invalid drive intake disposition")
@@ -595,7 +606,9 @@ def _latest_observed_fingerprint(
     session: Session, stable_identity: str
 ) -> tuple[str | None, str | None]:
     snapshot = session.scalar(
-        select(HardwareSnapshot).order_by(HardwareSnapshot.captured_at.desc()).limit(1)
+        select(HardwareSnapshot)
+        .order_by(HardwareSnapshot.captured_at.desc(), HardwareSnapshot.id.desc())
+        .limit(1)
     )
     if snapshot is None or document_hash(snapshot.payload_json) != snapshot.sha256:
         return None, "current_snapshot_unavailable"
@@ -618,6 +631,265 @@ def _latest_observed_fingerprint(
     except (StoragePolicyError, IntakeEvaluationError):
         return None, "current_fingerprint_invalid"
     return fingerprint_sha256, None
+
+
+def _admission_blocker(
+    code: str, message: str, *, physical_disk_id: str | None = None
+) -> dict[str, str]:
+    blocker = {"code": code, "message": message}
+    if physical_disk_id is not None:
+        blocker["physical_disk_id"] = physical_disk_id
+    return blocker
+
+
+def _validate_admission_record(
+    session: Session,
+    *,
+    record: DriveIntakeDisposition,
+    disk: PhysicalDisk,
+    stable_identity: str,
+    current_fingerprint_sha256: str,
+    expected_required_tests: list[str],
+    expected_policy_sha256: str,
+) -> str | None:
+    """Return a stable reason when immutable A1 history cannot be trusted."""
+
+    if (
+        record.physical_disk_id != disk.id
+        or record.stable_identity != stable_identity
+        or record.evaluating_operation_id != record.operation_id
+        or record.policy_name != POLICY_NAME
+        or record.policy_version != POLICY_VERSION
+        or record.intended_use != "destination"
+        or record.required_tests_json != expected_required_tests
+        or record.policy_sha256 != expected_policy_sha256
+        or record.device_fingerprint_sha256 != current_fingerprint_sha256
+        or document_hash(record.device_fingerprint_json) != record.device_fingerprint_sha256
+    ):
+        return "drive_intake_admission_binding_mismatch"
+
+    plan = session.get(Plan, record.plan_id)
+    operation = session.get(Operation, record.operation_id)
+    snapshot = session.get(HardwareSnapshot, record.hardware_snapshot_id)
+    if plan is None or operation is None or snapshot is None:
+        return "drive_intake_admission_history_incomplete"
+    try:
+        _exact_plan_and_operation(operation, plan)
+    except IntakeEvaluationError:
+        return "drive_intake_admission_history_tampered"
+    storage_value = plan.document_json.get("storage")
+    if (
+        not isinstance(storage_value, Mapping)
+        or storage_value.get("topology") != "test"
+        or operation.status != "succeeded"
+        or not isinstance(operation.result_json, Mapping)
+        or document_hash(operation.result_json) != record.execution_result_sha256
+        or record.plan_sha256 != plan.sha256
+        or record.wizard_revision != plan.revision
+        or record.hardware_snapshot_sha256 != snapshot.sha256
+    ):
+        return "drive_intake_admission_history_tampered"
+    try:
+        bound_snapshot, selected_devices, raw_devices = _bound_snapshot(session, storage_value)
+    except IntakeEvaluationError:
+        return "drive_intake_admission_history_tampered"
+    if (
+        bound_snapshot.id != record.hardware_snapshot_id
+        or storage_value["snapshot_binding"].get("device_binding_sha256")
+        != record.device_binding_sha256
+    ):
+        return "drive_intake_admission_history_tampered"
+    matches = [
+        (selected, raw)
+        for selected, raw in zip(selected_devices, raw_devices, strict=True)
+        if selected.get("id") == stable_identity
+    ]
+    if len(matches) != 1:
+        return "drive_intake_admission_history_tampered"
+    selected, raw = matches[0]
+    try:
+        (
+            disposition,
+            reasons,
+            required_tests,
+            test_results,
+            fingerprint,
+            fingerprint_sha256,
+            policy_sha256,
+        ) = _evaluate_device(
+            storage=storage_value,
+            selected=selected,
+            raw=raw,
+            execution_result=operation.result_json,
+        )
+    except IntakeEvaluationError:
+        return "drive_intake_admission_history_tampered"
+    if (
+        disposition != record.disposition
+        or reasons != record.reason_codes_json
+        or required_tests != record.required_tests_json
+        or test_results != record.test_results_json
+        or fingerprint != record.device_fingerprint_json
+        or fingerprint_sha256 != record.device_fingerprint_sha256
+        or policy_sha256 != record.policy_sha256
+    ):
+        return "drive_intake_admission_history_tampered"
+    return None
+
+
+def evaluate_storage_admission(
+    session: Session, plan_document: Mapping[str, Any]
+) -> IntakeAdmissionResult:
+    """Evaluate current destination PASS requirements without mutating durable state."""
+
+    storage_value = plan_document.get("storage")
+    if storage_value is None:
+        return IntakeAdmissionResult(
+            admitted=False,
+            qualification_exempt=False,
+            blockers=(
+                _admission_blocker(
+                    "storage_selection_required",
+                    "Select and review storage before applying this plan.",
+                ),
+            ),
+        )
+    if not isinstance(storage_value, Mapping):
+        return IntakeAdmissionResult(
+            admitted=False,
+            qualification_exempt=False,
+            blockers=(
+                _admission_blocker(
+                    "drive_intake_admission_plan_invalid",
+                    "The storage plan cannot be validated for drive admission.",
+                ),
+            ),
+        )
+    if storage_value.get("topology") == "test":
+        return IntakeAdmissionResult(admitted=False, qualification_exempt=True, blockers=())
+
+    try:
+        _snapshot, selected_devices, raw_devices = _bound_snapshot(session, storage_value)
+    except IntakeEvaluationError as exc:
+        return IntakeAdmissionResult(
+            admitted=False,
+            qualification_exempt=False,
+            blockers=(
+                _admission_blocker(
+                    exc.code,
+                    "The storage plan's immutable drive binding is missing or invalid.",
+                ),
+            ),
+        )
+
+    blockers: list[dict[str, str]] = []
+    for selected, raw in zip(selected_devices, raw_devices, strict=True):
+        stable_identity = str(selected["id"])
+        disks = list(
+            session.scalars(
+                select(PhysicalDisk).where(PhysicalDisk.stable_identity == stable_identity).limit(2)
+            )
+        )
+        if len(disks) != 1:
+            blockers.append(
+                _admission_blocker(
+                    "drive_intake_admission_identity_ambiguous"
+                    if disks
+                    else "drive_intake_admission_disk_missing",
+                    "The selected drive does not resolve to one durable inventory record.",
+                )
+            )
+            continue
+        disk = disks[0]
+        intended_use = _intended_use(storage_value, selected)
+        if intended_use != "destination":
+            blockers.append(
+                _admission_blocker(
+                    "drive_intake_admission_destination_required",
+                    "Only destination-qualified drives can be admitted to this storage plan.",
+                    physical_disk_id=disk.id,
+                )
+            )
+            continue
+        try:
+            expected_required, _policy_document, expected_policy_sha256 = _policy(
+                storage_value, intended_use
+            )
+            _fingerprint_document, current_fingerprint_sha256 = _fingerprint(selected, raw)
+        except IntakeEvaluationError:
+            blockers.append(
+                _admission_blocker(
+                    "drive_intake_admission_policy_invalid",
+                    "The destination intake policy cannot be validated.",
+                    physical_disk_id=disk.id,
+                )
+            )
+            continue
+        record = session.scalar(
+            select(DriveIntakeDisposition)
+            .where(DriveIntakeDisposition.physical_disk_id == disk.id)
+            .order_by(
+                DriveIntakeDisposition.evaluated_at.desc(),
+                DriveIntakeDisposition.id.desc(),
+            )
+            .limit(1)
+        )
+        if record is None:
+            blockers.append(
+                _admission_blocker(
+                    "drive_intake_admission_not_tested",
+                    "The selected drive has no completed intake disposition.",
+                    physical_disk_id=disk.id,
+                )
+            )
+            continue
+        if record.disposition != "PASS":
+            code = (
+                "drive_intake_admission_source_only"
+                if record.disposition == "SOURCE_ONLY"
+                else "drive_intake_admission_latest_not_pass"
+            )
+            blockers.append(
+                _admission_blocker(
+                    code,
+                    "The newest drive intake disposition does not permit destination use.",
+                    physical_disk_id=disk.id,
+                )
+            )
+            continue
+        invalid = _validate_admission_record(
+            session,
+            record=record,
+            disk=disk,
+            stable_identity=stable_identity,
+            current_fingerprint_sha256=current_fingerprint_sha256,
+            expected_required_tests=expected_required,
+            expected_policy_sha256=expected_policy_sha256,
+        )
+        if invalid is not None:
+            blockers.append(
+                _admission_blocker(
+                    invalid,
+                    "The newest drive intake PASS no longer matches this exact plan and policy.",
+                    physical_disk_id=disk.id,
+                )
+            )
+            continue
+        latest_fingerprint, stale_code = _latest_observed_fingerprint(session, stable_identity)
+        if stale_code is not None or latest_fingerprint != current_fingerprint_sha256:
+            blockers.append(
+                _admission_blocker(
+                    f"drive_intake_admission_{stale_code or 'current_fingerprint_changed'}",
+                    "Current hardware evidence no longer matches the qualified drive.",
+                    physical_disk_id=disk.id,
+                )
+            )
+
+    return IntakeAdmissionResult(
+        admitted=not blockers,
+        qualification_exempt=False,
+        blockers=tuple(blockers),
+    )
 
 
 def _public_result(result: Mapping[str, Any]) -> dict[str, Any]:

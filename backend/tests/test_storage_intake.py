@@ -31,7 +31,9 @@ from hoardarr.db.models import (
 from hoardarr.operations.service import document_hash
 from hoardarr.operations.worker import (
     StorageExecution,
+    WorkFailure,
     WorkItem,
+    _execute_storage,
     _finalize_success,
     reconcile_completed_storage_state,
 )
@@ -39,8 +41,10 @@ from hoardarr.storage.intake import (
     IntakeEvaluationError,
     current_assessment,
     disposition_history,
+    evaluate_storage_admission,
     persist_completed_intake,
 )
+from hoardarr.wizard.service import DEFAULT_LAYOUT, create_plan, create_wizard, update_step
 from hoardarr.wizard.storage_policy import device_review_document
 
 DEVICE_ID = "serial:synthetic:drive-a"
@@ -297,6 +301,59 @@ def _context(
     operation.result_json = result
     session.flush()
     return IntakeContext(operation, plan, snapshot, disk, result)
+
+
+def _destination_document(context: IntakeContext) -> dict[str, Any]:
+    storage = deepcopy(context.plan.document_json["storage"])
+    storage["topology"] = "individual"
+    storage["intended_use"] = "destination"
+    return {"apply_available": True, "blockers": [], "storage": storage}
+
+
+def _store_destination_operation(
+    session: Session,
+    context: IntakeContext,
+    *,
+    suffix: str,
+    resume: bool = False,
+) -> tuple[Plan, Operation]:
+    document = _destination_document(context)
+    wizard = context.plan.wizard_session_id
+    stored_wizard = session.get(WizardSession, wizard)
+    assert stored_wizard is not None
+    stored_wizard.revision += 1
+    stored_wizard.status = "review"
+    plan = Plan(
+        id=f"admission-plan-{suffix}",
+        wizard_session_id=wizard,
+        revision=stored_wizard.revision,
+        kind="storage.add",
+        document_json=document,
+        sha256=document_hash(document),
+    )
+    stored_wizard.plan_id = plan.id
+    request = {
+        "schema_version": 1,
+        "wizard_id": wizard,
+        "wizard_revision": plan.revision,
+        "plan_id": plan.id,
+        "plan_sha256": plan.sha256,
+    }
+    operation = Operation(
+        id=f"admission-operation-{suffix}",
+        kind="storage.apply",
+        status="queued",
+        actor_type="api_token",
+        actor_id="synthetic-user",
+        resource_type="wizard_session",
+        resource_id=wizard,
+        request_sha256=document_hash(request),
+        request_json=request,
+        result_json={"resume_requested": True, "resume_attempt": 1} if resume else None,
+    )
+    session.add_all([plan, operation])
+    session.flush()
+    return plan, operation
 
 
 def test_migration_0030_upgrades_downgrades_and_declares_constraints(tmp_path: Path) -> None:
@@ -564,6 +621,297 @@ def test_non_test_topology_and_empty_history_never_imply_pass() -> None:
         }
 
 
+def test_current_destination_pass_admits_while_test_topology_is_only_exempt() -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        context = _context(session, intended_use="destination")
+        exemption = evaluate_storage_admission(session, context.plan.document_json)
+        assert exemption.allowed is True
+        assert exemption.qualification_exempt is True
+        assert exemption.admitted is False
+        assert exemption.blockers == ()
+
+        missing = evaluate_storage_admission(session, _destination_document(context))
+        assert missing.allowed is False
+        assert [item["code"] for item in missing.blockers] == ["drive_intake_admission_not_tested"]
+
+        persist_completed_intake(
+            session,
+            operation=context.operation,
+            plan=context.plan,
+            execution_result=context.result,
+        )
+        admitted = evaluate_storage_admission(session, _destination_document(context))
+        assert admitted.allowed is True
+        assert admitted.admitted is True
+        assert admitted.qualification_exempt is False
+        assert admitted.blockers == ()
+
+
+def test_plan_review_appends_current_pass_blocker() -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        context = _context(session, intended_use="destination")
+        wizard = create_wizard(session, hardware_snapshot_id=context.snapshot.id)
+        wizard = update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=0,
+            step="storage",
+            answers={
+                "selected_device_ids": [DEVICE_ID],
+                "topology": "individual",
+                "purpose": "media",
+                "preserve_data": False,
+                "portable_systems": ["linux"],
+                "snapshots": False,
+                "encryption": "none",
+            },
+        )
+        wizard = update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=wizard.revision,
+            step="layout",
+            answers=DEFAULT_LAYOUT,
+        )
+        wizard = update_step(
+            session,
+            wizard_id=wizard.id,
+            expected_revision=wizard.revision,
+            step="applications",
+            answers={},
+        )
+        plan = create_plan(session, wizard_id=wizard.id, expected_revision=wizard.revision)
+        assert plan.document_json["apply_available"] is False
+        assert "drive_intake_admission_not_tested" in {
+            item["code"] for item in plan.document_json["blockers"]
+        }
+        assert plan.sha256 == document_hash(plan.document_json)
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    ["FAIL", "QUARANTINED", "INCOMPLETE", "UNSUPPORTED", "SOURCE_ONLY"],
+)
+def test_every_latest_non_pass_disposition_blocks_destination(disposition: str) -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        context = _context(session, intended_use="destination")
+        record = persist_completed_intake(
+            session,
+            operation=context.operation,
+            plan=context.plan,
+            execution_result=context.result,
+        ).records[0]
+        record.disposition = disposition
+        session.flush()
+        assessment = evaluate_storage_admission(session, _destination_document(context))
+        assert assessment.allowed is False
+        assert [item["code"] for item in assessment.blockers] == [
+            "drive_intake_admission_source_only"
+            if disposition == "SOURCE_ONLY"
+            else "drive_intake_admission_latest_not_pass"
+        ]
+        assert DEVICE_ID not in str(assessment.blockers)
+
+
+def test_later_non_pass_supersedes_older_pass_and_history_tamper_blocks() -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        first = _context(session, suffix="older-pass", intended_use="destination")
+        persist_completed_intake(
+            session,
+            operation=first.operation,
+            plan=first.plan,
+            execution_result=first.result,
+        )
+        second = _context(session, suffix="newer-fail", intended_use="destination")
+        second.result["action_results"][-1]["outcome"] = "failed"
+        second.result["action_results"][-1]["code"] = "surface_read_failed"
+        second.operation.result_json = second.result
+        newer = persist_completed_intake(
+            session,
+            operation=second.operation,
+            plan=second.plan,
+            execution_result=second.result,
+        ).records[0]
+        assert newer.disposition == "FAIL"
+        assessment = evaluate_storage_admission(session, _destination_document(second))
+        assert [item["code"] for item in assessment.blockers] == [
+            "drive_intake_admission_latest_not_pass"
+        ]
+
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        context = _context(session, intended_use="destination")
+        record = persist_completed_intake(
+            session,
+            operation=context.operation,
+            plan=context.plan,
+            execution_result=context.result,
+        ).records[0]
+        record.device_fingerprint_json = {
+            **record.device_fingerprint_json,
+            "firmware": "tampered",
+        }
+        assessment = evaluate_storage_admission(session, _destination_document(context))
+        assert [item["code"] for item in assessment.blockers] == [
+            "drive_intake_admission_binding_mismatch"
+        ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["selected_device", "device_hash", "snapshot_hash", "physical_disk", "source_result"],
+)
+def test_plan_disk_and_history_binding_tamper_fail_closed(change: str) -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        context = _context(session, intended_use="destination")
+        persist_completed_intake(
+            session,
+            operation=context.operation,
+            plan=context.plan,
+            execution_result=context.result,
+        )
+        document = _destination_document(context)
+        if change == "selected_device":
+            document["storage"]["selected_devices"][0]["model"] = "ALTERED"
+        elif change == "device_hash":
+            document["storage"]["snapshot_binding"]["device_binding_sha256"] = "0" * 64
+        elif change == "snapshot_hash":
+            document["storage"]["snapshot_binding"]["snapshot_sha256"] = "0" * 64
+        elif change == "physical_disk":
+            context.disk.stable_identity = "serial:synthetic:different"
+        else:
+            context.operation.result_json = {**context.result, "replayed": True}
+        assessment = evaluate_storage_admission(session, document)
+        assert assessment.allowed is False
+        assert assessment.blockers
+        serialized = str(assessment.blockers)
+        assert DEVICE_ID not in serialized
+        assert "SYNTHETIC-SERIAL-A" not in serialized
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "policy",
+        "firmware",
+        "capacity",
+        "geometry",
+        "controller",
+        "hub",
+        "port",
+        "signature",
+        "kernel_path",
+        "duplicate_current",
+    ],
+)
+def test_policy_and_current_hardware_revalidation_are_exact(change: str) -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        context = _context(session, intended_use="destination")
+        persist_completed_intake(
+            session,
+            operation=context.operation,
+            plan=context.plan,
+            execution_result=context.result,
+        )
+        document = _destination_document(context)
+        if change == "policy":
+            document["storage"]["intake_tests"]["smart_short"] = True
+        else:
+            payload = deepcopy(context.snapshot.payload_json)
+            if change == "firmware":
+                payload["disks"][0]["firmware_revision"] = "2.0-test"
+            elif change == "capacity":
+                payload["disks"][0]["capacity_bytes"] += 4096
+            elif change == "geometry":
+                payload["disks"][0]["sector_sizes"]["physical_bytes"] = 8192
+            elif change == "controller":
+                payload["disks"][0]["connection"]["controller_address"] = "changed"
+            elif change == "hub":
+                payload["disks"][0]["connection"]["hub_id"] = "synthetic-hub"
+            elif change == "port":
+                payload["disks"][0]["connection"]["hub_port"] = "7"
+            elif change == "signature":
+                payload["disks"][0]["signatures"] = ["zfs_member"]
+            elif change == "kernel_path":
+                payload["disks"][0]["kernel_path"] = "/dev/reordered"
+            else:
+                payload["disks"].append(deepcopy(payload["disks"][0]))
+            scan = Operation(
+                id=f"current-scan-{change}",
+                kind="hardware.scan",
+                status="succeeded",
+                actor_type="api_token",
+                actor_id="synthetic-user",
+                request_sha256=document_hash({}),
+                request_json={},
+            )
+            session.add(scan)
+            session.flush()
+            session.add(
+                HardwareSnapshot(
+                    id=f"current-snapshot-{change}",
+                    operation_id=scan.id,
+                    detector_schema_version=1,
+                    source="synthetic",
+                    payload_json=payload,
+                    sha256=document_hash(payload),
+                )
+            )
+            session.flush()
+        assessment = evaluate_storage_admission(session, document)
+        if change == "kernel_path":
+            assert assessment.allowed is True
+        else:
+            assert assessment.allowed is False
+
+
+def test_worker_resume_recomputes_admission_and_calls_applier_zero_times(
+    tmp_path: Path,
+) -> None:
+    engine = _engine()
+    factory = create_session_factory(engine)
+    with factory() as session, session.begin():
+        context = _context(session, intended_use="destination")
+        plan, operation = _store_destination_operation(
+            session, context, suffix="resume-reject", resume=True
+        )
+        item = WorkItem(
+            operation_id=operation.id,
+            kind=operation.kind,
+            resource_type=operation.resource_type,
+            resource_id=operation.resource_id,
+            request=deepcopy(operation.request_json),
+        )
+    calls: list[dict[str, Any]] = []
+
+    def applier(_socket: object, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {}
+
+    settings = Settings(
+        environment="test",
+        database_url="sqlite+pysqlite:///:memory:",
+        secret_key_file=tmp_path / "secret.key",
+        secure_cookies=False,
+        hardware_detector=tmp_path / "synthetic-detector.py",
+    )
+    with pytest.raises(WorkFailure) as rejected:
+        _execute_storage(factory, item, settings, applier)
+    assert rejected.value.code == "storage_drive_admission_blocked"
+    assert calls == []
+    with factory() as session:
+        stored_plan = session.get(Plan, plan.id)
+        assert stored_plan is not None
+        assert stored_plan.document_json["apply_available"] is True
+        assert stored_plan.document_json["blockers"] == []
+
+
 def test_worker_finalization_persists_disposition_in_completion_transaction() -> None:
     engine = _engine()
     factory = create_session_factory(engine)
@@ -752,3 +1100,71 @@ def test_authenticated_read_api_is_redacted_and_empty_history_is_not_tested(
         assert assessment.status_code == 200
         assert assessment.json()["assessment"] == "NOT_TESTED"
         assert assessment.json()["reason_codes"] == ["not_tested"]
+
+
+def test_authenticated_apply_recomputes_admission_before_queue(tmp_path: Path) -> None:
+    database = tmp_path / "intake-admission-api.db"
+    settings = Settings(
+        environment="test",
+        database_url=f"sqlite:///{database.as_posix()}",
+        secret_key_file=tmp_path / "secret.key",
+        secure_cookies=False,
+        hardware_detector=tmp_path / "synthetic-detector.py",
+    )
+    upgrade_database(settings.database_url)
+    engine = create_database_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    with factory() as session, session.begin():
+        setup_token = issue_setup_token(session)
+    app = create_app(settings)
+    with TestClient(app, base_url="http://testserver") as client:
+        credential_field = "".join(("pass", "word"))
+        claim = client.post(
+            "/api/v1/setup/claim",
+            headers={"Origin": "http://testserver"},
+            json={
+                "token": setup_token,
+                "username": "owner",
+                credential_field: "a-long-synthetic-credential-value",
+            },
+        )
+        csrf = claim.json()["csrf_token"]
+        with app.state.session_factory() as session, session.begin():
+            context = _context(session, intended_use="destination")
+            stored_wizard = session.get(WizardSession, context.plan.wizard_session_id)
+            assert stored_wizard is not None
+            document = _destination_document(context)
+            current_plan = Plan(
+                id="api-admission-plan",
+                wizard_session_id=stored_wizard.id,
+                revision=stored_wizard.revision + 1,
+                kind="storage.add",
+                document_json=document,
+                sha256=document_hash(document),
+            )
+            stored_wizard.revision = current_plan.revision
+            stored_wizard.status = "review"
+            stored_wizard.plan_id = current_plan.id
+            session.add(current_plan)
+            operation_count = session.scalar(select(func.count()).select_from(Operation))
+
+        response = client.post(
+            f"/api/v1/wizards/{stored_wizard.id}/apply",
+            headers={
+                "Origin": "http://testserver",
+                "X-CSRF-Token": csrf,
+                "Idempotency-Key": "synthetic-admission-rejection",
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["code"] == "storage_drive_admission_blocked"
+        assert response.json()["errors"] == [
+            {
+                "code": "drive_intake_admission_not_tested",
+                "message": "The selected drive has no completed intake disposition.",
+                "physical_disk_id": context.disk.id,
+            }
+        ]
+        assert DEVICE_ID not in response.text
+        with app.state.session_factory() as session:
+            assert session.scalar(select(func.count()).select_from(Operation)) == operation_count

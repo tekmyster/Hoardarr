@@ -27,6 +27,7 @@ from hoardarr.audit.service import record_audit
 from hoardarr.auth.service import Principal
 from hoardarr.db.models import HardwareSnapshot, Operation, Plan, WizardSession, utc_now
 from hoardarr.operations.service import OperationConflict, create_operation, document_hash
+from hoardarr.storage.intake import evaluate_storage_admission
 from hoardarr.storage.reservations import plan_selected_device_ids, reserved_device_ids
 from hoardarr.wizard.service import (
     WizardConflict,
@@ -460,6 +461,15 @@ def apply_plan(
     if plan is None or plan.sha256 != document_hash(plan.document_json):
         raise Problem(409, "plan_integrity_failed", "Plan changed", "Review a new storage plan.")
     blockers = plan.document_json.get("blockers")
+    admission = evaluate_storage_admission(session, plan.document_json)
+    if not admission.allowed:
+        raise Problem(
+            409,
+            "storage_drive_admission_blocked",
+            "Drive intake qualification is required",
+            "One or more selected drives do not have a current destination PASS.",
+            errors=list(admission.blockers),
+        )
     if plan.document_json.get("apply_available") is not True or blockers != []:
         raise Problem(
             409,

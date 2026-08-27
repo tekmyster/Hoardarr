@@ -118,7 +118,11 @@ from hoardarr.storage.foreign_migration_worker import (
     mark_foreign_migration_paused,
 )
 from hoardarr.storage.groups import reconcile_snapshot_disks
-from hoardarr.storage.intake import IntakeEvaluationError, persist_completed_intake
+from hoardarr.storage.intake import (
+    IntakeEvaluationError,
+    evaluate_storage_admission,
+    persist_completed_intake,
+)
 from hoardarr.storage.redundancy import (
     apply_redundancy_result,
     matching_devices,
@@ -1270,11 +1274,6 @@ def _execute_storage(
             raise WorkFailure(
                 "storage_plan_changed", "The storage plan changed before execution; review it again"
             )
-        if (
-            plan.document_json.get("apply_available") is not True
-            or plan.document_json.get("blockers") != []
-        ):
-            raise WorkFailure("storage_plan_blocked", "The storage plan is not executable")
         storage_document = plan.document_json.get("storage")
         risk = storage_document.get("risk") if isinstance(storage_document, Mapping) else None
         approval_required = isinstance(risk, Mapping) and risk.get("approval_required") is True
@@ -1322,6 +1321,18 @@ def _execute_storage(
                 "confirmation_phrase": "I AGREE",
                 "confirmation_sha256": approval.confirmation_sha256,
             }
+        admission = evaluate_storage_admission(session, plan.document_json)
+        if not admission.allowed:
+            raise WorkFailure(
+                "storage_drive_admission_blocked",
+                "Current drive intake qualification is required before storage execution",
+                needs_attention=True,
+            )
+        if (
+            plan.document_json.get("apply_available") is not True
+            or plan.document_json.get("blockers") != []
+        ):
+            raise WorkFailure("storage_plan_blocked", "The storage plan is not executable")
         plan_document = deepcopy(plan.document_json)
     try:
         result = storage_applier(

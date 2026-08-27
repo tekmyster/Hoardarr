@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from hoardarr.db.models import (
     MetricSample,
     Operation,
     PhysicalDisk,
+    Plan,
     RemoteBackupRun,
     RemoteBackupTarget,
     StorageBackend,
@@ -56,11 +58,13 @@ from hoardarr.db.models import (
     StorageVolume,
     StorageVolumeSnapshot,
     User,
+    WizardSession,
 )
 from hoardarr.hardware.topology_expectations import reconcile_topology_snapshot
 from hoardarr.operations.service import document_hash
 from hoardarr.operations.worker import refresh_media_libraries, run_once
 from hoardarr.storage.groups import register_disk
+from hoardarr.storage.intake import persist_completed_intake
 from hoardarr.storage.redundancy import register_single_path_storage
 from hoardarr.storage.tiering import plan_transfer
 from hoardarr.storage.volumes import register_volume
@@ -2662,6 +2666,11 @@ def test_authenticated_hardware_worker_and_wizard_flow(
                 "connection": {"transport": "usb", "protocol": "uas"},
                 "partitions": [],
                 "signatures": [],
+                "signature_scan": {
+                    "status": "complete",
+                    "reason": None,
+                    "source": "synthetic-fixture",
+                },
                 "maintenance_capabilities": {
                     "ata_secure_erase": False,
                     "nvme_block_erase": False,
@@ -2706,8 +2715,8 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     assert expansion.status_code == 200, expansion.text
     assert expansion.json()["hardware_snapshot_id"] == snapshot_id
     assert expansion.json()["methodology"].startswith("Plans use the latest persisted hardware")
-    assert expansion.json()["available_disks"][0]["existing_data"]["state"] == "unknown"
-    assert expansion.json()["candidates"][0]["kind"] == "import_existing"
+    assert expansion.json()["available_disks"][0]["existing_data"]["state"] == "none_detected"
+    assert expansion.json()["candidates"][0]["kind"] == "new_storage_group"
 
     foreign = client.get("/api/v1/storage/foreign")
     assert foreign.status_code == 200, foreign.text
@@ -2768,6 +2777,135 @@ def test_authenticated_hardware_worker_and_wizard_flow(
     assert plan.status_code == 201, plan.text
     document = plan.json()["plan"]["document"]
     assert document["layout"] == DEFAULT_LAYOUT
+    assert document["apply_available"] is False
+    assert "drive_intake_admission_not_tested" in {item["code"] for item in document["blockers"]}
+    with app.state.session_factory() as session, session.begin():
+        selected = document["storage"]["selected_devices"][0]
+        intake_storage = deepcopy(document["storage"])
+        intake_storage["topology"] = "test"
+        intake_storage["intended_use"] = "destination"
+        intake_storage["actions"] = [
+            item for item in intake_storage["actions"] if str(item["type"]).startswith("drive.")
+        ]
+        intake_document = {
+            "apply_available": True,
+            "blockers": [],
+            "storage": intake_storage,
+        }
+        intake_wizard = WizardSession(
+            id="api-flow-intake-wizard",
+            workflow="storage.add",
+            status="applied",
+            current_step="complete",
+            revision=1,
+            hardware_snapshot_id=snapshot_id,
+        )
+        intake_plan = Plan(
+            id="api-flow-intake-plan",
+            wizard_session_id=intake_wizard.id,
+            revision=1,
+            kind="storage.add",
+            document_json=intake_document,
+            sha256=document_hash(intake_document),
+        )
+        intake_wizard.plan_id = intake_plan.id
+        intake_request = {
+            "schema_version": 1,
+            "wizard_id": intake_wizard.id,
+            "wizard_revision": 1,
+            "plan_id": intake_plan.id,
+            "plan_sha256": intake_plan.sha256,
+        }
+        action_results = []
+        for action in intake_storage["actions"]:
+            if action["type"] == "drive.identity.verify":
+                evidence = {
+                    "kind": "immutable_device_revalidation",
+                    "stable_plan_identity": selected["id"],
+                    "current_revalidation": "matched_selected_device",
+                }
+                code = "identity_verified"
+            else:
+                evidence = {
+                    "kind": "command_success",
+                    "mode": "read_only",
+                    "full_device_intended_coverage": True,
+                    "target_capacity_bytes": selected["capacity_bytes"],
+                    "command_profile": "badblocks_-sv_full_device",
+                    "command_success": True,
+                }
+                code = "full_surface_read_completed"
+            action_results.append(
+                {
+                    "schema_version": 1,
+                    "action_id": action["action_id"],
+                    "device_id": action["device_id"],
+                    "type": action["type"],
+                    "outcome": "passed",
+                    "code": code,
+                    "evidence": evidence,
+                }
+            )
+        intake_result = {
+            "topology": "test",
+            "mountpoint": None,
+            "completed_actions": [item["action_id"] for item in intake_storage["actions"]],
+            "notices": [],
+            "action_results": action_results,
+            "replayed": False,
+        }
+        intake_operation = Operation(
+            id="api-flow-intake-operation",
+            kind="storage.apply",
+            status="succeeded",
+            actor_type="api_token",
+            actor_id="synthetic-user",
+            resource_type="wizard_session",
+            resource_id=intake_wizard.id,
+            request_sha256=document_hash(intake_request),
+            request_json=intake_request,
+            result_json=intake_result,
+        )
+        session.add(intake_wizard)
+        session.flush()
+        session.add_all([intake_plan, intake_operation])
+        session.flush()
+        persisted = persist_completed_intake(
+            session,
+            operation=intake_operation,
+            plan=intake_plan,
+            execution_result=intake_result,
+        )
+        assert persisted.records[0].disposition == "PASS"
+        current_payload = deepcopy(payload)
+        current_scan = Operation(
+            id="api-flow-current-scan",
+            kind="hardware.scan",
+            status="succeeded",
+            actor_type="api_token",
+            actor_id="synthetic-user",
+            request_sha256=document_hash({}),
+            request_json={},
+        )
+        session.add(current_scan)
+        session.flush()
+        session.add(
+            HardwareSnapshot(
+                id="api-flow-current-snapshot",
+                operation_id=current_scan.id,
+                detector_schema_version=1,
+                source="synthetic",
+                payload_json=current_payload,
+                sha256=document_hash(current_payload),
+            )
+        )
+    plan = client.post(
+        f"/api/v1/wizards/{wizard_id}/plan/refresh",
+        headers=_state_headers(csrf),
+        json={"revision": 3},
+    )
+    assert plan.status_code == 200, plan.text
+    document = plan.json()["plan"]["document"]
     assert document["apply_available"] is True
     assert document["blockers"] == []
     consent_required = client.post(
@@ -2781,7 +2919,7 @@ def test_authenticated_hardware_worker_and_wizard_flow(
         f"/api/v1/wizards/{wizard_id}/plan/approve",
         headers=_state_headers(csrf),
         json={
-            "revision": 3,
+            "revision": 4,
             "plan_sha256": plan.json()["plan"]["sha256"],
             "hardware_snapshot_sha256": document["storage"]["snapshot_binding"]["snapshot_sha256"],
             "selected_device_ids": document["storage"]["snapshot_binding"]["selected_device_ids"],
