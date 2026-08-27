@@ -7373,6 +7373,17 @@ Description: Backup program for disk arrays
                     self.assertIs(candidate["predicates"][predicate], False)
                     self.assertEqual(candidate["guard_outcome"], "REJECTED")
 
+            identity_predicates = {
+                "wrapper": "wrapper_identity_mode",
+                "helper": "real_helper_identity_mode",
+            }
+            self.assertEqual(
+                identity_predicates,
+                {
+                    "wrapper": "wrapper_identity_mode",
+                    "helper": "real_helper_identity_mode",
+                },
+            )
             for label, target in (("wrapper", "wrapper"), ("helper", "helper")):
                 with self.subTest(identity=label):
                     case, wrapper, helper = prepare(f"identity-{label}")
@@ -7391,7 +7402,7 @@ Description: Backup program for disk arrays
                     self.assertEqual(result.returncode, 0, result.stderr)
                     candidate = json.loads(read_entry(case).decode("ascii"))
                     self.assertIs(
-                        candidate["predicates"][f"{target}_identity_mode"], False
+                        candidate["predicates"][identity_predicates[label]], False
                     )
 
             case, wrapper, helper = prepare("unexpected")
