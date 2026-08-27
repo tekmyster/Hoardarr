@@ -7715,22 +7715,80 @@ Description: Backup program for disk arrays
                 for path in evidence_paths.values():
                     path.chmod(0o600)
 
-            for status in valid_statuses:
-                with self.subTest(valid_status=status):
-                    write_helper_evidence(status)
-                    observed = helper_function("after", root)
-                    self.assertIs(observed["invoked"], True)
-                    self.assertEqual(observed["status"], int(status))
-                    for path in evidence_paths.values():
-                        path.unlink()
+            def remove_helper_evidence() -> None:
+                for path in evidence_paths.values():
+                    path.unlink(missing_ok=True)
 
-            for label, status in invalid_statuses.items():
-                with self.subTest(invalid_status=label):
-                    write_helper_evidence(status)
-                    with self.assertRaises((SystemExit, UnicodeDecodeError)):
-                        helper_function("after", root)
-                    for path in evidence_paths.values():
-                        path.unlink()
+            write_helper_evidence(b"0\n")
+            evidence_paths["status"].chmod(0o640)
+            with self.assertRaisesRegex(
+                SystemExit, "F20 helper evidence metadata is invalid"
+            ):
+                helper_function("after", root)
+            remove_helper_evidence()
+
+            original_path_stat = pathlib.Path.stat
+            projected_paths = frozenset(evidence_paths.values())
+
+            def projected_helper_stat(
+                path: pathlib.Path, *args: object, **kwargs: object
+            ) -> os.stat_result:
+                observed = original_path_stat(path, *args, **kwargs)
+                if path not in projected_paths:
+                    return observed
+                fields = list(observed)
+                fields[stat.ST_MODE] = stat.S_IFREG | 0o600
+                fields[stat.ST_NLINK] = 1
+                fields[stat.ST_UID] = 0
+                fields[stat.ST_GID] = 0
+                return os.stat_result(fields)
+
+            with mock.patch.object(pathlib.Path, "stat", new=projected_helper_stat):
+                for status in valid_statuses:
+                    with self.subTest(valid_status=status):
+                        try:
+                            write_helper_evidence(status)
+                            if status == b"0\n":
+                                actual = original_path_stat(evidence_paths["status"])
+                                projected = evidence_paths["status"].stat()
+                                self.assertEqual(stat.S_IMODE(projected.st_mode), 0o600)
+                                self.assertEqual(
+                                    (
+                                        projected.st_uid,
+                                        projected.st_gid,
+                                        projected.st_nlink,
+                                    ),
+                                    (0, 0, 1),
+                                )
+                                for attribute in (
+                                    "st_ino",
+                                    "st_dev",
+                                    "st_size",
+                                    "st_atime",
+                                    "st_mtime",
+                                    "st_ctime",
+                                ):
+                                    self.assertEqual(
+                                        getattr(projected, attribute),
+                                        getattr(actual, attribute),
+                                    )
+                                self.assertEqual(
+                                    real_helper.stat(), original_path_stat(real_helper)
+                                )
+                            observed = helper_function("after", root)
+                            self.assertIs(observed["invoked"], True)
+                            self.assertEqual(observed["status"], int(status))
+                        finally:
+                            remove_helper_evidence()
+
+                for label, status in invalid_statuses.items():
+                    with self.subTest(invalid_status=label):
+                        try:
+                            write_helper_evidence(status)
+                            with self.assertRaises((SystemExit, UnicodeDecodeError)):
+                                helper_function("after", root)
+                        finally:
+                            remove_helper_evidence()
 
     def test_f21_capture_error_portable_contract_is_fail_closed(self) -> None:
         compile(F21_CAPTURE_ERROR_SCRIPT, "f21-capture-error.py", "exec")
