@@ -18,6 +18,7 @@ from managed_zvol_lio_lifecycle import (
     _read_safe_diagnostic,
     atomic_write_receipt,
     inspect_node_parity,
+    loop_release_postcondition,
     sanitize_diagnostic_bytes,
     validate_guard,
     validate_receipt,
@@ -828,6 +829,75 @@ def test_loop_release_unsafe_or_inconsistent_fixture_shapes_are_rejected(
     mutation(evidence)  # type: ignore[operator]
     with pytest.raises(LifecycleGuardError, match="loop release evidence"):
         validate_receipt(receipt)
+
+
+def _released_different_backing_receipt() -> dict[str, object]:
+    receipt = _receipt()
+    phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    phase["postcondition"] = True
+    evidence.update(
+        {
+            "post_detach_state": "DIFFERENT_BACKING",
+            "owned_image_released": True,
+            "release_probe_state": "RELEASED",
+            "holder_count": 0,
+            "holder_identity_sha256": [],
+            "holder_probe_state": "COMPLETE",
+        }
+    )
+    return receipt
+
+
+def test_released_different_backing_is_a_successful_loop_postcondition() -> None:
+    receipt = _released_different_backing_receipt()
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    assert loop_release_postcondition(evidence) is True
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda evidence: evidence.update({"owned_image_released": False}),
+        lambda evidence: evidence.update({"release_probe_state": "STILL_MAPPED"}),
+        lambda evidence: evidence.update(
+            {"holder_count": 1, "holder_identity_sha256": ["a" * 64]}
+        ),
+        lambda evidence: evidence.update({"holder_probe_state": "PROBE_ERROR"}),
+    ],
+)
+def test_released_different_backing_requires_each_release_predicate(
+    mutation: object,
+) -> None:
+    receipt = _released_different_backing_receipt()
+    evidence = receipt["cleanup"]["loop_release"][0]  # type: ignore[index]
+    mutation(evidence)  # type: ignore[operator]
+    assert loop_release_postcondition(evidence) is False
+    with pytest.raises(LifecycleGuardError, match="loop release evidence"):
+        validate_receipt(receipt)
+
+
+def test_released_different_backing_false_negative_is_rejected() -> None:
+    receipt = _released_different_backing_receipt()
+    phase = receipt["cleanup"]["phases"][7]  # type: ignore[index]
+    phase["postcondition"] = False
+    receipt["cleanup"]["classification"] = "cleanup_incomplete_bounded"  # type: ignore[index]
+    with pytest.raises(LifecycleGuardError, match="loop release evidence"):
+        validate_receipt(receipt)
+
+
+def test_shell_evaluates_released_different_backing_after_release_probe() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    cleanup = script.split("cleanup_controller() {", 1)[1].split(
+        "build_cleanup_json() {", 1
+    )[0]
+    condition = '[[ "$post_state" == "DIFFERENT_BACKING" ]]'
+    assert cleanup.count(condition) == 1
+    assert cleanup.index('release_probe="RELEASED"') < cleanup.index(condition)
+    assert '[[ "$released" == true ]]' in cleanup
+    assert '[[ "$loop_holder_count" -eq 0 ]]' in cleanup
+    assert '[[ "$loop_holder_probe_state" == "COMPLETE" ]]' in cleanup
 
 
 def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None:

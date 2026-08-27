@@ -317,7 +317,6 @@ cleanup_controller() {
       loop_timed_out=false; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && loop_timed_out=true
       classify_loop_stderr "$loop_stderr"
       post_state="$(loop_mapping_state "$loop" "$image")"
-      post=false; [[ "$post_state" == "ABSENT" ]] && post=true
       release_stdout="$(mktemp "$work/.loop-release.XXXXXX")"; release_stderr="$(mktemp "$work/.loop-release-stderr.XXXXXX")"
       chmod 600 "$release_stdout" "$release_stderr"
       set +e
@@ -329,6 +328,8 @@ cleanup_controller() {
       if [[ "$release_rc" -eq 0 && "$release_stdout_size" -eq 0 && "$release_stderr_size" -eq 0 ]]; then released=true; release_probe="RELEASED"; fi
       if [[ "$release_rc" -eq 0 && "$release_stdout_size" -gt 0 && "$release_stdout_size" -le 16384 && "$release_stderr_size" -le 16384 ]]; then release_probe="STILL_MAPPED"; fi
       rm -f -- "$release_stdout" "$release_stderr"
+      post=false
+      if [[ "$post_state" == "ABSENT" ]] || { [[ "$post_state" == "DIFFERENT_BACKING" ]] && [[ "$released" == true ]] && [[ "$release_probe" == "RELEASED" ]] && [[ "$loop_holder_count" -eq 0 ]] && [[ "$loop_holder_probe_state" == "COMPLETE" ]]; }; then post=true; fi
       append_loop_release "$number" "$precheck" "$post_state" "$released" "$release_probe"
     else
       attempted=false; rc=0; post=true; precheck="ABSENT"; post_state="ABSENT"; released=true

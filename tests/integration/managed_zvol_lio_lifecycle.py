@@ -414,6 +414,18 @@ def _read_safe_diagnostic(path: Path, *, expected_uid: int = 0) -> bytes:
     return raw
 
 
+def loop_release_postcondition(evidence: dict[str, Any]) -> bool:
+    if evidence.get("post_detach_state") == "ABSENT":
+        return True
+    return (
+        evidence.get("post_detach_state") == "DIFFERENT_BACKING"
+        and evidence.get("owned_image_released") is True
+        and evidence.get("release_probe_state") == "RELEASED"
+        and evidence.get("holder_count") == 0
+        and evidence.get("holder_probe_state") == "COMPLETE"
+    )
+
+
 def validate_receipt(document: object) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("schema_version") != 2:
         raise LifecycleGuardError("receipt schema is invalid")
@@ -695,8 +707,7 @@ def validate_receipt(document: object) -> dict[str, Any]:
             or not isinstance(evidence.get("stderr_size_bytes"), int)
             or isinstance(evidence.get("stderr_size_bytes"), bool)
             or not 0 <= evidence["stderr_size_bytes"] <= DIAGNOSTIC_LIMIT
-            or re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("stderr_sha256")))
-            is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("stderr_sha256"))) is None
             or evidence.get("post_detach_state") not in LOOP_RELEASE_POST_STATES
             or not isinstance(evidence.get("owned_image_released"), bool)
             or evidence.get("release_probe_state") not in LOOP_RELEASE_PROBE_STATES
@@ -723,8 +734,7 @@ def validate_receipt(document: object) -> dict[str, Any]:
             )
             or (
                 evidence["holder_probe_state"] == "COMPLETE"
-                and evidence["precheck"]
-                not in {"ORIGINAL_OWNED", "IDENTITY_CHANGED"}
+                and evidence["precheck"] not in {"ORIGINAL_OWNED", "IDENTITY_CHANGED"}
             )
             or (
                 evidence["holder_probe_state"] == "NOT_APPLICABLE"
@@ -756,10 +766,7 @@ def validate_receipt(document: object) -> dict[str, Any]:
                     or evidence["owned_image_released"] is True
                 )
             )
-            or (
-                phase["postcondition"]
-                is not (evidence["post_detach_state"] == "ABSENT")
-            )
+            or phase["postcondition"] is not loop_release_postcondition(evidence)
             or (
                 phase["status"] == "timeout"
                 and evidence["detach_timed_out"] is not True
