@@ -292,7 +292,7 @@ def helper(stage,work):
     invocation=paths[0].read_text("ascii").splitlines()
     if len(invocation)!=6 or invocation[0]!="F20HELPER\t1" or invocation[1]!="ARGC\t3" or invocation[2]!="ARGV0\t--root=/" or invocation[3]!="ARGV1\tdisable" or invocation[4]!="ARGV2\tiscsid" or invocation[5]!="ENV\tSYSTEMD_OFFLINE=1": raise SystemExit("F20 helper invocation is invalid")
     status_text=paths[3].read_text("ascii")
-    if not re.fullmatch(r"[0-9]{1,3}\\n",status_text) or int(status_text)>255: raise SystemExit("F20 helper status is invalid")
+    if not re.fullmatch(r"[0-9]{1,3}\n",status_text) or int(status_text)>255: raise SystemExit("F20 helper status is invalid")
     outputs={}
     for label,path in (("stdout",paths[1]),("stderr",paths[2])):
         raw=path.read_bytes()
@@ -7624,6 +7624,51 @@ Description: Backup program for disk arrays
             )
             helper_function = helper_namespace["helper"]
             self.assertTrue(callable(helper_function))
+            self.assertIn(
+                r're.fullmatch(r"[0-9]{1,3}\n",status_text)',
+                F20_SNAPSHOT_SCRIPT,
+            )
+            self.assertNotIn(
+                r're.fullmatch(r"[0-9]{1,3}\\n",status_text)',
+                F20_SNAPSHOT_SCRIPT,
+            )
+            status_patterns = [
+                value
+                for value in helper_function.__code__.co_consts
+                if isinstance(value, str) and value.startswith("[0-9]{1,3}")
+            ]
+            self.assertEqual(status_patterns, [r"[0-9]{1,3}\n"])
+
+            def status_is_valid(status: bytes) -> bool:
+                try:
+                    status_text = status.decode("ascii")
+                except UnicodeDecodeError:
+                    return False
+                return (
+                    re.fullmatch(status_patterns[0], status_text) is not None
+                    and int(status_text) <= 255
+                )
+
+            valid_statuses = (b"0\n", b"1\n", b"124\n", b"255\n")
+            invalid_statuses = {
+                "empty": b"",
+                "sign": b"-1\n",
+                "leading-space": b" 1\n",
+                "trailing-space": b"1 \n",
+                "crlf": b"1\r\n",
+                "missing-lf": b"1",
+                "extra-line": b"1\n2\n",
+                "literal-backslash-n": rb"0\n",
+                "too-many-digits": b"0000\n",
+                "non-ascii-digit": "\N{ARABIC-INDIC DIGIT ZERO}\n".encode(),
+                "above-255": b"256\n",
+            }
+            for status in valid_statuses:
+                self.assertTrue(status_is_valid(status), status)
+            for label, status in invalid_statuses.items():
+                with self.subTest(invalid_regex_status=label):
+                    self.assertFalse(status_is_valid(status))
+
             absent = helper_function("after", root)
             self.assertEqual(set(absent), {"invoked", "real_helper", "entry_guard"})
             self.assertIs(absent["invoked"], False)
@@ -7643,6 +7688,49 @@ Description: Backup program for disk arrays
                     with self.assertRaises(SystemExit):
                         helper_function("after", root)
                     evidence.unlink()
+
+            if os.name != "posix":
+                return
+
+            invocation = (
+                b"F20HELPER\t1\n"
+                b"ARGC\t3\n"
+                b"ARGV0\t--root=/\n"
+                b"ARGV1\tdisable\n"
+                b"ARGV2\tiscsid\n"
+                b"ENV\tSYSTEMD_OFFLINE=1\n"
+            )
+            evidence_paths = {
+                "invocation": root / "f20-helper-invocation.tsv",
+                "stdout": root / "f20-helper-stdout.bin",
+                "stderr": root / "f20-helper-stderr.bin",
+                "status": root / "f20-helper-status.txt",
+            }
+
+            def write_helper_evidence(status: bytes) -> None:
+                evidence_paths["invocation"].write_bytes(invocation)
+                evidence_paths["stdout"].write_bytes(b"")
+                evidence_paths["stderr"].write_bytes(b"")
+                evidence_paths["status"].write_bytes(status)
+                for path in evidence_paths.values():
+                    path.chmod(0o600)
+
+            for status in valid_statuses:
+                with self.subTest(valid_status=status):
+                    write_helper_evidence(status)
+                    observed = helper_function("after", root)
+                    self.assertIs(observed["invoked"], True)
+                    self.assertEqual(observed["status"], int(status))
+                    for path in evidence_paths.values():
+                        path.unlink()
+
+            for label, status in invalid_statuses.items():
+                with self.subTest(invalid_status=label):
+                    write_helper_evidence(status)
+                    with self.assertRaises((SystemExit, UnicodeDecodeError)):
+                        helper_function("after", root)
+                    for path in evidence_paths.values():
+                        path.unlink()
 
     def test_f21_capture_error_portable_contract_is_fail_closed(self) -> None:
         compile(F21_CAPTURE_ERROR_SCRIPT, "f21-capture-error.py", "exec")
@@ -8218,7 +8306,7 @@ Description: Backup program for disk arrays
         self.assertNotIn("str(f21),stage", F29_OUTER_RUNNER_SCRIPT)
         expected_script_hashes = {
             "F19": "4b8fe01485d8c5e97bcd525a07dbcac4b2240a15cf0751b44f30a5dff1d4cde2",
-            "F20": "99af83bf56dc9c7a9a1fc9690187825da0462338f13b61bda853b8b442c31c38",
+            "F20": "ed3c06580db1bf23fa9d4df4a86002cae13bee629a70f86a3354537219472603",
             "F21": "13366ef44f4065b716d42a3294d297bb8c77be7a46e61ae1093e1885a9ffdccd",
             "F29": "6d0c55cca01e2512a1234a42ebbfaba258e54edc88e55b47295f411a1faffc24",
             "F29_OUTER": "9c38bfc1da2751d99bc4a9785bbcce18a09f54210f903c29e23fc863a004e41a",
