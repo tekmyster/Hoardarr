@@ -98,6 +98,200 @@ F19_MOUNT_ROOTS = (
     "/var/lib/systemd",
     "/run/systemd",
 )
+F20_DIAGNOSTIC_SCHEMA = 1
+F20_DIAGNOSTIC_MAX_BYTES = 256 * 1024
+F20_OUTPUT_MAX_BYTES = 32 * 1024
+F20_SYSV_PATHS = (
+    "/etc/init.d/iscsid",
+    "/usr/lib/systemd/systemd-sysv-install",
+    "/usr/sbin/update-rc.d",
+    "/usr/sbin/invoke-rc.d",
+)
+F20_RC_DIRS = tuple(f"/etc/rc{level}.d" for level in (*range(7), "S"))
+F20_GENERATOR_ROOTS = (
+    "/run/systemd/generator",
+    "/run/systemd/generator.early",
+    "/run/systemd/generator.late",
+)
+
+
+def _f20_object(path: pathlib.Path) -> dict[str, object]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {"path": path.as_posix(), "type": "absent"}
+    if path.is_symlink():
+        kind = "symlink"
+    elif path.is_file():
+        kind = "regular"
+    elif path.is_dir():
+        kind = "directory"
+    else:
+        kind = "other"
+    record: dict[str, object] = {
+        "path": path.as_posix(),
+        "type": kind,
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "mode": format(metadata.st_mode & 0o7777, "04o"),
+        "size": metadata.st_size,
+    }
+    if kind == "symlink":
+        record["link_target"] = os.readlink(path)
+        resolved = path.resolve(strict=True)
+        if resolved.is_file() and not resolved.is_symlink():
+            record["resolved_sha256"] = hashlib.sha256(
+                resolved.read_bytes()
+            ).hexdigest()
+    elif kind == "regular":
+        record["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return record
+
+
+def _capture_f20_host_manifest() -> tuple[dict[str, object], str]:
+    records = [_f20_object(pathlib.Path(path)) for path in F20_SYSV_PATHS]
+    directories: list[dict[str, object]] = []
+    for raw in F20_RC_DIRS:
+        root = pathlib.Path(raw)
+        record = _f20_object(root)
+        entries = []
+        if root.is_dir() and not root.is_symlink():
+            for path in sorted(root.iterdir(), key=lambda item: item.name):
+                if "iscsid" not in path.name and "open-iscsi" not in path.name:
+                    continue
+                if len(entries) >= 32:
+                    raise AssertionError("F20 host SysV entry cap exceeded")
+                entries.append(_f20_object(path))
+        record["entries"] = entries
+        directories.append(record)
+    manifest = {"schema_version": 1, "objects": records, "rc_directories": directories}
+    encoded = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if len(encoded) > 128 * 1024:
+        raise AssertionError("F20 host manifest exceeds cap")
+    return manifest, hashlib.sha256(encoded).hexdigest()
+
+
+F20_SNAPSHOT_SCRIPT = r"""#!/usr/bin/python3
+from __future__ import annotations
+import base64, hashlib, json, os, pathlib, re, stat, subprocess, sys
+
+SCHEMA=1
+MAX_RECEIPT=256*1024
+MAX_CONTENT=64*1024
+MAX_OUTPUT=32*1024
+OBJECTS=("/etc/init.d/iscsid","/usr/lib/systemd/systemd-sysv-install","/usr/sbin/update-rc.d","/usr/sbin/invoke-rc.d")
+RC_DIRS=tuple(f"/etc/rc{x}.d" for x in (*range(7),"S"))
+GENERATORS=("/run/systemd/generator","/run/systemd/generator.early","/run/systemd/generator.late")
+SAFE_PACKAGE=re.compile(r"^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?$")
+
+def digest(path):
+    h=hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda:stream.read(1024*1024),b""): h.update(block)
+    return h.hexdigest()
+
+def classify(path,content=False):
+    try: metadata=path.lstat()
+    except FileNotFoundError: return {"path":str(path),"type":"absent","package":None}
+    mode=metadata.st_mode
+    kind="symlink" if stat.S_ISLNK(mode) else "regular" if stat.S_ISREG(mode) else "directory" if stat.S_ISDIR(mode) else "other"
+    row={"path":str(path),"type":kind,"uid":metadata.st_uid,"gid":metadata.st_gid,"mode":format(stat.S_IMODE(mode),"04o"),"size":metadata.st_size}
+    if kind=="symlink":
+        row["link_target"]=os.readlink(path)
+        resolved=path.resolve(strict=False)
+        row["resolved_path"]=str(resolved)
+        row["resolved_confined"]=any(resolved==root or root in resolved.parents for root in (pathlib.Path("/etc"),pathlib.Path("/usr")))
+    elif kind=="regular":
+        if metadata.st_size>MAX_CONTENT: raise SystemExit("F20 object exceeds cap")
+        row["sha256"]=digest(path)
+        if content: row["content_base64"]=base64.b64encode(path.read_bytes()).decode("ascii")
+    query=subprocess.run(["/usr/bin/dpkg-query","-S","--",str(path)],text=True,capture_output=True,check=False)
+    owners=[]
+    if query.returncode==0:
+        for raw in query.stdout.splitlines():
+            owner,separator,_=raw.partition(": ")
+            if not separator or not SAFE_PACKAGE.fullmatch(owner) or owner in owners: raise SystemExit("F20 package owner is unsafe or duplicated")
+            version=subprocess.run(["/usr/bin/dpkg-query","-W",f"-f=${{Status}}\\t${{Version}}\\n",owner],text=True,capture_output=True,check=False)
+            fields=version.stdout.rstrip("\n").split("\t")
+            if version.returncode!=0 or len(fields)!=2 or fields[0]!="install ok installed" or not fields[1] or len(fields[1])>128: raise SystemExit("F20 package version is invalid")
+            owners.append({"package":owner,"version":fields[1]})
+    elif query.returncode!=1: raise SystemExit("F20 package lookup status is invalid")
+    row["package"]=owners or None
+    return row
+
+def mount(path,source):
+    matches=[]
+    for raw in pathlib.Path("/proc/self/mountinfo").read_text().splitlines():
+        left,right=raw.split(" - ",1); fields=left.split(); point=fields[4].replace("\\040"," ")
+        if point==path: matches.append((fields,right.split()))
+    if len(matches)!=1: raise SystemExit(f"F20 private mount is missing or ambiguous: {path}")
+    fields,right=matches[0]; target=pathlib.Path(path); fixture=pathlib.Path(source)
+    return {"mountpoint":path,"mount_id":int(fields[0]),"root":fields[3],"filesystem_type":right[0],"source":right[1],"fixture_source":source,"fixture_identity":f"{fixture.stat().st_dev}:{fixture.stat().st_ino}","mountpoint_identity":f"{target.stat().st_dev}:{target.stat().st_ino}","bind_identity_matches":fixture.stat().st_dev==target.stat().st_dev and fixture.stat().st_ino==target.stat().st_ino}
+
+def entries(root):
+    output=[]
+    if root.is_dir() and not root.is_symlink():
+        for path in sorted(root.iterdir(),key=lambda item:item.name):
+            if "iscsid" not in path.name and "open-iscsi" not in path.name: continue
+            if len(output)>=32 or not re.fullmatch(r"[A-Za-z0-9_.@:+,-]+",path.name): raise SystemExit("F20 SysV entry is unsafe or excessive")
+            row=classify(path,content=True); row["name"]=path.name; output.append(row)
+    return output
+
+def helper(stage,work):
+    names=("f20-helper-invocation.tsv","f20-helper-stdout.bin","f20-helper-stderr.bin","f20-helper-status.txt")
+    paths=[work/name for name in names]
+    repeat=work/"f20-helper-repeat.txt"
+    real=work/"f20-helper-real"
+    source_hash=(work/"f20-helper-source.sha256").read_text("ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}",source_hash) or digest(real)!=source_hash: raise SystemExit("F20 copied helper identity is invalid")
+    identity={"path":str(real),"size":real.stat().st_size,"mode":format(stat.S_IMODE(real.stat().st_mode),"04o"),"sha256":source_hash}
+    if stage=="before":
+        if any(path.exists() or path.is_symlink() for path in (*paths,repeat)): raise SystemExit("F20 helper evidence exists before call")
+        return {"invoked":False,"real_helper":identity}
+    if repeat.exists() or repeat.is_symlink(): raise SystemExit("F20 helper was invoked more than once")
+    if not all(path.is_file() and not path.is_symlink() for path in paths): raise SystemExit("F20 helper evidence is incomplete")
+    for path in paths:
+        metadata=path.stat()
+        if stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_uid!=0 or metadata.st_gid!=0 or metadata.st_nlink!=1: raise SystemExit("F20 helper evidence metadata is invalid")
+    invocation=paths[0].read_text("ascii").splitlines()
+    if len(invocation)!=5 or invocation[0]!="F20HELPER\t1" or invocation[1]!="ARGC\t2" or invocation[2]!="ARGV0\tdisable" or invocation[3]!="ARGV1\tiscsid" or invocation[4]!="ENV\tSYSTEMD_OFFLINE=1": raise SystemExit("F20 helper invocation is invalid")
+    status_text=paths[3].read_text("ascii")
+    if not re.fullmatch(r"[0-9]{1,3}\\n",status_text) or int(status_text)>255: raise SystemExit("F20 helper status is invalid")
+    outputs={}
+    for label,path in (("stdout",paths[1]),("stderr",paths[2])):
+        raw=path.read_bytes()
+        if len(raw)>MAX_OUTPUT: raise SystemExit("F20 helper output exceeds cap")
+        first=raw.splitlines()[0].decode("utf-8","backslashreplace")[:240] if raw else ""
+        if any(ord(ch)<32 and ch not in "\\t" for ch in first): raise SystemExit("F20 helper first line is unsafe")
+        outputs[label]={"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest(),"safe_first_line":first,"content_base64":base64.b64encode(raw).decode("ascii")}
+    return {"invoked":True,"real_helper":identity,"argv":["disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_text),"invocation_sha256":digest(paths[0]),"outputs":outputs}
+
+def main():
+    if len(sys.argv)!=5: raise SystemExit("F20 snapshot argv invalid")
+    stage,output,work_arg,private_root=sys.argv[1:]
+    if stage not in {"before","after"}: raise SystemExit("F20 stage invalid")
+    work=pathlib.Path(work_arg); private=pathlib.Path(private_root); destination=pathlib.Path(output)
+    if destination.parent!=work or private.parent!=work or private.name!="f20-sysv": raise SystemExit("F20 fixture paths invalid")
+    objects=[classify(pathlib.Path(path),content=True) for path in OBJECTS]
+    rc=[{"path":path,"identity":classify(pathlib.Path(path)),"entries":entries(pathlib.Path(path))} for path in RC_DIRS]
+    generators=[]
+    for raw in GENERATORS:
+        root=pathlib.Path(raw); generators.append({"path":raw,"identity":classify(root),"entries":entries(root)})
+    mounts=[mount("/etc/init.d",str(private/"init.d"))]
+    mounts += [mount(path,str(private/pathlib.Path(path).name)) for path in RC_DIRS]
+    mounts.append(mount("/usr/lib/systemd/systemd-sysv-install",str(work/"f20-helper-wrapper")))
+    receipt={"schema_version":SCHEMA,"stage":stage,"objects":objects,"rc_directories":rc,"generators":generators,"mounts":mounts,"helper":helper(stage,work)}
+    encoded=(json.dumps(receipt,indent=2,sort_keys=True)+"\n").encode()
+    if len(encoded)>MAX_RECEIPT: raise SystemExit("F20 receipt exceeds cap")
+    partial=destination.with_suffix(destination.suffix+".partial")
+    if destination.exists() or partial.exists(): raise SystemExit("F20 receipt destination exists")
+    partial.write_bytes(encoded); os.chmod(partial,0o600); partial.replace(destination)
+    with destination.open("rb") as stream: os.fsync(stream.fileno())
+    return 0
+raise SystemExit(main())
+"""
 
 F19_SNAPSHOT_SCRIPT = r"""#!/usr/bin/python3
 from __future__ import annotations
@@ -1177,6 +1371,225 @@ def _validate_f19_command_trace(
         )
     )
     return sanitized + "\n", checks
+
+
+def _validate_f20_snapshot(
+    path: pathlib.Path, fixture_root: pathlib.Path, stage: str
+) -> tuple[dict[str, object], str]:
+    root = fixture_root.resolve(strict=True)
+    receipt_path = path.resolve(strict=True)
+    if receipt_path.parent != root or receipt_path.is_symlink():
+        raise AssertionError("F20 receipt escapes its fixture")
+    raw = receipt_path.read_bytes()
+    if not raw or len(raw) > F20_DIAGNOSTIC_MAX_BYTES or not raw.endswith(b"\n"):
+        raise AssertionError("F20 receipt framing/size is invalid")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssertionError("F20 receipt is not strict UTF-8 JSON") from exc
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "stage",
+        "objects",
+        "rc_directories",
+        "generators",
+        "mounts",
+        "helper",
+    }:
+        raise AssertionError("F20 receipt schema is not exact")
+    if receipt["schema_version"] != F20_DIAGNOSTIC_SCHEMA or receipt["stage"] != stage:
+        raise AssertionError("F20 receipt version/stage is invalid")
+
+    def validate_object(item: object, expected_path: str | None = None) -> None:
+        if not isinstance(item, dict) or item.get("type") not in {
+            "absent",
+            "regular",
+            "symlink",
+            "directory",
+        }:
+            raise AssertionError("F20 object type is invalid")
+        if expected_path is not None and item.get("path") != expected_path:
+            raise AssertionError("F20 object path is invalid")
+        packages = item.get("package")
+        if packages is not None:
+            if not isinstance(packages, list) or not 1 <= len(packages) <= 4:
+                raise AssertionError("F20 package ownership is invalid")
+            names = []
+            for owner in packages:
+                if (
+                    not isinstance(owner, dict)
+                    or set(owner) != {"package", "version"}
+                    or not re.fullmatch(
+                        r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?",
+                        str(owner["package"]),
+                    )
+                    or not isinstance(owner["version"], str)
+                    or not 1 <= len(owner["version"]) <= 128
+                ):
+                    raise AssertionError("F20 package identity is invalid")
+                names.append(owner["package"])
+            if names != list(dict.fromkeys(names)):
+                raise AssertionError("F20 package identity is duplicated")
+        if item["type"] == "regular":
+            if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
+                raise AssertionError("F20 regular object hash is invalid")
+            content = item.get("content_base64")
+            if content is not None:
+                try:
+                    decoded = __import__("base64").b64decode(
+                        str(content), validate=True
+                    )
+                except ValueError as exc:
+                    raise AssertionError("F20 object content is invalid") from exc
+                if (
+                    len(decoded) != item.get("size")
+                    or len(decoded) > 64 * 1024
+                    or hashlib.sha256(decoded).hexdigest() != item["sha256"]
+                ):
+                    raise AssertionError("F20 object content/hash is invalid")
+        if item["type"] == "symlink" and item.get("resolved_confined") is not True:
+            raise AssertionError("F20 symlink escapes fixed roots")
+
+    objects = receipt["objects"]
+    if not isinstance(objects, list) or len(objects) != len(F20_SYSV_PATHS):
+        raise AssertionError("F20 object coverage is incomplete")
+    for item, expected in zip(objects, F20_SYSV_PATHS, strict=True):
+        validate_object(item, expected)
+
+    rc_rows = receipt["rc_directories"]
+    if not isinstance(rc_rows, list) or len(rc_rows) != len(F20_RC_DIRS):
+        raise AssertionError("F20 rc-directory coverage is incomplete")
+    for row, expected in zip(rc_rows, F20_RC_DIRS, strict=True):
+        if not isinstance(row, dict) or set(row) != {"path", "identity", "entries"}:
+            raise AssertionError("F20 rc-directory schema is invalid")
+        if row["path"] != expected:
+            raise AssertionError("F20 rc-directory order is invalid")
+        validate_object(row["identity"], expected)
+        entries = row["entries"]
+        if not isinstance(entries, list) or len(entries) > 32:
+            raise AssertionError("F20 rc-directory entries are unbounded")
+        names = []
+        for item in entries:
+            validate_object(item)
+            name = str(item.get("name", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_.@:+,-]+", name):
+                raise AssertionError("F20 rc-entry name is unsafe")
+            names.append(name)
+        if names != sorted(set(names)):
+            raise AssertionError("F20 rc entries are duplicated or unsorted")
+
+    generators = receipt["generators"]
+    if not isinstance(generators, list) or len(generators) != len(F20_GENERATOR_ROOTS):
+        raise AssertionError("F20 generator coverage is incomplete")
+    for row, expected in zip(generators, F20_GENERATOR_ROOTS, strict=True):
+        if not isinstance(row, dict) or set(row) != {"path", "identity", "entries"}:
+            raise AssertionError("F20 generator schema is invalid")
+        if row["path"] != expected:
+            raise AssertionError("F20 generator order is invalid")
+        validate_object(row["identity"], expected)
+        if not isinstance(row["entries"], list) or len(row["entries"]) > 32:
+            raise AssertionError("F20 generator entries are unbounded")
+        names = []
+        for item in row["entries"]:
+            validate_object(item)
+            name = str(item.get("name", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_.@:+,-]+", name):
+                raise AssertionError("F20 generator entry name is unsafe")
+            names.append(name)
+        if names != sorted(set(names)):
+            raise AssertionError("F20 generator entries are duplicated or unsorted")
+
+    mounts = receipt["mounts"]
+    expected_mounts = [
+        "/etc/init.d",
+        *F20_RC_DIRS,
+        "/usr/lib/systemd/systemd-sysv-install",
+    ]
+    if (
+        not isinstance(mounts, list)
+        or [item.get("mountpoint") for item in mounts if isinstance(item, dict)]
+        != expected_mounts
+    ):
+        raise AssertionError("F20 private mount coverage/order is invalid")
+    for item in mounts:
+        if (
+            not isinstance(item, dict)
+            or item.get("bind_identity_matches") is not True
+            or not isinstance(item.get("mount_id"), int)
+            or item["mount_id"] <= 0
+        ):
+            raise AssertionError("F20 private mount identity is invalid")
+
+    helper = receipt["helper"]
+    if not isinstance(helper, dict) or not isinstance(helper.get("real_helper"), dict):
+        raise TypeError("F20 helper identity is missing")
+    real = helper["real_helper"]
+    if (
+        set(real) != {"path", "size", "mode", "sha256"}
+        or not re.fullmatch(r"[0-9a-f]{64}", str(real["sha256"]))
+        or not isinstance(real["size"], int)
+        or not 0 < real["size"] <= 64 * 1024
+    ):
+        raise AssertionError("F20 copied helper identity is invalid")
+    if stage == "before":
+        if set(helper) != {"invoked", "real_helper"} or helper["invoked"] is not False:
+            raise AssertionError("F20 helper was invoked before phase 12")
+    else:
+        if (
+            set(helper)
+            != {
+                "invoked",
+                "real_helper",
+                "argv",
+                "environment",
+                "status",
+                "invocation_sha256",
+                "outputs",
+            }
+            or helper["invoked"] is not True
+        ):
+            raise AssertionError("F20 helper invocation evidence is incomplete")
+        if helper["argv"] != ["disable", "iscsid"] or helper["environment"] != {
+            "SYSTEMD_OFFLINE": "1"
+        }:
+            raise AssertionError("F20 helper argv/environment changed")
+        if not isinstance(helper["status"], int) or not 0 <= helper["status"] <= 255:
+            raise AssertionError("F20 helper status is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(helper["invocation_sha256"])):
+            raise AssertionError("F20 invocation receipt hash is invalid")
+        outputs = helper["outputs"]
+        if not isinstance(outputs, dict) or set(outputs) != {"stdout", "stderr"}:
+            raise AssertionError("F20 helper outputs are incomplete")
+        for output in outputs.values():
+            if (
+                not isinstance(output, dict)
+                or set(output)
+                != {"size", "sha256", "safe_first_line", "content_base64"}
+                or not isinstance(output["size"], int)
+                or not 0 <= output["size"] <= F20_OUTPUT_MAX_BYTES
+                or not re.fullmatch(r"[0-9a-f]{64}", str(output["sha256"]))
+                or not isinstance(output["safe_first_line"], str)
+                or len(output["safe_first_line"]) > 240
+            ):
+                raise AssertionError("F20 helper output schema is invalid")
+            try:
+                decoded = __import__("base64").b64decode(
+                    str(output["content_base64"]), validate=True
+                )
+            except ValueError as exc:
+                raise AssertionError("F20 helper output encoding is invalid") from exc
+            if (
+                len(decoded) != output["size"]
+                or hashlib.sha256(decoded).hexdigest() != output["sha256"]
+            ):
+                raise AssertionError("F20 helper output identity is invalid")
+            if re.search(
+                rb"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|Authorization:[ \t]*Bearer|(?:token|password|secret)=\S+)",
+                decoded,
+                flags=re.IGNORECASE,
+            ):
+                raise AssertionError("F20 helper output contains secret-like material")
+    return receipt, hashlib.sha256(raw).hexdigest()
 
 
 def _pcp_phase_ten_with_causal_proof() -> str:
@@ -3943,6 +4356,13 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                 encoding="utf-8",
                 newline="\n",
             )
+            f20_snapshot = root / "f20-snapshot.py"
+            f20_snapshot.write_text(
+                F20_SNAPSHOT_SCRIPT,
+                encoding="utf-8",
+                newline="\n",
+            )
+            host_sysv_before, host_sysv_before_sha256 = _capture_f20_host_manifest()
 
             harness = root / "pcp-service-guard.sh"
             harness.write_text(
@@ -3972,9 +4392,10 @@ readback_validator="$6"
 readback_matrix="$7"
 f19_snapshot="$8"
 f19_finalizer_source="$9"
+f20_snapshot="${10}"
 trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
-mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install}
+mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install,f20-sysv/init.d}
 cp -a "$(command -v chroot)" "$work/usr-sbin/chroot"
 cp -a "$data/usr/lib/systemd/system/." "$work/vendor-units/" 2>/dev/null || {
     mkdir -p "$work/vendor-units"
@@ -4011,6 +4432,77 @@ mount --bind "$work/etc-systemd" /etc/systemd/system
 mount --bind "$work/systemd-state" /var/lib/systemd
 mount --bind "$work/run-systemd" /run/systemd
 mount --bind "$work/usr-sbin" /usr/sbin
+
+# Preserve the exact observed SysV objects while containing every possible
+# helper mutation in this private mount namespace.
+if [[ -e /etc/init.d/iscsid || -L /etc/init.d/iscsid ]]; then
+    cp -a -- /etc/init.d/iscsid "$work/f20-sysv/init.d/iscsid"
+fi
+for level in 0 1 2 3 4 5 6 S; do
+    private_rc="$work/f20-sysv/rc${level}.d"
+    source_rc="/etc/rc${level}.d"
+    mkdir -- "$private_rc"
+    if [[ -d "$source_rc" && ! -L "$source_rc" ]]; then
+        while IFS= read -r -d '' source_entry; do
+            cp -a -- "$source_entry" "$private_rc/"
+        done < <(find "$source_rc" -xdev -mindepth 1 -maxdepth 1 \
+            \( -name '*iscsid*' -o -name '*open-iscsi*' \) -print0)
+    fi
+done
+cp --dereference --preserve=mode,ownership,timestamps -- \
+    /usr/lib/systemd/systemd-sysv-install "$work/f20-helper-real"
+sha256sum -- "$work/f20-helper-real" | awk '{print $1}' \
+    >"$work/f20-helper-source.sha256"
+chmod 0600 -- "$work/f20-helper-source.sha256"
+cat >"$work/f20-helper-wrapper.body" <<'EOF'
+set -u
+umask 077
+if [[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]; then exit 125; fi
+[[ "${SYSTEMD_OFFLINE-}" == 1 && "${DPKG_MAINTSCRIPT_PACKAGE-}" == pcp && \
+    "${DPKG_MAINTSCRIPT_NAME-}" == postinst && "$PATH" == "__F20_PATH__" ]] || exit 125
+for evidence in "$evidence_root"/f20-helper-{invocation.tsv,stdout.bin,stderr.bin,status.txt}; do
+    if [[ -e "$evidence" || -L "$evidence" ]]; then
+        printf 'repeat\n' >"$evidence_root/f20-helper-repeat.txt"
+        chmod 0600 -- "$evidence_root/f20-helper-repeat.txt"
+        exit 124
+    fi
+done
+printf 'F20HELPER\t1\nARGC\t2\nARGV0\tdisable\nARGV1\tiscsid\nENV\tSYSTEMD_OFFLINE=1\n' \
+    >"$evidence_root/f20-helper-invocation.tsv" || exit 126
+chmod 0600 -- "$evidence_root/f20-helper-invocation.tsv" || exit 126
+"$real_helper" "$@" >"$evidence_root/f20-helper-stdout.bin.partial" \
+    2>"$evidence_root/f20-helper-stderr.bin.partial"
+helper_status=$?
+evidence_status=0
+for partial in "$evidence_root"/f20-helper-{stdout,stderr}.bin.partial; do
+    [[ -f "$partial" && ! -L "$partial" && "$(stat -c %s -- "$partial")" -le 32768 ]] || evidence_status=126
+    (( evidence_status != 0 )) || chmod 0600 -- "$partial" || evidence_status=126
+done
+(( evidence_status != 0 )) || mv -- "$evidence_root/f20-helper-stdout.bin.partial" "$evidence_root/f20-helper-stdout.bin" || evidence_status=126
+(( evidence_status != 0 )) || mv -- "$evidence_root/f20-helper-stderr.bin.partial" "$evidence_root/f20-helper-stderr.bin" || evidence_status=126
+(( evidence_status != 0 )) || printf '%s\n' "$helper_status" >"$evidence_root/f20-helper-status.txt" || evidence_status=126
+(( evidence_status != 0 )) || chmod 0600 -- "$evidence_root/f20-helper-status.txt" || evidence_status=126
+(( evidence_status != 0 )) || sync -f "$evidence_root/f20-helper-invocation.tsv" "$evidence_root/f20-helper-stdout.bin" \
+    "$evidence_root/f20-helper-stderr.bin" "$evidence_root/f20-helper-status.txt" || evidence_status=126
+if (( evidence_status != 0 )); then
+    rm -f -- "$evidence_root/f20-helper-status.txt"
+fi
+exit "$helper_status"
+EOF
+python3 - "$work/f20-helper-wrapper.body" "$work/f20-helper-wrapper" "$work" <<'PY'
+import pathlib, shlex, sys
+source=pathlib.Path(sys.argv[1]); destination=pathlib.Path(sys.argv[2]); work=pathlib.Path(sys.argv[3])
+body=source.read_text(encoding="utf-8")
+header="#!/bin/bash\nreadonly evidence_root="+shlex.quote(str(work))+"\nreadonly real_helper="+shlex.quote(str(work/"f20-helper-real"))+"\n"
+body=body.replace("__F20_PATH__",str(work/"wrappers")+":/usr/sbin:/usr/bin:/bin")
+destination.write_text(header+body,encoding="utf-8")
+PY
+chmod 0755 -- "$work/f20-helper-wrapper"
+mount --bind "$work/f20-sysv/init.d" /etc/init.d
+for level in 0 1 2 3 4 5 6 S; do
+    mount --bind "$work/f20-sysv/rc${level}.d" "/etc/rc${level}.d"
+done
+mount --bind "$work/f20-helper-wrapper" /usr/lib/systemd/systemd-sysv-install
 for command in dpkg-maintscript-helper touch chown groupadd useradd; do
     cat >"$work/wrappers/$command" <<'EOF'
 #!/bin/sh
@@ -4286,8 +4778,12 @@ f19_before="$work/f19-before.json"
 f19_after="$work/f19-after.json"
 f19_command_trace="$work/f19-command.trace"
 f19_capture_status_file="$work/f19-capture-status.txt"
+f20_before="$work/f20-before.json"
+f20_after="$work/f20-after.json"
+f20_capture_status_file="$work/f20-capture-status.txt"
 python3 "$f19_snapshot" before "$f19_before" "$f19_finalizer_source" \
     "$phase09_outcomes" "$f19_command_trace" 0 0 none none
+python3 "$f20_snapshot" before "$f20_before" "$work" "$work/f20-sysv"
 f19_capture_after_failure() {
     local original_status="$1"
     local original_line="$2"
@@ -4300,7 +4796,10 @@ f19_capture_after_failure() {
         "$phase09_outcomes" "$f19_command_trace" "$original_status" \
         "$original_line" "$original_function" "$original_command" || \
         capture_status=$?
+    python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv" || \
+        capture_status=$?
     printf '%s\n' "$capture_status" >"$f19_capture_status_file" || :
+    printf '%s\n' "$capture_status" >"$f20_capture_status_file" || :
     return 0
 }
 trap 'f19_status=$?; f19_line=$LINENO; f19_function=${FUNCNAME[0]:-main}; f19_command=$BASH_COMMAND; f19_capture_after_failure "$f19_status" "$f19_line" "$f19_function" "$f19_command"; trace_failure "$f19_status" "$f19_line"' ERR
@@ -4313,6 +4812,8 @@ set -x
 disable_unmasked_units
 set +x
 exec 19>&-
+python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv"
+printf '0\n' >"$f20_capture_status_file"
 trap 'trace_failure "$?" "$LINENO"' ERR
 [[ "$denied_units_finalized" == true ]]
 [[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq "${#denied_units[@]}" ]]
@@ -4477,6 +4978,7 @@ exit 0
                             str(readback_matrix),
                             str(f19_snapshot),
                             str(finalizer_source),
+                            str(f20_snapshot),
                         ],
                         text=True,
                         capture_output=True,
@@ -4508,6 +5010,9 @@ exit 0
             trace_text, trace_status = _validate_pcp_trace(
                 trace_path, root, namespace_path
             )
+            host_sysv_after, host_sysv_after_sha256 = _capture_f20_host_manifest()
+            self.assertEqual(host_sysv_after, host_sysv_before)
+            self.assertEqual(host_sysv_after_sha256, host_sysv_before_sha256)
             if ownership_error is not None:
                 self.fail(
                     f"namespace ownership cleanup failed: {ownership_error}\n{trace_text}"
@@ -4568,6 +5073,60 @@ exit 0
             capture_status_path = namespace_path / "f19-capture-status.txt"
             self.assertTrue(capture_status_path.is_file())
             self.assertEqual(capture_status_path.read_text(encoding="ascii"), "0\n")
+            f20_capture_status = namespace_path / "f20-capture-status.txt"
+            self.assertTrue(f20_capture_status.is_file())
+            self.assertEqual(f20_capture_status.read_text(encoding="ascii"), "0\n")
+            f20_before_receipt, f20_before_sha256 = _validate_f20_snapshot(
+                namespace_path / "f20-before.json", namespace_path, "before"
+            )
+            f20_after_receipt, f20_after_sha256 = _validate_f20_snapshot(
+                namespace_path / "f20-after.json", namespace_path, "after"
+            )
+            self.assertEqual(f20_before_receipt["mounts"], f20_after_receipt["mounts"])
+            self.assertEqual(
+                f20_before_receipt["helper"]["real_helper"],
+                f20_after_receipt["helper"]["real_helper"],
+            )
+            identity_keys = {
+                "path",
+                "type",
+                "uid",
+                "gid",
+                "mode",
+                "size",
+                "link_target",
+                "sha256",
+            }
+
+            def identity(item: dict[str, object]) -> dict[str, object]:
+                return {key: item[key] for key in identity_keys if key in item}
+
+            host_objects = {item["path"]: item for item in host_sysv_before["objects"]}
+            private_objects = {
+                item["path"]: item for item in f20_before_receipt["objects"]
+            }
+            self.assertEqual(
+                identity(private_objects["/etc/init.d/iscsid"]),
+                identity(host_objects["/etc/init.d/iscsid"]),
+            )
+            self.assertEqual(
+                f20_before_receipt["helper"]["real_helper"]["sha256"],
+                host_objects["/usr/lib/systemd/systemd-sysv-install"].get(
+                    "sha256",
+                    host_objects["/usr/lib/systemd/systemd-sysv-install"].get(
+                        "resolved_sha256"
+                    ),
+                ),
+            )
+            host_rc = {
+                row["path"]: [identity(item) for item in row["entries"]]
+                for row in host_sysv_before["rc_directories"]
+            }
+            private_rc = {
+                row["path"]: [identity(item) for item in row["entries"]]
+                for row in f20_before_receipt["rc_directories"]
+            }
+            self.assertEqual(private_rc, host_rc)
             before_receipt, before_sha256 = _validate_f19_snapshot(
                 namespace_path / "f19-before.json",
                 namespace_path,
@@ -4636,11 +5195,61 @@ exit 0
                 "command_trace": after_receipt["command_trace"],
                 "command_checks": command_checks,
             }
+            f20_helper = f20_after_receipt["helper"]
+            assert isinstance(f20_helper, dict)
+            f20_outputs = f20_helper["outputs"]
+            assert isinstance(f20_outputs, dict)
+            f20_sanitized = {
+                "schema_version": F20_DIAGNOSTIC_SCHEMA,
+                "host_manifest_sha256": host_sysv_after_sha256,
+                "before_sha256": f20_before_sha256,
+                "after_sha256": f20_after_sha256,
+                "objects": [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key != "content_base64"
+                    }
+                    for item in f20_after_receipt["objects"]
+                ],
+                "mounts": f20_after_receipt["mounts"],
+                "rc_directories": [
+                    {
+                        "path": row["path"],
+                        "identity": row["identity"],
+                        "entries": [
+                            {
+                                key: value
+                                for key, value in item.items()
+                                if key != "content_base64"
+                            }
+                            for item in row["entries"]
+                        ],
+                    }
+                    for row in f20_after_receipt["rc_directories"]
+                ],
+                "generators": f20_after_receipt["generators"],
+                "helper": {
+                    key: value for key, value in f20_helper.items() if key != "outputs"
+                }
+                | {
+                    "outputs": {
+                        label: {
+                            key: value
+                            for key, value in output.items()
+                            if key != "content_base64"
+                        }
+                        for label, output in f20_outputs.items()
+                    }
+                },
+            }
             f19_diagnostic = (
                 "\nVALIDATED F19 SANITIZED DIAGNOSTIC\n"
                 + json.dumps(sanitized, indent=2, sort_keys=True)
                 + "\nVALIDATED F19 COMMAND TRACE\n"
                 + command_diagnostic
+                + "\nVALIDATED F20 SANITIZED DIAGNOSTIC\n"
+                + json.dumps(f20_sanitized, indent=2, sort_keys=True)
             )
         self.assertEqual(
             result.returncode,
@@ -5339,6 +5948,164 @@ Description: Backup program for disk arrays
                     )
                     with self.assertRaises(AssertionError):
                         _validate_f19_command_trace(trace, root, candidate_hash)
+
+    def test_f20_sysv_diagnostic_scope_and_receipt_are_fail_closed(self) -> None:
+        payload = ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+        verifier = ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
+        self.assertEqual(
+            hashlib.sha256(payload.read_bytes()).hexdigest(),
+            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+        )
+        self.assertEqual(
+            hashlib.sha256(verifier.read_bytes()).hexdigest(),
+            "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        )
+        compile(F20_SNAPSHOT_SCRIPT, "f20-snapshot.py", "exec")
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        phase12 = source.split(
+            "trace_begin 12-final-disable-readback final-disable-readback\n", 1
+        )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
+        self.assertEqual(phase12.count("\ndisable_unmasked_units\n"), 1)
+        self.assertIn("set -x\ndisable_unmasked_units\nset +x", phase12)
+        self.assertNotRegex(
+            phase12,
+            r"(?:if|until|while)\s+disable_unmasked_units|disable_unmasked_units\s*(?:\|\||&&)",
+        )
+        wrapper = source.split("cat >\"$work/f20-helper-wrapper.body\" <<'EOF'\n", 1)[
+            1
+        ].split("\nEOF\n", 1)[0]
+        for exact in (
+            '[[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]',
+            '"$real_helper" "$@"',
+            "helper_status=$?",
+            'exit "$helper_status"',
+            "SYSTEMD_OFFLINE=1",
+        ):
+            self.assertIn(exact, wrapper)
+        self.assertEqual(wrapper.count('"$real_helper" "$@"'), 1)
+        self.assertNotIn("systemctl", wrapper)
+        self.assertNotIn("eval", wrapper)
+
+        absent_objects = [
+            {"path": path, "type": "absent", "package": None} for path in F20_SYSV_PATHS
+        ]
+        absent_rc = [
+            {
+                "path": path,
+                "identity": {"path": path, "type": "absent", "package": None},
+                "entries": [],
+            }
+            for path in F20_RC_DIRS
+        ]
+        absent_generators = [
+            {
+                "path": path,
+                "identity": {"path": path, "type": "absent", "package": None},
+                "entries": [],
+            }
+            for path in F20_GENERATOR_ROOTS
+        ]
+        mounts = [
+            {
+                "mountpoint": path,
+                "mount_id": index + 1,
+                "root": "/",
+                "filesystem_type": "tmpfs",
+                "source": "tmpfs",
+                "fixture_source": f"/fixture/{index}",
+                "fixture_identity": f"1:{index + 1}",
+                "mountpoint_identity": f"1:{index + 1}",
+                "bind_identity_matches": True,
+            }
+            for index, path in enumerate(
+                [
+                    "/etc/init.d",
+                    *F20_RC_DIRS,
+                    "/usr/lib/systemd/systemd-sysv-install",
+                ]
+            )
+        ]
+        empty_hash = hashlib.sha256(b"").hexdigest()
+        receipt = {
+            "schema_version": 1,
+            "stage": "after",
+            "objects": absent_objects,
+            "rc_directories": absent_rc,
+            "generators": absent_generators,
+            "mounts": mounts,
+            "helper": {
+                "invoked": True,
+                "real_helper": {
+                    "path": "/fixture/helper",
+                    "size": 1,
+                    "mode": "0755",
+                    "sha256": "1" * 64,
+                },
+                "argv": ["disable", "iscsid"],
+                "environment": {"SYSTEMD_OFFLINE": "1"},
+                "status": 1,
+                "invocation_sha256": "2" * 64,
+                "outputs": {
+                    label: {
+                        "size": 0,
+                        "sha256": empty_hash,
+                        "safe_first_line": "",
+                        "content_base64": "",
+                    }
+                    for label in ("stdout", "stderr")
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            candidate = root / "f20-after.json"
+
+            def write(document: dict[str, object]) -> None:
+                candidate.write_text(
+                    json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
+                )
+
+            write(receipt)
+            _validate_f20_snapshot(candidate, root, "after")
+            mutations = {
+                "schema": {**receipt, "schema_version": 2},
+                "wrong-path": {
+                    **receipt,
+                    "objects": [
+                        {**absent_objects[0], "path": "/etc/init.d/other"},
+                        *absent_objects[1:],
+                    ],
+                },
+                "mount-drift": {
+                    **receipt,
+                    "mounts": [
+                        {**mounts[0], "bind_identity_matches": False},
+                        *mounts[1:],
+                    ],
+                },
+                "argv": {
+                    **receipt,
+                    "helper": {**receipt["helper"], "argv": ["enable", "iscsid"]},
+                },
+                "unbounded": {
+                    **receipt,
+                    "helper": {
+                        **receipt["helper"],
+                        "outputs": {
+                            **receipt["helper"]["outputs"],
+                            "stderr": {
+                                **receipt["helper"]["outputs"]["stderr"],
+                                "size": F20_OUTPUT_MAX_BYTES + 1,
+                            },
+                        },
+                    },
+                },
+            }
+            for label, mutation in mutations.items():
+                with self.subTest(label=label):
+                    write(mutation)
+                    with self.assertRaises(AssertionError):
+                        _validate_f20_snapshot(candidate, root, "after")
 
     def test_actual_install_argv_executes_exact_production_fragment(self) -> None:
         payload = (
