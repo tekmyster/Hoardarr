@@ -7301,7 +7301,8 @@ Description: Backup program for disk arrays
             )
             output = work / "f21-capture-error.json"
             attempt = work / "f29-f21-attempt.json"
-            source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            baseline_source = source.read_bytes()
+            source_sha256 = hashlib.sha256(baseline_source).hexdigest()
             command = [
                 "sudo",
                 "-n",
@@ -7343,43 +7344,58 @@ Description: Backup program for disk arrays
                 ),
                 before,
             )
-            for label, mutate in (
-                ("source-drift", lambda: source.write_text("x", encoding="ascii")),
-                ("output-collision", lambda: output.write_bytes(b"preserved\n")),
-            ):
-                with self.subTest(mutation=label):
-                    case = root / label
-                    case.mkdir()
-                    stderr_path = case / "f20-after.stderr"
-                    stderr_path.write_bytes(b"F20 bounded fixture failure\n")
-                    stderr_path.chmod(0o600)
-                    subprocess.run(
-                        ["sudo", "-n", "chown", "0:0", "--", str(stderr_path)],
-                        check=True,
-                    )
-                    candidate_output = case / "f21-capture-error.json"
-                    candidate_attempt = case / "f29-f21-attempt.json"
-                    if label == "output-collision":
-                        candidate_output.write_bytes(b"preserved\n")
-                    altered = [
-                        "sudo",
-                        "-n",
-                        sys.executable,
-                        str(runner),
-                        "f20-after",
-                        "1",
-                        str(stderr_path),
-                        str(source),
-                        str(candidate_output),
-                        str(candidate_attempt),
-                        str(case),
-                        source_sha256,
-                    ]
-                    rejected = subprocess.run(
-                        altered, text=True, capture_output=True, check=False
-                    )
-                    self.assertNotEqual(rejected.returncode, 0)
-                    self.assertFalse(candidate_attempt.exists())
+            try:
+                for label in ("source-drift", "output-collision"):
+                    with self.subTest(mutation=label):
+                        if label == "source-drift":
+                            source.write_bytes(b"x\n")
+                            self.assertNotEqual(
+                                hashlib.sha256(source.read_bytes()).hexdigest(),
+                                source_sha256,
+                            )
+                        else:
+                            source.write_bytes(baseline_source)
+                            self.assertEqual(
+                                hashlib.sha256(source.read_bytes()).hexdigest(),
+                                source_sha256,
+                            )
+                        case = root / label
+                        case.mkdir()
+                        stderr_path = case / "f20-after.stderr"
+                        stderr_path.write_bytes(b"F20 bounded fixture failure\n")
+                        stderr_path.chmod(0o600)
+                        subprocess.run(
+                            ["sudo", "-n", "chown", "0:0", "--", str(stderr_path)],
+                            check=True,
+                        )
+                        candidate_output = case / "f21-capture-error.json"
+                        candidate_attempt = case / "f29-f21-attempt.json"
+                        if label == "output-collision":
+                            candidate_output.write_bytes(b"preserved\n")
+                        altered = [
+                            "sudo",
+                            "-n",
+                            sys.executable,
+                            str(runner),
+                            "f20-after",
+                            "1",
+                            str(stderr_path),
+                            str(source),
+                            str(candidate_output),
+                            str(candidate_attempt),
+                            str(case),
+                            source_sha256,
+                        ]
+                        rejected = subprocess.run(
+                            altered, text=True, capture_output=True, check=False
+                        )
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertFalse(candidate_attempt.exists())
+            finally:
+                source.write_bytes(baseline_source)
+                self.assertEqual(
+                    hashlib.sha256(source.read_bytes()).hexdigest(), source_sha256
+                )
 
     def test_f23_instrumentation_preserves_the_single_systemctl_call(self) -> None:
         payload = (
