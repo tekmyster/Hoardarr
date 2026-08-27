@@ -2171,6 +2171,34 @@ F29_OUTER_CLASSES = {
     "PYTHON_EXCEPTION_SANITIZED",
     "UNCLASSIFIED_BOUNDED",
 }
+F29_DIRECT_OUTPUT_MAX_BYTES = 8 * 1024
+F29_DIRECT_STATUS_MAX_BYTES = 4
+F29_DIRECT_SECRET_PATTERN = re.compile(
+    rb"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|"
+    rb"github_pat_[A-Za-z0-9_]{20,}|Authorization:[ \t]*Bearer|"
+    rb"(?:token|password|secret)=\S+)",
+    re.IGNORECASE,
+)
+F29_DIRECT_STREAM_CLASSES = {
+    "EMPTY",
+    "OUTER_GUARD",
+    "PERMISSION_DENIED",
+    "ENCODING_INVALID",
+    "FRAMING_INVALID",
+    "UNSAFE_OR_TRUNCATED",
+    "PYTHON_EXCEPTION_SANITIZED",
+    "UNCLASSIFIED_BOUNDED",
+}
+F29_DIRECT_OUTER_GUARDS = {
+    "F29 outer argv invalid",
+    "F29 outer stage or digest is invalid",
+    "F29 outer path identity is invalid",
+    "F29 outer required path is unavailable",
+    "F29 outer required path metadata is invalid",
+    "F29 outer source or receipt identity is invalid",
+    "F29 outer receipt exceeds cap",
+    "F29 outer receipt already exists",
+}
 
 
 def _validate_f29_f21_attempt(
@@ -2289,6 +2317,105 @@ def _validate_f29_outer_receipt(
         if not re.fullmatch(r"[0-9a-f]{64}", str(receipt[key])):
             raise AssertionError("F29 outer receipt output digest is invalid")
     return receipt, hashlib.sha256(raw).hexdigest()
+
+
+def _classify_f29_direct_stream(raw: bytes) -> str:
+    if not raw:
+        return "EMPTY"
+    if len(raw) > F29_DIRECT_OUTPUT_MAX_BYTES or F29_DIRECT_SECRET_PATTERN.search(raw):
+        return "UNSAFE_OR_TRUNCATED"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "ENCODING_INVALID"
+    if text.count("\n") != 1 or not text.endswith("\n") or "\r" in text:
+        return "FRAMING_INVALID"
+    message = text[:-1]
+    if message in F29_DIRECT_OUTER_GUARDS:
+        return "OUTER_GUARD"
+    if "Permission denied" in message:
+        return "PERMISSION_DENIED"
+    if "Traceback" in message or "Exception" in message:
+        return "PYTHON_EXCEPTION_SANITIZED"
+    if "/" in message or "\\" in message:
+        return "UNSAFE_OR_TRUNCATED"
+    return "UNCLASSIFIED_BOUNDED"
+
+
+def _validate_f29_direct_capture(
+    fixture_root: pathlib.Path, stage: str
+) -> dict[str, object]:
+    if stage not in {"f19-after", "f20-after"}:
+        raise AssertionError("F29 direct capture stage is invalid")
+    prefix = f"f29-direct-{stage}"
+    status_raw = _read_strict_root_file(
+        fixture_root / f"{prefix}.status",
+        fixture_root,
+        expected_name=f"{prefix}.status",
+        max_bytes=F29_DIRECT_STATUS_MAX_BYTES,
+    )
+    if not re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", status_raw):
+        raise AssertionError("F29 direct capture status is invalid")
+    status = int(status_raw[:-1])
+    if status > 255:
+        raise AssertionError("F29 direct capture status is out of range")
+    streams: dict[str, dict[str, object]] = {}
+    for label in ("stdout", "stderr"):
+        raw = _read_strict_root_file(
+            fixture_root / f"{prefix}.{label}",
+            fixture_root,
+            expected_name=f"{prefix}.{label}",
+            max_bytes=F29_DIRECT_OUTPUT_MAX_BYTES,
+        )
+        classification = _classify_f29_direct_stream(raw)
+        if classification not in F29_DIRECT_STREAM_CLASSES:
+            raise AssertionError("F29 direct capture stream class is invalid")
+        streams[label] = {
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "classification": classification,
+        }
+    return {
+        "stage": stage,
+        "attempted": True,
+        "exit_status": status,
+        "completed_status_record": True,
+        "timed_out": False,
+        "streams": streams,
+    }
+
+
+def _format_f29_direct_captures(captures: list[dict[str, object]]) -> str:
+    expected_stages = ["f19-after", "f20-after"]
+    stages = [str(capture["stage"]) for capture in captures]
+    if not captures or stages != expected_stages[: len(captures)]:
+        raise AssertionError("F29 direct capture order is invalid")
+    fields: list[str] = []
+    for capture in captures:
+        streams = capture["streams"]
+        if (
+            capture["attempted"] is not True
+            or capture["completed_status_record"] is not True
+            or capture["timed_out"] is not False
+            or not isinstance(streams, dict)
+        ):
+            raise AssertionError("F29 direct capture values are invalid")
+        fields.append(
+            "stage={stage} attempted=true exit_status={status} timed_out=false "
+            "stdout_size={stdout_size} stdout_sha256={stdout_sha} "
+            "stdout_class={stdout_class} stderr_size={stderr_size} "
+            "stderr_sha256={stderr_sha} stderr_class={stderr_class}".format(
+                stage=capture["stage"],
+                status=capture["exit_status"],
+                stdout_size=streams["stdout"]["size"],
+                stdout_sha=streams["stdout"]["sha256"],
+                stdout_class=streams["stdout"]["classification"],
+                stderr_size=streams["stderr"]["size"],
+                stderr_sha=streams["stderr"]["sha256"],
+                stderr_class=streams["stderr"]["classification"],
+            )
+        )
+    return f"F29 direct outer invocations: count={len(captures)} " + " | ".join(fields)
 
 
 def _pcp_phase_ten_with_causal_proof() -> str:
@@ -5596,6 +5723,34 @@ f21_capture_error_receipt="$work/f21-capture-error.json"
 f29_f21_attempt_receipt="$work/f29-f21-attempt.json"
 f29_outer_f19_receipt="$work/f29-outer-f19-after.json"
 f29_outer_f20_receipt="$work/f29-outer-f20-after.json"
+capture_f29_outer_invocation() {
+    local stage="$1"
+    local snapshot_status="$2"
+    local snapshot_stderr="$3"
+    local receipt="$4"
+    local capture_prefix="$work/f29-direct-$stage"
+    local capture_stdout="$capture_prefix.stdout"
+    local capture_stderr="$capture_prefix.stderr"
+    local capture_status="$capture_prefix.status"
+    local outer_status=0
+    [[ ! -e "$capture_stdout" && ! -L "$capture_stdout" ]]
+    [[ ! -e "$capture_stderr" && ! -L "$capture_stderr" ]]
+    [[ ! -e "$capture_status" && ! -L "$capture_status" ]]
+    install -m 0600 -- /dev/null "$capture_stdout"
+    install -m 0600 -- /dev/null "$capture_stderr"
+    install -m 0600 -- /dev/null "$capture_status"
+    (
+        ulimit -f 16
+        python3 "$f29_outer_runner" "$stage" "$snapshot_status" \
+            "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
+            "$f29_f21_attempt_receipt" "$work" "$f21_capture_error_sha256" \
+            "$f29_f21_runner" "$f29_f21_runner_sha256" "$receipt" \
+            >"$capture_stdout" 2>"$capture_stderr"
+    ) || outer_status=$?
+    printf '%s\n' "$outer_status" >"$capture_status"
+    chmod 0600 -- "$capture_stdout" "$capture_stderr" "$capture_status"
+    return 0
+}
 python3 "$f19_snapshot" before "$f19_before" "$f19_finalizer_source" \
     "$phase09_outcomes" "$f19_command_trace" 0 0 none none
 python3 "$f20_snapshot" before "$f20_before" "$work" "$work/f20-sysv"
@@ -5625,10 +5780,8 @@ f19_capture_after_failure() {
         fi
     fi
     if (( snapshot_status != 0 )); then
-        python3 "$f29_outer_runner" f19-after "$snapshot_status" \
-            "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
-            "$f29_f21_attempt_receipt" "$work" "$f21_capture_error_sha256" \
-            "$f29_f21_runner" "$f29_f21_runner_sha256" "$f29_outer_f19_receipt" || :
+        capture_f29_outer_invocation f19-after "$snapshot_status" \
+            "$snapshot_stderr" "$f29_outer_f19_receipt"
         capture_status="$snapshot_status"
     fi
     snapshot_status=0
@@ -5647,10 +5800,8 @@ f19_capture_after_failure() {
     fi
     if (( snapshot_status != 0 )); then
         if [[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]; then
-            python3 "$f29_outer_runner" f20-after "$snapshot_status" \
-                "$snapshot_stderr" "$f21_capture_error" "$f21_capture_error_receipt" \
-                "$f29_f21_attempt_receipt" "$work" "$f21_capture_error_sha256" \
-                "$f29_f21_runner" "$f29_f21_runner_sha256" "$f29_outer_f20_receipt" || :
+            capture_f29_outer_invocation f20-after "$snapshot_status" \
+                "$snapshot_stderr" "$f29_outer_f20_receipt"
         fi
         (( capture_status != 0 )) || capture_status="$snapshot_status"
     fi
@@ -5830,6 +5981,8 @@ exit 0
             precleanup_f29_attempt_failure: AssertionError | None = None
             precleanup_f29_outer: list[tuple[dict[str, object], str]] = []
             precleanup_f29_outer_failure: AssertionError | None = None
+            precleanup_f29_direct: list[dict[str, object]] = []
+            precleanup_f29_direct_failure: AssertionError | None = None
             f23_outputs: dict[str, dict[str, object]] | None = None
             f23_output_failure: AssertionError | None = None
             manager_receipt_diagnostic = ""
@@ -5904,6 +6057,22 @@ exit 0
                                 )
                             except AssertionError as exc:
                                 precleanup_f29_outer_failure = exc
+                    for outer_stage in ("f19-after", "f20-after"):
+                        direct_status_path = (
+                            namespace_path / f"f29-direct-{outer_stage}.status"
+                        )
+                        if (
+                            direct_status_path.exists()
+                            or direct_status_path.is_symlink()
+                        ):
+                            try:
+                                precleanup_f29_direct.append(
+                                    _validate_f29_direct_capture(
+                                        namespace_path, outer_stage
+                                    )
+                                )
+                            except AssertionError as exc:
+                                precleanup_f29_direct_failure = exc
                     try:
                         f23_outputs = {
                             "stdout": _validate_f23_systemctl_output(
@@ -6028,6 +6197,16 @@ exit 0
                         f"attempt_exists={outer['attempt_exists']} "
                         f"output_exists={outer['output_exists']} "
                         f"receipt_sha256={outer_sha256}\n{trace_text}"
+                    )
+                if precleanup_f29_direct_failure is not None:
+                    self.fail(
+                        "F29 direct outer invocation capture is invalid: "
+                        f"{precleanup_f29_direct_failure}\n{trace_text}"
+                    )
+                if precleanup_f29_direct:
+                    self.fail(
+                        f"{_format_f29_direct_captures(precleanup_f29_direct)}\n"
+                        f"{trace_text}"
                     )
                 if precleanup_capture_error_failure is not None:
                     self.fail(
@@ -7510,11 +7689,66 @@ Description: Backup program for disk arrays
                     expected_source,
                 )
 
+        valid_direct = (b"9\n", b"", b"F29 outer path identity is invalid\n")
+        with mock.patch(f"{__name__}._read_strict_root_file", side_effect=valid_direct):
+            direct = _validate_f29_direct_capture(pathlib.Path("fixture"), "f19-after")
+        self.assertEqual(direct["stage"], "f19-after")
+        self.assertIs(direct["attempted"], True)
+        self.assertEqual(direct["exit_status"], 9)
+        self.assertIs(direct["completed_status_record"], True)
+        self.assertFalse(direct["timed_out"])
+        self.assertEqual(direct["streams"]["stdout"]["classification"], "EMPTY")
+        self.assertEqual(direct["streams"]["stderr"]["classification"], "OUTER_GUARD")
+        for label, values in {"status": (b"256\n", b"", b"")}.items():
+            with (
+                self.subTest(direct_capture=label),
+                mock.patch(f"{__name__}._read_strict_root_file", side_effect=values),
+                self.assertRaises(AssertionError),
+            ):
+                _validate_f29_direct_capture(pathlib.Path("fixture"), "f19-after")
+        for label, raw in {
+            "secret": b"token=not-a-real-test-value\n",
+            "multiline": b"one\ntwo\n",
+            "encoding": b"\xff",
+            "oversize": b"x" * (F29_DIRECT_OUTPUT_MAX_BYTES + 1),
+        }.items():
+            with self.subTest(direct_stream=label):
+                self.assertEqual(
+                    _classify_f29_direct_stream(raw),
+                    "UNSAFE_OR_TRUNCATED"
+                    if label in {"secret", "oversize"}
+                    else "FRAMING_INVALID"
+                    if label == "multiline"
+                    else "ENCODING_INVALID",
+                )
+        self.assertEqual(
+            _classify_f29_direct_stream(b"/private/fixture/path\n"),
+            "UNSAFE_OR_TRUNCATED",
+        )
+        with self.assertRaises(AssertionError):
+            _validate_f29_direct_capture(pathlib.Path("fixture"), "../escape")
+        f20_direct = {**direct, "stage": "f20-after"}
+        formatted = _format_f29_direct_captures([direct, f20_direct])
+        self.assertTrue(formatted.startswith("F29 direct outer invocations: count=2 "))
+        self.assertLess(
+            formatted.index("stage=f19-after"), formatted.index("stage=f20-after")
+        )
+        self.assertNotIn("fixture", formatted)
+        for malformed in (
+            [],
+            [f20_direct, direct],
+            [{**direct, "completed_status_record": False}],
+            [{**direct, "timed_out": True}],
+        ):
+            with self.assertRaises(AssertionError):
+                _format_f29_direct_captures(malformed)
+
         source = pathlib.Path(__file__).read_text(encoding="utf-8")
         phase12 = source.split(
             "trace_begin 12-final-disable-readback final-disable-readback\n", 1
         )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
-        self.assertEqual(phase12.count('python3 "$f29_outer_runner"'), 2)
+        self.assertEqual(phase12.count('python3 "$f29_outer_runner"'), 1)
+        self.assertEqual(phase12.count("capture_f29_outer_invocation"), 3)
         self.assertEqual(phase12.count('python3 "$f29_f21_runner"'), 0)
         self.assertNotIn('python3 "$f21_capture_error" f19-after', phase12)
         self.assertNotIn('python3 "$f21_capture_error" f20-after', phase12)
@@ -7715,7 +7949,7 @@ Description: Backup program for disk arrays
     @unittest.skipIf(sys.platform == "win32", "requires Bash subprocess coverage")
     def test_f29_capture_status_tracks_snapshots_not_original_phase(self) -> None:
         source = pathlib.Path(__file__).read_text(encoding="utf-8")
-        start = source.index("f19_capture_after_failure() {\n")
+        start = source.index("capture_f29_outer_invocation() {\n")
         end = source.index("\n}\ntrap 'f19_status=", start) + 2
         function = source[start:end]
 
@@ -7728,7 +7962,8 @@ Description: Backup program for disk arrays
             chmod_fails: bool = False,
             rm_fails: bool = False,
             outer_status: int = 0,
-        ) -> tuple[str, str, list[str], list[str], str]:
+            create_f19_receipt: bool = True,
+        ) -> tuple[str, str, list[str], list[str], list[str], str]:
             with tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
                 work = root / "work"
@@ -7756,7 +7991,7 @@ Description: Backup program for disk arrays
                 outer.write_text(
                     "import os, pathlib, sys\n"
                     "pathlib.Path(os.environ['OUTER']).open('a').write(sys.argv[1]+'|'+sys.argv[2]+'\\n')\n"
-                    "if sys.argv[1] == 'f19-after': pathlib.Path(sys.argv[5]).write_text('receipt')\n"
+                    "if sys.argv[1] == 'f19-after' and os.environ['CREATE_F19_RECEIPT'] == '1': pathlib.Path(sys.argv[5]).write_text('receipt')\n"
                     "sys.exit(int(os.environ['OUTER_STATUS']))\n",
                     encoding="ascii",
                     newline="\n",
@@ -7813,6 +8048,7 @@ Description: Backup program for disk arrays
                         "CHMOD_FAILS": "1" if chmod_fails else "0",
                         "RM_FAILS": "1" if rm_fails else "0",
                         "OUTER_STATUS": str(outer_status),
+                        "CREATE_F19_RECEIPT": "1" if create_f19_receipt else "0",
                         "ARGS": str(args),
                         "OUTER": str(outer_log),
                         "SNAPSHOTS": str(snapshots),
@@ -7826,58 +8062,87 @@ Description: Backup program for disk arrays
                     if outer_log.exists()
                     else [],
                     snapshots.read_text(encoding="ascii").splitlines(),
+                    sorted(
+                        path.name
+                        for path in work.glob("f29-direct-*")
+                        if path.is_file()
+                    ),
                     args.read_text(encoding="utf-8"),
                 )
 
         with self.subTest(case="both-success"):
-            f19_capture, f20_capture, outer_calls, snapshots, args = run_case(0, 0)
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, args = (
+                run_case(0, 0)
+            )
             self.assertEqual((f19_capture, f20_capture), ("0\n", "0\n"))
             self.assertEqual(outer_calls, [])
+            self.assertEqual(direct_files, [])
             self.assertEqual(snapshots, ["f19", "f20"])
             self.assertIn("|1|99|main|phase12-command", f"|{args}")
         with self.subTest(case="nonempty-stderr"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
-                0, 0, f19_stderr="unexpected\n"
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(0, 0, f19_stderr="unexpected\n")
             )
             self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
             self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="f19-nonzero"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(41, 0)
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(41, 0)
+            )
             self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
             self.assertEqual(outer_calls, ["f19-after|41"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="f20-nonzero"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(0, 42)
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(0, 42)
+            )
             self.assertEqual((f19_capture, f20_capture), ("42\n", "42\n"))
             self.assertEqual(outer_calls, ["f20-after|42"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="permission-failure-after-zero"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
-                0, 0, chmod_fails=True
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(0, 0, chmod_fails=True)
             )
             self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
             self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="owned-removal-failure-after-empty-zero"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
-                0, 0, rm_fails=True
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(0, 0, rm_fails=True)
             )
             self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
             self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="f19-and-f20-fail-first-status-wins"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(41, 42)
-            self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
-            self.assertEqual(outer_calls, ["f19-after|41"])
-            self.assertEqual(snapshots, ["f19", "f20"])
-        with self.subTest(case="outer-failure-preserves-capture-status"):
-            f19_capture, f20_capture, outer_calls, snapshots, _ = run_case(
-                41, 0, outer_status=9
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(41, 42)
             )
             self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
             self.assertEqual(outer_calls, ["f19-after|41"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="outer-failure-preserves-capture-status"):
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(41, 0, outer_status=9)
+            )
+            self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
+            self.assertEqual(outer_calls, ["f19-after|41"])
+            self.assertEqual(len(direct_files), 3)
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="dual-failure-without-f19-receipt-captures-both"):
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(41, 42, create_f19_receipt=False)
+            )
+            self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
+            self.assertEqual(outer_calls, ["f19-after|41", "f20-after|42"])
+            self.assertEqual(snapshots, ["f19", "f20"])
+            self.assertEqual(len(direct_files), 6)
 
     def test_f23_instrumentation_preserves_the_single_systemctl_call(self) -> None:
         payload = (
