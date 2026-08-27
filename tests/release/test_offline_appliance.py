@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -101,6 +102,8 @@ F19_MOUNT_ROOTS = (
 F20_DIAGNOSTIC_SCHEMA = 1
 F20_DIAGNOSTIC_MAX_BYTES = 256 * 1024
 F20_OUTPUT_MAX_BYTES = 32 * 1024
+F21_CAPTURE_ERROR_SCHEMA = 1
+F21_CAPTURE_ERROR_MAX_STDERR_BYTES = 8 * 1024
 F20_SYSV_PATHS = (
     "/etc/init.d/iscsid",
     "/usr/lib/systemd/systemd-sysv-install",
@@ -242,15 +245,19 @@ def entries(root):
 def helper(stage,work):
     names=("f20-helper-invocation.tsv","f20-helper-stdout.bin","f20-helper-stderr.bin","f20-helper-status.txt")
     paths=[work/name for name in names]
+    partials=[work/"f20-helper-stdout.bin.partial",work/"f20-helper-stderr.bin.partial"]
     repeat=work/"f20-helper-repeat.txt"
     real=work/"f20-helper-real"
     source_hash=(work/"f20-helper-source.sha256").read_text("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{64}",source_hash) or digest(real)!=source_hash: raise SystemExit("F20 copied helper identity is invalid")
     identity={"path":str(real),"size":real.stat().st_size,"mode":format(stat.S_IMODE(real.stat().st_mode),"04o"),"sha256":source_hash}
     if stage=="before":
-        if any(path.exists() or path.is_symlink() for path in (*paths,repeat)): raise SystemExit("F20 helper evidence exists before call")
+        if any(path.exists() or path.is_symlink() for path in (*paths,*partials,repeat)): raise SystemExit("F20 helper evidence exists before call")
         return {"invoked":False,"real_helper":identity}
+    present=[path for path in (*paths,*partials,repeat) if path.exists() or path.is_symlink()]
+    if not present: return {"invoked":False,"real_helper":identity}
     if repeat.exists() or repeat.is_symlink(): raise SystemExit("F20 helper was invoked more than once")
+    if any(path.exists() or path.is_symlink() for path in partials): raise SystemExit("F20 helper partial evidence remains")
     if not all(path.is_file() and not path.is_symlink() for path in paths): raise SystemExit("F20 helper evidence is incomplete")
     for path in paths:
         metadata=path.stat()
@@ -289,6 +296,58 @@ def main():
     if destination.exists() or partial.exists(): raise SystemExit("F20 receipt destination exists")
     partial.write_bytes(encoded); os.chmod(partial,0o600); partial.replace(destination)
     with destination.open("rb") as stream: os.fsync(stream.fileno())
+    return 0
+raise SystemExit(main())
+"""
+
+F21_CAPTURE_ERROR_SCRIPT = r"""#!/usr/bin/python3
+from __future__ import annotations
+import hashlib, json, os, pathlib, re, stat, sys
+
+SCHEMA=1
+MAX_STDERR=8*1024
+SAFE_MESSAGES={
+    "F20 helper evidence is incomplete":"f20-helper-evidence-incomplete",
+    "F20 helper partial evidence remains":"f20-helper-partial-evidence",
+    "F20 helper was invoked more than once":"f20-helper-repeat-evidence",
+    "F20 copied helper identity is invalid":"f20-helper-identity-invalid",
+}
+SECRET=re.compile(rb"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|Authorization:[ \t]*Bearer|(?:token|password|secret)=\S+)",re.IGNORECASE)
+
+def classify_error(stage,raw):
+    if not raw or len(raw)>MAX_STDERR or SECRET.search(raw): raise SystemExit("F21 capture stderr unsafe or truncated")
+    try: message=raw.decode("utf-8").rstrip("\n")
+    except UnicodeDecodeError as exc: raise SystemExit("F21 capture stderr encoding invalid") from exc
+    if "\n" in message or "\r" in message: raise SystemExit("F21 capture stderr framing invalid")
+    classification=SAFE_MESSAGES.get(message)
+    if classification is None:
+        if stage=="f19-after" and re.fullmatch(r"F19 [A-Za-z0-9 ,._'():+-]{1,240}",message): classification="f19-snapshot-validation-error"
+        elif stage=="f20-after" and re.fullmatch(r"F20 [A-Za-z0-9 ,._'():+-]{1,240}",message): classification="f20-snapshot-validation-error"
+        else: raise SystemExit("F21 capture stderr is not sanitizable")
+    return classification
+
+def main():
+    if len(sys.argv)!=6: raise SystemExit("F21 capture argv invalid")
+    stage,status_text,stderr_arg,output_arg,work_arg=sys.argv[1:]
+    if stage not in {"f19-after","f20-after"}: raise SystemExit("F21 capture stage invalid")
+    if not re.fullmatch(r"[1-9][0-9]{0,2}",status_text) or int(status_text)>255: raise SystemExit("F21 capture status invalid")
+    work=pathlib.Path(work_arg).resolve(strict=True)
+    stderr_path=pathlib.Path(stderr_arg)
+    output=pathlib.Path(output_arg)
+    if stderr_path.parent.resolve(strict=True)!=work or output.parent.resolve(strict=True)!=work: raise SystemExit("F21 capture path escapes fixture")
+    if stderr_path.name!=stage+".stderr" or output.name!="f21-capture-error.json": raise SystemExit("F21 capture path identity invalid")
+    if output.exists() or output.is_symlink() or output.with_suffix(output.suffix+".partial").exists(): raise SystemExit("F21 capture record already exists")
+    metadata=stderr_path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or stderr_path.is_symlink() or metadata.st_uid!=0 or metadata.st_gid!=0 or stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_nlink!=1: raise SystemExit("F21 capture stderr metadata invalid")
+    raw=stderr_path.read_bytes()
+    classification=classify_error(stage,raw)
+    receipt={"schema_version":SCHEMA,"stage":stage,"status":int(status_text),"stderr_size":len(raw),"stderr_sha256":hashlib.sha256(raw).hexdigest(),"stderr_class":classification,"stderr_uid":metadata.st_uid,"stderr_gid":metadata.st_gid,"stderr_mode":format(stat.S_IMODE(metadata.st_mode),"04o")}
+    encoded=(json.dumps(receipt,sort_keys=True,separators=(",",":"))+"\n").encode("ascii")
+    partial=output.with_suffix(output.suffix+".partial")
+    fd=os.open(partial,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,"wb") as stream: stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+    os.replace(partial,output)
+    with output.open("rb") as stream: os.fsync(stream.fileno())
     return 0
 raise SystemExit(main())
 """
@@ -1531,7 +1590,7 @@ def _validate_f20_snapshot(
         or not 0 < real["size"] <= 64 * 1024
     ):
         raise AssertionError("F20 copied helper identity is invalid")
-    if stage == "before":
+    if stage == "before" or helper.get("invoked") is False:
         if set(helper) != {"invoked", "real_helper"} or helper["invoked"] is not False:
             raise AssertionError("F20 helper was invoked before phase 12")
     else:
@@ -1589,6 +1648,62 @@ def _validate_f20_snapshot(
                 flags=re.IGNORECASE,
             ):
                 raise AssertionError("F20 helper output contains secret-like material")
+    return receipt, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_f21_capture_error(
+    path: pathlib.Path, fixture_root: pathlib.Path
+) -> tuple[dict[str, object], str]:
+    root = fixture_root.resolve(strict=True)
+    if path.name != "f21-capture-error.json":
+        raise AssertionError("F21 capture-error name is invalid")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise AssertionError("F21 capture-error record is missing") from exc
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.resolve(strict=True).parent != root
+        or metadata.st_mode & 0o7777 != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise AssertionError("F21 capture-error metadata is invalid")
+    raw = path.read_bytes()
+    if not raw or len(raw) > 1024 or not raw.endswith(b"\n"):
+        raise AssertionError("F21 capture-error framing is invalid")
+    try:
+        receipt = json.loads(raw.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssertionError("F21 capture-error JSON is invalid") from exc
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "stage",
+        "status",
+        "stderr_size",
+        "stderr_sha256",
+        "stderr_class",
+        "stderr_uid",
+        "stderr_gid",
+        "stderr_mode",
+    }:
+        raise AssertionError("F21 capture-error schema is not exact")
+    if receipt["schema_version"] != F21_CAPTURE_ERROR_SCHEMA or receipt[
+        "stage"
+    ] not in {"f19-after", "f20-after"}:
+        raise AssertionError("F21 capture-error version/stage is invalid")
+    if (
+        not isinstance(receipt["status"], int)
+        or not 1 <= receipt["status"] <= 255
+        or not isinstance(receipt["stderr_size"], int)
+        or not 1 <= receipt["stderr_size"] <= F21_CAPTURE_ERROR_MAX_STDERR_BYTES
+        or not re.fullmatch(r"[0-9a-f]{64}", str(receipt["stderr_sha256"]))
+        or not re.fullmatch(r"[a-z0-9-]{1,64}", str(receipt["stderr_class"]))
+        or receipt["stderr_uid"] != 0
+        or receipt["stderr_gid"] != 0
+        or receipt["stderr_mode"] != "0600"
+    ):
+        raise AssertionError("F21 capture-error values are invalid")
     return receipt, hashlib.sha256(raw).hexdigest()
 
 
@@ -4362,6 +4477,12 @@ systemd-analyze condition "ConditionPathExists=$peer_condition"
                 encoding="utf-8",
                 newline="\n",
             )
+            f21_capture_error = root / "f21-capture-error.py"
+            f21_capture_error.write_text(
+                F21_CAPTURE_ERROR_SCRIPT,
+                encoding="utf-8",
+                newline="\n",
+            )
             host_sysv_before, host_sysv_before_sha256 = _capture_f20_host_manifest()
 
             harness = root / "pcp-service-guard.sh"
@@ -4393,6 +4514,7 @@ readback_matrix="$7"
 f19_snapshot="$8"
 f19_finalizer_source="$9"
 f20_snapshot="${10}"
+f21_capture_error="${11}"
 trace_begin 05-mount-namespace mount-namespace
 mount --make-rprivate /
 mkdir -p "$work"/{etc-systemd,systemd-state,run-systemd,usr-sbin,wrappers,state,install,f20-sysv/init.d}
@@ -4781,6 +4903,7 @@ f19_capture_status_file="$work/f19-capture-status.txt"
 f20_before="$work/f20-before.json"
 f20_after="$work/f20-after.json"
 f20_capture_status_file="$work/f20-capture-status.txt"
+f21_capture_error_receipt="$work/f21-capture-error.json"
 python3 "$f19_snapshot" before "$f19_before" "$f19_finalizer_source" \
     "$phase09_outcomes" "$f19_command_trace" 0 0 none none
 python3 "$f20_snapshot" before "$f20_before" "$work" "$work/f20-sysv"
@@ -4792,12 +4915,37 @@ f19_capture_after_failure() {
     local capture_status=0
     set +x
     exec 19>&-
+    local snapshot_status=0
+    local snapshot_stderr=
+    snapshot_stderr="$work/f19-after.stderr"
     python3 "$f19_snapshot" after "$f19_after" "$f19_finalizer_source" \
         "$phase09_outcomes" "$f19_command_trace" "$original_status" \
-        "$original_line" "$original_function" "$original_command" || \
-        capture_status=$?
-    python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv" || \
-        capture_status=$?
+        "$original_line" "$original_function" "$original_command" \
+        >/dev/null 2>"$snapshot_stderr" || snapshot_status=$?
+    chmod 0600 -- "$snapshot_stderr" || snapshot_status=126
+    if (( snapshot_status == 0 )); then
+        [[ ! -s "$snapshot_stderr" ]] || snapshot_status=126
+        rm -f -- "$snapshot_stderr" || snapshot_status=126
+    else
+        python3 "$f21_capture_error" f19-after "$snapshot_status" \
+            "$snapshot_stderr" "$f21_capture_error_receipt" "$work" || :
+        capture_status="$snapshot_status"
+    fi
+    snapshot_status=0
+    snapshot_stderr="$work/f20-after.stderr"
+    python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv" \
+        >/dev/null 2>"$snapshot_stderr" || snapshot_status=$?
+    chmod 0600 -- "$snapshot_stderr" || snapshot_status=126
+    if (( snapshot_status == 0 )); then
+        [[ ! -s "$snapshot_stderr" ]] || snapshot_status=126
+        rm -f -- "$snapshot_stderr" || snapshot_status=126
+    else
+        if [[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]; then
+            python3 "$f21_capture_error" f20-after "$snapshot_status" \
+                "$snapshot_stderr" "$f21_capture_error_receipt" "$work" || :
+        fi
+        (( capture_status != 0 )) || capture_status="$snapshot_status"
+    fi
     printf '%s\n' "$capture_status" >"$f19_capture_status_file" || :
     printf '%s\n' "$capture_status" >"$f20_capture_status_file" || :
     return 0
@@ -4814,6 +4962,7 @@ set +x
 exec 19>&-
 python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv"
 printf '0\n' >"$f20_capture_status_file"
+[[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]
 trap 'trace_failure "$?" "$LINENO"' ERR
 [[ "$denied_units_finalized" == true ]]
 [[ "$(wc -l <"$state_root/service-policy-readback.tsv")" -eq "${#denied_units[@]}" ]]
@@ -4979,6 +5128,7 @@ exit 0
                             str(f19_snapshot),
                             str(finalizer_source),
                             str(f20_snapshot),
+                            str(f21_capture_error),
                         ],
                         text=True,
                         capture_output=True,
@@ -5072,10 +5222,37 @@ exit 0
             self.assertRegex(executable_hash, r"^[0-9a-f]{64}$")
             capture_status_path = namespace_path / "f19-capture-status.txt"
             self.assertTrue(capture_status_path.is_file())
-            self.assertEqual(capture_status_path.read_text(encoding="ascii"), "0\n")
             f20_capture_status = namespace_path / "f20-capture-status.txt"
             self.assertTrue(f20_capture_status.is_file())
-            self.assertEqual(f20_capture_status.read_text(encoding="ascii"), "0\n")
+            capture_statuses = (
+                capture_status_path.read_text(encoding="ascii"),
+                f20_capture_status.read_text(encoding="ascii"),
+            )
+            self.assertEqual(capture_statuses[0], capture_statuses[1])
+            if capture_statuses[0] != "0\n":
+                try:
+                    capture_error, capture_error_sha256 = _validate_f21_capture_error(
+                        namespace_path / "f21-capture-error.json",
+                        namespace_path,
+                    )
+                except AssertionError as exc:
+                    self.fail(
+                        "F21 snapshot capture failed without a valid sanitized "
+                        f"record: {exc}\n{trace_text}"
+                    )
+                self.fail(
+                    "F21 validated capture error: "
+                    f"stage={capture_error['stage']} "
+                    f"status={capture_error['status']} "
+                    f"stderr_class={capture_error['stderr_class']} "
+                    f"stderr_size={capture_error['stderr_size']} "
+                    f"stderr_sha256={capture_error['stderr_sha256']} "
+                    f"receipt_sha256={capture_error_sha256}\n{trace_text}"
+                )
+            self.assertFalse(
+                (namespace_path / "f21-capture-error.json").exists()
+                or (namespace_path / "f21-capture-error.json").is_symlink()
+            )
             f20_before_receipt, f20_before_sha256 = _validate_f20_snapshot(
                 namespace_path / "f20-before.json", namespace_path, "before"
             )
@@ -5197,8 +5374,24 @@ exit 0
             }
             f20_helper = f20_after_receipt["helper"]
             assert isinstance(f20_helper, dict)
-            f20_outputs = f20_helper["outputs"]
-            assert isinstance(f20_outputs, dict)
+            f20_outputs = f20_helper.get("outputs")
+            if f20_helper["invoked"] is True:
+                assert isinstance(f20_outputs, dict)
+                sanitized_helper = {
+                    key: value for key, value in f20_helper.items() if key != "outputs"
+                } | {
+                    "outputs": {
+                        label: {
+                            key: value
+                            for key, value in output.items()
+                            if key != "content_base64"
+                        }
+                        for label, output in f20_outputs.items()
+                    }
+                }
+            else:
+                self.assertIsNone(f20_outputs)
+                sanitized_helper = f20_helper
             f20_sanitized = {
                 "schema_version": F20_DIAGNOSTIC_SCHEMA,
                 "host_manifest_sha256": host_sysv_after_sha256,
@@ -5229,19 +5422,7 @@ exit 0
                     for row in f20_after_receipt["rc_directories"]
                 ],
                 "generators": f20_after_receipt["generators"],
-                "helper": {
-                    key: value for key, value in f20_helper.items() if key != "outputs"
-                }
-                | {
-                    "outputs": {
-                        label: {
-                            key: value
-                            for key, value in output.items()
-                            if key != "content_base64"
-                        }
-                        for label, output in f20_outputs.items()
-                    }
-                },
+                "helper": sanitized_helper,
             }
             f19_diagnostic = (
                 "\nVALIDATED F19 SANITIZED DIAGNOSTIC\n"
@@ -5961,6 +6142,7 @@ Description: Backup program for disk arrays
             "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
         )
         compile(F20_SNAPSHOT_SCRIPT, "f20-snapshot.py", "exec")
+        compile(F21_CAPTURE_ERROR_SCRIPT, "f21-capture-error.py", "exec")
         source = pathlib.Path(__file__).read_text(encoding="utf-8")
         phase12 = source.split(
             "trace_begin 12-final-disable-readback final-disable-readback\n", 1
@@ -6067,6 +6249,16 @@ Description: Backup program for disk arrays
 
             write(receipt)
             _validate_f20_snapshot(candidate, root, "after")
+            not_invoked = {
+                **receipt,
+                "helper": {
+                    "invoked": False,
+                    "real_helper": receipt["helper"]["real_helper"],
+                },
+            }
+            write(not_invoked)
+            validated_not_invoked, _ = _validate_f20_snapshot(candidate, root, "after")
+            self.assertIs(validated_not_invoked["helper"]["invoked"], False)
             mutations = {
                 "schema": {**receipt, "schema_version": 2},
                 "wrong-path": {
@@ -6100,12 +6292,474 @@ Description: Backup program for disk arrays
                         },
                     },
                 },
+                "false-with-status": {
+                    **not_invoked,
+                    "helper": {**not_invoked["helper"], "status": 1},
+                },
+                "true-missing-output": {
+                    **receipt,
+                    "helper": {
+                        key: value
+                        for key, value in receipt["helper"].items()
+                        if key != "outputs"
+                    },
+                },
+                "true-duplicate-key-shape": {
+                    **receipt,
+                    "helper": {**receipt["helper"], "unexpected": True},
+                },
+                "true-malformed-status": {
+                    **receipt,
+                    "helper": {**receipt["helper"], "status": "1"},
+                },
+                "true-inconsistent-output": {
+                    **receipt,
+                    "helper": {
+                        **receipt["helper"],
+                        "outputs": {
+                            **receipt["helper"]["outputs"],
+                            "stdout": {
+                                **receipt["helper"]["outputs"]["stdout"],
+                                "sha256": "9" * 64,
+                            },
+                        },
+                    },
+                },
             }
             for label, mutation in mutations.items():
                 with self.subTest(label=label):
                     write(mutation)
                     with self.assertRaises(AssertionError):
                         _validate_f20_snapshot(candidate, root, "after")
+
+            helper_namespace: dict[str, object] = {}
+            exec(  # noqa: S102 - execute the fixed generated helper for regression proof
+                F20_SNAPSHOT_SCRIPT.rsplit("raise SystemExit(main())", 1)[0],
+                helper_namespace,
+            )
+            real_helper = root / "f20-helper-real"
+            real_helper.write_bytes(b"helper")
+            (root / "f20-helper-source.sha256").write_text(
+                hashlib.sha256(b"helper").hexdigest(), encoding="ascii"
+            )
+            helper_function = helper_namespace["helper"]
+            self.assertTrue(callable(helper_function))
+            absent = helper_function("after", root)
+            self.assertEqual(set(absent), {"invoked", "real_helper"})
+            self.assertIs(absent["invoked"], False)
+            for evidence_name in (
+                "f20-helper-invocation.tsv",
+                "f20-helper-stdout.bin",
+                "f20-helper-stderr.bin",
+                "f20-helper-status.txt",
+                "f20-helper-stdout.bin.partial",
+                "f20-helper-stderr.bin.partial",
+                "f20-helper-repeat.txt",
+            ):
+                with self.subTest(evidence=evidence_name):
+                    evidence = root / evidence_name
+                    evidence.write_bytes(b"x")
+                    with self.assertRaises(SystemExit):
+                        helper_function("after", root)
+                    evidence.unlink()
+
+    def test_f21_capture_error_portable_contract_is_fail_closed(self) -> None:
+        compile(F21_CAPTURE_ERROR_SCRIPT, "f21-capture-error.py", "exec")
+        script_prefix = F21_CAPTURE_ERROR_SCRIPT.rsplit("raise SystemExit(main())", 1)[
+            0
+        ]
+        namespace: dict[str, object] = {}
+        exec(  # noqa: S102 - execute only the fixed generated diagnostic helpers
+            script_prefix,
+            namespace,
+        )
+        classify_error = namespace["classify_error"]
+        self.assertTrue(callable(classify_error))
+        valid_error = b"F20 helper evidence is incomplete\n"
+        self.assertEqual(
+            classify_error("f20-after", valid_error),
+            "f20-helper-evidence-incomplete",
+        )
+        for label, stage, content in (
+            (
+                "oversized",
+                "f20-after",
+                b"F20 " + b"x" * F21_CAPTURE_ERROR_MAX_STDERR_BYTES,
+            ),
+            (
+                "secret",
+                "f20-after",
+                b"F20 password=not-a-real-test-value\n",
+            ),
+            ("malformed", "f20-after", b"arbitrary failure\n"),
+            ("multiline", "f20-after", b"F20 first\nF20 second\n"),
+        ):
+            with self.subTest(label=label), self.assertRaises(SystemExit):
+                classify_error(stage, content)
+
+        strict_metadata = (
+            "not stat.S_ISREG(metadata.st_mode) or stderr_path.is_symlink() "
+            "or metadata.st_uid!=0 or metadata.st_gid!=0 or "
+            "stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_nlink!=1"
+        )
+        self.assertIn(strict_metadata, F21_CAPTURE_ERROR_SCRIPT)
+        self.assertIn('output.name!="f21-capture-error.json"', F21_CAPTURE_ERROR_SCRIPT)
+        self.assertIn("F21 capture record already exists", F21_CAPTURE_ERROR_SCRIPT)
+        self.assertIn("F21 capture path escapes fixture", F21_CAPTURE_ERROR_SCRIPT)
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        phase12 = source.split(
+            "trace_begin 12-final-disable-readback final-disable-readback\n", 1
+        )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
+        self.assertEqual(phase12.count("\ndisable_unmasked_units\n"), 1)
+        self.assertNotRegex(
+            phase12,
+            r"(?:if|until|while)\s+disable_unmasked_units|disable_unmasked_units\s*(?:\|\||&&)",
+        )
+        self.assertIn(
+            '[[ ! -e "$f21_capture_error_receipt" && ! -L "$f21_capture_error_receipt" ]]',
+            phase12,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            script = root / "f21-capture-error.py"
+            script.write_text(F21_CAPTURE_ERROR_SCRIPT, encoding="utf-8", newline="\n")
+            stderr_path = root / "f20-after.stderr"
+            stderr_path.write_bytes(valid_error)
+            output = root / "f21-capture-error.json"
+            outside = root.parent / f"{root.name}-outside.stderr"
+            outside.write_bytes(valid_error)
+            command = [sys.executable, str(script)]
+            for label, args, expected in (
+                (
+                    "unknown-stage",
+                    ["unknown", "1", str(stderr_path), str(output), str(root)],
+                    "F21 capture stage invalid",
+                ),
+                (
+                    "status-zero",
+                    ["f20-after", "0", str(stderr_path), str(output), str(root)],
+                    "F21 capture status invalid",
+                ),
+                (
+                    "traversal",
+                    ["f20-after", "1", str(outside), str(output), str(root)],
+                    "F21 capture path escapes fixture",
+                ),
+            ):
+                with self.subTest(label=label):
+                    rejected = subprocess.run(
+                        [*command, *args],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(rejected.stderr, expected + "\n")
+                    self.assertFalse(output.exists())
+                    self.assertFalse(
+                        output.with_suffix(output.suffix + ".partial").exists()
+                    )
+            output.write_text("preserved\n", encoding="ascii")
+            duplicate = subprocess.run(
+                [
+                    *command,
+                    "f20-after",
+                    "1",
+                    str(stderr_path),
+                    str(output),
+                    str(root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(duplicate.returncode, 0)
+            self.assertEqual(duplicate.stderr, "F21 capture record already exists\n")
+            self.assertEqual(output.read_text(encoding="ascii"), "preserved\n")
+            outside.unlink()
+
+    @unittest.skipUnless(
+        sys.platform == "win32",
+        "Windows-specific 0666 metadata rejection boundary",
+    )
+    def test_f21_windows_0666_fixture_is_rejected_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            script = root / "f21-capture-error.py"
+            script.write_text(F21_CAPTURE_ERROR_SCRIPT, encoding="utf-8", newline="\n")
+            stderr_path = root / "f20-after.stderr"
+            stderr_path.write_bytes(b"F20 helper evidence is incomplete\n")
+            stderr_path.chmod(0o600)
+            self.assertEqual(stat.S_IMODE(stderr_path.stat().st_mode), 0o666)
+            output = root / "f21-capture-error.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "f20-after",
+                    "1",
+                    str(stderr_path),
+                    str(output),
+                    str(root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(
+                completed.stderr,
+                "F21 capture stderr metadata invalid\n",
+            )
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_suffix(output.suffix + ".partial").exists())
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "requires real POSIX root ownership, mode 0600, and link-count semantics",
+    )
+    def test_f21_posix_capture_error_receipt_is_bounded_and_fail_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            script = root / "f21-capture-error.py"
+            script.write_text(F21_CAPTURE_ERROR_SCRIPT, encoding="utf-8", newline="\n")
+            stderr_path = root / "f20-after.stderr"
+            output = root / "f21-capture-error.json"
+            valid_error = b"F20 helper evidence is incomplete\n"
+            stderr_path.write_bytes(valid_error)
+            stderr_path.chmod(0o600)
+
+            if sys.platform == "win32":
+                command_prefix = [sys.executable]
+            else:
+                command_prefix = ["sudo", "-n", "/usr/bin/python3"]
+                subprocess.run(
+                    ["sudo", "-n", "chown", "0:0", "--", str(stderr_path)],
+                    check=True,
+                )
+            completed = subprocess.run(
+                [
+                    *command_prefix,
+                    str(script),
+                    "f20-after",
+                    "1",
+                    str(stderr_path),
+                    str(output),
+                    str(root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            receipt, receipt_hash = _validate_f21_capture_error(output, root)
+            self.assertEqual(receipt["stage"], "f20-after")
+            self.assertEqual(receipt["status"], 1)
+            self.assertEqual(receipt["stderr_size"], len(valid_error))
+            self.assertEqual(
+                receipt["stderr_sha256"], hashlib.sha256(valid_error).hexdigest()
+            )
+            self.assertRegex(receipt_hash, r"^[0-9a-f]{64}$")
+
+            duplicate = subprocess.run(
+                [
+                    *command_prefix,
+                    str(script),
+                    "f20-after",
+                    "1",
+                    str(stderr_path),
+                    str(output),
+                    str(root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(duplicate.returncode, 0)
+
+            if sys.platform != "win32":
+                ownership = subprocess.run(
+                    [
+                        "sudo",
+                        "-n",
+                        "chown",
+                        "-R",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--",
+                        str(root),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(ownership.returncode, 0, ownership.stderr)
+
+            output.unlink()
+            negative_cases = {
+                "unknown-stage": ("unknown", "1", valid_error),
+                "status-zero": ("f20-after", "0", valid_error),
+                "status-overflow": ("f20-after", "256", valid_error),
+                "oversized": (
+                    "f20-after",
+                    "1",
+                    b"F20 " + b"x" * F21_CAPTURE_ERROR_MAX_STDERR_BYTES,
+                ),
+                "secret": (
+                    "f20-after",
+                    "1",
+                    b"F20 password=not-a-real-test-value\n",
+                ),
+                "malformed": ("f20-after", "1", b"arbitrary failure\n"),
+            }
+            for label, (stage, status, content) in negative_cases.items():
+                with self.subTest(label=label):
+                    stderr_path.write_bytes(content)
+                    stderr_path.chmod(0o600)
+                    if sys.platform != "win32":
+                        subprocess.run(
+                            [
+                                "sudo",
+                                "-n",
+                                "chown",
+                                "0:0",
+                                "--",
+                                str(stderr_path),
+                            ],
+                            check=True,
+                        )
+                    rejected = subprocess.run(
+                        [
+                            *command_prefix,
+                            str(script),
+                            stage,
+                            status,
+                            str(stderr_path),
+                            str(output),
+                            str(root),
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(output.exists())
+                    if sys.platform != "win32":
+                        subprocess.run(
+                            [
+                                "sudo",
+                                "-n",
+                                "chown",
+                                f"{os.getuid()}:{os.getgid()}",
+                                "--",
+                                str(stderr_path),
+                            ],
+                            check=True,
+                        )
+
+            metadata_cases = ("wrong-mode", "wrong-owner", "directory", "symlink")
+            for label in metadata_cases:
+                with self.subTest(label=label):
+                    if stderr_path.exists() or stderr_path.is_symlink():
+                        if stderr_path.is_dir() and not stderr_path.is_symlink():
+                            stderr_path.rmdir()
+                        else:
+                            stderr_path.unlink()
+                    if label == "directory":
+                        stderr_path.mkdir()
+                    elif label == "symlink":
+                        target = root / "symlink-target"
+                        target.write_bytes(valid_error)
+                        stderr_path.symlink_to(target)
+                    else:
+                        stderr_path.write_bytes(valid_error)
+                        stderr_path.chmod(0o644 if label == "wrong-mode" else 0o600)
+                        if sys.platform != "win32" and label == "wrong-mode":
+                            subprocess.run(
+                                [
+                                    "sudo",
+                                    "-n",
+                                    "chown",
+                                    "0:0",
+                                    "--",
+                                    str(stderr_path),
+                                ],
+                                check=True,
+                            )
+                    rejected = subprocess.run(
+                        [
+                            *command_prefix,
+                            str(script),
+                            "f20-after",
+                            "1",
+                            str(stderr_path),
+                            str(output),
+                            str(root),
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(output.exists())
+                    if sys.platform != "win32":
+                        subprocess.run(
+                            [
+                                "sudo",
+                                "-n",
+                                "chown",
+                                "-h",
+                                f"{os.getuid()}:{os.getgid()}",
+                                "--",
+                                str(stderr_path),
+                            ],
+                            check=True,
+                        )
+
+            if stderr_path.is_symlink():
+                stderr_path.unlink()
+            outside = root.parent / f"{root.name}-outside.stderr"
+            outside.write_bytes(valid_error)
+            outside.chmod(0o600)
+            if sys.platform != "win32":
+                subprocess.run(
+                    ["sudo", "-n", "chown", "0:0", "--", str(outside)],
+                    check=True,
+                )
+            traversal = subprocess.run(
+                [
+                    *command_prefix,
+                    str(script),
+                    "f20-after",
+                    "1",
+                    str(outside),
+                    str(output),
+                    str(root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(traversal.returncode, 0)
+            self.assertFalse(output.exists())
+            if sys.platform != "win32":
+                subprocess.run(
+                    [
+                        "sudo",
+                        "-n",
+                        "chown",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--",
+                        str(outside),
+                    ],
+                    check=True,
+                )
+            outside.unlink()
+
+            with self.assertRaises(AssertionError):
+                _validate_f21_capture_error(output, root)
 
     def test_actual_install_argv_executes_exact_production_fragment(self) -> None:
         payload = (
