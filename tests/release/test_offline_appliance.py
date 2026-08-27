@@ -279,7 +279,7 @@ def helper(stage,work):
                 values.append(None)
             else: raise SystemExit("F25 helper entry argv classification is invalid")
         if not isinstance(predicates,dict) or set(predicates)!=set(keys) or any(type(value) is not bool for value in predicates.values()): raise SystemExit("F25 helper entry predicates are invalid")
-        if predicates["expected_argc"] is not (argc==2) or predicates["exact_vector"] is not (values==["disable","iscsid"]): raise SystemExit("F25 helper entry predicates are inconsistent")
+        if predicates["expected_argc"] is not (argc==3) or predicates["exact_vector"] is not (values==["--root=/","disable","iscsid"]): raise SystemExit("F25 helper entry predicates are inconsistent")
         if entry.get("guard_outcome")!=("ACCEPTED" if all(predicates.values()) else "REJECTED"): raise SystemExit("F25 helper entry outcome is inconsistent")
     present=[path for path in (*paths,*partials,repeat) if path.exists() or path.is_symlink()]
     if not present: return {"invoked":False,"real_helper":identity,"entry_guard":entry}
@@ -290,7 +290,7 @@ def helper(stage,work):
         metadata=path.stat()
         if stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_uid!=0 or metadata.st_gid!=0 or metadata.st_nlink!=1: raise SystemExit("F20 helper evidence metadata is invalid")
     invocation=paths[0].read_text("ascii").splitlines()
-    if len(invocation)!=5 or invocation[0]!="F20HELPER\t1" or invocation[1]!="ARGC\t2" or invocation[2]!="ARGV0\tdisable" or invocation[3]!="ARGV1\tiscsid" or invocation[4]!="ENV\tSYSTEMD_OFFLINE=1": raise SystemExit("F20 helper invocation is invalid")
+    if len(invocation)!=6 or invocation[0]!="F20HELPER\t1" or invocation[1]!="ARGC\t3" or invocation[2]!="ARGV0\t--root=/" or invocation[3]!="ARGV1\tdisable" or invocation[4]!="ARGV2\tiscsid" or invocation[5]!="ENV\tSYSTEMD_OFFLINE=1": raise SystemExit("F20 helper invocation is invalid")
     status_text=paths[3].read_text("ascii")
     if not re.fullmatch(r"[0-9]{1,3}\\n",status_text) or int(status_text)>255: raise SystemExit("F20 helper status is invalid")
     outputs={}
@@ -300,7 +300,7 @@ def helper(stage,work):
         first=raw.splitlines()[0].decode("utf-8","backslashreplace")[:240] if raw else ""
         if any(ord(ch)<32 and ch not in "\\t" for ch in first): raise SystemExit("F20 helper first line is unsafe")
         outputs[label]={"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest(),"safe_first_line":first,"content_base64":base64.b64encode(raw).decode("ascii")}
-    return {"invoked":True,"real_helper":identity,"entry_guard":entry,"argv":["disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_text),"invocation_sha256":digest(paths[0]),"outputs":outputs}
+    return {"invoked":True,"real_helper":identity,"entry_guard":entry,"argv":["--root=/","disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_text),"invocation_sha256":digest(paths[0]),"outputs":outputs}
 
 def main():
     if len(sys.argv)!=5: raise SystemExit("F20 snapshot argv invalid")
@@ -594,8 +594,8 @@ def _validate_f25_entry_guard(value: object) -> dict[str, object]:
         or any(type(result) is not bool for result in predicates.values())
     ):
         raise AssertionError("F25 guard predicate schema is invalid")
-    expected_argc = argc == 2
-    exact_vector = classified == ["disable", "iscsid"]
+    expected_argc = argc == 3
+    exact_vector = classified == ["--root=/", "disable", "iscsid"]
     if predicates["expected_argc"] is not expected_argc:
         raise AssertionError("F25 argc predicate is inconsistent")
     if predicates["exact_vector"] is not exact_vector:
@@ -1914,9 +1914,9 @@ def _validate_f20_snapshot(
             or helper["invoked"] is not True
         ):
             raise AssertionError("F20 helper invocation evidence is incomplete")
-        if helper["argv"] != ["disable", "iscsid"] or helper["environment"] != {
-            "SYSTEMD_OFFLINE": "1"
-        }:
+        if helper["argv"] != ["--root=/", "disable", "iscsid"] or helper[
+            "environment"
+        ] != {"SYSTEMD_OFFLINE": "1"}:
             raise AssertionError("F20 helper argv/environment changed")
         if not isinstance(helper["status"], int) or not 0 <= helper["status"] <= 255:
             raise AssertionError("F20 helper status is invalid")
@@ -4950,7 +4950,7 @@ if not stat.S_ISREG(metadata.st_mode) or destination.is_symlink() or metadata.st
 PY
 set -u
 umask 077
-if [[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]; then exit 125; fi
+if [[ "$#" -ne 3 || "$1" != --root=/ || "$2" != disable || "$3" != iscsid ]]; then exit 125; fi
 [[ "${SYSTEMD_OFFLINE-}" == 1 && "${DPKG_MAINTSCRIPT_PACKAGE-}" == pcp && \
     "${DPKG_MAINTSCRIPT_NAME-}" == postinst && "$PATH" == "__F20_PATH__" ]] || exit 125
 for evidence in "$evidence_root"/f20-helper-{invocation.tsv,stdout.bin,stderr.bin,status.txt}; do
@@ -4960,7 +4960,7 @@ for evidence in "$evidence_root"/f20-helper-{invocation.tsv,stdout.bin,stderr.bi
         exit 124
     fi
 done
-printf 'F20HELPER\t1\nARGC\t2\nARGV0\tdisable\nARGV1\tiscsid\nENV\tSYSTEMD_OFFLINE=1\n' \
+printf 'F20HELPER\t1\nARGC\t3\nARGV0\t--root=/\nARGV1\tdisable\nARGV2\tiscsid\nENV\tSYSTEMD_OFFLINE=1\n' \
     >"$evidence_root/f20-helper-invocation.tsv" || exit 126
 chmod 0600 -- "$evidence_root/f20-helper-invocation.tsv" || exit 126
 "$real_helper" "$@" >"$evidence_root/f20-helper-stdout.bin.partial" \
@@ -6617,7 +6617,11 @@ Description: Backup program for disk arrays
             1
         ].split("\nEOF\n", 1)[0]
         for exact in (
-            '[[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]',
+            '[[ "$#" -ne 3 || "$1" != --root=/ || "$2" != disable || "$3" != iscsid ]]',
+            "ARGC\\t3",
+            "ARGV0\\t--root=/",
+            "ARGV1\\tdisable",
+            "ARGV2\\tiscsid",
             '"$real_helper" "$@"',
             "helper_status=$?",
             'exit "$helper_status"',
@@ -6686,15 +6690,20 @@ Description: Backup program for disk arrays
                 "entry_guard": {
                     "schema_version": F25_ENTRY_SCHEMA,
                     "entry_reached": True,
-                    "argc": 2,
+                    "argc": 3,
                     "argv": [
                         {
                             "position": 0,
                             "classification": "ALLOWLISTED",
-                            "value": "disable",
+                            "value": "--root=/",
                         },
                         {
                             "position": 1,
+                            "classification": "ALLOWLISTED",
+                            "value": "disable",
+                        },
+                        {
+                            "position": 2,
                             "classification": "ALLOWLISTED",
                             "value": "iscsid",
                         },
@@ -6704,7 +6713,7 @@ Description: Backup program for disk arrays
                     },
                     "guard_outcome": "ACCEPTED",
                 },
-                "argv": ["disable", "iscsid"],
+                "argv": ["--root=/", "disable", "iscsid"],
                 "environment": {"SYSTEMD_OFFLINE": "1"},
                 "status": 1,
                 "invocation_sha256": "2" * 64,
@@ -7067,7 +7076,7 @@ Description: Backup program for disk arrays
             ]
 
         rejected_predicates = {
-            predicate: predicate not in {"expected_argc", "exact_vector"}
+            predicate: predicate != "systemd_offline"
             for predicate in F25_ENTRY_PREDICATES
         }
         rejected = {
@@ -7105,13 +7114,13 @@ Description: Backup program for disk arrays
 
         accepted = {
             **rejected,
-            "argc": 2,
-            "argv": allowlisted(["disable", "iscsid"]),
             "predicates": {predicate: True for predicate in F25_ENTRY_PREDICATES},
             "guard_outcome": "ACCEPTED",
         }
         accepted_stderr = {
-            "lines": ["Executing: /usr/lib/systemd/systemd-sysv-install disable iscsid"]
+            "lines": [
+                "Executing: /usr/lib/systemd/systemd-sysv-install --root=/ disable iscsid"
+            ]
         }
         self.assertEqual(
             _classify_f25_entry(
@@ -7180,7 +7189,7 @@ Description: Backup program for disk arrays
             },
             "predicate-inconsistent": {
                 **rejected,
-                "predicates": {**rejected_predicates, "expected_argc": True},
+                "predicates": {**rejected_predicates, "expected_argc": False},
             },
             "outcome-inconsistent": {**rejected, "guard_outcome": "ACCEPTED"},
         }
@@ -7196,7 +7205,7 @@ Description: Backup program for disk arrays
         self.assertTrue(body.startswith("/usr/bin/python3 - __F25_EVIDENCE_ROOT__"))
         self.assertLess(body.index("f25-helper-entry.json"), body.index("set -u\n"))
         existing_guard = (
-            'if [[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]; then exit 125; fi\n'
+            'if [[ "$#" -ne 3 || "$1" != --root=/ || "$2" != disable || "$3" != iscsid ]]; then exit 125; fi\n'
             '[[ "${SYSTEMD_OFFLINE-}" == 1 && "${DPKG_MAINTSCRIPT_PACKAGE-}" == pcp && \\\n'
             '    "${DPKG_MAINTSCRIPT_NAME-}" == postinst && "$PATH" == "__F20_PATH__" ]] || exit 125'
         )
@@ -7324,40 +7333,60 @@ Description: Backup program for disk arrays
                     max_bytes=F25_ENTRY_MAX_BYTES,
                 )
 
-            case, wrapper, helper = prepare("valid-rejected")
+            case, wrapper, helper = prepare("valid-rooted")
             completed = invoke(case, wrapper, helper, list(F25_ENTRY_ALLOWLIST))
             self.assertEqual(completed.returncode, 0, completed.stderr)
             receipt = json.loads(read_entry(case).decode("ascii"))
             validated = _validate_f25_entry_guard(receipt)
             self.assertEqual(validated["argc"], 3)
-            self.assertIs(validated["predicates"]["expected_argc"], False)
-            self.assertIs(validated["predicates"]["exact_vector"], False)
-            self.assertEqual(validated["guard_outcome"], "REJECTED")
+            self.assertTrue(all(validated["predicates"].values()))
+            self.assertEqual(validated["guard_outcome"], "ACCEPTED")
             original = read_entry(case)
             repeated = invoke(case, wrapper, helper, list(F25_ENTRY_ALLOWLIST))
             self.assertNotEqual(repeated.returncode, 0)
             self.assertEqual(read_entry(case), original)
 
             predicate_cases = {
-                "argc": (["disable"], {}, "expected_argc"),
-                "vector": (["iscsid", "disable"], {}, "exact_vector"),
+                "old-two-argument": (["disable", "iscsid"], {}, "expected_argc"),
+                "missing-root": (["disable", "iscsid"], {}, "exact_vector"),
+                "other-root": (
+                    ["--root=/tmp", "disable", "iscsid"],
+                    {},
+                    "exact_vector",
+                ),
+                "root-without-equals": (
+                    ["--root", "disable", "iscsid"],
+                    {},
+                    "exact_vector",
+                ),
+                "reordered": (["--root=/", "iscsid", "disable"], {}, "exact_vector"),
+                "duplicate": (
+                    ["--root=/", "--root=/", "disable", "iscsid"],
+                    {},
+                    "expected_argc",
+                ),
+                "extra": (
+                    ["--root=/", "disable", "iscsid", "extra"],
+                    {},
+                    "expected_argc",
+                ),
                 "offline": (
-                    ["disable", "iscsid"],
+                    list(F25_ENTRY_ALLOWLIST),
                     {"SYSTEMD_OFFLINE": "0"},
                     "systemd_offline",
                 ),
                 "package": (
-                    ["disable", "iscsid"],
+                    list(F25_ENTRY_ALLOWLIST),
                     {"DPKG_MAINTSCRIPT_PACKAGE": "other"},
                     "dpkg_maintscripts_package",
                 ),
                 "name": (
-                    ["disable", "iscsid"],
+                    list(F25_ENTRY_ALLOWLIST),
                     {"DPKG_MAINTSCRIPT_NAME": "prerm"},
                     "dpkg_maintscripts_name",
                 ),
                 "path": (
-                    ["disable", "iscsid"],
+                    list(F25_ENTRY_ALLOWLIST),
                     {"PATH": "/usr/sbin:/usr/bin:/bin"},
                     "exact_private_path",
                 ),
@@ -7398,7 +7427,7 @@ Description: Backup program for disk arrays
                         ],
                         check=True,
                     )
-                    result = invoke(case, wrapper, helper, ["disable", "iscsid"])
+                    result = invoke(case, wrapper, helper, list(F25_ENTRY_ALLOWLIST))
                     self.assertEqual(result.returncode, 0, result.stderr)
                     candidate = json.loads(read_entry(case).decode("ascii"))
                     self.assertIs(
@@ -7439,7 +7468,7 @@ Description: Backup program for disk arrays
                     else:
                         partial.write_bytes(b"partial\n")
                     before = sentinel.read_bytes()
-                    result = invoke(case, wrapper, helper, ["disable", "iscsid"])
+                    result = invoke(case, wrapper, helper, list(F25_ENTRY_ALLOWLIST))
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(sentinel.read_bytes(), before)
                     if label == "partial":
@@ -7461,7 +7490,7 @@ Description: Backup program for disk arrays
                 case,
                 wrapper,
                 helper,
-                ["disable", "iscsid"],
+                list(F25_ENTRY_ALLOWLIST),
                 script=injected_path,
             )
             self.assertNotEqual(result.returncode, 0)
