@@ -2194,11 +2194,27 @@ F29_DIRECT_OUTER_GUARDS = {
     "F29 outer stage or digest is invalid",
     "F29 outer path identity is invalid",
     "F29 outer required path is unavailable",
-    "F29 outer required path metadata is invalid",
     "F29 outer source or receipt identity is invalid",
     "F29 outer receipt exceeds cap",
     "F29 outer receipt already exists",
 }
+F29_DIRECT_REQUIRED_PATH_MESSAGE = "F29 outer required path metadata is invalid"
+F29_REQUIRED_OBJECT_MODES = {
+    "F20_SNAPSHOT_STDERR": 0o600,
+    "F21_CAPTURE_SOURCE": 0o644,
+    "F29_RUNNER_SOURCE": 0o644,
+}
+F29_REQUIRED_PATH_CLASSES = {
+    f"{object_name}_{predicate}"
+    for object_name in F29_REQUIRED_OBJECT_MODES
+    for predicate in (
+        "REGULAR_FILE",
+        "NON_SYMLINK",
+        "EXPECTED_MODE",
+        "LINK_COUNT_ONE",
+    )
+} | {"F20_SNAPSHOT_STDERR_EXPECTED_OWNER"}
+F29_DIRECT_STREAM_CLASSES |= F29_REQUIRED_PATH_CLASSES
 
 
 def _validate_f29_f21_attempt(
@@ -2331,6 +2347,10 @@ def _classify_f29_direct_stream(raw: bytes) -> str:
     if text.count("\n") != 1 or not text.endswith("\n") or "\r" in text:
         return "FRAMING_INVALID"
     message = text[:-1]
+    if message == F29_DIRECT_REQUIRED_PATH_MESSAGE:
+        return "REQUIRED_PATH_METADATA"
+    if "F29 outer required path" in message:
+        return "REQUIRED_PATH_METADATA_INVALID"
     if message in F29_DIRECT_OUTER_GUARDS:
         return "OUTER_GUARD"
     if "Permission denied" in message:
@@ -2342,8 +2362,49 @@ def _classify_f29_direct_stream(raw: bytes) -> str:
     return "UNCLASSIFIED_BOUNDED"
 
 
+def _classify_f29_required_path_predicate(
+    required_paths: dict[str, tuple[pathlib.Path, int, tuple[int, int] | None]],
+) -> str:
+    if set(required_paths) != set(F29_REQUIRED_OBJECT_MODES):
+        raise AssertionError("F29 required-object schema is invalid")
+    failures: list[str] = []
+    for object_name, declared_mode in F29_REQUIRED_OBJECT_MODES.items():
+        path, expected_mode, expected_owner = required_paths[object_name]
+        if expected_mode != declared_mode:
+            raise AssertionError("F29 required-object mode contract is invalid")
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise AssertionError("F29 required-object observation failed") from exc
+        if path.is_symlink():
+            failures.append(f"{object_name}_NON_SYMLINK")
+        elif not stat.S_ISREG(metadata.st_mode):
+            failures.append(f"{object_name}_REGULAR_FILE")
+        elif stat.S_IMODE(metadata.st_mode) != expected_mode:
+            failures.append(f"{object_name}_EXPECTED_MODE")
+        elif metadata.st_nlink != 1:
+            failures.append(f"{object_name}_LINK_COUNT_ONE")
+        elif (
+            expected_owner is not None
+            and (
+                metadata.st_uid,
+                metadata.st_gid,
+            )
+            != expected_owner
+        ):
+            failures.append(f"{object_name}_EXPECTED_OWNER")
+    if len(failures) != 1 or failures[0] not in F29_REQUIRED_PATH_CLASSES:
+        raise AssertionError("F29 required-path predicate is ambiguous")
+    return failures[0]
+
+
 def _validate_f29_direct_capture(
-    fixture_root: pathlib.Path, stage: str
+    fixture_root: pathlib.Path,
+    stage: str,
+    *,
+    required_paths: (
+        dict[str, tuple[pathlib.Path, int, tuple[int, int] | None]] | None
+    ) = None,
 ) -> dict[str, object]:
     if stage not in {"f19-after", "f20-after"}:
         raise AssertionError("F29 direct capture stage is invalid")
@@ -2368,6 +2429,10 @@ def _validate_f29_direct_capture(
             max_bytes=F29_DIRECT_OUTPUT_MAX_BYTES,
         )
         classification = _classify_f29_direct_stream(raw)
+        if classification == "REQUIRED_PATH_METADATA":
+            if stage != "f20-after" or required_paths is None:
+                raise AssertionError("F29 required-path context is unavailable")
+            classification = _classify_f29_required_path_predicate(required_paths)
         if classification not in F29_DIRECT_STREAM_CLASSES:
             raise AssertionError("F29 direct capture stream class is invalid")
         streams[label] = {
@@ -2416,6 +2481,20 @@ def _format_f29_direct_captures(captures: list[dict[str, object]]) -> str:
             or not isinstance(streams, dict)
         ):
             raise AssertionError("F29 direct capture values are invalid")
+        if set(streams) != {"stdout", "stderr"}:
+            raise AssertionError("F29 direct capture stream schema is invalid")
+        for stream in streams.values():
+            if (
+                not isinstance(stream, dict)
+                or set(stream) != {"size", "sha256", "classification"}
+                or not isinstance(stream["size"], int)
+                or isinstance(stream["size"], bool)
+                or not 0 <= stream["size"] <= F29_DIRECT_OUTPUT_MAX_BYTES
+                or not re.fullmatch(r"[0-9a-f]{64}", str(stream["sha256"]))
+                or stream["classification"] not in F29_DIRECT_STREAM_CLASSES
+                or stream["classification"] == "REQUIRED_PATH_METADATA"
+            ):
+                raise AssertionError("F29 direct capture stream values are invalid")
         fields.append(
             "stage={stage} attempted=true exit_status={status} timed_out=false "
             "stdout_size={stdout_size} stdout_sha256={stdout_sha} "
@@ -6084,7 +6163,27 @@ exit 0
                             try:
                                 precleanup_f29_direct.append(
                                     _validate_f29_direct_capture(
-                                        namespace_path, outer_stage
+                                        namespace_path,
+                                        outer_stage,
+                                        required_paths={
+                                            "F20_SNAPSHOT_STDERR": (
+                                                namespace_path / "f20-after.stderr",
+                                                0o600,
+                                                (0, 0),
+                                            ),
+                                            "F21_CAPTURE_SOURCE": (
+                                                f21_capture_error,
+                                                0o644,
+                                                None,
+                                            ),
+                                            "F29_RUNNER_SOURCE": (
+                                                f29_f21_runner,
+                                                0o644,
+                                                None,
+                                            ),
+                                        }
+                                        if outer_stage == "f20-after"
+                                        else None,
                                     )
                                 )
                             except AssertionError as exc:
@@ -7715,6 +7814,42 @@ Description: Backup program for disk arrays
         self.assertFalse(direct["timed_out"])
         self.assertEqual(direct["streams"]["stdout"]["classification"], "EMPTY")
         self.assertEqual(direct["streams"]["stderr"]["classification"], "OUTER_GUARD")
+        for fixed_class in sorted(F29_REQUIRED_PATH_CLASSES):
+            fixed_direct = {
+                **direct,
+                "streams": {
+                    **direct["streams"],
+                    "stderr": {
+                        **direct["streams"]["stderr"],
+                        "classification": fixed_class,
+                    },
+                },
+            }
+            with self.subTest(fixed_required_path_class=fixed_class):
+                formatted_fixed = _format_f29_direct_captures([fixed_direct])
+                self.assertIn(f"stderr_class={fixed_class}", formatted_fixed)
+        for invalid_class in (
+            "F20_SNAPSHOT_STDERR",
+            "F20_SNAPSHOT_STDERR_EXPECTED_MODE_EXTRA",
+            "EXPECTED_MODE_F20_SNAPSHOT_STDERR",
+            "F20_SNAPSHOT_STDERR_EXPECTED_MODE F21_CAPTURE_SOURCE_EXPECTED_MODE",
+            "f20_snapshot_stderr_expected_mode",
+        ):
+            invalid_direct = {
+                **direct,
+                "streams": {
+                    **direct["streams"],
+                    "stderr": {
+                        **direct["streams"]["stderr"],
+                        "classification": invalid_class,
+                    },
+                },
+            }
+            with (
+                self.subTest(invalid_required_path_class=invalid_class),
+                self.assertRaises(AssertionError),
+            ):
+                _format_f29_direct_captures([invalid_direct])
         for label, values in {"status": (b"256\n", b"", b"")}.items():
             with (
                 self.subTest(direct_capture=label),
@@ -7741,8 +7876,61 @@ Description: Backup program for disk arrays
             _classify_f29_direct_stream(b"/private/fixture/path\n"),
             "UNSAFE_OR_TRUNCATED",
         )
+        self.assertEqual(
+            _classify_f29_direct_stream(
+                b"F29 outer required path metadata is invalid\n"
+            ),
+            "REQUIRED_PATH_METADATA",
+        )
+        for malformed_required_path in (
+            b"prefix F29 outer required path metadata is invalid\n",
+            b"F29 outer required path metadata is invalid suffix\n",
+            b"F29 outer required path metadata is invalid\nF29 outer required path metadata is invalid\n",
+            b"F29 outer required path metadata is invalid\x00\n",
+        ):
+            with self.subTest(malformed_required_path=malformed_required_path):
+                self.assertNotEqual(
+                    _classify_f29_direct_stream(malformed_required_path),
+                    "REQUIRED_PATH_METADATA",
+                )
         with self.assertRaises(AssertionError):
             _validate_f29_direct_capture(pathlib.Path("fixture"), "../escape")
+        required_message_capture = (
+            b"1\n",
+            b"",
+            b"F29 outer required path metadata is invalid\n",
+        )
+        with (
+            mock.patch(
+                f"{__name__}._read_strict_root_file",
+                side_effect=required_message_capture,
+            ),
+            self.assertRaises(AssertionError),
+        ):
+            _validate_f29_direct_capture(pathlib.Path("fixture"), "f20-after")
+        dummy_required_paths = {
+            name: (pathlib.Path(f"fixture-{name}"), mode, None)
+            for name, mode in F29_REQUIRED_OBJECT_MODES.items()
+        }
+        with (
+            mock.patch(
+                f"{__name__}._read_strict_root_file",
+                side_effect=required_message_capture,
+            ),
+            mock.patch(
+                f"{__name__}._classify_f29_required_path_predicate",
+                return_value="F20_SNAPSHOT_STDERR_EXPECTED_MODE",
+            ),
+        ):
+            classified_required = _validate_f29_direct_capture(
+                pathlib.Path("fixture"),
+                "f20-after",
+                required_paths=dummy_required_paths,
+            )
+        self.assertEqual(
+            classified_required["streams"]["stderr"]["classification"],
+            "F20_SNAPSHOT_STDERR_EXPECTED_MODE",
+        )
         f20_direct = {**direct, "stage": "f20-after"}
         for captures, expected_count in (
             ([direct], 1),
@@ -7790,6 +7978,131 @@ Description: Backup program for disk arrays
             F29_OUTER_RUNNER_SCRIPT.count("subprocess.run([sys.executable,str(f29)"), 1
         )
         self.assertNotIn("str(f21),stage", F29_OUTER_RUNNER_SCRIPT)
+        expected_script_hashes = {
+            "F19": "4b8fe01485d8c5e97bcd525a07dbcac4b2240a15cf0751b44f30a5dff1d4cde2",
+            "F20": "99af83bf56dc9c7a9a1fc9690187825da0462338f13b61bda853b8b442c31c38",
+            "F21": "13366ef44f4065b716d42a3294d297bb8c77be7a46e61ae1093e1885a9ffdccd",
+            "F29": "6d0c55cca01e2512a1234a42ebbfaba258e54edc88e55b47295f411a1faffc24",
+            "F29_OUTER": "9c38bfc1da2751d99bc4a9785bbcce18a09f54210f903c29e23fc863a004e41a",
+        }
+        for label, script in (
+            ("F19", F19_SNAPSHOT_SCRIPT),
+            ("F20", F20_SNAPSHOT_SCRIPT),
+            ("F21", F21_CAPTURE_ERROR_SCRIPT),
+            ("F29", F29_F21_RUNNER_SCRIPT),
+            ("F29_OUTER", F29_OUTER_RUNNER_SCRIPT),
+        ):
+            self.assertEqual(
+                hashlib.sha256(script.encode()).hexdigest(),
+                expected_script_hashes[label],
+            )
+        for function_name, expected_hash in (
+            (
+                "capture_f29_outer_invocation",
+                "6bda7b0bf00c07a2f5aac130a5bc58b4cb3bd6354c73649b92a8af0cc11bc3d3",
+            ),
+            (
+                "f19_capture_after_failure",
+                "78bdfcc4aa484e0c218b53abd26f78e2ac29431d2fc4c214eadb1bcec1c4d9a8",
+            ),
+        ):
+            start = source.index(f"{function_name}() {{\n")
+            end = source.index("\n}\n", start) + 3
+            self.assertEqual(
+                hashlib.sha256(source[start:end].encode()).hexdigest(), expected_hash
+            )
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "requires POSIX file metadata and root-owner fixture transitions",
+    )
+    def test_f29_required_path_predicates_are_exact_and_causal(self) -> None:
+        for expected_class in sorted(F29_REQUIRED_PATH_CLASSES):
+            object_name = next(
+                name
+                for name in F29_REQUIRED_OBJECT_MODES
+                if expected_class.startswith(f"{name}_")
+            )
+            predicate = expected_class.removeprefix(f"{object_name}_")
+            with (
+                self.subTest(required_class=expected_class),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = pathlib.Path(temporary)
+                paths = {
+                    "F20_SNAPSHOT_STDERR": root / "f20-after.stderr",
+                    "F21_CAPTURE_SOURCE": root / "f21-capture-error.py",
+                    "F29_RUNNER_SOURCE": root / "f29-f21-runner.py",
+                }
+                for name, path in paths.items():
+                    path.write_bytes(b"fixture\n")
+                    path.chmod(F29_REQUIRED_OBJECT_MODES[name])
+                path = paths[object_name]
+                if predicate == "REGULAR_FILE":
+                    path.unlink()
+                    path.mkdir()
+                elif predicate == "NON_SYMLINK":
+                    path.unlink()
+                    target = root / f"{object_name.lower()}-target"
+                    target.write_bytes(b"fixture\n")
+                    path.symlink_to(target)
+                elif predicate == "EXPECTED_MODE":
+                    path.chmod(0o640)
+                elif predicate == "LINK_COUNT_ONE":
+                    os.link(path, root / f"{object_name.lower()}-peer")
+                elif predicate != "EXPECTED_OWNER":
+                    self.fail(f"unhandled fixed predicate: {predicate}")
+                f20_path = paths["F20_SNAPSHOT_STDERR"]
+                if (
+                    not (
+                        object_name == "F20_SNAPSHOT_STDERR"
+                        and predicate == "EXPECTED_OWNER"
+                    )
+                    and f20_path.is_file()
+                    and not f20_path.is_symlink()
+                ):
+                    subprocess.run(
+                        ["sudo", "-n", "chown", "0:0", "--", str(f20_path)],
+                        check=True,
+                    )
+                required_paths = {
+                    "F20_SNAPSHOT_STDERR": (
+                        paths["F20_SNAPSHOT_STDERR"],
+                        0o600,
+                        (0, 0),
+                    ),
+                    "F21_CAPTURE_SOURCE": (
+                        paths["F21_CAPTURE_SOURCE"],
+                        0o644,
+                        None,
+                    ),
+                    "F29_RUNNER_SOURCE": (
+                        paths["F29_RUNNER_SOURCE"],
+                        0o644,
+                        None,
+                    ),
+                }
+                self.assertEqual(
+                    _classify_f29_required_path_predicate(required_paths),
+                    expected_class,
+                )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            paths = {
+                "F20_SNAPSHOT_STDERR": root / "f20-after.stderr",
+                "F21_CAPTURE_SOURCE": root / "f21-capture-error.py",
+                "F29_RUNNER_SOURCE": root / "f29-f21-runner.py",
+            }
+            for name, path in paths.items():
+                path.write_bytes(b"fixture\n")
+                path.chmod(0o640)
+            ambiguous = {
+                "F20_SNAPSHOT_STDERR": (paths["F20_SNAPSHOT_STDERR"], 0o600, None),
+                "F21_CAPTURE_SOURCE": (paths["F21_CAPTURE_SOURCE"], 0o644, None),
+                "F29_RUNNER_SOURCE": (paths["F29_RUNNER_SOURCE"], 0o644, None),
+            }
+            with self.assertRaises(AssertionError):
+                _classify_f29_required_path_predicate(ambiguous)
 
     @unittest.skipIf(
         sys.platform == "win32",
