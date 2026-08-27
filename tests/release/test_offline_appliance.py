@@ -4920,8 +4920,8 @@ for position,arg in enumerate(args[:16]):
     else:
         classified.append({"position":position,"classification":"UNEXPECTED","byte_length":len(raw),"sha256":hashlib.sha256(raw).hexdigest()})
 predicates={
-    "expected_argc":len(args)==2,
-    "exact_vector":args==["disable","iscsid"],
+    "expected_argc":len(args)==3,
+    "exact_vector":args==["--root=/","disable","iscsid"],
     "systemd_offline":os.environ.get("SYSTEMD_OFFLINE")=="1",
     "dpkg_maintscripts_package":os.environ.get("DPKG_MAINTSCRIPT_PACKAGE")=="pcp",
     "dpkg_maintscripts_name":os.environ.get("DPKG_MAINTSCRIPT_NAME")=="postinst",
@@ -7210,6 +7210,14 @@ Description: Backup program for disk arrays
             '    "${DPKG_MAINTSCRIPT_NAME-}" == postinst && "$PATH" == "__F20_PATH__" ]] || exit 125'
         )
         self.assertIn(existing_guard, body)
+        writer = body.split("<<'PY'\n", 1)[1].split("\nPY\nset -u", 1)[0]
+        self.assertEqual(writer.count('"expected_argc":len(args)==3'), 1)
+        self.assertEqual(
+            writer.count('"exact_vector":args==["--root=/","disable","iscsid"]'),
+            1,
+        )
+        self.assertNotIn('"expected_argc":len(args)==2', writer)
+        self.assertNotIn('"exact_vector":args==["disable","iscsid"]', writer)
         self.assertEqual(body.count('"$real_helper" "$@"'), 1)
         self.assertIn("os.O_EXCL", body)
         self.assertIn('getattr(os,"O_NOFOLLOW",0)', body)
