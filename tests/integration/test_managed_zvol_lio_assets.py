@@ -584,3 +584,28 @@ def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None
     assert "if: always()" in workflow
     assert "test -f dist/validation/managed-zvol-lio-lifecycle.json" in workflow
     assert "if-no-files-found: error" in workflow
+
+
+def test_targetcli_cleanup_uses_exact_parent_child_vectors_in_order() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    cleanup = script.split("cleanup_controller() {", 1)[1].split(
+        "build_cleanup_json() {", 1
+    )[0]
+    node_delete = (
+        'run_bounded 8 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" -o delete'
+    )
+    target_delete = 'run_bounded 10 targetcli /iscsi delete "$target_iqn"'
+    backstore_delete = 'run_bounded 10 targetcli /backstores/block delete "$backstore"'
+    saveconfig = 'phase_result "saveconfig" true 10 true targetcli saveconfig'
+
+    assert cleanup.count(target_delete) == 1
+    assert cleanup.count(backstore_delete) == 1
+    assert cleanup.index(node_delete) < cleanup.index(target_delete)
+    assert cleanup.index(target_delete) < cleanup.index(backstore_delete)
+    assert cleanup.index(backstore_delete) < cleanup.index(saveconfig)
+    assert 'targetcli "/iscsi/$target_iqn" delete' not in cleanup
+    assert 'targetcli "/backstores/block/$backstore" delete' not in cleanup
+    assert "targetcli /iscsi delete $target_iqn" not in cleanup
+    assert "targetcli /backstores/block delete $backstore" not in cleanup
+    assert "clearconfig" not in cleanup
+    assert "*" not in cleanup

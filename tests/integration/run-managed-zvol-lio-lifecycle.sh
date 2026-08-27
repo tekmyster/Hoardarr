@@ -191,7 +191,7 @@ cleanup_controller() {
 
   if target_absent; then attempted=false; else attempted=true; fi
   set +e
-  if [[ "$attempted" == true ]]; then run_bounded 10 targetcli "/iscsi/$target_iqn" delete; rc=$?; else rc=0; fi
+  if [[ "$attempted" == true ]]; then run_bounded 10 targetcli /iscsi delete "$target_iqn"; rc=$?; else rc=0; fi
   set -e
   if target_absent; then post=true; else post=false; fi
   status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
@@ -199,7 +199,7 @@ cleanup_controller() {
 
   if backstore_absent; then attempted=false; else attempted=true; fi
   set +e
-  if [[ "$attempted" == true ]]; then run_bounded 10 targetcli "/backstores/block/$backstore" delete; rc=$?; else rc=0; fi
+  if [[ "$attempted" == true ]]; then run_bounded 10 targetcli /backstores/block delete "$backstore"; rc=$?; else rc=0; fi
   set -e
   if backstore_absent; then post=true; else post=false; fi
   status="skipped"; [[ "$attempted" == true && "$rc" -eq 0 ]] && status="success"; [[ "$attempted" == true && "$rc" -ne 0 ]] && status="failed"; [[ "$rc" -eq 124 || "$rc" -eq 137 ]] && status="timeout"
