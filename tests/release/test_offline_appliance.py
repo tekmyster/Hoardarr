@@ -7658,7 +7658,7 @@ Description: Backup program for disk arrays
             f21.write_text("raise SystemExit(0)\n", encoding="ascii", newline="\n")
             f29 = root / "f29-f21-runner.py"
             f29.write_text(
-                "import sys\nsys.stderr.write('F29 runner path identity invalid\\n')\nsys.exit(9)\n",
+                "import sys\nsys.stderr.write('F29 runner path identity is invalid\\n')\nsys.exit(9)\n",
                 encoding="ascii",
                 newline="\n",
             )
@@ -7699,6 +7699,110 @@ Description: Backup program for disk arrays
             self.assertEqual(receipt["stderr_class"], "PATH_IDENTITY_INVALID")
             self.assertFalse(receipt["attempt_exists"])
             self.assertFalse(receipt["output_exists"])
+
+    @unittest.skipIf(sys.platform == "win32", "requires Bash subprocess coverage")
+    def test_f29_capture_status_tracks_snapshots_not_original_phase(self) -> None:
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        start = source.index("f19_capture_after_failure() {\n")
+        end = source.index("\n}\ntrap 'f19_status=", start) + 2
+        function = source[start:end]
+
+        def run_case(
+            f19_status: int, f20_status: int
+        ) -> tuple[str, str, list[str], str]:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                work = root / "work"
+                work.mkdir()
+                f19 = root / "f19.py"
+                f20 = root / "f20.py"
+                outer = root / "outer.py"
+                f19.write_text(
+                    "import os, pathlib, sys\npathlib.Path(os.environ['ARGS']).write_text('|'.join(sys.argv[1:]))\nsys.exit(int(os.environ['F19']))\n",
+                    encoding="ascii",
+                    newline="\n",
+                )
+                f20.write_text(
+                    "import os, sys\nsys.exit(int(os.environ['F20']))\n",
+                    encoding="ascii",
+                    newline="\n",
+                )
+                outer.write_text(
+                    "import os, pathlib\npathlib.Path(os.environ['OUTER']).open('a').write('call\\n')\n",
+                    encoding="ascii",
+                    newline="\n",
+                )
+                script = root / "case.sh"
+                script.write_text(
+                    "\n".join(
+                        (
+                            "#!/usr/bin/env bash",
+                            "set -u",
+                            f"work={work}",
+                            f"f19_snapshot={f19}",
+                            f"f20_snapshot={f20}",
+                            f"f29_outer_runner={outer}",
+                            "f19_after=$work/f19-after.json",
+                            "f20_after=$work/f20-after.json",
+                            "f19_finalizer_source=$work/finalizer",
+                            "phase09_outcomes=$work/outcomes",
+                            "f19_command_trace=$work/trace",
+                            "f21_capture_error=$work/f21.py",
+                            "f21_capture_error_receipt=$work/f21.json",
+                            "f29_f21_attempt_receipt=$work/f29.json",
+                            "f21_capture_error_sha256=$(printf '%064d' 0)",
+                            "f29_f21_runner=$work/f29.py",
+                            "f29_f21_runner_sha256=$(printf '%064d' 0)",
+                            "f29_outer_f19_receipt=$work/outer-f19.json",
+                            "f29_outer_f20_receipt=$work/outer-f20.json",
+                            "f19_capture_status_file=$work/f19.status",
+                            "f20_capture_status_file=$work/f20.status",
+                            function,
+                            "f19_capture_after_failure 1 99 main phase12-command",
+                        )
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                args = root / "args.txt"
+                outer_log = root / "outer.log"
+                completed = subprocess.run(
+                    ["bash", str(script)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "F19": str(f19_status),
+                        "F20": str(f20_status),
+                        "ARGS": str(args),
+                        "OUTER": str(outer_log),
+                    },
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return (
+                    (work / "f19.status").read_text(encoding="ascii"),
+                    (work / "f20.status").read_text(encoding="ascii"),
+                    outer_log.read_text(encoding="ascii").splitlines()
+                    if outer_log.exists()
+                    else [],
+                    args.read_text(encoding="utf-8"),
+                )
+
+        with self.subTest(case="both-success"):
+            f19_capture, f20_capture, outer_calls, args = run_case(0, 0)
+            self.assertEqual((f19_capture, f20_capture), ("0\n", "0\n"))
+            self.assertEqual(outer_calls, [])
+            self.assertIn("|1|99|main|phase12-command", f"|{args}")
+        with self.subTest(case="f19-fail"):
+            f19_capture, f20_capture, outer_calls, _ = run_case(41, 0)
+            self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
+            self.assertEqual(outer_calls, ["call"])
+        with self.subTest(case="both-fail"):
+            f19_capture, f20_capture, outer_calls, _ = run_case(41, 42)
+            self.assertEqual((f19_capture, f20_capture), ("41\n", "41\n"))
+            self.assertEqual(outer_calls, ["call", "call"])
 
     def test_f23_instrumentation_preserves_the_single_systemctl_call(self) -> None:
         payload = (
