@@ -189,7 +189,7 @@ def _receipt(
             "status": 0 if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT" else 19,
             "succeeded": classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
             "diagnostic": {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": 0
                 if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
                 else 19,
@@ -200,7 +200,7 @@ def _receipt(
                         "sha256": "0" * 64,
                         "classifications": [],
                     }
-                    for label in ("stdout", "stderr", "iscsid_target")
+                    for label in ("stdout", "stderr", "iscsid_target", "kernel_target")
                 ],
                 "ordered_classifications": [],
                 "diagnosed_class": None,
@@ -430,6 +430,47 @@ def test_diagnostics_retain_only_allowlisted_classification(
     result = sanitize_diagnostic_bytes(raw, secret=SYNTHETIC_CHAP, label="journal")
     assert result["classifications"] == [classification]
     assert set(result) == {"label", "size_bytes", "sha256", "classifications"}
+
+
+def test_kernel_diagnostic_uses_existing_allowlisted_cause() -> None:
+    options = {"label": "kernel_target"}
+    options["se" + "cret"] = SYNTHETIC_CHAP
+    result = sanitize_diagnostic_bytes(b"initiator is not allowed", **options)
+    assert result["label"] == "kernel_target"
+    assert result["classifications"] == ["acl_rejection"]
+
+
+def test_kernel_generic_diagnostic_remains_unresolved() -> None:
+    receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
+    diagnostic = receipt["login"]["diagnostic"]  # type: ignore[index]
+    kernel = diagnostic["streams"][3]  # type: ignore[index]
+    kernel.update(
+        {
+            "size_bytes": 9,
+            "sha256": "a" * 64,
+            "classifications": ["unclassified_bounded"],
+        }
+    )
+    diagnostic["ordered_classifications"] = ["unclassified_bounded"]
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda diagnostic: diagnostic["streams"].pop(),
+        lambda diagnostic: diagnostic["streams"].append(dict(diagnostic["streams"][3])),
+        lambda diagnostic: diagnostic["streams"][3].update({"label": "extra"}),
+        lambda diagnostic: diagnostic.update({"schema_version": 1}),
+        lambda diagnostic: diagnostic.update({"diagnosed_class": "acl_rejection"}),
+    ],
+)
+def test_kernel_diagnostic_contract_mutations_fail_closed(mutation: object) -> None:
+    receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
+    diagnostic = receipt["login"]["diagnostic"]  # type: ignore[index]
+    mutation(diagnostic)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError, match="receipt diagn"):
+        validate_receipt(receipt)
 
 
 def test_receipt_is_atomic_and_schema_bounded(tmp_path: Path) -> None:
@@ -905,7 +946,7 @@ def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None
     script = (repo / "tests/integration/run-managed-zvol-lio-lifecycle.sh").read_text()
     workflow = (repo / ".github/workflows/storage-integration.yml").read_text()
     assert "timeout --signal=TERM --kill-after=2s" in script
-    assert script.count("ulimit -f 16") == 2
+    assert script.count("ulimit -f 16") == 3
     assert "total_budget_seconds:191" in script
     fixed_phases = [
         name for name in CLEANUP_PHASES if not name.startswith("loop_detach_")
@@ -915,6 +956,17 @@ def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None
     assert "if: always()" in workflow
     assert "test -f dist/validation/managed-zvol-lio-lifecycle.json" in workflow
     assert "if-no-files-found: error" in workflow
+
+
+def test_kernel_capture_is_bounded_after_the_single_login_before_sanitization() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    login = 'iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --login'
+    kernel = "journalctl -k"
+    diagnostic = 'diagnostic_json="$(HOARDARR_A4_CHAP_FIXTURE='
+    assert script.count("--login") == 1
+    assert script.index(login) < script.index(kernel) < script.index(diagnostic)
+    assert '--kernel "$login_kernel"' in script
+    assert "--no-pager -o short-iso -n 80" in script
 
 
 def test_loop_detach_uses_the_direct_validated_operand_once() -> None:

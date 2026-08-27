@@ -535,10 +535,10 @@ def validate_receipt(document: object) -> dict[str, Any]:
             "ordered_classifications",
             "diagnosed_class",
         }
-        or diagnostic.get("schema_version") != 1
+        or diagnostic.get("schema_version") != 2
         or diagnostic.get("status") != login_status
         or not isinstance(diagnostic.get("streams"), list)
-        or len(diagnostic["streams"]) > 3
+        or len(diagnostic["streams"]) > 4
         or not isinstance(diagnostic.get("ordered_classifications"), list)
         or len(diagnostic["ordered_classifications"])
         != len(set(diagnostic["ordered_classifications"]))
@@ -557,7 +557,7 @@ def validate_receipt(document: object) -> dict[str, Any]:
         raise LifecycleGuardError("receipt diagnostic is invalid")
     if (
         document["classification"] != "HARNESS_ERROR"
-        and len(diagnostic["streams"]) != login_count * 3
+        and len(diagnostic["streams"]) != login_count * 4
     ):
         raise LifecycleGuardError("receipt diagnostic stream count is invalid")
     labels: set[str] = set()
@@ -565,7 +565,8 @@ def validate_receipt(document: object) -> dict[str, Any]:
         if (
             not isinstance(stream, dict)
             or set(stream) != {"label", "size_bytes", "sha256", "classifications"}
-            or stream.get("label") not in {"stdout", "stderr", "iscsid_target"}
+            or stream.get("label")
+            not in {"stdout", "stderr", "iscsid_target", "kernel_target"}
             or stream["label"] in labels
             or not isinstance(stream.get("size_bytes"), int)
             or isinstance(stream.get("size_bytes"), bool)
@@ -576,6 +577,18 @@ def validate_receipt(document: object) -> dict[str, Any]:
         ):
             raise LifecycleGuardError("receipt diagnostic stream is invalid")
         labels.add(stream["label"])
+    if login_count == 1 and labels != {
+        "stdout",
+        "stderr",
+        "iscsid_target",
+        "kernel_target",
+    }:
+        raise LifecycleGuardError("receipt diagnostic labels are invalid")
+    if diagnostic["diagnosed_class"] is not None and not any(
+        diagnostic["diagnosed_class"] in stream["classifications"]
+        for stream in diagnostic["streams"]
+    ):
+        raise LifecycleGuardError("receipt diagnosis lacks stream evidence")
     if document["classification"] == "PARITY_MISMATCH_IDENTIFIED" and login_count != 0:
         raise LifecycleGuardError("parity mismatch attempted login")
     if (
@@ -1071,6 +1084,7 @@ def _parser() -> argparse.ArgumentParser:
     diagnostic.add_argument("--stdout", type=Path, required=True)
     diagnostic.add_argument("--stderr", type=Path, required=True)
     diagnostic.add_argument("--journal", type=Path, required=True)
+    diagnostic.add_argument("--kernel", type=Path, required=True)
     diagnostic.add_argument("--status", type=int, required=True)
     receipt = subparsers.add_parser("receipt")
     receipt.add_argument("--draft", type=Path, required=True)
@@ -1133,6 +1147,7 @@ def main() -> None:
         ("stdout", args.stdout),
         ("stderr", args.stderr),
         ("iscsid_target", args.journal),
+        ("kernel_target", args.kernel),
     ):
         streams.append(
             sanitize_diagnostic_bytes(
@@ -1160,7 +1175,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": args.status,
                 "streams": streams,
                 "ordered_classifications": ordered,

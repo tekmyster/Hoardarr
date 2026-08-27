@@ -59,7 +59,7 @@ restart_passed=false
 remove_passed=false
 backing_retained=false
 parity_json='{"schema_version":1,"exact":false,"mismatch":"NOT_RUN","record_count":0,"auth_method_chap":false,"username_match":false,"password_match":false,"record_count_exact":false,"record_safe":false,"username_length":0,"password_length":0,"target_identity_sha256":"","initiator_identity_sha256":"","parity_sha256":""}'
-diagnostic_json='{"schema_version":1,"status":-1,"streams":[],"ordered_classifications":[],"diagnosed_class":null}'
+diagnostic_json='{"schema_version":2,"status":-1,"streams":[],"ordered_classifications":[],"diagnosed_class":null}'
 initial_json='{}'
 independent_json='{}'
 idempotent_json='{}'
@@ -568,9 +568,11 @@ fi
 login_stdout="$work/login.stdout"
 login_stderr="$work/login.stderr"
 login_journal="$work/login.journal"
+login_kernel="$work/login.kernel"
 install -m 600 /dev/null "$login_stdout"
 install -m 600 /dev/null "$login_stderr"
 install -m 600 /dev/null "$login_journal"
+install -m 600 /dev/null "$login_kernel"
 attempt_started="$(date --iso-8601=seconds)"
 login_attempt_count=1
 trap - ERR
@@ -583,17 +585,21 @@ login_status=$?
   -u iscsid.service -u rtslib-fb-targetctl.service --since "$attempt_started" \
   --no-pager -n 80 >"$login_journal" 2>/dev/null)
 diagnostic_capture_status=$?
+(ulimit -f 16; timeout --signal=TERM --kill-after=2s 10s journalctl -k \
+  --since "$attempt_started" --no-pager -o short-iso -n 80 >"$login_kernel" 2>/dev/null)
+kernel_capture_status=$?
 set -e
-if [[ "$login_status" -eq 153 || "$diagnostic_capture_status" -eq 153 ]]; then
+if [[ "$login_status" -eq 153 || "$diagnostic_capture_status" -eq 153 || "$kernel_capture_status" -eq 153 ]]; then
   classification="HARNESS_ERROR"; failure_code="DIAGNOSTIC_OVERFLOW"; exit 42
 fi
-if [[ "$diagnostic_capture_status" -ne 0 && "$diagnostic_capture_status" -ne 1 ]]; then
+if { [[ "$diagnostic_capture_status" -ne 0 && "$diagnostic_capture_status" -ne 1 ]]; } || { [[ "$kernel_capture_status" -ne 0 && "$kernel_capture_status" -ne 1 ]]; }; then
   classification="HARNESS_ERROR"; failure_code="DIAGNOSTIC_CAPTURE_FAILED"; exit 42
 fi
 set +e
 diagnostic_json="$(HOARDARR_A4_CHAP_FIXTURE="$chap_fixture" "$python" \
   "$repo/tests/integration/managed_zvol_lio_lifecycle.py" diagnostic \
   --stdout "$login_stdout" --stderr "$login_stderr" --journal "$login_journal" \
+  --kernel "$login_kernel" \
   --status "$login_status")"
 diagnostic_status=$?
 set -e
