@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -247,15 +248,41 @@ def helper(stage,work):
     paths=[work/name for name in names]
     partials=[work/"f20-helper-stdout.bin.partial",work/"f20-helper-stderr.bin.partial"]
     repeat=work/"f20-helper-repeat.txt"
+    entry_path=work/"f25-helper-entry.json"
+    entry_partial=work/"f25-helper-entry.json.partial"
     real=work/"f20-helper-real"
     source_hash=(work/"f20-helper-source.sha256").read_text("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{64}",source_hash) or digest(real)!=source_hash: raise SystemExit("F20 copied helper identity is invalid")
     identity={"path":str(real),"size":real.stat().st_size,"mode":format(stat.S_IMODE(real.stat().st_mode),"04o"),"sha256":source_hash}
     if stage=="before":
-        if any(path.exists() or path.is_symlink() for path in (*paths,*partials,repeat)): raise SystemExit("F20 helper evidence exists before call")
-        return {"invoked":False,"real_helper":identity}
+        if any(path.exists() or path.is_symlink() for path in (*paths,*partials,repeat,entry_path,entry_partial)): raise SystemExit("F20 helper evidence exists before call")
+        return {"invoked":False,"real_helper":identity,"entry_guard":{"entry_reached":False}}
+    entry={"entry_reached":False}
+    if entry_path.exists() or entry_path.is_symlink() or entry_partial.exists() or entry_partial.is_symlink():
+        if entry_partial.exists() or entry_partial.is_symlink(): raise SystemExit("F25 helper entry partial evidence remains")
+        metadata=entry_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or entry_path.is_symlink() or stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_uid!=0 or metadata.st_gid!=0 or metadata.st_nlink!=1 or metadata.st_size>8192: raise SystemExit("F25 helper entry metadata is invalid")
+        try: entry=json.loads(entry_path.read_text("utf-8"))
+        except (UnicodeDecodeError,json.JSONDecodeError) as exc: raise SystemExit("F25 helper entry is invalid JSON") from exc
+        keys=("expected_argc","exact_vector","systemd_offline","dpkg_maintscripts_package","dpkg_maintscripts_name","exact_private_path","wrapper_identity_mode","real_helper_identity_mode")
+        if not isinstance(entry,dict) or set(entry)!={"schema_version","entry_reached","argc","argv","predicates","guard_outcome"} or entry.get("schema_version")!=1 or entry.get("entry_reached") is not True: raise SystemExit("F25 helper entry schema is invalid")
+        argc=entry.get("argc"); argv=entry.get("argv"); predicates=entry.get("predicates")
+        if not isinstance(argc,int) or isinstance(argc,bool) or not 0<=argc<=16 or not isinstance(argv,list) or len(argv)!=argc: raise SystemExit("F25 helper entry argc is invalid")
+        values=[]
+        for index,item in enumerate(argv):
+            if not isinstance(item,dict) or item.get("position")!=index: raise SystemExit("F25 helper entry argv order is invalid")
+            if item.get("classification")=="ALLOWLISTED":
+                if set(item)!={"position","classification","value"} or item.get("value") not in {"--root=/","disable","iscsid"}: raise SystemExit("F25 helper entry raw argv escaped allowlist")
+                values.append(item["value"])
+            elif item.get("classification")=="UNEXPECTED":
+                if set(item)!={"position","classification","byte_length","sha256"} or not isinstance(item.get("byte_length"),int) or isinstance(item.get("byte_length"),bool) or not 0<=item["byte_length"]<=128*1024 or not re.fullmatch(r"[0-9a-f]{64}",str(item.get("sha256",""))): raise SystemExit("F25 helper entry unexpected argv is invalid")
+                values.append(None)
+            else: raise SystemExit("F25 helper entry argv classification is invalid")
+        if not isinstance(predicates,dict) or set(predicates)!=set(keys) or any(type(value) is not bool for value in predicates.values()): raise SystemExit("F25 helper entry predicates are invalid")
+        if predicates["expected_argc"] is not (argc==2) or predicates["exact_vector"] is not (values==["disable","iscsid"]): raise SystemExit("F25 helper entry predicates are inconsistent")
+        if entry.get("guard_outcome")!=("ACCEPTED" if all(predicates.values()) else "REJECTED"): raise SystemExit("F25 helper entry outcome is inconsistent")
     present=[path for path in (*paths,*partials,repeat) if path.exists() or path.is_symlink()]
-    if not present: return {"invoked":False,"real_helper":identity}
+    if not present: return {"invoked":False,"real_helper":identity,"entry_guard":entry}
     if repeat.exists() or repeat.is_symlink(): raise SystemExit("F20 helper was invoked more than once")
     if any(path.exists() or path.is_symlink() for path in partials): raise SystemExit("F20 helper partial evidence remains")
     if not all(path.is_file() and not path.is_symlink() for path in paths): raise SystemExit("F20 helper evidence is incomplete")
@@ -273,7 +300,7 @@ def helper(stage,work):
         first=raw.splitlines()[0].decode("utf-8","backslashreplace")[:240] if raw else ""
         if any(ord(ch)<32 and ch not in "\\t" for ch in first): raise SystemExit("F20 helper first line is unsafe")
         outputs[label]={"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest(),"safe_first_line":first,"content_base64":base64.b64encode(raw).decode("ascii")}
-    return {"invoked":True,"real_helper":identity,"argv":["disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_text),"invocation_sha256":digest(paths[0]),"outputs":outputs}
+    return {"invoked":True,"real_helper":identity,"entry_guard":entry,"argv":["disable","iscsid"],"environment":{"SYSTEMD_OFFLINE":"1"},"status":int(status_text),"invocation_sha256":digest(paths[0]),"outputs":outputs}
 
 def main():
     if len(sys.argv)!=5: raise SystemExit("F20 snapshot argv invalid")
@@ -355,6 +382,20 @@ raise SystemExit(main())
 F23_SYSTEMCTL_OUTPUT_MAX_BYTES = 8 * 1024
 F24_SYSTEMCTL_OUTPUT_MAX_LINES = 64
 F24_SYSTEMCTL_OUTPUT_MAX_LINE_BYTES = 512
+F25_ENTRY_SCHEMA = 1
+F25_ENTRY_MAX_BYTES = 8 * 1024
+F25_ENTRY_MAX_ARGC = 16
+F25_ENTRY_ALLOWLIST = ("--root=/", "disable", "iscsid")
+F25_ENTRY_PREDICATES = (
+    "expected_argc",
+    "exact_vector",
+    "systemd_offline",
+    "dpkg_maintscripts_package",
+    "dpkg_maintscripts_name",
+    "exact_private_path",
+    "wrapper_identity_mode",
+    "real_helper_identity_mode",
+)
 F23_ROOT_READER_SCRIPT = r"""import os, stat, sys
 path=sys.argv[1]
 expected_dev=int(sys.argv[2])
@@ -493,6 +534,121 @@ def _validate_f23_systemctl_output(
         "lines": lines,
         "trailing_lf": trailing_lf,
     }
+
+
+def _validate_f25_entry_guard(value: object) -> dict[str, object]:
+    if value == {"entry_reached": False}:
+        return {"entry_reached": False}
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "entry_reached",
+        "argc",
+        "argv",
+        "predicates",
+        "guard_outcome",
+    }:
+        raise AssertionError("F25 entry receipt schema is not exact")
+    if (
+        value["schema_version"] != F25_ENTRY_SCHEMA
+        or value["entry_reached"] is not True
+    ):
+        raise AssertionError("F25 entry receipt version/state is invalid")
+    argc = value["argc"]
+    argv = value["argv"]
+    if (
+        not isinstance(argc, int)
+        or isinstance(argc, bool)
+        or not 0 <= argc <= F25_ENTRY_MAX_ARGC
+        or not isinstance(argv, list)
+        or len(argv) != argc
+    ):
+        raise AssertionError("F25 entry argc/vector is unbounded")
+    classified: list[str | None] = []
+    for index, item in enumerate(argv):
+        if not isinstance(item, dict) or item.get("position") != index:
+            raise AssertionError("F25 entry argv order/schema is invalid")
+        classification = item.get("classification")
+        if classification == "ALLOWLISTED":
+            if set(item) != {"position", "classification", "value"}:
+                raise AssertionError("F25 allowlisted argv schema is invalid")
+            raw = item["value"]
+            if raw not in F25_ENTRY_ALLOWLIST:
+                raise AssertionError("F25 raw argv escaped its allowlist")
+            classified.append(str(raw))
+        elif classification == "UNEXPECTED":
+            if (
+                set(item) != {"position", "classification", "byte_length", "sha256"}
+                or not isinstance(item["byte_length"], int)
+                or isinstance(item["byte_length"], bool)
+                or not 0 <= item["byte_length"] <= 128 * 1024
+                or not re.fullmatch(r"[0-9a-f]{64}", str(item["sha256"]))
+            ):
+                raise AssertionError("F25 unexpected argv schema is invalid")
+            classified.append(None)
+        else:
+            raise AssertionError("F25 argv classification is invalid")
+    predicates = value["predicates"]
+    if (
+        not isinstance(predicates, dict)
+        or set(predicates) != set(F25_ENTRY_PREDICATES)
+        or any(type(result) is not bool for result in predicates.values())
+    ):
+        raise AssertionError("F25 guard predicate schema is invalid")
+    expected_argc = argc == 2
+    exact_vector = classified == ["disable", "iscsid"]
+    if predicates["expected_argc"] is not expected_argc:
+        raise AssertionError("F25 argc predicate is inconsistent")
+    if predicates["exact_vector"] is not exact_vector:
+        raise AssertionError("F25 vector predicate is inconsistent")
+    expected_outcome = "ACCEPTED" if all(predicates.values()) else "REJECTED"
+    if value["guard_outcome"] != expected_outcome:
+        raise AssertionError("F25 guard outcome is inconsistent")
+    return value
+
+
+def _classify_f25_entry(
+    systemctl_stderr: dict[str, object], helper: dict[str, object]
+) -> str:
+    lines = systemctl_stderr.get("lines")
+    if not isinstance(lines, list):
+        raise TypeError("F25 systemctl lines are unavailable")
+    prefix = "Executing: /usr/lib/systemd/systemd-sysv-install "
+    attempted = [
+        line for line in lines if isinstance(line, str) and line.startswith(prefix)
+    ]
+    if len(attempted) != 1:
+        raise AssertionError("F25 attempted helper argv is missing or ambiguous")
+    attempted_argv = attempted[0][len(prefix) :].split(" ")
+    if not 1 <= len(attempted_argv) <= F25_ENTRY_MAX_ARGC or any(
+        argument not in F25_ENTRY_ALLOWLIST for argument in attempted_argv
+    ):
+        raise AssertionError("F25 attempted helper argv is outside its allowlist")
+    entry = _validate_f25_entry_guard(helper.get("entry_guard"))
+    invoked = helper.get("invoked")
+    if invoked not in {True, False}:
+        raise AssertionError("F25 post-guard invocation state is invalid")
+    if entry == {"entry_reached": False}:
+        if invoked is not False:
+            raise AssertionError("F25 invocation cannot precede wrapper entry")
+        return "HELPER_EXEC_NOT_REACHED"
+    argv = entry["argv"]
+    assert isinstance(argv, list)
+    values = [
+        item.get("value")
+        for item in argv
+        if isinstance(item, dict) and item.get("classification") == "ALLOWLISTED"
+    ]
+    if len(values) != len(argv) or values != attempted_argv:
+        raise AssertionError("F25 systemctl and wrapper argv disagree")
+    predicates = entry["predicates"]
+    assert isinstance(predicates, dict)
+    if all(predicates.values()):
+        if invoked is not True:
+            raise AssertionError("F25 accepted guard lacks post-guard evidence")
+        return "WRAPPER_ENTRY_ACCEPTED"
+    if invoked is not False:
+        raise AssertionError("F25 rejected guard cannot invoke the real helper")
+    return "WRAPPER_ENTRY_GUARD_REJECTION"
 
 
 F19_SNAPSHOT_SCRIPT = r"""#!/usr/bin/python3
@@ -1725,6 +1881,7 @@ def _validate_f20_snapshot(
     helper = receipt["helper"]
     if not isinstance(helper, dict) or not isinstance(helper.get("real_helper"), dict):
         raise TypeError("F20 helper identity is missing")
+    entry_guard = _validate_f25_entry_guard(helper.get("entry_guard"))
     real = helper["real_helper"]
     if (
         set(real) != {"path", "size", "mode", "sha256"}
@@ -1734,14 +1891,20 @@ def _validate_f20_snapshot(
     ):
         raise AssertionError("F20 copied helper identity is invalid")
     if stage == "before" or helper.get("invoked") is False:
-        if set(helper) != {"invoked", "real_helper"} or helper["invoked"] is not False:
+        if (
+            set(helper) != {"invoked", "real_helper", "entry_guard"}
+            or helper["invoked"] is not False
+        ):
             raise AssertionError("F20 helper was invoked before phase 12")
+        if stage == "before" and entry_guard != {"entry_reached": False}:
+            raise AssertionError("F25 helper entry exists before phase 12")
     else:
         if (
             set(helper)
             != {
                 "invoked",
                 "real_helper",
+                "entry_guard",
                 "argv",
                 "environment",
                 "status",
@@ -4712,6 +4875,79 @@ sha256sum -- "$work/f20-helper-real" | awk '{print $1}' \
     >"$work/f20-helper-source.sha256"
 chmod 0600 -- "$work/f20-helper-source.sha256"
 cat >"$work/f20-helper-wrapper.body" <<'EOF'
+/usr/bin/python3 - __F25_EVIDENCE_ROOT__ "$0" __F25_REAL_HELPER__ \
+    __F25_SOURCE_HASH__ __F25_EXPECTED_PATH__ "$@" <<'PY'
+import hashlib, json, os, pathlib, re, stat, sys
+
+root=pathlib.Path(sys.argv[1])
+wrapper=pathlib.Path(sys.argv[2])
+real_helper=pathlib.Path(sys.argv[3])
+source_hash_path=pathlib.Path(sys.argv[4])
+expected_path=sys.argv[5]
+args=sys.argv[6:]
+partial=root/"f25-helper-entry.json.partial"
+destination=root/"f25-helper-entry.json"
+allowlist={"--root=/","disable","iscsid"}
+
+def identity_mode(path,expected_mode):
+    try: metadata=path.lstat()
+    except OSError: return False
+    return stat.S_ISREG(metadata.st_mode) and not path.is_symlink() and metadata.st_uid==0 and metadata.st_gid==0 and stat.S_IMODE(metadata.st_mode)==expected_mode and metadata.st_nlink==1
+
+def digest(path):
+    value=hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda:stream.read(1024*1024),b""): value.update(block)
+    except OSError: return None
+    return value.hexdigest()
+
+try:
+    source_hash=source_hash_path.read_text("ascii").strip()
+except (OSError,UnicodeError):
+    source_hash=""
+wrapper_source=root/"f20-helper-wrapper"
+wrapper_identity=identity_mode(wrapper,0o755) and identity_mode(wrapper_source,0o755)
+if wrapper_identity:
+    wrapper_metadata=wrapper.stat(); source_metadata=wrapper_source.stat()
+    wrapper_identity=wrapper_metadata.st_dev==source_metadata.st_dev and wrapper_metadata.st_ino==source_metadata.st_ino
+real_identity=identity_mode(real_helper,0o755) and re.fullmatch(r"[0-9a-f]{64}",source_hash) is not None and digest(real_helper)==source_hash
+classified=[]
+for position,arg in enumerate(args[:16]):
+    raw=os.fsencode(arg)
+    if arg in allowlist:
+        classified.append({"position":position,"classification":"ALLOWLISTED","value":arg})
+    else:
+        classified.append({"position":position,"classification":"UNEXPECTED","byte_length":len(raw),"sha256":hashlib.sha256(raw).hexdigest()})
+predicates={
+    "expected_argc":len(args)==2,
+    "exact_vector":args==["disable","iscsid"],
+    "systemd_offline":os.environ.get("SYSTEMD_OFFLINE")=="1",
+    "dpkg_maintscripts_package":os.environ.get("DPKG_MAINTSCRIPT_PACKAGE")=="pcp",
+    "dpkg_maintscripts_name":os.environ.get("DPKG_MAINTSCRIPT_NAME")=="postinst",
+    "exact_private_path":os.environ.get("PATH")==expected_path,
+    "wrapper_identity_mode":wrapper_identity,
+    "real_helper_identity_mode":real_identity,
+}
+receipt={"schema_version":1,"entry_reached":True,"argc":len(args),"argv":classified,"predicates":predicates,"guard_outcome":"ACCEPTED" if all(predicates.values()) else "REJECTED"}
+encoded=(json.dumps(receipt,separators=(",",":"))+"\n").encode("ascii")
+if len(encoded)>8192: raise SystemExit(127)
+if os.path.lexists(destination) or os.path.lexists(partial): raise SystemExit(127)
+flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0)
+fd=os.open(partial,flags,0o600)
+try:
+    with os.fdopen(fd,"wb",closefd=True) as stream:
+        stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+    os.link(partial,destination,follow_symlinks=False)
+    os.unlink(partial)
+    directory_fd=os.open(root,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_CLOEXEC",0))
+    try: os.fsync(directory_fd)
+    finally: os.close(directory_fd)
+except BaseException:
+    raise
+metadata=destination.lstat()
+if not stat.S_ISREG(metadata.st_mode) or destination.is_symlink() or metadata.st_uid!=0 or metadata.st_gid!=0 or stat.S_IMODE(metadata.st_mode)!=0o600 or metadata.st_nlink!=1 or destination.read_bytes()!=encoded: raise SystemExit(127)
+PY
 set -u
 umask 077
 if [[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]; then exit 125; fi
@@ -4750,8 +4986,16 @@ python3 - "$work/f20-helper-wrapper.body" "$work/f20-helper-wrapper" "$work" <<'
 import pathlib, shlex, sys
 source=pathlib.Path(sys.argv[1]); destination=pathlib.Path(sys.argv[2]); work=pathlib.Path(sys.argv[3])
 body=source.read_text(encoding="utf-8")
-header="#!/bin/bash\nreadonly evidence_root="+shlex.quote(str(work))+"\nreadonly real_helper="+shlex.quote(str(work/"f20-helper-real"))+"\n"
-body=body.replace("__F20_PATH__",str(work/"wrappers")+":/usr/sbin:/usr/bin:/bin")
+expected_path=str(work/"wrappers")+":/usr/sbin:/usr/bin:/bin"
+header="#!/bin/bash\n"
+for marker,value in (
+    ("__F25_EVIDENCE_ROOT__",str(work)),
+    ("__F25_REAL_HELPER__",str(work/"f20-helper-real")),
+    ("__F25_SOURCE_HASH__",str(work/"f20-helper-source.sha256")),
+    ("__F25_EXPECTED_PATH__",expected_path),
+): body=body.replace(marker,shlex.quote(value))
+body=body.replace("__F20_PATH__",expected_path)
+body=body.replace("set -u\n","readonly evidence_root="+shlex.quote(str(work))+"\nreadonly real_helper="+shlex.quote(str(work/"f20-helper-real"))+"\nset -u\n",1)
 destination.write_text(header+body,encoding="utf-8")
 PY
 chmod 0755 -- "$work/f20-helper-wrapper"
@@ -5531,6 +5775,9 @@ exit 0
                 "status": disable_statuses[-1],
                 "outputs": f23_outputs,
             }
+            f25_classification = _classify_f25_entry(
+                f23_outputs["stderr"], f20_after_receipt["helper"]
+            )
             self.assertEqual(before_receipt["systemd"], after_receipt["systemd"])
             self.assertEqual(before_receipt["mounts"], after_receipt["mounts"])
             self.assertEqual(
@@ -5580,6 +5827,7 @@ exit 0
                 "command_trace": after_receipt["command_trace"],
                 "command_checks": command_checks,
                 "systemctl_disable": f23_systemctl_evidence,
+                "helper_entry_classification": f25_classification,
             }
             f20_helper = f20_after_receipt["helper"]
             assert isinstance(f20_helper, dict)
@@ -5632,6 +5880,7 @@ exit 0
                 ],
                 "generators": f20_after_receipt["generators"],
                 "helper": sanitized_helper,
+                "helper_entry_classification": f25_classification,
             }
             f19_diagnostic = (
                 "\nVALIDATED F19 SANITIZED DIAGNOSTIC\n"
@@ -6434,6 +6683,27 @@ Description: Backup program for disk arrays
                     "mode": "0755",
                     "sha256": "1" * 64,
                 },
+                "entry_guard": {
+                    "schema_version": F25_ENTRY_SCHEMA,
+                    "entry_reached": True,
+                    "argc": 2,
+                    "argv": [
+                        {
+                            "position": 0,
+                            "classification": "ALLOWLISTED",
+                            "value": "disable",
+                        },
+                        {
+                            "position": 1,
+                            "classification": "ALLOWLISTED",
+                            "value": "iscsid",
+                        },
+                    ],
+                    "predicates": {
+                        predicate: True for predicate in F25_ENTRY_PREDICATES
+                    },
+                    "guard_outcome": "ACCEPTED",
+                },
                 "argv": ["disable", "iscsid"],
                 "environment": {"SYSTEMD_OFFLINE": "1"},
                 "status": 1,
@@ -6465,6 +6735,7 @@ Description: Backup program for disk arrays
                 "helper": {
                     "invoked": False,
                     "real_helper": receipt["helper"]["real_helper"],
+                    "entry_guard": {"entry_reached": False},
                 },
             }
             write(not_invoked)
@@ -6556,8 +6827,9 @@ Description: Backup program for disk arrays
             helper_function = helper_namespace["helper"]
             self.assertTrue(callable(helper_function))
             absent = helper_function("after", root)
-            self.assertEqual(set(absent), {"invoked", "real_helper"})
+            self.assertEqual(set(absent), {"invoked", "real_helper", "entry_guard"})
             self.assertIs(absent["invoked"], False)
+            self.assertEqual(absent["entry_guard"], {"entry_reached": False})
             for evidence_name in (
                 "f20-helper-invocation.tsv",
                 "f20-helper-stdout.bin",
@@ -6782,6 +7054,416 @@ Description: Backup program for disk arrays
                 self.assertRaises(AssertionError),
             ):
                 _validate_f23_systemctl_output(path, root, "f23-systemctl-stderr.bin")
+
+    def test_f25_entry_guard_receipt_and_correlation_are_fail_closed(self) -> None:
+        def allowlisted(values: list[str]) -> list[dict[str, object]]:
+            return [
+                {
+                    "position": index,
+                    "classification": "ALLOWLISTED",
+                    "value": value,
+                }
+                for index, value in enumerate(values)
+            ]
+
+        rejected_predicates = {
+            predicate: predicate not in {"expected_argc", "exact_vector"}
+            for predicate in F25_ENTRY_PREDICATES
+        }
+        rejected = {
+            "schema_version": F25_ENTRY_SCHEMA,
+            "entry_reached": True,
+            "argc": 3,
+            "argv": allowlisted(["--root=/", "disable", "iscsid"]),
+            "predicates": rejected_predicates,
+            "guard_outcome": "REJECTED",
+        }
+        stderr = {
+            "lines": [
+                "Synchronizing state of iscsid.service with SysV service script.",
+                "Executing: /usr/lib/systemd/systemd-sysv-install --root=/ disable iscsid",
+            ]
+        }
+        self.assertEqual(_validate_f25_entry_guard(rejected), rejected)
+        self.assertEqual(
+            _classify_f25_entry(
+                stderr,
+                {
+                    "invoked": False,
+                    "entry_guard": rejected,
+                },
+            ),
+            "WRAPPER_ENTRY_GUARD_REJECTION",
+        )
+        self.assertEqual(
+            _classify_f25_entry(
+                stderr,
+                {"invoked": False, "entry_guard": {"entry_reached": False}},
+            ),
+            "HELPER_EXEC_NOT_REACHED",
+        )
+
+        accepted = {
+            **rejected,
+            "argc": 2,
+            "argv": allowlisted(["disable", "iscsid"]),
+            "predicates": {predicate: True for predicate in F25_ENTRY_PREDICATES},
+            "guard_outcome": "ACCEPTED",
+        }
+        accepted_stderr = {
+            "lines": ["Executing: /usr/lib/systemd/systemd-sysv-install disable iscsid"]
+        }
+        self.assertEqual(
+            _classify_f25_entry(
+                accepted_stderr, {"invoked": True, "entry_guard": accepted}
+            ),
+            "WRAPPER_ENTRY_ACCEPTED",
+        )
+        with self.assertRaises(AssertionError):
+            _classify_f25_entry(
+                accepted_stderr, {"invoked": False, "entry_guard": accepted}
+            )
+        with self.assertRaises(AssertionError):
+            _classify_f25_entry(stderr, {"invoked": True, "entry_guard": rejected})
+        with self.assertRaises(AssertionError):
+            _classify_f25_entry(
+                {
+                    "lines": [
+                        "Executing: /usr/lib/systemd/systemd-sysv-install disable iscsid"
+                    ]
+                },
+                {"invoked": False, "entry_guard": rejected},
+            )
+
+        unexpected_raw = b"unexpected-value"
+        unexpected = {
+            **rejected,
+            "argc": 1,
+            "argv": [
+                {
+                    "position": 0,
+                    "classification": "UNEXPECTED",
+                    "byte_length": len(unexpected_raw),
+                    "sha256": hashlib.sha256(unexpected_raw).hexdigest(),
+                }
+            ],
+            "predicates": {
+                predicate: predicate not in {"expected_argc", "exact_vector"}
+                for predicate in F25_ENTRY_PREDICATES
+            },
+        }
+        self.assertEqual(_validate_f25_entry_guard(unexpected), unexpected)
+        self.assertNotIn("unexpected-value", json.dumps(unexpected))
+        mutations = {
+            "missing-key": {
+                key: value for key, value in rejected.items() if key != "argc"
+            },
+            "extra-key": {**rejected, "extra": True},
+            "argc-type": {**rejected, "argc": True},
+            "argc-cap": {**rejected, "argc": F25_ENTRY_MAX_ARGC + 1},
+            "argv-count": {**rejected, "argv": rejected["argv"][:-1]},
+            "argv-order": {
+                **rejected,
+                "argv": [{**rejected["argv"][0], "position": 1}, *rejected["argv"][1:]],
+            },
+            "raw-unexpected": {
+                **unexpected,
+                "argv": [{**unexpected["argv"][0], "value": "unexpected-value"}],
+            },
+            "predicate-extra": {
+                **rejected,
+                "predicates": {**rejected_predicates, "unexpected": False},
+            },
+            "predicate-type": {
+                **rejected,
+                "predicates": {**rejected_predicates, "systemd_offline": 1},
+            },
+            "predicate-inconsistent": {
+                **rejected,
+                "predicates": {**rejected_predicates, "expected_argc": True},
+            },
+            "outcome-inconsistent": {**rejected, "guard_outcome": "ACCEPTED"},
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), self.assertRaises(AssertionError):
+                _validate_f25_entry_guard(mutation)
+
+    def test_f25_wrapper_entry_is_first_and_preserves_the_existing_guard(self) -> None:
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        body = source.split("cat >\"$work/f20-helper-wrapper.body\" <<'EOF'\n", 1)[
+            1
+        ].split("\nEOF\n", 1)[0]
+        self.assertTrue(body.startswith("/usr/bin/python3 - __F25_EVIDENCE_ROOT__"))
+        self.assertLess(body.index("f25-helper-entry.json"), body.index("set -u\n"))
+        existing_guard = (
+            'if [[ "$#" -ne 2 || "$1" != disable || "$2" != iscsid ]]; then exit 125; fi\n'
+            '[[ "${SYSTEMD_OFFLINE-}" == 1 && "${DPKG_MAINTSCRIPT_PACKAGE-}" == pcp && \\\n'
+            '    "${DPKG_MAINTSCRIPT_NAME-}" == postinst && "$PATH" == "__F20_PATH__" ]] || exit 125'
+        )
+        self.assertIn(existing_guard, body)
+        self.assertEqual(body.count('"$real_helper" "$@"'), 1)
+        self.assertIn("os.O_EXCL", body)
+        self.assertIn('getattr(os,"O_NOFOLLOW",0)', body)
+        self.assertIn("os.fsync(stream.fileno())", body)
+        self.assertIn("os.link(partial,destination,follow_symlinks=False)", body)
+        self.assertNotIn("eval", body)
+        phase12 = source.split(
+            "trace_begin 12-final-disable-readback final-disable-readback\n", 1
+        )[1].split('[[ "$denied_units_finalized" == true ]]', 1)[0]
+        self.assertEqual(phase12.count("\ndisable_unmasked_units\n"), 1)
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "requires real POSIX root ownership, mode, symlink, and hard-link semantics",
+    )
+    def test_f25_entry_writer_is_exclusive_atomic_and_predicate_complete(self) -> None:
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        body = source.split("cat >\"$work/f20-helper-wrapper.body\" <<'EOF'\n", 1)[
+            1
+        ].split("\nEOF\n", 1)[0]
+        writer = body.split("<<'PY'\n", 1)[1].split("\nPY\nset -u", 1)[0]
+        with contextlib.ExitStack() as stack:
+            temporary = stack.enter_context(tempfile.TemporaryDirectory())
+            root = pathlib.Path(temporary)
+            stack.callback(
+                subprocess.run,
+                [
+                    "sudo",
+                    "-n",
+                    "chown",
+                    "-R",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--",
+                    str(root),
+                ],
+                check=False,
+                capture_output=True,
+            )
+            writer_path = root / "f25-entry-writer.py"
+            writer_path.write_text(writer, encoding="utf-8", newline="\n")
+            expected_path = f"{root / 'wrappers'}:/usr/sbin:/usr/bin:/bin"
+
+            def prepare(label: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+                case = root / label
+                case.mkdir()
+                wrapper = case / "f20-helper-wrapper"
+                helper = case / "f20-helper-real"
+                source_hash = case / "f20-helper-source.sha256"
+                wrapper.write_bytes(b"wrapper\n")
+                helper.write_bytes(b"helper\n")
+                wrapper.chmod(0o755)
+                helper.chmod(0o755)
+                source_hash.write_text(
+                    hashlib.sha256(helper.read_bytes()).hexdigest() + "\n",
+                    encoding="ascii",
+                )
+                subprocess.run(
+                    [
+                        "sudo",
+                        "-n",
+                        "chown",
+                        "0:0",
+                        "--",
+                        str(wrapper),
+                        str(helper),
+                        str(source_hash),
+                    ],
+                    check=True,
+                )
+                return case, wrapper, helper
+
+            def invoke(
+                case: pathlib.Path,
+                wrapper: pathlib.Path,
+                helper: pathlib.Path,
+                args: list[str],
+                *,
+                environment: dict[str, str] | None = None,
+                script: pathlib.Path | None = None,
+            ) -> subprocess.CompletedProcess[str]:
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "SYSTEMD_OFFLINE": "1",
+                        "DPKG_MAINTSCRIPT_PACKAGE": "pcp",
+                        "DPKG_MAINTSCRIPT_NAME": "postinst",
+                        "PATH": expected_path,
+                    }
+                )
+                if environment:
+                    env.update(environment)
+                return subprocess.run(
+                    [
+                        "/usr/bin/sudo",
+                        "-n",
+                        "/usr/bin/env",
+                        f"SYSTEMD_OFFLINE={env['SYSTEMD_OFFLINE']}",
+                        f"DPKG_MAINTSCRIPT_PACKAGE={env['DPKG_MAINTSCRIPT_PACKAGE']}",
+                        f"DPKG_MAINTSCRIPT_NAME={env['DPKG_MAINTSCRIPT_NAME']}",
+                        f"PATH={env['PATH']}",
+                        "/usr/bin/python3",
+                        str(script or writer_path),
+                        str(case),
+                        str(wrapper),
+                        str(helper),
+                        str(case / "f20-helper-source.sha256"),
+                        expected_path,
+                        *args,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                )
+
+            def read_entry(case: pathlib.Path) -> bytes:
+                return _read_strict_root_file(
+                    case / "f25-helper-entry.json",
+                    case,
+                    expected_name="f25-helper-entry.json",
+                    max_bytes=F25_ENTRY_MAX_BYTES,
+                )
+
+            case, wrapper, helper = prepare("valid-rejected")
+            completed = invoke(case, wrapper, helper, list(F25_ENTRY_ALLOWLIST))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            receipt = json.loads(read_entry(case).decode("ascii"))
+            validated = _validate_f25_entry_guard(receipt)
+            self.assertEqual(validated["argc"], 3)
+            self.assertIs(validated["predicates"]["expected_argc"], False)
+            self.assertIs(validated["predicates"]["exact_vector"], False)
+            self.assertEqual(validated["guard_outcome"], "REJECTED")
+            original = read_entry(case)
+            repeated = invoke(case, wrapper, helper, list(F25_ENTRY_ALLOWLIST))
+            self.assertNotEqual(repeated.returncode, 0)
+            self.assertEqual(read_entry(case), original)
+
+            predicate_cases = {
+                "argc": (["disable"], {}, "expected_argc"),
+                "vector": (["iscsid", "disable"], {}, "exact_vector"),
+                "offline": (
+                    ["disable", "iscsid"],
+                    {"SYSTEMD_OFFLINE": "0"},
+                    "systemd_offline",
+                ),
+                "package": (
+                    ["disable", "iscsid"],
+                    {"DPKG_MAINTSCRIPT_PACKAGE": "other"},
+                    "dpkg_maintscripts_package",
+                ),
+                "name": (
+                    ["disable", "iscsid"],
+                    {"DPKG_MAINTSCRIPT_NAME": "prerm"},
+                    "dpkg_maintscripts_name",
+                ),
+                "path": (
+                    ["disable", "iscsid"],
+                    {"PATH": "/usr/sbin:/usr/bin:/bin"},
+                    "exact_private_path",
+                ),
+            }
+            for label, (args, environment, predicate) in predicate_cases.items():
+                with self.subTest(predicate=label):
+                    case, wrapper, helper = prepare(f"predicate-{label}")
+                    result = invoke(
+                        case, wrapper, helper, args, environment=environment
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    candidate = json.loads(read_entry(case).decode("ascii"))
+                    self.assertIs(candidate["predicates"][predicate], False)
+                    self.assertEqual(candidate["guard_outcome"], "REJECTED")
+
+            for label, target in (("wrapper", "wrapper"), ("helper", "helper")):
+                with self.subTest(identity=label):
+                    case, wrapper, helper = prepare(f"identity-{label}")
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "chmod",
+                            "0700",
+                            "--",
+                            str(wrapper if target == "wrapper" else helper),
+                        ],
+                        check=True,
+                    )
+                    result = invoke(case, wrapper, helper, ["disable", "iscsid"])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    candidate = json.loads(read_entry(case).decode("ascii"))
+                    self.assertIs(
+                        candidate["predicates"][f"{target}_identity_mode"], False
+                    )
+
+            case, wrapper, helper = prepare("unexpected")
+            unexpected = "outside-allowlist"
+            result = invoke(case, wrapper, helper, [unexpected])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw_receipt = read_entry(case)
+            self.assertNotIn(unexpected.encode(), raw_receipt)
+            candidate = json.loads(raw_receipt)
+            self.assertEqual(candidate["argv"][0]["classification"], "UNEXPECTED")
+            self.assertEqual(candidate["argv"][0]["byte_length"], len(unexpected))
+            self.assertEqual(
+                candidate["argv"][0]["sha256"],
+                hashlib.sha256(unexpected.encode()).hexdigest(),
+            )
+
+            for label in ("regular", "symlink", "hardlink", "unsafe-mode", "partial"):
+                with self.subTest(preexisting=label):
+                    case, wrapper, helper = prepare(f"preexisting-{label}")
+                    destination = case / "f25-helper-entry.json"
+                    partial = case / "f25-helper-entry.json.partial"
+                    sentinel = case / "sentinel"
+                    sentinel.write_bytes(b"preserved\n")
+                    if label == "regular":
+                        destination.write_bytes(b"preserved\n")
+                    elif label == "symlink":
+                        destination.symlink_to(sentinel)
+                    elif label == "hardlink":
+                        os.link(sentinel, destination)
+                        self.assertEqual(sentinel.stat().st_nlink, 2)
+                    elif label == "unsafe-mode":
+                        destination.write_bytes(b"preserved\n")
+                        destination.chmod(0o644)
+                    else:
+                        partial.write_bytes(b"partial\n")
+                    before = sentinel.read_bytes()
+                    result = invoke(case, wrapper, helper, ["disable", "iscsid"])
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(sentinel.read_bytes(), before)
+                    if label == "partial":
+                        self.assertFalse(destination.exists())
+                        self.assertEqual(partial.read_bytes(), b"partial\n")
+
+            case, wrapper, helper = prepare("partial-write")
+            injected_path = root / "f25-entry-writer-partial.py"
+            injected_path.write_text(
+                writer.replace(
+                    "stream.write(encoded); stream.flush(); os.fsync(stream.fileno())",
+                    'stream.write(encoded[:1]); stream.flush(); raise OSError("injected")',
+                    1,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = invoke(
+                case,
+                wrapper,
+                helper,
+                ["disable", "iscsid"],
+                script=injected_path,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((case / "f25-helper-entry.json").exists())
+            self.assertEqual(
+                _read_strict_root_file(
+                    case / "f25-helper-entry.json.partial",
+                    case,
+                    expected_name="f25-helper-entry.json.partial",
+                    max_bytes=F25_ENTRY_MAX_BYTES,
+                ),
+                b"{",
+            )
 
     @unittest.skipIf(
         sys.platform == "win32",
