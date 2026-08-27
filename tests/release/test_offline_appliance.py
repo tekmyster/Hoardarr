@@ -2313,9 +2313,7 @@ def _validate_f29_outer_receipt(
         or receipt["runner_invoked"] is not True
         or not isinstance(receipt["runner_status"], int)
         or isinstance(receipt["runner_status"], bool)
-        or not 1 <= receipt["runner_status"] <= 255
         or type(receipt["timed_out"]) is not bool
-        or receipt["timed_out"] is not (receipt["runner_status"] == 124)
         or receipt["stderr_class"] not in F29_OUTER_CLASSES
         or receipt["source_sha256"] != expected_source_sha256
         or type(receipt["attempt_exists"]) is not bool
@@ -2332,6 +2330,25 @@ def _validate_f29_outer_receipt(
     for key in ("stdout_sha256", "stderr_sha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", str(receipt[key])):
             raise AssertionError("F29 outer receipt output digest is invalid")
+    runner_status = receipt["runner_status"]
+    assert isinstance(runner_status, int) and not isinstance(runner_status, bool)
+    if runner_status == 0:
+        empty_sha256 = hashlib.sha256(b"").hexdigest()
+        if (
+            receipt["timed_out"] is not False
+            or receipt["stdout_size"] != 0
+            or receipt["stderr_size"] != 0
+            or receipt["stdout_sha256"] != empty_sha256
+            or receipt["stderr_sha256"] != empty_sha256
+            or receipt["stderr_class"] != "EMPTY"
+            or receipt["attempt_exists"] is not False
+            or receipt["output_exists"] is not True
+        ):
+            raise AssertionError("F29 outer success envelope is invalid")
+    elif not 1 <= runner_status <= 255 or receipt["timed_out"] is not (
+        runner_status == 124
+    ):
+        raise AssertionError("F29 outer receipt values are invalid")
     return receipt, hashlib.sha256(raw).hexdigest()
 
 
@@ -2448,6 +2465,48 @@ def _validate_f29_direct_capture(
         "timed_out": False,
         "streams": streams,
     }
+
+
+def _require_f29_outer_success_correlation(
+    outer_receipts: list[tuple[dict[str, object], str]],
+    direct_captures: list[dict[str, object]],
+    capture_error: tuple[dict[str, object], str] | None,
+) -> tuple[dict[str, object], str]:
+    outer_stages = [str(receipt[0]["stage"]) for receipt in outer_receipts]
+    if not outer_stages or outer_stages not in (
+        ["f19-after"],
+        ["f20-after"],
+        ["f19-after", "f20-after"],
+    ):
+        raise AssertionError("F29 outer success order is invalid")
+    if any(receipt[0]["runner_status"] != 0 for receipt in outer_receipts):
+        raise AssertionError("F29 outer success status is invalid")
+    if [str(capture["stage"]) for capture in direct_captures] != outer_stages:
+        raise AssertionError("F29 outer/direct success stages do not match")
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    for capture in direct_captures:
+        streams = capture.get("streams")
+        if (
+            capture.get("attempted") is not True
+            or capture.get("exit_status") != 0
+            or capture.get("completed_status_record") is not True
+            or capture.get("timed_out") is not False
+            or not isinstance(streams, dict)
+            or set(streams) != {"stdout", "stderr"}
+        ):
+            raise AssertionError("F29 direct success envelope is invalid")
+        for stream in streams.values():
+            if (
+                not isinstance(stream, dict)
+                or set(stream) != {"size", "sha256", "classification"}
+                or stream["size"] != 0
+                or stream["sha256"] != empty_sha256
+                or stream["classification"] != "EMPTY"
+            ):
+                raise AssertionError("F29 direct success stream is invalid")
+    if capture_error is None:
+        raise AssertionError("F29 outer success has no validated F21 capture error")
+    return capture_error
 
 
 def _format_f29_direct_captures(captures: list[dict[str, object]]) -> str:
@@ -6299,30 +6358,62 @@ exit 0
                         "F29 outer runner failed without a valid root-owned receipt: "
                         f"{precleanup_f29_outer_failure}\n{trace_text}"
                     )
+                correlated_outer_success = False
                 if precleanup_f29_outer:
-                    outer, outer_sha256 = precleanup_f29_outer[-1]
-                    self.fail(
-                        "F29 validated outer invocation: "
-                        f"stage={outer['stage']} "
-                        f"runner_status={outer['runner_status']} "
-                        f"timed_out={outer['timed_out']} "
-                        f"stdout_size={outer['stdout_size']} "
-                        f"stderr_size={outer['stderr_size']} "
-                        f"stderr_class={outer['stderr_class']} "
-                        f"attempt_exists={outer['attempt_exists']} "
-                        f"output_exists={outer['output_exists']} "
-                        f"receipt_sha256={outer_sha256}\n{trace_text}"
-                    )
-                if precleanup_f29_direct_failure is not None:
-                    self.fail(
-                        "F29 direct outer invocation capture is invalid: "
-                        f"{precleanup_f29_direct_failure}\n{trace_text}"
-                    )
-                if precleanup_f29_direct:
-                    self.fail(
-                        f"{_format_f29_direct_captures(precleanup_f29_direct)}\n"
-                        f"{trace_text}"
-                    )
+                    nonzero_outer = [
+                        item
+                        for item in precleanup_f29_outer
+                        if item[0]["runner_status"] != 0
+                    ]
+                    if nonzero_outer:
+                        outer, outer_sha256 = nonzero_outer[-1]
+                        self.fail(
+                            "F29 validated outer invocation: "
+                            f"stage={outer['stage']} "
+                            f"runner_status={outer['runner_status']} "
+                            f"timed_out={outer['timed_out']} "
+                            f"stdout_size={outer['stdout_size']} "
+                            f"stderr_size={outer['stderr_size']} "
+                            f"stderr_class={outer['stderr_class']} "
+                            f"attempt_exists={outer['attempt_exists']} "
+                            f"output_exists={outer['output_exists']} "
+                            f"receipt_sha256={outer_sha256}\n{trace_text}"
+                        )
+                    if precleanup_f29_direct_failure is not None:
+                        self.fail(
+                            "F29 direct outer invocation capture is invalid: "
+                            f"{precleanup_f29_direct_failure}\n{trace_text}"
+                        )
+                    if precleanup_capture_error_failure is not None:
+                        self.fail(
+                            "F21 snapshot capture failed without a valid sanitized "
+                            f"record: {precleanup_capture_error_failure}\n{trace_text}"
+                        )
+                    try:
+                        precleanup_capture_error = (
+                            _require_f29_outer_success_correlation(
+                                precleanup_f29_outer,
+                                precleanup_f29_direct,
+                                precleanup_capture_error,
+                            )
+                        )
+                    except AssertionError as exc:
+                        self.fail(
+                            "F29 outer/direct success correlation is invalid: "
+                            f"{exc}\n{trace_text}"
+                        )
+                    correlated_outer_success = True
+                if not correlated_outer_success:
+                    if precleanup_f29_direct_failure is not None:
+                        self.fail(
+                            "F29 direct outer invocation capture is invalid: "
+                            f"{precleanup_f29_direct_failure}\n{trace_text}"
+                        )
+                    if precleanup_f29_direct:
+                        self.fail(
+                            f"{_format_f29_direct_captures(precleanup_f29_direct)}\n"
+                            f"{trace_text}"
+                        )
                 if precleanup_capture_error_failure is not None:
                     self.fail(
                         "F21 snapshot capture failed without a valid sanitized "
@@ -7804,6 +7895,77 @@ Description: Backup program for disk arrays
                     expected_source,
                 )
 
+        empty_sha256 = hashlib.sha256(b"").hexdigest()
+        outer_success = {
+            **outer_valid,
+            "runner_status": 0,
+            "stdout_size": 0,
+            "stdout_sha256": empty_sha256,
+            "stderr_size": 0,
+            "stderr_sha256": empty_sha256,
+            "stderr_class": "EMPTY",
+            "attempt_exists": False,
+            "output_exists": True,
+        }
+        outer_success_raw = (
+            json.dumps(outer_success, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("ascii")
+        with mock.patch(
+            f"{__name__}._read_strict_root_file", return_value=outer_success_raw
+        ):
+            success_receipt, _ = _validate_f29_outer_receipt(
+                pathlib.Path("fixture/f29-outer-f19-after.json"),
+                pathlib.Path("fixture"),
+                "f19-after",
+                expected_source,
+            )
+        self.assertEqual(success_receipt, outer_success)
+        for label, mutation in {
+            "timed-out": {**outer_success, "timed_out": True},
+            "stdout-size": {**outer_success, "stdout_size": 1},
+            "stdout-digest": {**outer_success, "stdout_sha256": "b" * 64},
+            "stderr-size": {**outer_success, "stderr_size": 1},
+            "stderr-digest": {**outer_success, "stderr_sha256": "b" * 64},
+            "stderr-class": {
+                **outer_success,
+                "stderr_class": "UNCLASSIFIED_BOUNDED",
+            },
+            "attempt-present": {**outer_success, "attempt_exists": True},
+            "output-absent": {**outer_success, "output_exists": False},
+        }.items():
+            invalid_raw = (
+                json.dumps(mutation, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            with (
+                self.subTest(outer_success_mutation=label),
+                mock.patch(
+                    f"{__name__}._read_strict_root_file", return_value=invalid_raw
+                ),
+                self.assertRaisesRegex(
+                    AssertionError, "F29 outer success envelope is invalid"
+                ),
+            ):
+                _validate_f29_outer_receipt(
+                    pathlib.Path("fixture/f29-outer-f19-after.json"),
+                    pathlib.Path("fixture"),
+                    "f19-after",
+                    expected_source,
+                )
+        outer_timeout = {**outer_valid, "runner_status": 124, "timed_out": True}
+        outer_timeout_raw = (
+            json.dumps(outer_timeout, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("ascii")
+        with mock.patch(
+            f"{__name__}._read_strict_root_file", return_value=outer_timeout_raw
+        ):
+            timeout_receipt, _ = _validate_f29_outer_receipt(
+                pathlib.Path("fixture/f29-outer-f19-after.json"),
+                pathlib.Path("fixture"),
+                "f19-after",
+                expected_source,
+            )
+        self.assertEqual(timeout_receipt, outer_timeout)
+
         valid_direct = (b"9\n", b"", b"F29 outer path identity is invalid\n")
         with mock.patch(f"{__name__}._read_strict_root_file", side_effect=valid_direct):
             direct = _validate_f29_direct_capture(pathlib.Path("fixture"), "f19-after")
@@ -7814,6 +7976,82 @@ Description: Backup program for disk arrays
         self.assertFalse(direct["timed_out"])
         self.assertEqual(direct["streams"]["stdout"]["classification"], "EMPTY")
         self.assertEqual(direct["streams"]["stderr"]["classification"], "OUTER_GUARD")
+        direct_success = {
+            **direct,
+            "exit_status": 0,
+            "streams": {
+                "stdout": {
+                    "size": 0,
+                    "sha256": empty_sha256,
+                    "classification": "EMPTY",
+                },
+                "stderr": {
+                    "size": 0,
+                    "sha256": empty_sha256,
+                    "classification": "EMPTY",
+                },
+            },
+        }
+        validated_capture_error = ({"status": 1}, "b" * 64)
+        self.assertIs(
+            _require_f29_outer_success_correlation(
+                [(outer_success, "a" * 64)],
+                [direct_success],
+                validated_capture_error,
+            ),
+            validated_capture_error,
+        )
+        for label, mutation in {
+            "nonzero-status": {**direct_success, "exit_status": 1},
+            "timeout": {**direct_success, "timed_out": True},
+            "incomplete-status": {
+                **direct_success,
+                "completed_status_record": False,
+            },
+            "stdout-size": {
+                **direct_success,
+                "streams": {
+                    **direct_success["streams"],
+                    "stdout": {
+                        **direct_success["streams"]["stdout"],
+                        "size": 1,
+                    },
+                },
+            },
+            "stderr-class": {
+                **direct_success,
+                "streams": {
+                    **direct_success["streams"],
+                    "stderr": {
+                        **direct_success["streams"]["stderr"],
+                        "classification": "UNCLASSIFIED_BOUNDED",
+                    },
+                },
+            },
+        }.items():
+            with (
+                self.subTest(direct_success_mutation=label),
+                self.assertRaises(AssertionError),
+            ):
+                _require_f29_outer_success_correlation(
+                    [(outer_success, "a" * 64)],
+                    [mutation],
+                    validated_capture_error,
+                )
+        with self.assertRaisesRegex(
+            AssertionError, "F29 outer/direct success stages do not match"
+        ):
+            _require_f29_outer_success_correlation(
+                [(outer_success, "a" * 64)],
+                [{**direct_success, "stage": "f20-after"}],
+                validated_capture_error,
+            )
+        with self.assertRaisesRegex(
+            AssertionError, "F29 outer success has no validated F21 capture error"
+        ):
+            _require_f29_outer_success_correlation(
+                [(outer_success, "a" * 64)], [direct_success], None
+            )
         for fixed_class in sorted(F29_REQUIRED_PATH_CLASSES):
             fixed_direct = {
                 **direct,
@@ -8086,6 +8324,33 @@ Description: Backup program for disk arrays
                 ).read_bytes()
             ).hexdigest(),
             "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        )
+
+    def test_f31_correlated_success_precedes_f21_diagnostic(self) -> None:
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        start = source.index('            if capture_statuses[0] != "0\\n":\n')
+        end = source.index(
+            "            self.assertFalse(\n"
+            '                (namespace_path / "f21-capture-error.json").exists()',
+            start,
+        )
+        diagnostic = source[start:end]
+        self.assertEqual(diagnostic.count("_require_f29_outer_success_correlation("), 1)
+        self.assertLess(
+            diagnostic.index("if precleanup_f29_outer_failure is not None:"),
+            diagnostic.index("nonzero_outer = ["),
+        )
+        self.assertLess(
+            diagnostic.index("if nonzero_outer:"),
+            diagnostic.index("_require_f29_outer_success_correlation("),
+        )
+        self.assertLess(
+            diagnostic.index("if precleanup_capture_error_failure is not None:"),
+            diagnostic.index("_require_f29_outer_success_correlation("),
+        )
+        self.assertLess(
+            diagnostic.index("_require_f29_outer_success_correlation("),
+            diagnostic.index("if precleanup_capture_error is not None:"),
         )
 
     @unittest.skipIf(
@@ -8556,8 +8821,8 @@ Description: Backup program for disk arrays
                 run_case(0, 0, absolute_chmod_fails=True)
             )
             self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
-            self.assertEqual(outer_calls, [])
-            self.assertEqual(len(direct_files), 6)
+            self.assertEqual(outer_calls, ["f19-after|126"])
+            self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="owned-removal-failure-after-empty-zero"):
             f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
