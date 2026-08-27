@@ -5864,7 +5864,7 @@ f19_capture_after_failure() {
         "$phase09_outcomes" "$f19_command_trace" "$original_status" \
         "$original_line" "$original_function" "$original_command" \
         >/dev/null 2>"$snapshot_stderr" || snapshot_status=$?
-    chmod 0600 -- "$snapshot_stderr" || {
+    /usr/bin/chmod 0600 -- "$snapshot_stderr" || {
         (( snapshot_status != 0 )) || snapshot_status=126
     }
     if (( snapshot_status == 0 )); then
@@ -5883,7 +5883,7 @@ f19_capture_after_failure() {
     snapshot_stderr="$work/f20-after.stderr"
     python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv" \
         >/dev/null 2>"$snapshot_stderr" || snapshot_status=$?
-    chmod 0600 -- "$snapshot_stderr" || {
+    /usr/bin/chmod 0600 -- "$snapshot_stderr" || {
         (( snapshot_status != 0 )) || snapshot_status=126
     }
     if (( snapshot_status == 0 )); then
@@ -8003,7 +8003,7 @@ Description: Backup program for disk arrays
             ),
             (
                 "f19_capture_after_failure",
-                "78bdfcc4aa484e0c218b53abd26f78e2ac29431d2fc4c214eadb1bcec1c4d9a8",
+                "8633f3d90485b4624d88154ac5c0694f91fa95179378ba09983fe75c6e0dd006",
             ),
         ):
             start = source.index(f"{function_name}() {{\n")
@@ -8011,6 +8011,82 @@ Description: Backup program for disk arrays
             self.assertEqual(
                 hashlib.sha256(source[start:end].encode()).hexdigest(), expected_hash
             )
+
+    def test_f30_absolute_snapshot_stderr_mode_contract_is_exact(self) -> None:
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+
+        def exact_shell_function(name: str) -> str:
+            start = source.index(f"{name}() {{\n")
+            end = source.index("\n}\n", start) + 3
+            return source[start:end]
+
+        capture_function = exact_shell_function("f19_capture_after_failure")
+        absolute_snapshot_chmod = '/usr/bin/chmod 0600 -- "$snapshot_stderr"'
+        self.assertEqual(capture_function.count(absolute_snapshot_chmod), 2)
+        self.assertNotIn('\n    chmod 0600 -- "$snapshot_stderr"', capture_function)
+        for stage_start, stage_end in (
+            (
+                'snapshot_stderr="$work/f19-after.stderr"',
+                'snapshot_stderr="$work/f20-after.stderr"',
+            ),
+            (
+                'snapshot_stderr="$work/f20-after.stderr"',
+                '    printf \'%s\\n\' "$capture_status" >"$f19_capture_status_file"',
+            ),
+        ):
+            stage = capture_function.split(stage_start, 1)[1].split(stage_end, 1)[0]
+            self.assertLess(
+                stage.index("python3"), stage.index(absolute_snapshot_chmod)
+            )
+            self.assertLess(
+                stage.index(absolute_snapshot_chmod),
+                stage.index("if (( snapshot_status == 0 ))"),
+            )
+            self.assertLess(
+                stage.index("if (( snapshot_status == 0 ))"),
+                stage.index("if (( snapshot_status != 0 ))"),
+            )
+            self.assertLess(
+                stage.index("if (( snapshot_status != 0 ))"),
+                stage.index("capture_f29_outer_invocation"),
+            )
+
+        wrapper_start = source.index("cat >\"$work/wrappers/chmod\" <<'EOF'\n")
+        wrapper_end = source.index(
+            '\nEOF\nchmod 0755 "$work/wrappers/chmod"\n', wrapper_start
+        ) + len('\nEOF\nchmod 0755 "$work/wrappers/chmod"\n')
+        private_chmod_wrapper = source[wrapper_start:wrapper_end]
+        self.assertEqual(len(private_chmod_wrapper.encode()), 1781)
+        self.assertEqual(
+            hashlib.sha256(private_chmod_wrapper.encode()).hexdigest(),
+            "13f6849a0cca4e251331ab8c55e9ce51d06609d0ddf233614b3131e1e9ca03ec",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                exact_shell_function("capture_f29_outer_invocation").encode()
+            ).hexdigest(),
+            "6bda7b0bf00c07a2f5aac130a5bc58b4cb3bd6354c73649b92a8af0cc11bc3d3",
+        )
+        self.assertEqual(
+            hashlib.sha256(capture_function.encode()).hexdigest(),
+            "8633f3d90485b4624d88154ac5c0694f91fa95179378ba09983fe75c6e0dd006",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                (
+                    ROOT / "packaging" / "appliance" / "install-offline-payload.sh"
+                ).read_bytes()
+            ).hexdigest(),
+            "62077ef0e6f885cc13d11a882f674b906988acdf60352b338f631494820c42cf",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                (
+                    ROOT / "packaging" / "appliance" / "verify-offline-appliance.sh"
+                ).read_bytes()
+            ).hexdigest(),
+            "f188d76e7c19ba38472a5125c68d53e428bcf095d36878ac688e56a93fc627ad",
+        )
 
     @unittest.skipIf(
         sys.platform == "win32",
@@ -8318,6 +8394,7 @@ Description: Backup program for disk arrays
             f19_stderr: str = "",
             f20_stderr: str = "",
             chmod_fails: bool = False,
+            absolute_chmod_fails: bool = False,
             rm_fails: bool = False,
             outer_status: int = 0,
             create_f19_receipt: bool = True,
@@ -8334,6 +8411,7 @@ Description: Backup program for disk arrays
                     "pathlib.Path(os.environ['ARGS']).write_text('|'.join(sys.argv[1:]))\n"
                     "pathlib.Path(os.environ['SNAPSHOTS']).open('a').write('f19\\n')\n"
                     "sys.stderr.write(os.environ['F19_STDERR'])\n"
+                    "if os.environ['ABSOLUTE_CHMOD_FAILS'] == '1': pathlib.Path(os.environ['F19_STDERR_PATH']).unlink()\n"
                     "sys.exit(int(os.environ['F19']))\n",
                     encoding="ascii",
                     newline="\n",
@@ -8342,6 +8420,7 @@ Description: Backup program for disk arrays
                     "import os, pathlib, sys\n"
                     "pathlib.Path(os.environ['SNAPSHOTS']).open('a').write('f20\\n')\n"
                     "sys.stderr.write(os.environ['F20_STDERR'])\n"
+                    "if os.environ['ABSOLUTE_CHMOD_FAILS'] == '1': pathlib.Path(os.environ['F20_STDERR_PATH']).unlink()\n"
                     "sys.exit(int(os.environ['F20']))\n",
                     encoding="ascii",
                     newline="\n",
@@ -8404,6 +8483,9 @@ Description: Backup program for disk arrays
                         "F19_STDERR": f19_stderr,
                         "F20_STDERR": f20_stderr,
                         "CHMOD_FAILS": "1" if chmod_fails else "0",
+                        "ABSOLUTE_CHMOD_FAILS": ("1" if absolute_chmod_fails else "0"),
+                        "F19_STDERR_PATH": str(work / "f19-after.stderr"),
+                        "F20_STDERR_PATH": str(work / "f20-after.stderr"),
                         "RM_FAILS": "1" if rm_fails else "0",
                         "OUTER_STATUS": str(outer_status),
                         "CREATE_F19_RECEIPT": "1" if create_f19_receipt else "0",
@@ -8461,13 +8543,21 @@ Description: Backup program for disk arrays
             self.assertEqual(outer_calls, ["f20-after|42"])
             self.assertEqual(len(direct_files), 3)
             self.assertEqual(snapshots, ["f19", "f20"])
-        with self.subTest(case="permission-failure-after-zero"):
+        with self.subTest(case="private-chmod-wrapper-does-not-intercept"):
             f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
                 run_case(0, 0, chmod_fails=True)
             )
+            self.assertEqual((f19_capture, f20_capture), ("0\n", "0\n"))
+            self.assertEqual(outer_calls, [])
+            self.assertEqual(direct_files, [])
+            self.assertEqual(snapshots, ["f19", "f20"])
+        with self.subTest(case="absolute-chmod-failure-after-zero"):
+            f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
+                run_case(0, 0, absolute_chmod_fails=True)
+            )
             self.assertEqual((f19_capture, f20_capture), ("126\n", "126\n"))
-            self.assertEqual(outer_calls, ["f19-after|126"])
-            self.assertEqual(len(direct_files), 3)
+            self.assertEqual(outer_calls, [])
+            self.assertEqual(len(direct_files), 6)
             self.assertEqual(snapshots, ["f19", "f20"])
         with self.subTest(case="owned-removal-failure-after-empty-zero"):
             f19_capture, f20_capture, outer_calls, snapshots, direct_files, _ = (
