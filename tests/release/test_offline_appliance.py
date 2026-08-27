@@ -3755,7 +3755,7 @@ class OfflineApplianceTests(unittest.TestCase):
             target, candidate = prepare("outside-root")
             wants = candidate.parent
             wants.rmdir()
-            outside = root / "outside-root"
+            outside = root / "outside-enablement-parent"
             outside.mkdir()
             outside_candidate = outside / "fixture.service"
             outside_candidate.symlink_to("/usr/lib/systemd/system/fixture.service")
@@ -6174,6 +6174,7 @@ set -x
 disable_unmasked_units
 set +x
 exec 19>&-
+printf '0\n' >"$f19_capture_status_file"
 [[ ! -e "$work/etc-systemd/multi-user.target.wants/iscsid.service" && \
     ! -L "$work/etc-systemd/multi-user.target.wants/iscsid.service" ]]
 python3 "$f20_snapshot" after "$f20_after" "$work" "$work/f20-sysv"
