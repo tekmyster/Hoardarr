@@ -52,6 +52,7 @@ login_attempt_count=0
 login_status=-1
 initial_apply_passed=false
 prelogin_readback_passed=false
+tpg_authentication_json='{"schema_version":1,"observed":false,"enabled":null}'
 bounded_io_passed=false
 idempotent_passed=false
 reconciled_passed=false
@@ -404,6 +405,7 @@ write_receipt() {
     --argjson raidz2_member_count "$([[ "$pool_created_once" == true ]] && echo 6 || echo 0)" \
     --argjson zvol_count "$([[ "$zvol_created" == true ]] && echo 1 || echo 0)" \
     --argjson initial_apply "$initial_apply_passed" --argjson prelogin_readback "$prelogin_readback_passed" \
+    --argjson tpg_authentication "$tpg_authentication_json" \
     --argjson parity "$parity_json" --argjson login_attempt_count "$login_attempt_count" \
     --argjson login_status "$login_status" --argjson diagnostic "$diagnostic_json" \
     --argjson bounded_io "$bounded_io_passed" --argjson idempotent "$idempotent_passed" \
@@ -417,7 +419,8 @@ write_receipt() {
       topology:{loop_count:$loop_count,raidz2_vdev_count:$raidz2_vdev_count,
         raidz2_member_count:$raidz2_member_count,zvol_count:$zvol_count,
         pool_guid_sha256:$pool_guid_sha256,raw_paths_emitted:false},
-      prelogin:{production_apply_passed:$initial_apply,production_readback_passed:$prelogin_readback},
+      prelogin:{production_apply_passed:$initial_apply,production_readback_passed:$prelogin_readback,
+        tpg_authentication:$tpg_authentication},
       parity:$parity,
       login:{attempt_count:$login_attempt_count,status:$login_status,
         succeeded:($login_status==0),diagnostic:$diagnostic},
@@ -475,6 +478,23 @@ helper() {
     --volume-id "$volume_id" --pool "$pool" --zvol "$zvol" \
     --size-bytes "$zvol_size_bytes" --target-iqn "$target_iqn" --portal "$portal" \
     --initiator-iqn "$initiator_iqn" --chap-user "$chap_user"
+}
+
+read_tpg_authentication() {
+  local candidate status
+  candidate=""
+  set +e
+  candidate="$("$python" "$repo/tests/integration/managed_zvol_lio_lifecycle.py" \
+    tpg-authentication --target-iqn "$target_iqn")"
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]] || \
+    ! jq -e 'type == "object" and keys == ["enabled", "observed", "schema_version"] and .schema_version == 1 and .observed == true and (.enabled | type == "boolean")' \
+      <<<"$candidate" >/dev/null; then
+    tpg_authentication_json='{"schema_version":1,"observed":false,"enabled":null}'
+    return 1
+  fi
+  tpg_authentication_json="$candidate"
 }
 
 safe_work_root
@@ -538,6 +558,14 @@ independent_json="$(helper readback)"
 initial_digest="$(jq -r .readback.evidence_sha256 <<<"$initial_json")"
 [[ "$(jq -r .readback.evidence_sha256 <<<"$independent_json")" == "$initial_digest" ]]
 
+prelogin_target_json="$(helper readback)"
+[[ "$(jq -r '.readback.state == "active" and .readback.portal_exact and .readback.acl_exact and .readback.chap_configured and .readback.chap_user_matches and .readback.chap_secret_matches and .readback.device_matches_binding' <<<"$prelogin_target_json")" == "true" ]]
+[[ "$(jq -r .readback.evidence_sha256 <<<"$prelogin_target_json")" == "$initial_digest" ]]
+prelogin_readback_passed=true
+if ! read_tpg_authentication; then
+  classification="HARNESS_ERROR"; failure_code="TPG_AUTHENTICATION_READBACK_FAILED"; exit 44
+fi
+
 if [[ -f /etc/iscsi/initiatorname.iscsi ]]; then
   cp --preserve=mode /etc/iscsi/initiatorname.iscsi "$initiator_backup"
   initiator_had_original=true
@@ -551,10 +579,6 @@ iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --op update -n node.session.
 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --op update -n node.session.auth.username -v "$chap_user"
 iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --op update -n node.session.auth.password -v "$chap_fixture"
 
-prelogin_target_json="$(helper readback)"
-[[ "$(jq -r '.readback.state == "active" and .readback.portal_exact and .readback.acl_exact and .readback.chap_configured and .readback.chap_user_matches and .readback.chap_secret_matches and .readback.device_matches_binding' <<<"$prelogin_target_json")" == "true" ]]
-[[ "$(jq -r .readback.evidence_sha256 <<<"$prelogin_target_json")" == "$initial_digest" ]]
-prelogin_readback_passed=true
 parity_json="$(HOARDARR_A4_CHAP_FIXTURE="$chap_fixture" "$python" \
   "$repo/tests/integration/managed_zvol_lio_lifecycle.py" parity \
   --node-root /etc/iscsi/nodes --target-iqn "$target_iqn" --portal "$portal" \

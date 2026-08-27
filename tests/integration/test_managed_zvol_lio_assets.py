@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import managed_zvol_lio_lifecycle as lifecycle
@@ -20,7 +22,9 @@ from managed_zvol_lio_lifecycle import (
     inspect_node_parity,
     loop_release_postcondition,
     protocol_status_from_stderr,
+    read_effective_tpg_authentication,
     sanitize_diagnostic_bytes,
+    tpg_authentication_from_saveconfig,
     validate_guard,
     validate_receipt,
 )
@@ -185,6 +189,15 @@ def _receipt(
             "initiator_identity_sha256": "2" * 64,
             "parity_sha256": "3" * 64,
         },
+        "prelogin": {
+            "production_apply_passed": True,
+            "production_readback_passed": True,
+            "tpg_authentication": {
+                "schema_version": 1,
+                "observed": True,
+                "enabled": True,
+            },
+        },
         "login": {
             "attempt_count": 1,
             "status": 0 if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT" else 19,
@@ -294,7 +307,149 @@ def _receipt(
         )
         login.update({"attempt_count": 0, "status": -1, "succeeded": False})
         diagnostic.update({"status": -1, "streams": []})
+        prelogin = receipt["prelogin"]
+        assert isinstance(prelogin, dict)
+        prelogin.update(
+            {
+                "production_apply_passed": False,
+                "production_readback_passed": False,
+                "tpg_authentication": {
+                    "schema_version": 1,
+                    "observed": False,
+                    "enabled": None,
+                },
+            }
+        )
     return receipt
+
+
+def _tpg_saveconfig(authentication: object = 1) -> dict[str, object]:
+    return {
+        "storage_objects": [],
+        "targets": [
+            {
+                "wwn": "iqn.2026-08.local.hoardarr.tpg-auth",
+                "tpgs": [{"tag": 1, "attributes": {"authentication": authentication}}],
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(("authentication", "enabled"), [(0, False), (1, True)])
+def test_exact_tpg_authentication_states_are_sanitized(
+    authentication: int, enabled: bool
+) -> None:
+    result = tpg_authentication_from_saveconfig(
+        _tpg_saveconfig(authentication),
+        target_iqn="iqn.2026-08.local.hoardarr.tpg-auth",
+    )
+    assert result == {"schema_version": 1, "observed": True, "enabled": enabled}
+
+
+@pytest.mark.parametrize(("authentication", "enabled"), [(0, False), (1, True)])
+def test_tpg_authentication_reader_returns_only_the_boolean_fact(
+    tmp_path: Path, authentication: int, enabled: bool
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    path.write_text(json.dumps(_tpg_saveconfig(authentication)), encoding="utf-8")
+    assert read_effective_tpg_authentication(
+        path, target_iqn="iqn.2026-08.local.hoardarr.tpg-auth"
+    ) == {"schema_version": 1, "observed": True, "enabled": enabled}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda document: document["targets"][0]["tpgs"][0]["attributes"].pop(
+            "authentication"
+        ),
+        lambda document: document["targets"][0]["tpgs"][0]["attributes"].update(
+            {"authentication": True}
+        ),
+        lambda document: document["targets"][0]["tpgs"][0]["attributes"].update(
+            {"authentication": "1"}
+        ),
+        lambda document: document["targets"][0]["tpgs"][0]["attributes"].update(
+            {"authentication": 2}
+        ),
+        lambda document: document["targets"].append(dict(document["targets"][0])),
+        lambda document: document["targets"][0].update(
+            {
+                "tpgs": [
+                    {"tag": 1, "attributes": {"authentication": 1}},
+                    {"tag": 1, "attributes": {"authentication": 1}},
+                ]
+            }
+        ),
+        lambda document: document["targets"][0]["tpgs"][0].update({"tag": 2}),
+        lambda document: document["targets"][0]["tpgs"][0]["attributes"].update(
+            {"authentication": "auth_material=synthetic-value"}
+        ),
+    ],
+)
+def test_tpg_authentication_adversarial_shapes_fail_closed(mutation: object) -> None:
+    document = _tpg_saveconfig()
+    mutation(document)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError) as rejected:
+        tpg_authentication_from_saveconfig(
+            document, target_iqn="iqn.2026-08.local.hoardarr.tpg-auth"
+        )
+    assert "synthetic-value" not in str(rejected.value)
+
+
+@pytest.mark.parametrize("kind", ["malformed", "oversized", "deep"])
+def test_tpg_authentication_reader_reuses_bounded_saveconfig_protections(
+    tmp_path: Path, kind: str
+) -> None:
+    path = tmp_path / "saveconfig.json"
+    if kind == "malformed":
+        path.write_bytes(b'{"targets":[')
+    elif kind == "oversized":
+        path.write_bytes(b"x" * (lifecycle.lio_readback.MAX_SAVECONFIG_BYTES + 1))
+    else:
+        path.write_bytes(
+            b'{"storage_objects":[],"targets":' + b"[" * 5000 + b"]" * 5000 + b"}"
+        )
+    with pytest.raises(LifecycleGuardError) as rejected:
+        read_effective_tpg_authentication(
+            path, target_iqn="iqn.2026-08.local.hoardarr.tpg-auth"
+        )
+    assert "saveconfig" not in str(rejected.value).lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda prelogin: prelogin.pop("tpg_authentication"),
+        lambda prelogin: prelogin.update({"extra": True}),
+        lambda prelogin: prelogin["tpg_authentication"].update({"extra": True}),
+        lambda prelogin: prelogin["tpg_authentication"].update({"enabled": "true"}),
+        lambda prelogin: prelogin["tpg_authentication"].update({"observed": False}),
+        lambda prelogin: prelogin["tpg_authentication"].update({"schema_version": 2}),
+    ],
+)
+def test_receipt_tpg_authentication_contract_fails_closed(mutation: object) -> None:
+    receipt = _receipt()
+    prelogin = receipt["prelogin"]
+    assert isinstance(prelogin, dict)
+    mutation(prelogin)  # type: ignore[operator]
+    with pytest.raises(LifecycleGuardError, match="receipt prelogin"):
+        validate_receipt(receipt)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_receipt_accepts_only_exact_observed_tpg_authentication_booleans(
+    enabled: bool,
+) -> None:
+    receipt = _receipt()
+    prelogin = receipt["prelogin"]
+    assert isinstance(prelogin, dict)
+    prelogin["tpg_authentication"] = {
+        "schema_version": 1,
+        "observed": True,
+        "enabled": enabled,
+    }
+    validate_receipt(receipt)
 
 
 def test_exact_node_parity_retains_only_safe_facts(tmp_path: Path) -> None:
@@ -1108,6 +1263,88 @@ def test_kernel_capture_is_bounded_after_the_single_login_before_sanitization() 
     assert script.index(login) < script.index(kernel) < script.index(diagnostic)
     assert '--kernel "$login_kernel"' in script
     assert "--no-pager -o short-iso -n 80" in script
+
+
+def test_tpg_authentication_readback_precedes_discovery_and_single_login() -> None:
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    authentication = 'tpg-authentication --target-iqn "$target_iqn"'
+    discovery = 'iscsiadm -m discovery -t sendtargets -p "$portal:3260"'
+    login = 'iscsiadm -d 1 -m node -T "$target_iqn" -p "$portal:3260" --login'
+    assert script.count(authentication) == 1
+    assert script.index(authentication) < script.index(discovery) < script.index(login)
+    assert script.count("--login") == 1
+    assert script.count("if ! read_tpg_authentication; then") == 1
+
+
+@pytest.mark.parametrize(
+    ("candidate", "status", "expected"),
+    [
+        ("", "1", "failure"),
+        ("not-json", "0", "failure"),
+        ('{"schema_version":1,"observed":true,"enabled":"true"}', "0", "failure"),
+        (
+            '{"schema_version":1,"observed":true,"enabled":true,"extra":"auth_material=synthetic"}',
+            "0",
+            "failure",
+        ),
+        ('{"schema_version":1,"observed":true,"enabled":false}', "0", "success"),
+        ('{"schema_version":1,"observed":true,"enabled":true}', "0", "success"),
+    ],
+)
+def test_tpg_authentication_shell_boundary_preserves_failure_receipt_sentinel(
+    tmp_path: Path, candidate: str, status: str, expected: str
+) -> None:
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+    if bash is None or shutil.which("jq") is None:
+        pytest.skip("Bash and jq are required to execute the shell boundary")
+    helper = tmp_path / "fake-helper"
+    helper.write_text(
+        '#!/bin/sh\nprintf \'%s\' "$A8F_TEST_CANDIDATE"\nexit "$A8F_TEST_STATUS"\n',
+        encoding="utf-8",
+    )
+    helper.chmod(0o700)
+    script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
+    body = script.split("read_tpg_authentication() {", 1)[1].split(
+        "\n}\n\nsafe_work_root", 1
+    )[0]
+    boundary = f"read_tpg_authentication() {{{body}\n}}"
+    program = "\n".join(
+        (
+            "set -euo pipefail",
+            "repo=/fixture",
+            f"python='{helper.as_posix()}'",
+            "target_iqn=iqn.2026-08.local.hoardarr.fixture",
+            "tpg_authentication_json='{"
+            + '"schema_version":1,"observed":false,"enabled":null'
+            + "}'",
+            boundary,
+            "if read_tpg_authentication; then result=success; else result=failure; fi",
+            'printf \'%s\\n%s\\n\' "$result" "$tpg_authentication_json"',
+        )
+    )
+    environment = os.environ.copy()
+    environment.update({"A8F_TEST_CANDIDATE": candidate, "A8F_TEST_STATUS": status})
+    completed = subprocess.run(
+        [bash, "-c", program],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    result, retained = completed.stdout.splitlines()
+    assert result == expected
+    if expected == "failure":
+        assert retained == '{"schema_version":1,"observed":false,"enabled":null}'
+        receipt = _receipt(classification="HARNESS_ERROR")
+        prelogin = receipt["prelogin"]
+        assert isinstance(prelogin, dict)
+        prelogin["tpg_authentication"] = json.loads(retained)
+        validate_receipt(receipt)
+        assert not candidate or candidate not in completed.stdout
+        assert "auth_material" not in completed.stdout
+    else:
+        assert json.loads(retained) == json.loads(candidate)
 
 
 def test_loop_detach_uses_the_direct_validated_operand_once() -> None:

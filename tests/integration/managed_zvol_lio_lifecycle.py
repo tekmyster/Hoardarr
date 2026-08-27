@@ -497,6 +497,60 @@ def _read_safe_diagnostic(path: Path, *, expected_uid: int = 0) -> bytes:
     return raw
 
 
+def tpg_authentication_from_saveconfig(
+    document: object, *, target_iqn: str
+) -> dict[str, object]:
+    if not isinstance(document, dict) or not isinstance(target_iqn, str):
+        raise LifecycleGuardError("TPG authentication could not be safely read")
+    targets = document.get("targets")
+    if (
+        not isinstance(targets, list)
+        or len(targets) > lio_readback.MAX_COLLECTION_ENTRIES
+    ):
+        raise LifecycleGuardError("TPG authentication could not be safely read")
+    matches: list[dict[str, Any]] = []
+    for candidate in targets:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("wwn"), str):
+            raise LifecycleGuardError("TPG authentication could not be safely read")
+        if candidate["wwn"] == target_iqn:
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise LifecycleGuardError("TPG authentication could not be safely read")
+    tpgs = matches[0].get("tpgs")
+    if (
+        not isinstance(tpgs, list)
+        or len(tpgs) != 1
+        or len(tpgs) > lio_readback.MAX_COLLECTION_ENTRIES
+        or not isinstance(tpgs[0], dict)
+        or tpgs[0].get("tag") != 1
+        or isinstance(tpgs[0].get("tag"), bool)
+    ):
+        raise LifecycleGuardError("TPG authentication could not be safely read")
+    attributes = tpgs[0].get("attributes")
+    authentication = (
+        attributes.get("authentication") if isinstance(attributes, dict) else None
+    )
+    if (
+        not isinstance(authentication, int)
+        or isinstance(authentication, bool)
+        or authentication not in {0, 1}
+    ):
+        raise LifecycleGuardError("TPG authentication could not be safely read")
+    return {"schema_version": 1, "observed": True, "enabled": authentication == 1}
+
+
+def read_effective_tpg_authentication(
+    path: Path, *, target_iqn: str
+) -> dict[str, object]:
+    try:
+        document = lio_readback.read_saveconfig(path)
+    except lio_readback.LioReadbackError as exc:
+        raise LifecycleGuardError(
+            "TPG authentication could not be safely read"
+        ) from exc
+    return tpg_authentication_from_saveconfig(document, target_iqn=target_iqn)
+
+
 def loop_release_postcondition(evidence: dict[str, Any]) -> bool:
     if evidence.get("post_detach_state") == "ABSENT":
         return True
@@ -515,14 +569,40 @@ def validate_receipt(document: object) -> dict[str, Any]:
     if document.get("classification") not in CLASSIFICATIONS:
         raise LifecycleGuardError("receipt classification is invalid")
     parity = document.get("parity")
+    prelogin = document.get("prelogin")
     login = document.get("login")
     cleanup = document.get("cleanup")
     if (
         not isinstance(parity, dict)
+        or not isinstance(prelogin, dict)
         or not isinstance(login, dict)
         or not isinstance(cleanup, dict)
     ):
         raise LifecycleGuardError("receipt sections are invalid")
+    tpg_authentication = prelogin.get("tpg_authentication")
+    if (
+        set(prelogin)
+        != {
+            "production_apply_passed",
+            "production_readback_passed",
+            "tpg_authentication",
+        }
+        or not isinstance(prelogin.get("production_apply_passed"), bool)
+        or not isinstance(prelogin.get("production_readback_passed"), bool)
+        or not isinstance(tpg_authentication, dict)
+        or set(tpg_authentication) != {"schema_version", "observed", "enabled"}
+        or tpg_authentication.get("schema_version") != 1
+        or not isinstance(tpg_authentication.get("observed"), bool)
+    ):
+        raise LifecycleGuardError("receipt prelogin is invalid")
+    if tpg_authentication["observed"]:
+        if not isinstance(tpg_authentication.get("enabled"), bool):
+            raise LifecycleGuardError("receipt prelogin is invalid")
+    elif (
+        document["classification"] != "HARNESS_ERROR"
+        or tpg_authentication.get("enabled") is not None
+    ):
+        raise LifecycleGuardError("receipt prelogin is invalid")
     topology = document.get("topology")
     if not isinstance(topology, dict) or topology.get("raw_paths_emitted") is not False:
         raise LifecycleGuardError("receipt topology is invalid")
@@ -710,6 +790,12 @@ def validate_receipt(document: object) -> dict[str, Any]:
         and login_count != 1
     ):
         raise LifecycleGuardError("exact parity did not make one login attempt")
+    if document["classification"] != "HARNESS_ERROR" and (
+        prelogin["production_apply_passed"] is not True
+        or prelogin["production_readback_passed"] is not True
+        or tpg_authentication["observed"] is not True
+    ):
+        raise LifecycleGuardError("receipt prelogin is incomplete")
     if document["classification"] in {
         "LOGIN_FAILURE_DIAGNOSED",
         "LOGIN_FAILURE_UNRESOLVED",
@@ -1194,6 +1280,11 @@ def _parser() -> argparse.ArgumentParser:
     diagnostic.add_argument("--journal", type=Path, required=True)
     diagnostic.add_argument("--kernel", type=Path, required=True)
     diagnostic.add_argument("--status", type=int, required=True)
+    tpg_authentication = subparsers.add_parser("tpg-authentication")
+    tpg_authentication.add_argument("--target-iqn", required=True)
+    tpg_authentication.add_argument(
+        "--saveconfig", type=Path, default=lio_readback.RTSLIB_SAVECONFIG_PATH
+    )
     receipt = subparsers.add_parser("receipt")
     receipt.add_argument("--draft", type=Path, required=True)
     receipt.add_argument("--output", type=Path, required=True)
@@ -1221,6 +1312,16 @@ def main() -> None:
     if args.command == "receipt":
         atomic_write_receipt(
             json.loads(args.draft.read_text(encoding="utf-8")), args.output
+        )
+        return
+    if args.command == "tpg-authentication":
+        print(
+            json.dumps(
+                read_effective_tpg_authentication(
+                    args.saveconfig, target_iqn=args.target_iqn
+                ),
+                sort_keys=True,
+            )
         )
         return
     args.chap_value = os.environ.get("HOARDARR_A4_CHAP_FIXTURE")
