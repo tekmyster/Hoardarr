@@ -19,6 +19,7 @@ from managed_zvol_lio_lifecycle import (
     atomic_write_receipt,
     inspect_node_parity,
     loop_release_postcondition,
+    protocol_status_from_stderr,
     sanitize_diagnostic_bytes,
     validate_guard,
     validate_receipt,
@@ -189,7 +190,7 @@ def _receipt(
             "status": 0 if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT" else 19,
             "succeeded": classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT",
             "diagnostic": {
-                "schema_version": 2,
+                "schema_version": 3,
                 "status": 0
                 if classification == "LOGIN_SUCCEEDED_LIFECYCLE_RESULT"
                 else 19,
@@ -204,6 +205,13 @@ def _receipt(
                 ],
                 "ordered_classifications": [],
                 "diagnosed_class": None,
+                "protocol_status": {
+                    "observed": False,
+                    "status_class": None,
+                    "status_detail": None,
+                    "meaning": "NONE",
+                    "source_label": None,
+                },
             },
         },
         "cleanup": {
@@ -247,12 +255,15 @@ def _receipt(
         login.update({"attempt_count": 0, "status": -1, "succeeded": False})
         diagnostic.update({"status": -1, "streams": []})
     elif classification == "LOGIN_FAILURE_DIAGNOSED":
-        streams = diagnostic["streams"]
-        assert isinstance(streams, list) and isinstance(streams[1], dict)
-        streams[1]["classifications"] = ["credential_rejection"]
         diagnostic.update(
             {
-                "ordered_classifications": ["credential_rejection"],
+                "protocol_status": {
+                    "observed": True,
+                    "status_class": 2,
+                    "status_detail": 1,
+                    "meaning": "AUTHENTICATION_FAILURE",
+                    "source_label": "stderr",
+                },
                 "diagnosed_class": "credential_rejection",
             }
         )
@@ -456,20 +467,148 @@ def test_kernel_generic_diagnostic_remains_unresolved() -> None:
 
 
 @pytest.mark.parametrize(
+    ("raw", "status_class", "status_detail", "meaning", "diagnosed"),
+    [
+        (
+            b"iscsid: login response status 0201\n",
+            2,
+            1,
+            "AUTHENTICATION_FAILURE",
+            "credential_rejection",
+        ),
+        (
+            b"iscsid: login response status 0202\n",
+            2,
+            2,
+            "AUTHORIZATION_FAILURE",
+            "acl_rejection",
+        ),
+        (
+            b"iscsid: login response status 0203\n",
+            2,
+            3,
+            "TARGET_NOT_FOUND",
+            "target_not_found",
+        ),
+        (b"iscsid: login response status 0300\n", 3, 0, "TARGET_ERROR", "target_error"),
+    ],
+)
+def test_protocol_status_retains_only_exact_safe_response_facts(
+    raw: bytes,
+    status_class: int,
+    status_detail: int,
+    meaning: str,
+    diagnosed: str,
+) -> None:
+    protocol = protocol_status_from_stderr(raw, final_status=19)
+    assert protocol == {
+        "observed": True,
+        "status_class": status_class,
+        "status_detail": status_detail,
+        "meaning": meaning,
+        "source_label": "stderr",
+    }
+    receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
+    diagnostic = receipt["login"]["diagnostic"]  # type: ignore[index]
+    diagnostic.update({"protocol_status": protocol, "diagnosed_class": diagnosed})
+    receipt["classification"] = "LOGIN_FAILURE_DIAGNOSED"
+    validate_receipt(receipt)
+    assert set(protocol) == {
+        "observed",
+        "status_class",
+        "status_detail",
+        "meaning",
+        "source_label",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"fatal login status 19\n",
+        b"iscsid: unrelated bounded output\n",
+    ],
+)
+def test_absent_or_generic_fatal_login_text_remains_unresolved(raw: bytes) -> None:
+    assert protocol_status_from_stderr(raw, final_status=19) == {
+        "observed": False,
+        "status_class": None,
+        "status_detail": None,
+        "meaning": "NONE",
+        "source_label": None,
+    }
+
+
+def test_unknown_protocol_combination_retains_numbers_without_a_diagnosis() -> None:
+    protocol = protocol_status_from_stderr(
+        b"iscsid: login response status 0299\n", final_status=19
+    )
+    assert protocol == {
+        "observed": True,
+        "status_class": 2,
+        "status_detail": 99,
+        "meaning": "NONE",
+        "source_label": "stderr",
+    }
+    receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
+    diagnostic = receipt["login"]["diagnostic"]  # type: ignore[index]
+    diagnostic["protocol_status"] = protocol
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"iscsid: login response status 0000\n",
+        b"iscsid: login response status 02x1\n",
+        b"iscsid: login response status 0400\n",
+        b"iscsid: login response status 0201 suffix\n",
+        b"iscsid: login response status 0201\niscsid: login response status 0201\n",
+        b"iscsid: login response status 0201\niscsid: login response status 0202\n",
+        b"iscsid: login response status 0201\niscsid: login response status 02x1\n",
+    ],
+)
+def test_protocol_status_malformed_duplicate_or_inconsistent_is_rejected(
+    raw: bytes,
+) -> None:
+    with pytest.raises(DiagnosticError):
+        protocol_status_from_stderr(raw, final_status=19)
+
+
+def test_protocol_failure_response_with_successful_login_is_rejected() -> None:
+    with pytest.raises(DiagnosticError):
+        protocol_status_from_stderr(
+            b"iscsid: login response status 0201\n", final_status=0
+        )
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         lambda diagnostic: diagnostic["streams"].pop(),
         lambda diagnostic: diagnostic["streams"].append(dict(diagnostic["streams"][3])),
         lambda diagnostic: diagnostic["streams"][3].update({"label": "extra"}),
-        lambda diagnostic: diagnostic.update({"schema_version": 1}),
+        lambda diagnostic: diagnostic.update({"schema_version": 2}),
         lambda diagnostic: diagnostic.update({"diagnosed_class": "acl_rejection"}),
+        lambda diagnostic: diagnostic.pop("protocol_status"),
+        lambda diagnostic: diagnostic.update({"protocol_status": {}}),
+        lambda diagnostic: diagnostic["protocol_status"].update({"extra": True}),
+        lambda diagnostic: diagnostic["protocol_status"].update({"observed": "true"}),
+        lambda diagnostic: diagnostic["protocol_status"].update({"meaning": "RAW"}),
+        lambda diagnostic: diagnostic["protocol_status"].update(
+            {"source_label": "kernel_target"}
+        ),
+        lambda diagnostic: diagnostic["protocol_status"].update(
+            {"status_detail": "01"}
+        ),
     ],
 )
 def test_kernel_diagnostic_contract_mutations_fail_closed(mutation: object) -> None:
     receipt = _receipt(classification="LOGIN_FAILURE_UNRESOLVED")
     diagnostic = receipt["login"]["diagnostic"]  # type: ignore[index]
     mutation(diagnostic)  # type: ignore[operator]
-    with pytest.raises(LifecycleGuardError, match="receipt diagn"):
+    with pytest.raises(LifecycleGuardError, match="receipt (diagn|protocol)"):
         validate_receipt(receipt)
 
 
@@ -960,10 +1099,12 @@ def test_cleanup_commands_are_bounded_and_receipt_absence_fails_closed() -> None
 
 def test_kernel_capture_is_bounded_after_the_single_login_before_sanitization() -> None:
     script = (Path(__file__).parent / "run-managed-zvol-lio-lifecycle.sh").read_text()
-    login = 'iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --login'
+    login = 'iscsiadm -d 1 -m node -T "$target_iqn" -p "$portal:3260" --login'
     kernel = "journalctl -k"
     diagnostic = 'diagnostic_json="$(HOARDARR_A4_CHAP_FIXTURE='
     assert script.count("--login") == 1
+    assert script.count("iscsiadm -d 1 -m node") == 1
+    assert all(f"iscsiadm -d {level} -m node" not in script for level in range(2, 9))
     assert script.index(login) < script.index(kernel) < script.index(diagnostic)
     assert '--kernel "$login_kernel"' in script
     assert "--no-pager -o short-iso -n 80" in script

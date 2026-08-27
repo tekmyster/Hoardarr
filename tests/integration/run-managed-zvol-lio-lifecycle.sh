@@ -59,7 +59,7 @@ restart_passed=false
 remove_passed=false
 backing_retained=false
 parity_json='{"schema_version":1,"exact":false,"mismatch":"NOT_RUN","record_count":0,"auth_method_chap":false,"username_match":false,"password_match":false,"record_count_exact":false,"record_safe":false,"username_length":0,"password_length":0,"target_identity_sha256":"","initiator_identity_sha256":"","parity_sha256":""}'
-diagnostic_json='{"schema_version":2,"status":-1,"streams":[],"ordered_classifications":[],"diagnosed_class":null}'
+diagnostic_json='{"schema_version":3,"status":-1,"streams":[],"ordered_classifications":[],"diagnosed_class":null,"protocol_status":{"observed":false,"status_class":null,"status_detail":null,"meaning":"NONE","source_label":null}}'
 initial_json='{}'
 independent_json='{}'
 idempotent_json='{}'
@@ -578,7 +578,7 @@ login_attempt_count=1
 trap - ERR
 set +e
 (ulimit -f 16; timeout --signal=TERM --kill-after=2s 20s \
-  iscsiadm -m node -T "$target_iqn" -p "$portal:3260" --login \
+  iscsiadm -d 1 -m node -T "$target_iqn" -p "$portal:3260" --login \
   >"$login_stdout" 2>"$login_stderr")
 login_status=$?
 (ulimit -f 16; timeout --signal=TERM --kill-after=2s 10s journalctl \

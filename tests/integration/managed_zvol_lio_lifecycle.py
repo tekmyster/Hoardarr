@@ -47,6 +47,49 @@ CLEANUP_CLASSIFICATIONS = {
 DIAGNOSTIC_LIMIT = 16 * 1024
 NODE_RECORD_LIMIT = 16 * 1024
 LOOP_HOLDER_LIMIT = 8
+PROTOCOL_STATUS_PATTERN = re.compile(
+    rb"(?m)^.*\blogin response status ([0-9]{2})([0-9]{2})\s*$"
+)
+PROTOCOL_STATUS_MARKER = re.compile(rb"login response status")
+PROTOCOL_MEANINGS = {
+    (1, 0): "REDIRECT_TEMPORARY",
+    (1, 1): "REDIRECT_PERMANENT",
+    (2, 0): "INITIATOR_ERROR",
+    (2, 1): "AUTHENTICATION_FAILURE",
+    (2, 2): "AUTHORIZATION_FAILURE",
+    (2, 3): "TARGET_NOT_FOUND",
+    (2, 4): "TARGET_REMOVED",
+    (2, 5): "UNSUPPORTED_VERSION",
+    (2, 6): "TOO_MANY_CONNECTIONS",
+    (2, 7): "MISSING_PARAMETER",
+    (2, 8): "CANNOT_INCLUDE_IN_SESSION",
+    (2, 9): "SESSION_TYPE_NOT_SUPPORTED",
+    (2, 10): "SESSION_DOES_NOT_EXIST",
+    (2, 11): "INVALID_REQUEST",
+    (3, 0): "TARGET_ERROR",
+    (3, 1): "SERVICE_UNAVAILABLE",
+    (3, 2): "OUT_OF_RESOURCES",
+}
+PROTOCOL_DIAGNOSES = {
+    (1, 0): "protocol_redirection",
+    (1, 1): "protocol_redirection",
+    (2, 0): "initiator_error",
+    (2, 1): "credential_rejection",
+    (2, 2): "acl_rejection",
+    (2, 3): "target_not_found",
+    (2, 4): "target_removed",
+    (2, 5): "unsupported_version",
+    (2, 6): "too_many_connections",
+    (2, 7): "missing_parameter",
+    (2, 8): "session_inclusion_rejection",
+    (2, 9): "unsupported_session_type",
+    (2, 10): "session_state_rejection",
+    (2, 11): "invalid_request",
+    (3, 0): "target_error",
+    (3, 1): "service_unavailable",
+    (3, 2): "target_resource_exhausted",
+}
+DIAGNOSED_CLASSES = {None, *PROTOCOL_DIAGNOSES.values()}
 LOOP_RELEASE_PRECHECKS = {
     "ORIGINAL_OWNED",
     "ABSENT",
@@ -376,6 +419,46 @@ def sanitize_diagnostic_bytes(
     }
 
 
+def protocol_status_from_stderr(raw: bytes, *, final_status: int) -> dict[str, Any]:
+    marker_lines = [
+        line for line in raw.splitlines() if PROTOCOL_STATUS_MARKER.search(line)
+    ]
+    matches = [PROTOCOL_STATUS_PATTERN.fullmatch(line) for line in marker_lines]
+    if marker_lines and (len(marker_lines) != 1 or matches[0] is None):
+        raise DiagnosticError("PROTOCOL_STATUS_MALFORMED")
+    if not marker_lines:
+        return {
+            "observed": False,
+            "status_class": None,
+            "status_detail": None,
+            "meaning": "NONE",
+            "source_label": None,
+        }
+    match = matches[0]
+    assert match is not None
+    status_class = int(match.group(1))
+    status_detail = int(match.group(2))
+    if status_class not in {0, 1, 2, 3} or (status_class == 0 and status_detail != 0):
+        raise DiagnosticError("PROTOCOL_STATUS_OUT_OF_RANGE")
+    if (status_class == 0) != (final_status == 0):
+        raise DiagnosticError("PROTOCOL_STATUS_INCONSISTENT")
+    return {
+        "observed": True,
+        "status_class": status_class,
+        "status_detail": status_detail,
+        "meaning": PROTOCOL_MEANINGS.get((status_class, status_detail), "NONE"),
+        "source_label": "stderr",
+    }
+
+
+def protocol_diagnosed_class(protocol_status: dict[str, Any]) -> str | None:
+    if protocol_status.get("observed") is not True:
+        return None
+    return PROTOCOL_DIAGNOSES.get(
+        (protocol_status.get("status_class"), protocol_status.get("status_detail"))
+    )
+
+
 def _read_safe_diagnostic(path: Path, *, expected_uid: int = 0) -> bytes:
     try:
         named = path.lstat()
@@ -534,8 +617,9 @@ def validate_receipt(document: object) -> dict[str, Any]:
             "streams",
             "ordered_classifications",
             "diagnosed_class",
+            "protocol_status",
         }
-        or diagnostic.get("schema_version") != 2
+        or diagnostic.get("schema_version") != 3
         or diagnostic.get("status") != login_status
         or not isinstance(diagnostic.get("streams"), list)
         or len(diagnostic["streams"]) > 4
@@ -545,16 +629,43 @@ def validate_receipt(document: object) -> dict[str, Any]:
         or not set(diagnostic["ordered_classifications"]).issubset(
             DIAGNOSTIC_CLASSIFICATIONS
         )
-        or diagnostic.get("diagnosed_class")
-        not in {
-            None,
-            "acl_rejection",
-            "authentication_method_rejection",
-            "credential_rejection",
-            "transport_rejection",
-        }
+        or diagnostic.get("diagnosed_class") not in DIAGNOSED_CLASSES
     ):
         raise LifecycleGuardError("receipt diagnostic is invalid")
+    protocol_status = diagnostic["protocol_status"]
+    if (
+        not isinstance(protocol_status, dict)
+        or set(protocol_status)
+        != {"observed", "status_class", "status_detail", "meaning", "source_label"}
+        or not isinstance(protocol_status.get("observed"), bool)
+        or protocol_status.get("meaning") not in {"NONE", *PROTOCOL_MEANINGS.values()}
+    ):
+        raise LifecycleGuardError("receipt protocol status is invalid")
+    observed = protocol_status["observed"]
+    status_class = protocol_status.get("status_class")
+    status_detail = protocol_status.get("status_detail")
+    if not observed:
+        if (
+            status_class is not None
+            or status_detail is not None
+            or protocol_status.get("meaning") != "NONE"
+            or protocol_status.get("source_label") is not None
+        ):
+            raise LifecycleGuardError("receipt protocol status is invalid")
+    elif (
+        not isinstance(status_class, int)
+        or isinstance(status_class, bool)
+        or status_class not in {0, 1, 2, 3}
+        or not isinstance(status_detail, int)
+        or isinstance(status_detail, bool)
+        or not 0 <= status_detail <= 99
+        or protocol_status.get("source_label") != "stderr"
+        or protocol_status.get("meaning")
+        != PROTOCOL_MEANINGS.get((status_class, status_detail), "NONE")
+        or (status_class == 0 and status_detail != 0)
+        or ((status_class == 0) != (login_status == 0))
+    ):
+        raise LifecycleGuardError("receipt protocol status is invalid")
     if (
         document["classification"] != "HARNESS_ERROR"
         and len(diagnostic["streams"]) != login_count * 4
@@ -584,11 +695,8 @@ def validate_receipt(document: object) -> dict[str, Any]:
         "kernel_target",
     }:
         raise LifecycleGuardError("receipt diagnostic labels are invalid")
-    if diagnostic["diagnosed_class"] is not None and not any(
-        diagnostic["diagnosed_class"] in stream["classifications"]
-        for stream in diagnostic["streams"]
-    ):
-        raise LifecycleGuardError("receipt diagnosis lacks stream evidence")
+    if diagnostic["diagnosed_class"] != protocol_diagnosed_class(protocol_status):
+        raise LifecycleGuardError("receipt diagnosis lacks protocol evidence")
     if document["classification"] == "PARITY_MISMATCH_IDENTIFIED" and login_count != 0:
         raise LifecycleGuardError("parity mismatch attempted login")
     if (
@@ -1143,43 +1251,37 @@ def main() -> None:
         print(json.dumps(result, sort_keys=True))
         return
     streams = []
+    stderr_raw: bytes | None = None
     for label, path in (
         ("stdout", args.stdout),
         ("stderr", args.stderr),
         ("iscsid_target", args.journal),
         ("kernel_target", args.kernel),
     ):
+        raw = _read_safe_diagnostic(path)
+        if label == "stderr":
+            stderr_raw = raw
         streams.append(
-            sanitize_diagnostic_bytes(
-                _read_safe_diagnostic(path), secret=args.chap_value, label=label
-            )
+            sanitize_diagnostic_bytes(raw, secret=args.chap_value, label=label)
         )
+    if stderr_raw is None:
+        raise DiagnosticError("PROTOCOL_STATUS_MALFORMED")
+    protocol_status = protocol_status_from_stderr(stderr_raw, final_status=args.status)
     ordered = []
     for stream in streams:
         for classification in stream["classifications"]:
             if classification not in ordered:
                 ordered.append(classification)
-    diagnosed = next(
-        (
-            value
-            for value in (
-                "acl_rejection",
-                "authentication_method_rejection",
-                "credential_rejection",
-                "transport_rejection",
-            )
-            if value in ordered
-        ),
-        None,
-    )
+    diagnosed = protocol_diagnosed_class(protocol_status)
     print(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "status": args.status,
                 "streams": streams,
                 "ordered_classifications": ordered,
                 "diagnosed_class": diagnosed,
+                "protocol_status": protocol_status,
             },
             sort_keys=True,
         )
