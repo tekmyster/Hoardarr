@@ -1,121 +1,157 @@
-# Hoardarr
+<p align="center">
+  <img src="website/dev.hoardarr.com/assets/hoardarr-mark.svg" width="92" height="92" alt="Hoardarr">
+</p>
 
-Storage lifecycle management for the ARR ecosystem.
+<h1 align="center">Hoardarr</h1>
 
-Hoardarr is a storage lifecycle management platform for homelab
-operators and large media hoarders running the ARR stack. It provides a
-unified control plane and web interface on top of proven Linux storage
-tools such as mergerfs, ZFS, and SnapRAID.
+<p align="center"><strong>ARR-first storage lifecycle management for real homelabs.</strong></p>
 
-## Website
+Hoardarr is a free storage control plane for media enthusiasts, data hoarders, and homelab operators. It combines a guided, goal-first WebUI with access to the meaningful layers underneath: disks, paths, vdevs, pools, datasets, zvols, shares, LUNs, telemetry, import, recovery, and eventually multi-host availability.
 
-https://hoardarr.com
+The design target is simple:
 
-The Hoardarr website hosts conceptual UI mockups that illustrate the
-intended ARR-style interface and storage lifecycle workflows.
+- approachable enough for someone building their first media server;
+- fast and opinionated enough for a typical ARR stack;
+- deep enough for an experienced storage engineer to inspect and tune;
+- one configuration and execution engine underneath both Standard and Advanced modes;
+- no paid feature gates.
 
-## Overview
+> **Alpha status:** a bootable Ubuntu 24.04 amd64 candidate exists and is in private appliance validation. The public Alpha ISO is coming soon; there is intentionally no public image link yet.
 
-Hoardarr allows operators to manage heterogeneous storage backends
-including:
+## Product principles
 
--   individual disks
--   SnapRAID parity-protected disk sets
--   ZFS pools
--   mixed storage backends
--   foreign storage systems
+1. **ARR community first.** Media libraries, downloads, stable application paths, gradual disk growth, and practical homelab hardware lead the design.
+2. **Wizard ease by default.** Detect what can be known, recommend sensible defaults, and ask only the questions that materially affect the result.
+3. **Advanced depth on demand.** Expose supported storage-layer controls without inventing a second engine or bypassing plan validation.
+4. **Fast defaults.** Quick formatting and bounded fast tests are recommended unless the user deliberately selects a longer operation.
+5. **Real readback.** A setting is not treated as successfully applied until Hoardarr can inspect the resulting state.
 
+## What Hoardarr manages
 
-## Why Hoardarr Exists
+Hoardarr models storage as a related stack:
 
-Most NAS platforms assume:
+```text
+physical device
+  -> path / partition / preparation
+    -> redundancy and vdev topology
+      -> pool
+        -> dataset, filesystem, or zvol
+          -> SMB/NFS share or iSCSI LUN
+            -> stable application-visible storage
+```
 
--   clean initial architecture
--   static pools
--   planned hardware refresh cycles
+The backend remains authoritative for detection, capabilities, recommendations, validation, plan generation, safety classification, execution, and readback. The WebUI presents and edits that shared model.
 
-Real homelab storage environments evolve gradually:
+## Capability overview
 
--   disks are acquired opportunistically
--   storage pools accumulate over time
--   RAID decisions age poorly
--   migrating arrays is difficult and disruptive
--   ARR tools require stable paths
+### Storage creation and lifecycle
 
-Hoardarr provides lifecycle-aware storage management for these
-environments.
+- ZFS RAIDZ1, RAIDZ2, and RAIDZ3 guided pool creation
+- topology and usable-capacity review before creation
+- protected system-disk exclusion
+- dataset and zvol-backed storage planning
+- scrub, degradation, replacement, resilver, export, and recovery workflows
+- SnapRAID and mergerfs lifecycle work for heterogeneous media storage
+- stable paths for ARR applications while disks are added, drained, or retired
 
-## What Hoardarr Is
+### Existing storage intake
 
-Hoardarr is an ARR-first storage control plane that allows operators to:
+- metadata-first discovery of existing disks, pools, arrays, and filesystems
+- reviewed import rather than silent activation
+- manual intake fallback when auto-detection is incomplete
+- permission policy on import: preserve, remap identities, or deliberately replace
+- safe tests can be skipped for a previously working array; drive testing remains a separate choice
+- imported data, ACL, xattr, ownership, and topology continuity checks
 
--   grow storage incrementally
--   mix ZFS and SnapRAID strategies
--   drain and retire aging disks safely
--   ingest foreign storage systems
--   maintain stable media paths
--   monitor disk health and parity freshness
--   integrate with homelab automation systems
+### File and block access
 
-Hoardarr treats storage as a lifecycle rather than a static pool.
+- SMB shares for Windows and mixed clients
+- NFS exports for Linux, Proxmox, and ARR workloads
+- zvol-backed iSCSI targets and LUNs
+- initiator mapping and reconnect persistence
+- bounded write/read/hash/delete data-path tests
+- Quick format as the recommended option where a new client filesystem is required
+- multipath and HA block-storage work in active development
 
-## Core Architecture
+### Observability
 
-Hoardarr orchestrates existing Linux storage tools:
+- pool and device state
+- bandwidth and read/write throughput
+- IOPS and latency
+- SMART, NVMe, SAS, controller, path, multipath, thermal, and endurance expansion
+- lifecycle-operation progress and auditable plan/readback records
+- planned top-level, per-user dashboard builder with persistent Grafana-style panels
+- graph expansion/compression state that persists across page refreshes
+- planned Cisco-style show-tech diagnostic bundle with user-controlled encrypted support packaging
 
--   **ZFS** for protected pools and scrubs
--   **SnapRAID** for parity protection
--   **mergerfs** for unified namespaces
--   **SMART telemetry** for disk health
--   lifecycle workflows for migration and retirement
+### Availability roadmap
 
-## Primary Use Cases
+- standalone mode with no heartbeat or quorum requirement
+- guided two-node active/passive and active/active modes
+- dedicated heartbeat/synchronization link plus shared-storage witness records
+- monotonic ownership epochs, peer acknowledgements, fencing, and exactly one writable owner
+- optional external witness
+- ongoing local ZFS replication with lag and lineage reporting
+- multipathed shared SAS/NVMe and iSCSI presentation continuity
+- three-plus-node cluster mode built on a proven cluster foundation
 
-Hoardarr is designed for operators who need to:
+HA work is intentionally labeled as in development until failover behavior and data ownership are proven end to end.
 
--   grow media storage gradually
--   maintain stable paths for ARR tools
--   migrate data from older disks
--   mix storage protection strategies
--   import data from legacy NAS systems
--   ingest external archive drives
+## Standard and Advanced modes
 
-## Safety Model
+**Standard mode** starts from the user's goal—media library, downloads/scratch, general files, VM storage, database, backup/archive, mixed use—and derives the relevant topology and tuning from detected hardware.
 
-Hoardarr enforces guardrails before destructive operations such as:
+**Advanced mode** reveals the same plan layer by layer, including supported disk/path facts, vdev layout, pool properties, datasets, zvol geometry, shares, LUNs, multipath, replication, and HA state. Detected, derived, recommended, inherited, overridden, immutable, unsupported, and destructive values are distinguished explicitly.
 
--   disk wipes
--   backend removal
--   storage retirement
--   drain operations
+Advanced means more control, not fewer guardrails.
 
-Checks include:
+## First public Alpha ISO target
 
--   capacity validation
--   health checks
--   parity freshness checks
--   topology validation
+The first Rufus-ready image is being prepared around a complete standalone storage-server path:
 
-Destructive operations require explicit confirmation and are logged.
+- Ubuntu 24.04 LTS amd64 appliance installation
+- guided system-disk selection and protection
+- first-run Hoardarr WebUI
+- hardware and existing-storage discovery
+- Standard and Advanced configuration views
+- ZFS RAIDZ1/2/3 pool creation
+- existing ZFS pool discovery and import
+- SMB and NFS file presentation
+- iSCSI block presentation
+- users, groups, and imported-permission handling
+- live bandwidth, IOPS, latency, capacity, and health views
+- scrub, degraded-pool, replacement, resilver, export, and recovery flows
+- offline-friendly release artifact and future update/rollback path
 
-## Observability
+The ISO will be linked only after the installer and first-run storage path are repeatable on real boot media. Published images will include checksums.
 
-Hoardarr exposes telemetry including:
+## Development site
 
--   disk SMART metrics
--   ZFS health
--   SnapRAID sync status
--   storage capacity
--   namespace usage
--   job progress
+- Preview: [dev.hoardarr.com](https://dev.hoardarr.com)
+- Production: [hoardarr.com](https://hoardarr.com)
 
-Metrics are exposed via a Prometheus-compatible endpoint.
+The development site is intentionally marked `noindex` while the Alpha presentation and public release material are being prepared.
 
-## Project Status
+## Architecture
 
-Hoardarr is currently in the design and architecture phase.
+Hoardarr orchestrates proven Linux facilities instead of reimplementing them:
 
-## Vision
+- ZFS for protected pools, datasets, zvols, scrub, snapshot, and replication primitives
+- SnapRAID for parity-oriented heterogeneous media storage
+- mergerfs for stable pooled namespaces
+- Samba, NFS, and LIO for file and block presentation
+- SMART/NVMe/system telemetry for device and path health
+- systemd-managed services for appliance operation
+- FastAPI/Python backend and a modern WebUI
 
-Hoardarr enables homelab operators to treat storage as an evolving
-system rather than a fixed appliance.
+The goal is not to expose every command-line switch. Hoardarr exposes settings it can understand, explain, validate, execute, and read back.
+
+## Project status
+
+Hoardarr is pre-Alpha software under active homelab validation. Standalone storage creation, import, file/block data paths, telemetry, and recovery scenarios have working proof points. Installer finalization, broader hardware intake, multipath, HA, replication, dashboards, and additional lifecycle coverage remain active work.
+
+Expect interfaces and storage contracts to evolve before the first stable release. Do not use irreplaceable data without independent backups.
+
+## Contributing
+
+The project welcomes focused issues, reproducible hardware observations, UX feedback, and test results from ARR/community storage environments. Please keep proposals aligned with the existing detection -> recommendation -> plan -> validation -> execution -> readback architecture rather than introducing parallel storage engines.

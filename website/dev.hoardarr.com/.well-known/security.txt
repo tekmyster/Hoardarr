@@ -1,0 +1,5 @@
+Contact: https://hoardarr.com/security/
+Expires: 2027-08-25T23:59:59Z
+Preferred-Languages: en
+Canonical: https://hoardarr.com/.well-known/security.txt
+Policy: https://hoardarr.com/security/
