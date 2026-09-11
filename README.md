@@ -14,17 +14,17 @@ The design target is simple:
 - fast and opinionated enough for a typical ARR stack;
 - deep enough for an experienced storage engineer to inspect and tune;
 - one configuration and execution engine underneath both Standard and Advanced modes;
-- no paid feature gates.
+- every feature available to the community.
 
-> **Alpha status:** a bootable Ubuntu 24.04 amd64 candidate exists and is in private appliance validation. The public Alpha ISO is coming soon; there is intentionally no public image link yet.
+> **Alpha ISO:** coming soon. Please follow this repository for release announcements and published checksums.
 
 ## Product principles
 
 1. **ARR community first.** Media libraries, downloads, stable application paths, gradual disk growth, and practical homelab hardware lead the design.
-2. **Wizard ease by default.** Detect what can be known, recommend sensible defaults, and ask only the questions that materially affect the result.
-3. **Advanced depth on demand.** Expose supported storage-layer controls without inventing a second engine or bypassing plan validation.
-4. **Fast defaults.** Quick formatting and bounded fast tests are recommended unless the user deliberately selects a longer operation.
-5. **Real readback.** A setting is not treated as successfully applied until Hoardarr can inspect the resulting state.
+2. **Wizard ease by default.** Detect what can be known, recommend sensible defaults, and ask targeted questions about choices that shape the result.
+3. **Advanced depth on demand.** Expose supported storage-layer controls through the same configuration engine and planning workflow.
+4. **Fast defaults.** Quick formatting and fast tests are recommended, with full validation available when desired.
+5. **Real readback.** Hoardarr confirms each applied setting by inspecting the resulting state.
 
 ## What Hoardarr manages
 
@@ -40,7 +40,7 @@ physical device
             -> stable application-visible storage
 ```
 
-The backend remains authoritative for detection, capabilities, recommendations, validation, plan generation, safety classification, execution, and readback. The WebUI presents and edits that shared model.
+The backend provides detection, capabilities, recommendations, plan generation, validation, execution, and readback. The WebUI presents and edits that shared model.
 
 ## Capability overview
 
@@ -48,7 +48,7 @@ The backend remains authoritative for detection, capabilities, recommendations, 
 
 - ZFS RAIDZ1, RAIDZ2, and RAIDZ3 guided pool creation
 - topology and usable-capacity review before creation
-- protected system-disk exclusion
+- dedicated system-disk separation
 - dataset and zvol-backed storage planning
 - scrub, degradation, replacement, resilver, export, and recovery workflows
 - SnapRAID and mergerfs lifecycle work for heterogeneous media storage
@@ -57,10 +57,10 @@ The backend remains authoritative for detection, capabilities, recommendations, 
 ### Existing storage intake
 
 - metadata-first discovery of existing disks, pools, arrays, and filesystems
-- reviewed import rather than silent activation
+- guided import with topology and identity preview
 - manual intake fallback when auto-detection is incomplete
-- permission policy on import: preserve, remap identities, or deliberately replace
-- safe tests can be skipped for a previously working array; drive testing remains a separate choice
+- permission policy on import: preserve, remap identities, or reset
+- optional drive testing for previously validated arrays
 - imported data, ACL, xattr, ownership, and topology continuity checks
 
 ### File and block access
@@ -69,7 +69,7 @@ The backend remains authoritative for detection, capabilities, recommendations, 
 - NFS exports for Linux, Proxmox, and ARR workloads
 - zvol-backed iSCSI targets and LUNs
 - initiator mapping and reconnect persistence
-- bounded write/read/hash/delete data-path tests
+- real write/read/hash/delete data-path tests
 - Quick format as the recommended option where a new client filesystem is required
 - multipath and HA block-storage work in active development
 
@@ -95,15 +95,15 @@ The backend remains authoritative for detection, capabilities, recommendations, 
 - multipathed shared SAS/NVMe and iSCSI presentation continuity
 - three-plus-node cluster mode built on a proven cluster foundation
 
-HA work is intentionally labeled as in development until failover behavior and data ownership are proven end to end.
+HA development is focused on end-to-end failover behavior, continuous service, and clear data ownership.
 
 ## Standard and Advanced modes
 
 **Standard mode** starts from the user's goal—media library, downloads/scratch, general files, VM storage, database, backup/archive, mixed use—and derives the relevant topology and tuning from detected hardware.
 
-**Advanced mode** reveals the same plan layer by layer, including supported disk/path facts, vdev layout, pool properties, datasets, zvol geometry, shares, LUNs, multipath, replication, and HA state. Detected, derived, recommended, inherited, overridden, immutable, unsupported, and destructive values are distinguished explicitly.
+**Advanced mode** reveals the same plan layer by layer, including supported disk/path facts, vdev layout, pool properties, datasets, zvol geometry, shares, LUNs, multipath, replication, and HA state. The interface clearly identifies detected, derived, recommended, inherited, overridden, immutable, and higher-impact values.
 
-Advanced means more control, not fewer guardrails.
+Advanced mode adds deeper control while retaining the shared plan and validation workflow.
 
 ## First public Alpha ISO target
 
@@ -123,20 +123,18 @@ The first Rufus-ready image is being prepared around a complete standalone stora
 - scrub, degraded-pool, replacement, resilver, export, and recovery flows
 - offline-friendly release artifact and future update/rollback path
 
-The ISO will be linked only after the installer and first-run storage path are repeatable on real boot media. Published images will include checksums.
+Please follow this repository for the Alpha release announcement and published checksums.
 
 ## Development site
 
 - Preview: [dev.hoardarr.com](https://dev.hoardarr.com)
 - Production: [hoardarr.com](https://hoardarr.com)
 
-The development site is intentionally marked `noindex` while the Alpha presentation and public release material are being prepared.
-
 ## Architecture
 
 Hoardarr orchestrates proven Linux facilities instead of reimplementing them:
 
-- ZFS for protected pools, datasets, zvols, scrub, snapshot, and replication primitives
+- ZFS for resilient pools, datasets, zvols, scrub, snapshot, and replication primitives
 - SnapRAID for parity-oriented heterogeneous media storage
 - mergerfs for stable pooled namespaces
 - Samba, NFS, and LIO for file and block presentation
@@ -144,14 +142,12 @@ Hoardarr orchestrates proven Linux facilities instead of reimplementing them:
 - systemd-managed services for appliance operation
 - FastAPI/Python backend and a modern WebUI
 
-The goal is not to expose every command-line switch. Hoardarr exposes settings it can understand, explain, validate, execute, and read back.
+Hoardarr presents storage settings as an understandable, connected system with complete planning, execution, and readback.
 
 ## Project status
 
-Hoardarr is pre-Alpha software under active homelab validation. Standalone storage creation, import, file/block data paths, telemetry, and recovery scenarios have working proof points. Installer finalization, broader hardware intake, multipath, HA, replication, dashboards, and additional lifecycle coverage remain active work.
-
-Expect interfaces and storage contracts to evolve before the first stable release. Do not use irreplaceable data without independent backups.
+Hoardarr is moving toward its first public Alpha. Standalone storage creation, import, file and block data paths, telemetry, and recovery have working proof points. Installer finalization, broader hardware intake, multipath, HA, replication, dashboards, and additional lifecycle coverage are in active development.
 
 ## Contributing
 
-The project welcomes focused issues, reproducible hardware observations, UX feedback, and test results from ARR/community storage environments. Please keep proposals aligned with the existing detection -> recommendation -> plan -> validation -> execution -> readback architecture rather than introducing parallel storage engines.
+The project welcomes focused issues, reproducible hardware observations, UX feedback, and test results from ARR/community storage environments. Proposals are easiest to integrate when they build on the detection -> recommendation -> plan -> validation -> execution -> readback architecture.
