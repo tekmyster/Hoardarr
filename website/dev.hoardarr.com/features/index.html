@@ -29,7 +29,7 @@
         <p class="eyebrow">Product roadmap</p>
         <h1>One storage lifecycle. Every useful layer.</h1>
         <p class="lede">This is the public, product-facing view of Hoardarr's master feature register. It groups hundreds of implementation and validation items into capabilities you can actually use.</p>
-        <div class="tag-row"><span class="tag">ARR community first</span><span class="tag">Guided by default</span><span class="tag">Advanced when requested</span><span class="tag">No license gates</span></div>
+        <div class="tag-row"><span class="tag">ARR community first</span><span class="tag">Guided by default</span><span class="tag">Advanced when requested</span><span class="tag">All features included</span></div>
       </div>
     </section>
 
@@ -47,27 +47,27 @@
         <div class="roadmap-grid">
           <article class="card feature-card" data-feature="storage">
             <span class="feature-status status-proven">Live proven</span><h3>Guided ZFS pools</h3>
-            <p>Create RAIDZ1, RAIDZ2, and RAIDZ3 from the WebUI with protected system-disk exclusion, quick-format defaults, topology review, usable-capacity guidance, and exact readback.</p>
+            <p>Create RAIDZ1, RAIDZ2, and RAIDZ3 from the WebUI with dedicated system-disk separation, quick-format defaults, topology review, usable-capacity guidance, and exact readback.</p>
             <div class="tag-row"><span class="tag">ZFS</span><span class="tag">RAIDZ</span><span class="tag">Wizard</span></div>
           </article>
           <article class="card feature-card" data-feature="storage">
             <span class="feature-status status-proven">Live proven</span><h3>Existing pool intake</h3>
-            <p>Discover exportable pools without importing them, review topology and identity, then import with data, ACL, xattr, ownership, and permission-policy continuity.</p>
-            <div class="tag-row"><span class="tag">Auto-detect</span><span class="tag">Manual fallback</span><span class="tag">No full read</span></div>
+            <p>Preview exportable pools, review topology and identity, then import with data, ACL, xattr, ownership, and permission-policy continuity.</p>
+            <div class="tag-row"><span class="tag">Auto-detect</span><span class="tag">Manual fallback</span><span class="tag">Metadata-first</span></div>
           </article>
           <article class="card feature-card" data-feature="storage">
             <span class="feature-status status-building">In development</span><h3>SnapRAID + mergerfs lifecycle</h3>
-            <p>Stable application paths over heterogeneous disks, parity-aware growth, scheduled sync and scrub, safe drain, replacement, and retirement.</p>
+            <p>Stable application paths over heterogeneous disks, parity-aware growth, scheduled sync and scrub, managed drain, replacement, and retirement.</p>
             <div class="tag-row"><span class="tag">SnapRAID</span><span class="tag">mergerfs</span><span class="tag">Mixed disks</span></div>
           </article>
           <article class="card feature-card" data-feature="access">
             <span class="feature-status status-proven">Live proven</span><h3>SMB file shares</h3>
-            <p>Managed Windows-compatible shares, user and storage-group access, persistent mounts, and bounded write/read/hash/delete validation with telemetry.</p>
+            <p>Managed Windows-compatible shares, user and storage-group access, persistent mounts, and real write/read/hash/delete testing with telemetry.</p>
             <div class="tag-row"><span class="tag">Windows</span><span class="tag">ACLs</span><span class="tag">Real I/O</span></div>
           </article>
           <article class="card feature-card" data-feature="access">
             <span class="feature-status status-proven">Live proven</span><h3>NFS exports</h3>
-            <p>Linux and hypervisor file access with explicit client scope, identity-aware permissions, and real data-path verification without permission bypasses.</p>
+            <p>Linux and hypervisor file access with explicit client scope, identity-aware permissions, and real data-path verification.</p>
             <div class="tag-row"><span class="tag">Linux</span><span class="tag">Proxmox</span><span class="tag">UID/GID</span></div>
           </article>
           <article class="card feature-card" data-feature="access">
@@ -77,7 +77,7 @@
           </article>
           <article class="card feature-card" data-feature="access">
             <span class="feature-status status-proven">Live proven</span><h3>Permission adoption</h3>
-            <p>On imported storage, choose to preserve ownership, remap one identity to another, or deliberately replace permissions with a reviewed policy.</p>
+            <p>On imported storage, choose to preserve ownership, remap one identity to another, or apply a fresh permission policy.</p>
             <div class="tag-row"><span class="tag">Preserve</span><span class="tag">Remap</span><span class="tag">Replace</span></div>
           </article>
           <article class="card feature-card" data-feature="observe">
@@ -117,17 +117,17 @@
           </article>
           <article class="card feature-card" data-feature="resilience">
             <span class="feature-status status-roadmap">Roadmap</span><h3>Three-plus-node cluster mode</h3>
-            <p>A guided front end to a proven cluster foundation, with quorum state, ownership, failover risk, errors, and recovery presented clearly in the Hoardarr dashboard.</p>
+            <p>A guided front end to a proven cluster foundation, with quorum state, ownership, failover health, errors, and recovery presented clearly in the Hoardarr dashboard.</p>
             <div class="tag-row"><span class="tag">3+ nodes</span><span class="tag">Quorum</span><span class="tag">Advanced</span></div>
           </article>
           <article class="card feature-card" data-feature="experience">
             <span class="feature-status status-proven">Live proven</span><h3>Standard + Advanced modes</h3>
             <p>Recommended goal-first setup and full layer-by-layer control feed the same models, policies, validation, plan, execution, and readback.</p>
-            <div class="tag-row"><span class="tag">One engine</span><span class="tag">Progressive disclosure</span><span class="tag">No license gates</span></div>
+            <div class="tag-row"><span class="tag">One engine</span><span class="tag">Progressive disclosure</span><span class="tag">All features included</span></div>
           </article>
           <article class="card feature-card" data-feature="experience">
             <span class="feature-status status-building">In development</span><h3>Bootable appliance installer</h3>
-            <p>A Rufus-ready Ubuntu 24.04 amd64 ISO with guided installation, protected system-disk selection, first-run WebUI, rollback evidence, and offline-friendly release artifacts.</p>
+            <p>A Rufus-ready Ubuntu 24.04 amd64 ISO with guided installation, dedicated system-disk selection, first-run WebUI, recovery tooling, and offline-friendly release artifacts.</p>
             <div class="tag-row"><span class="tag">ISO</span><span class="tag">First run</span><span class="tag">Updates</span></div>
           </article>
           <article class="card feature-card" data-feature="experience">
@@ -142,15 +142,15 @@
     <section class="section section-alt">
       <div class="shell photo-split">
         <div>
-          <p class="eyebrow">A product, not a command collection</p>
+          <p class="eyebrow">One connected storage model</p>
           <h2>Every control belongs to a layer.</h2>
           <p class="lede">Physical device → path and partition → redundancy → pool → dataset or zvol → SMB/NFS share or iSCSI LUN → application-visible storage.</p>
-          <p>Hoardarr exposes a control only when it can detect, explain, validate, execute, and read it back. Advanced mode adds depth, not a bypass around safety.</p>
+          <p>Hoardarr connects every control to detection, planning, validation, execution, and readback. Advanced mode reveals more of the same storage model.</p>
         </div>
         <div class="card">
           <p class="card-kicker">Product principle</p>
           <h3>Home lab first. Wizard ease second. Enterprise depth on demand.</h3>
-          <p>No business licensing model. No feature ransom. No requirement that a media enthusiast become a storage engineer before creating a protected pool.</p>
+          <p>Free and open for every homelab, with guided workflows for newcomers and enterprise-depth controls for experts.</p>
           <div class="actions"><a class="button primary" href="/alpha/">See the first release target</a></div>
         </div>
       </div>

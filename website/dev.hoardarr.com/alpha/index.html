@@ -19,7 +19,7 @@
       <div class="shell">
         <p class="eyebrow">First public release</p>
         <h1>A usable storage server from one ISO.</h1>
-        <p class="lede">The Alpha target is deliberately practical: boot, install, discover storage, create or import a pool, expose it to your ARR stack, and understand what the hardware is doing.</p>
+        <p class="lede">The Alpha brings the complete standalone workflow together: boot, install, discover storage, create or import a pool, connect your ARR stack, and see what the hardware is doing.</p>
       </div>
     </section>
 
@@ -30,26 +30,26 @@
           <h2>What the image is being prepared to deliver</h2>
           <ul class="checklist">
             <li><span>Rufus-ready Ubuntu 24.04 amd64 installation media</span></li>
-            <li><span>Guided system-disk selection with strong exclusion from storage pools</span></li>
+            <li><span>Guided system-disk selection with dedicated storage-pool separation</span></li>
             <li><span>First-run WebUI and detected hardware inventory</span></li>
             <li><span>Standard and Advanced views of one storage plan</span></li>
             <li><span>ZFS RAIDZ1, RAIDZ2, and RAIDZ3 pool creation</span></li>
             <li><span>Existing ZFS pool discovery, review, and import</span></li>
-            <li><span>Permission preservation, identity remapping, or deliberate replacement on import</span></li>
+            <li><span>Permission preservation, identity remapping, or a fresh permission policy on import</span></li>
             <li><span>SMB and NFS file shares with users and storage-group access</span></li>
             <li><span>iSCSI targets and LUNs for block-storage clients</span></li>
-            <li><span>Quick formatting and bounded fast tests as the recommended defaults</span></li>
+            <li><span>Quick formatting and fast tests as the recommended defaults</span></li>
             <li><span>Live pool, device, bandwidth, IOPS, and latency telemetry</span></li>
             <li><span>Scrub, degradation, replacement, resilver, export, and recovery workflows</span></li>
-            <li><span>Auditable plans and readback around destructive actions</span></li>
+            <li><span>Clear plans, confirmations, and configuration history</span></li>
             <li><span>Offline-friendly application bundle and future update/rollback path</span></li>
           </ul>
         </article>
 
         <aside class="release-box">
-          <div class="release-state"><span class="status-dot" aria-hidden="true"></span> Private validation</div>
-          <h3>Public download: coming soon</h3>
-          <p>The first bootable candidate has been built and is going through final appliance, hardware, and failover validation. It is not yet offered as a public download.</p>
+          <div class="release-state"><span class="status-dot" aria-hidden="true"></span> Alpha preview</div>
+          <h3>Alpha ISO coming soon</h3>
+          <p>The first bootable candidate is completing appliance, hardware, and failover validation.</p>
           <dl>
             <dt>Base</dt><dd>Ubuntu 24.04 LTS · amd64</dd>
             <dt>Install target</dt><dd>Dedicated homelab storage host</dd>
@@ -64,16 +64,16 @@
 
     <section class="section section-alt">
       <div class="shell">
-        <div class="section-head"><p class="eyebrow">Honest Alpha boundaries</p><h2>What “coming soon” means here.</h2><p>The image will be published when the installer and first-run storage path are repeatable enough for a real homelab—not merely because an ISO file exists.</p></div>
+        <div class="section-head"><p class="eyebrow">Alpha roadmap</p><h2>Built for a complete first experience.</h2><p>The first Alpha release focuses on a polished, usable standalone storage-server experience.</p></div>
         <div class="grid-3">
           <article class="card"><p class="card-kicker">Validated now</p><h3>Standalone storage core</h3><p>Live ZFS creation/import, SMB/NFS/iSCSI I/O, telemetry, degradation, replacement, scrub, and a complete WebUI demo have been exercised.</p></article>
-          <article class="card"><p class="card-kicker">Release work</p><h3>Installer and appliance finish</h3><p>Boot/install continuity, first-run behavior, recovery, image size, release evidence, and USB-media testing are the publication gate.</p></article>
+          <article class="card"><p class="card-kicker">Release work</p><h3>Installer and appliance finish</h3><p>Boot/install continuity, first-run behavior, recovery, image size, and USB-media testing are in final validation.</p></article>
           <article class="card"><p class="card-kicker">After Alpha</p><h3>HA, cluster, and deeper dashboards</h3><p>Two-node failover, local replication, shared-storage fencing, customizable persistent dashboards, and three-plus-node cluster mode remain active development.</p></article>
         </div>
       </div>
     </section>
 
-    <section class="section"><div class="shell"><div class="notice"><strong>No public ISO link is shown yet.</strong> That is intentional. Follow the repository for the release announcement and checksum when the public Alpha image is ready.</div></div></section>
+    <section class="section"><div class="shell"><div class="notice"><strong>Coming soon.</strong> Please follow the <a href="https://github.com/tekmyster/Hoardarr">repository</a> for release announcements.</div></div></section>
   </main>
 
   <footer class="site-footer"><div class="shell footer-grid"><div><a class="brand" href="/" aria-label="Hoardarr home"><span class="brand-wordmark"><img src="/assets/hoardarr-wordmark.png" alt="Hoardarr"></span></a><p class="footer-note">Free, ARR-first storage lifecycle software for real homelabs.</p></div><div class="footer-links"><a href="/">Overview</a><a href="/features/">Features</a><a href="https://github.com/tekmyster/Hoardarr">GitHub</a></div></div></footer>
