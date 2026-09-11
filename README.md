@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="website/dev.hoardarr.com/assets/hoardarr-mark.svg" width="92" height="92" alt="Hoardarr">
+  <img src="website/dev.hoardarr.com/assets/hoardarr-wordmark.png" width="560" alt="Hoardarr">
 </p>
 
 <h1 align="center">Hoardarr</h1>
