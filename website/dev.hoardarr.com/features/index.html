@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore Hoardarr's storage lifecycle features: guided ZFS, import, SMB, NFS, iSCSI, telemetry, permissions, HA, and more.">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Features · Hoardarr</title>
+  <link rel="icon" href="/assets/hoardarr-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <script src="/assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="nav shell" aria-label="Primary navigation">
+      <a class="brand" href="/"><img src="/assets/hoardarr-mark.svg" alt=""><span>Hoard<em>arr</em></span></a>
+      <button class="theme-toggle menu-toggle" type="button" data-menu-toggle aria-expanded="false" aria-label="Open navigation">☰</button>
+      <div class="nav-links" data-nav>
+        <a href="/">Overview</a><a aria-current="page" href="/features/">Features</a><a href="/alpha/">Alpha ISO</a><a href="https://github.com/tekmyster/Hoardarr">GitHub</a>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme">☀</button>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="page-hero">
+      <div class="shell">
+        <p class="eyebrow">Product roadmap</p>
+        <h1>One storage lifecycle. Every useful layer.</h1>
+        <p class="lede">This is the public, product-facing view of Hoardarr's master feature register. It groups hundreds of implementation and validation items into capabilities you can actually use.</p>
+        <div class="tag-row"><span class="tag">ARR community first</span><span class="tag">Guided by default</span><span class="tag">Advanced when requested</span><span class="tag">No license gates</span></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="feature-toolbar" aria-label="Filter feature roadmap">
+          <button class="filter-button active" type="button" data-filter="all">All</button>
+          <button class="filter-button" type="button" data-filter="storage">Storage</button>
+          <button class="filter-button" type="button" data-filter="access">Access</button>
+          <button class="filter-button" type="button" data-filter="observe">Observe</button>
+          <button class="filter-button" type="button" data-filter="resilience">Resilience</button>
+          <button class="filter-button" type="button" data-filter="experience">Experience</button>
+        </div>
+
+        <div class="roadmap-grid">
+          <article class="card feature-card" data-feature="storage">
+            <span class="feature-status status-proven">Live proven</span><h3>Guided ZFS pools</h3>
+            <p>Create RAIDZ1, RAIDZ2, and RAIDZ3 from the WebUI with protected system-disk exclusion, quick-format defaults, topology review, usable-capacity guidance, and exact readback.</p>
+            <div class="tag-row"><span class="tag">ZFS</span><span class="tag">RAIDZ</span><span class="tag">Wizard</span></div>
+          </article>
+          <article class="card feature-card" data-feature="storage">
+            <span class="feature-status status-proven">Live proven</span><h3>Existing pool intake</h3>
+            <p>Discover exportable pools without importing them, review topology and identity, then import with data, ACL, xattr, ownership, and permission-policy continuity.</p>
+            <div class="tag-row"><span class="tag">Auto-detect</span><span class="tag">Manual fallback</span><span class="tag">No full read</span></div>
+          </article>
+          <article class="card feature-card" data-feature="storage">
+            <span class="feature-status status-building">In development</span><h3>SnapRAID + mergerfs lifecycle</h3>
+            <p>Stable application paths over heterogeneous disks, parity-aware growth, scheduled sync and scrub, safe drain, replacement, and retirement.</p>
+            <div class="tag-row"><span class="tag">SnapRAID</span><span class="tag">mergerfs</span><span class="tag">Mixed disks</span></div>
+          </article>
+          <article class="card feature-card" data-feature="access">
+            <span class="feature-status status-proven">Live proven</span><h3>SMB file shares</h3>
+            <p>Managed Windows-compatible shares, user and storage-group access, persistent mounts, and bounded write/read/hash/delete validation with telemetry.</p>
+            <div class="tag-row"><span class="tag">Windows</span><span class="tag">ACLs</span><span class="tag">Real I/O</span></div>
+          </article>
+          <article class="card feature-card" data-feature="access">
+            <span class="feature-status status-proven">Live proven</span><h3>NFS exports</h3>
+            <p>Linux and hypervisor file access with explicit client scope, identity-aware permissions, and real data-path verification without permission bypasses.</p>
+            <div class="tag-row"><span class="tag">Linux</span><span class="tag">Proxmox</span><span class="tag">UID/GID</span></div>
+          </article>
+          <article class="card feature-card" data-feature="access">
+            <span class="feature-status status-proven">Live proven</span><h3>iSCSI block storage</h3>
+            <p>Zvol-backed LUNs, target and initiator mapping, Windows Quick format, reconnect persistence, real block I/O, and a path toward multipath VM storage.</p>
+            <div class="tag-row"><span class="tag">LIO</span><span class="tag">LUN</span><span class="tag">VM storage</span></div>
+          </article>
+          <article class="card feature-card" data-feature="access">
+            <span class="feature-status status-proven">Live proven</span><h3>Permission adoption</h3>
+            <p>On imported storage, choose to preserve ownership, remap one identity to another, or deliberately replace permissions with a reviewed policy.</p>
+            <div class="tag-row"><span class="tag">Preserve</span><span class="tag">Remap</span><span class="tag">Replace</span></div>
+          </article>
+          <article class="card feature-card" data-feature="observe">
+            <span class="feature-status status-proven">Live proven</span><h3>Live performance graphs</h3>
+            <p>Throughput, read/write IOPS, latency, operation state, and per-device/pool views respond to actual SMB, NFS, and iSCSI workloads.</p>
+            <div class="tag-row"><span class="tag">Bandwidth</span><span class="tag">IOPS</span><span class="tag">Latency</span></div>
+          </article>
+          <article class="card feature-card" data-feature="observe">
+            <span class="feature-status status-building">In development</span><h3>Personal dashboard builder</h3>
+            <p>A dedicated top-level dashboard where each user can add, remove, resize, and persist Grafana-style panels. Graph compression/expansion state will persist across page refreshes.</p>
+            <div class="tag-row"><span class="tag">Persistent layout</span><span class="tag">Per user</span><span class="tag">Custom metrics</span></div>
+          </article>
+          <article class="card feature-card" data-feature="observe">
+            <span class="feature-status status-roadmap">Roadmap</span><h3>Full hardware telemetry</h3>
+            <p>SMART, NVMe, SAS paths, multipath health, controller state, thermals, endurance, queue depth, bandwidth saturation, pool pressure, and predictive alerts.</p>
+            <div class="tag-row"><span class="tag">SMART</span><span class="tag">NVMe</span><span class="tag">Multipath</span></div>
+          </article>
+          <article class="card feature-card" data-feature="observe">
+            <span class="feature-status status-roadmap">Roadmap</span><h3>Show-tech support bundle</h3>
+            <p>A Cisco-style diagnostic package with logs, topology, configuration, relevant state, metrics, and system facts; large bundles enrolled and encrypted for optional project support.</p>
+            <div class="tag-row"><span class="tag">Diagnostics</span><span class="tag">PKI packaging</span><span class="tag">User controlled</span></div>
+          </article>
+          <article class="card feature-card" data-feature="resilience">
+            <span class="feature-status status-proven">Live proven</span><h3>Degradation, scrub, and resilver</h3>
+            <p>Detect failures, keep topology visible, replace devices, monitor rebuild progress, scrub data, and prove pool health after recovery.</p>
+            <div class="tag-row"><span class="tag">Health</span><span class="tag">Replacement</span><span class="tag">Recovery</span></div>
+          </article>
+          <article class="card feature-card" data-feature="resilience">
+            <span class="feature-status status-building">In development</span><h3>Two-node high availability</h3>
+            <p>Guided active/passive and active/active designs using heartbeat plus storage witness, monotonic ownership epochs, fencing, acknowledgements, and one writable owner.</p>
+            <div class="tag-row"><span class="tag">Failover</span><span class="tag">Quorum</span><span class="tag">Fencing</span></div>
+          </article>
+          <article class="card feature-card" data-feature="resilience">
+            <span class="feature-status status-building">In development</span><h3>Local storage replication</h3>
+            <p>Matching local pools, ongoing snapshot-based synchronization, standby read-only state, lag reporting, lineage checks, and guided failover for two storage hosts.</p>
+            <div class="tag-row"><span class="tag">ZFS send/receive</span><span class="tag">Lag</span><span class="tag">Failover</span></div>
+          </article>
+          <article class="card feature-card" data-feature="resilience">
+            <span class="feature-status status-roadmap">Roadmap</span><h3>Three-plus-node cluster mode</h3>
+            <p>A guided front end to a proven cluster foundation, with quorum state, ownership, failover risk, errors, and recovery presented clearly in the Hoardarr dashboard.</p>
+            <div class="tag-row"><span class="tag">3+ nodes</span><span class="tag">Quorum</span><span class="tag">Advanced</span></div>
+          </article>
+          <article class="card feature-card" data-feature="experience">
+            <span class="feature-status status-proven">Live proven</span><h3>Standard + Advanced modes</h3>
+            <p>Recommended goal-first setup and full layer-by-layer control feed the same models, policies, validation, plan, execution, and readback.</p>
+            <div class="tag-row"><span class="tag">One engine</span><span class="tag">Progressive disclosure</span><span class="tag">No license gates</span></div>
+          </article>
+          <article class="card feature-card" data-feature="experience">
+            <span class="feature-status status-building">In development</span><h3>Bootable appliance installer</h3>
+            <p>A Rufus-ready Ubuntu 24.04 amd64 ISO with guided installation, protected system-disk selection, first-run WebUI, rollback evidence, and offline-friendly release artifacts.</p>
+            <div class="tag-row"><span class="tag">ISO</span><span class="tag">First run</span><span class="tag">Updates</span></div>
+          </article>
+          <article class="card feature-card" data-feature="experience">
+            <span class="feature-status status-roadmap">Roadmap</span><h3>Hidden arcade</h3>
+            <p>A complete pirate-themed isometric browser arcade game hidden in the WebUI, with physical-media treasure, ten bandwidth levels, score validation, and leaderboards.</p>
+            <div class="tag-row"><span class="tag">TypeScript</span><span class="tag">Phaser</span><span class="tag">Easter egg</span></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="shell photo-split">
+        <div>
+          <p class="eyebrow">A product, not a command collection</p>
+          <h2>Every control belongs to a layer.</h2>
+          <p class="lede">Physical device → path and partition → redundancy → pool → dataset or zvol → SMB/NFS share or iSCSI LUN → application-visible storage.</p>
+          <p>Hoardarr exposes a control only when it can detect, explain, validate, execute, and read it back. Advanced mode adds depth, not a bypass around safety.</p>
+        </div>
+        <div class="card">
+          <p class="card-kicker">Product principle</p>
+          <h3>Home lab first. Wizard ease second. Enterprise depth on demand.</h3>
+          <p>No business licensing model. No feature ransom. No requirement that a media enthusiast become a storage engineer before creating a protected pool.</p>
+          <div class="actions"><a class="button primary" href="/alpha/">See the first release target</a></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><div class="shell footer-grid"><div><a class="brand" href="/"><img src="/assets/hoardarr-mark.svg" alt=""><span>Hoard<em>arr</em></span></a><p class="footer-note">Free, ARR-first storage lifecycle software for real homelabs.</p></div><div class="footer-links"><a href="/">Overview</a><a href="/alpha/">Alpha ISO</a><a href="https://github.com/tekmyster/Hoardarr">GitHub</a></div></div></footer>
+</body>
+</html>

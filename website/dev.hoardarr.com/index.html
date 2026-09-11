@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Hoardarr is ARR-first storage lifecycle management for homelabs: guided ZFS, SMB, NFS, iSCSI, observability, import, and recovery.">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Hoardarr · Storage that grows with your homelab</title>
+  <link rel="icon" href="/assets/hoardarr-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <script src="/assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="nav shell" aria-label="Primary navigation">
+      <a class="brand" href="/"><img src="/assets/hoardarr-mark.svg" alt=""><span>Hoard<em>arr</em></span></a>
+      <button class="theme-toggle menu-toggle" type="button" data-menu-toggle aria-expanded="false" aria-label="Open navigation">☰</button>
+      <div class="nav-links" data-nav>
+        <a aria-current="page" href="/">Overview</a>
+        <a href="/features/">Features</a>
+        <a href="/alpha/">Alpha ISO</a>
+        <a href="https://github.com/tekmyster/Hoardarr">GitHub</a>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme">☀</button>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="shell">
+        <div class="hero-content">
+          <p class="eyebrow">ARR-first storage lifecycle management</p>
+          <h1>Your media grows. Your storage should too.</h1>
+          <p class="lede">Hoardarr turns real homelab disks, pools, shares, and block storage into one guided lifecycle—from first discovery to expansion, recovery, and eventual retirement.</p>
+          <div class="actions">
+            <a class="button primary" href="/alpha/">See the first Alpha ISO</a>
+            <a class="button" href="/features/">Explore the roadmap</a>
+          </div>
+          <p class="hero-note"><span class="status-dot" aria-hidden="true"></span>Private Alpha validation is active. Public image coming soon.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="proof-strip" aria-label="Validated capability highlights">
+      <div class="shell proof-grid">
+        <article class="proof">
+          <svg class="proof-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></svg>
+          <strong>RAIDZ1 / Z2 / Z3</strong>
+          <span>Guided pool creation and exact topology review</span>
+        </article>
+        <article class="proof">
+          <svg class="proof-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 8h14v11H5zM8 5h8v3M2 12h3M19 12h3M9 15h6"/></svg>
+          <strong>SMB · NFS · iSCSI</strong>
+          <span>File and block presentation with real data-path tests</span>
+        </article>
+        <article class="proof">
+          <svg class="proof-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5M4 4v4.5h4.5"/><path d="M12 8v5l3 2"/></svg>
+          <strong>Import & recovery</strong>
+          <span>Detect existing pools, review them, and preserve data</span>
+        </article>
+        <article class="proof">
+          <svg class="proof-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 19V5M3 19h18M6 15l4-4 3 2 5-7"/><circle cx="18" cy="6" r="2"/></svg>
+          <strong>Live telemetry</strong>
+          <span>Bandwidth, IOPS, latency, health, and lifecycle state</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">A calmer storage workflow</p>
+          <h2>Tell Hoardarr the outcome. It handles the layers.</h2>
+          <p>Standard mode detects what it can, recommends a complete stack, and asks only the questions that materially affect your data.</p>
+        </div>
+        <div class="flow" aria-label="Hoardarr guided workflow">
+          <article class="flow-step"><h3>Detect</h3><p>Disks, paths, sectors, health, pools, filesystems, shares, LUNs, and existing data.</p></article>
+          <article class="flow-step"><h3>Understand</h3><p>Media, downloads, backups, VMs, databases, mixed workloads, or a custom goal.</p></article>
+          <article class="flow-step"><h3>Recommend</h3><p>Topology, protection, growth plan, datasets or zvols, tuning, and presentation.</p></article>
+          <article class="flow-step"><h3>Review</h3><p>Plain-language consequences, capacity, compatibility, risks, and every proposed action.</p></article>
+          <article class="flow-step"><h3>Apply</h3><p>One validated plan using the same backend policies and safety controls as Advanced mode.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">One engine · two ways to work</p>
+          <h2>Simple enough to start. Deep enough to stay.</h2>
+          <p>Grandma and an ONTAP developer should be able to configure the same safe storage plan at the level that makes sense to them.</p>
+        </div>
+        <div class="mode-grid">
+          <article class="mode recommended">
+            <span class="mode-badge">Default</span>
+            <p class="card-kicker">Standard mode</p>
+            <h3>Goal-first guided setup</h3>
+            <p>Hoardarr detects hardware, preselects recommended quick options, and explains the decisions that matter.</p>
+            <ul>
+              <li>ARR and media-library presets</li>
+              <li>Recommended layouts from detected disks</li>
+              <li>Quick format and fast validation by default</li>
+              <li>No silent guesses about destructive choices</li>
+            </ul>
+          </article>
+          <article class="mode">
+            <p class="card-kicker">Advanced mode</p>
+            <h3>The full storage stack, still guarded</h3>
+            <p>Inspect and override the same plan layer by layer without switching to a separate storage engine.</p>
+            <ul>
+              <li>Disk and path characteristics</li>
+              <li>Vdev, pool, dataset, zvol, share, and LUN controls</li>
+              <li>Multipath, replication, quorum, and HA visibility</li>
+              <li>Enterprise-grade depth without license gates</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell photo-split">
+        <div class="photo-frame">
+          <img src="/assets/storage-hardware-workbench.png" alt="Real enterprise hard disk, SAS solid-state drive, U.2 NVMe drive, SAS cable, fiber cables, and rackmount disk shelf on an antistatic workbench" width="1792" height="1024" loading="lazy">
+          <div class="photo-caption">Real hardware, mixed generations, changing connections—exactly the environment Hoardarr is designed to make understandable.</div>
+        </div>
+        <div>
+          <p class="eyebrow">Built for the hardware you have</p>
+          <h2>Local disks, SAS shelves, NVMe, and imported arrays.</h2>
+          <p class="lede">Hoardarr treats identity, topology, permissions, and presentation as connected layers—not a pile of unrelated settings.</p>
+          <div class="bullet-list">
+            <div class="bullet-item"><span class="bullet-icon">01</span><div><strong>Detect before asking</strong><p>Use real hardware and existing configuration facts wherever they are reliable.</p></div></div>
+            <div class="bullet-item"><span class="bullet-icon">02</span><div><strong>Keep unknowns honest</strong><p>Unknown stays unknown until the user answers; it is never silently invented.</p></div></div>
+            <div class="bullet-item"><span class="bullet-icon">03</span><div><strong>Preserve the route back</strong><p>Reviewable plans, readback, stable application paths, and explicit import permission policy.</p></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">See the problem before the pool feels it</p>
+          <h2>Storage telemetry that tells a story.</h2>
+          <p>Live graphs already expose throughput, operations, latency, and health. Persistent, per-user Grafana-style dashboards are on the active roadmap.</p>
+        </div>
+        <div class="dashboard" role="img" aria-label="Hoardarr dashboard preview showing storage bandwidth, IOPS, latency, and disk health">
+          <div class="dashboard-top"><strong>Media pool · Live performance</strong><span class="live-pill"><span class="status-dot"></span> Live</span></div>
+          <div class="dashboard-grid">
+            <article class="metric">
+              <span class="metric-label">Bandwidth</span><div class="metric-value">742 MB/s</div>
+              <div class="chart"><svg viewBox="0 0 400 110" preserveAspectRatio="none" aria-hidden="true"><path d="M0 92 C35 80,45 58,76 63 S125 18,160 38 S215 70,250 51 S304 16,335 32 S374 28,400 12" fill="none" stroke="#27d3c2" stroke-width="3"/><path d="M0 98 C48 90,63 94,100 82 S155 90,190 74 S249 86,284 70 S340 79,400 62" fill="none" stroke="#ff9d44" stroke-width="2"/></svg></div>
+              <small>Read / write · rolling live window</small>
+            </article>
+            <article class="metric">
+              <span class="metric-label">Operations</span><div class="metric-value">1,284 IOPS</div>
+              <div class="chart"><svg viewBox="0 0 260 110" preserveAspectRatio="none" aria-hidden="true"><path d="M0 86 L24 72 L47 79 L72 30 L98 57 L120 49 L146 68 L169 24 L195 44 L220 21 L260 38" fill="none" stroke="#27d3c2" stroke-width="3"/></svg></div>
+              <small>Peak 1,741 IOPS</small>
+            </article>
+            <article class="metric">
+              <span class="metric-label">Pool health</span><div class="metric-value">Online</div>
+              <div class="health-list">
+                <div class="health-row"><span><i></i>Five data devices</span><strong>Healthy</strong></div>
+                <div class="health-row"><span><i></i>Last scrub</span><strong>Clean</strong></div>
+                <div class="health-row"><span><i></i>Multipath links</span><strong>2 / 2</strong></div>
+                <div class="health-row"><span><i></i>Write latency</span><strong>2.4 ms</strong></div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell alpha-callout">
+        <p class="eyebrow">Coming soon</p>
+        <h2>The first Hoardarr Alpha ISO.</h2>
+        <p class="lede">A bootable Ubuntu 24.04-based image is in private validation. The first public Alpha is being prepared around a complete, usable standalone storage-server experience—not a slideshow of unfinished menus.</p>
+        <div class="actions">
+          <a class="button primary" href="/alpha/">View the Alpha target</a>
+          <a class="button" href="https://github.com/tekmyster/Hoardarr">Follow development</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-grid">
+      <div><a class="brand" href="/"><img src="/assets/hoardarr-mark.svg" alt=""><span>Hoard<em>arr</em></span></a><p class="footer-note">Free, ARR-first storage lifecycle software for real homelabs.</p></div>
+      <div class="footer-links"><a href="/features/">Features</a><a href="/alpha/">Alpha ISO</a><a href="https://github.com/tekmyster/Hoardarr">GitHub</a><a href="https://hoardarr.com">Production site</a></div>
+    </div>
+  </footer>
+</body>
+</html>
